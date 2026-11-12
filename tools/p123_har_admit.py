@@ -625,14 +625,18 @@ def _check_perf(uid: int, doc: dict[str, Any], as_of: date) -> date:
 
 
 def _equity_rows(doc: dict[str, Any]) -> list[list[str]]:
-    """Code-1 rows on consecutive business days from the start (the preserved extractor rule)."""
+    """Every row on consecutive business days from the start, with its marker.
+
+    P123 marks the base row 0, ordinary days 1 and week-start days 3. The earlier
+    extractor kept only marker 1, which dropped every Monday and the base day, so
+    the next kept day's return silently spanned two days (RULING-E D9). All rows
+    are kept; the marker is a fourth column so no consumer loses information."""
     day = date.fromisoformat(str(doc["date"]))
     while day.weekday() >= 5:
         day += timedelta(days=1)
     rows = []
     for code, equity, cash in doc["data"]:
-        if code == 1:
-            rows.append([day.isoformat(), str(equity), str(cash)])
+        rows.append([day.isoformat(), str(equity), str(cash), str(code)])
         day += timedelta(days=1)
         while day.weekday() >= 5:
             day += timedelta(days=1)
@@ -700,8 +704,12 @@ def build_outputs(
             )
             eq = _equity_rows(doc)
             files[f"csv/strategy_{uid}_perf.csv"] = _csv_bytes(
-                ["Date", "Total Equity", "Cash Added"], eq
+                ["Date", "Total Equity", "Cash Added", "Marker"], eq
             )
+            if len(eq) != len(doc["data"]):
+                raise AdmissionRefused(
+                    f"item {uid} staged equity rows differ from the raw perf rows"
+                )
             entry["equity_rows"] = len(eq)
             entry["perf_rows"] = len(doc["data"])
         else:
