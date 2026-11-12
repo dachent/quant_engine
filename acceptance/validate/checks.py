@@ -11100,6 +11100,24 @@ def _is_owner_exclusion(
     )
 
 
+_POLICY_INAPPLICABLE_METRICS = frozenset(
+    {"capital.strategy_cash.cutoff", COVERAGE_END_METRIC}
+)
+
+
+def _is_policy_inapplicable(row: Mapping[str, Any]) -> bool:
+    """A fund-scoped strategy has no derived cash line, so no cash or coverage end.
+
+    The oracle states it (``applicability``); the validator honours it only for the two
+    metrics the fund-scoped policy removes, so a wrong flag cannot hide another gap.
+    """
+
+    return (
+        row.get("applicability") == "INAPPLICABLE_BY_POLICY"
+        and row.get("metric_id") in _POLICY_INAPPLICABLE_METRICS
+    )
+
+
 def expected_exclusions(ctx: Context) -> list[dict[str, Any]]:
     """Oracle not-derivable performance rows of owner-excluded accounts.
 
@@ -11117,6 +11135,15 @@ def expected_exclusions(ctx: Context) -> list[dict[str, Any]]:
         }
         for row in ctx.expected_not_derivable
         if _is_owner_exclusion(row, owner_excluded)
+    ] + [
+        {
+            "metric_id": row.get("metric_id"),
+            "entity": row.get("entity"),
+            "disposition": "INAPPLICABLE_BY_POLICY",
+            "reason": row.get("reason"),
+        }
+        for row in ctx.expected_not_derivable
+        if _is_policy_inapplicable(row)
     ]
 
 
@@ -11136,7 +11163,7 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
         return
     owner_excluded = _owner_excluded_accounts(ctx)
     for row in ctx.expected_not_derivable:
-        if _is_owner_exclusion(row, owner_excluded):
+        if _is_owner_exclusion(row, owner_excluded) or _is_policy_inapplicable(row):
             continue
         yield _finding(
             "expected.not_derivable",

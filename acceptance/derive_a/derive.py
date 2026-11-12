@@ -268,6 +268,7 @@ CASH_METRIC = "capital.strategy_cash.cutoff"
 # One row per custody cash line (entity <strategy>|<provider>|<account>): the
 # unclamped date through which every admission the line is derived from attests it.
 COVERAGE_METRIC = "date.strategy_cash.coverage_end"
+INAPPLICABLE_BY_POLICY = "INAPPLICABLE_BY_POLICY"
 INVESTED_METRIC = "invested_capital.strategy.cutoff"
 WEIGHT_METRIC = "weight.strategy.cutoff"
 # Raw Quantbase activity rows: deposits/withdrawals are owner funding, fund
@@ -893,16 +894,24 @@ class Output:
         )
 
     def missing(
-        self, metric_id: str, entity: str, window: str | None, reason: str
+        self,
+        metric_id: str,
+        entity: str,
+        window: str | None,
+        reason: str,
+        applicability: str | None = None,
     ) -> None:
-        self.not_derivable.append(
-            {
-                "metric_id": metric_id,
-                "entity": entity,
-                "window": window,
-                "reason": reason,
-            }
-        )
+        row = {
+            "metric_id": metric_id,
+            "entity": entity,
+            "window": window,
+            "reason": reason,
+        }
+        if applicability is not None:
+            # INAPPLICABLE_BY_POLICY: the metric does not exist for this entity under a
+            # governed policy (fund-scoped providers); it is not a gap (#895 F2).
+            row["applicability"] = applicability
+        self.not_derivable.append(row)
 
 
 @dataclass
@@ -5280,12 +5289,15 @@ def _derive_strategies_and_portfolio_v3(
                     "account funding and wallet conversion residuals are not "
                     "strategy cash or capital"
                 )
-                output.missing(CASH_METRIC, strategy_id, None, reason)
+                output.missing(
+                    CASH_METRIC, strategy_id, None, reason, INAPPLICABLE_BY_POLICY
+                )
                 output.missing(
                     COVERAGE_METRIC,
                     coverage_entity,
                     None,
                     reason + "; cash coverage is inapplicable",
+                    INAPPLICABLE_BY_POLICY,
                 )
             elif facts is not None:
                 output.metric(

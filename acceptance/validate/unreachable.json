@@ -60,17 +60,17 @@
       "check_id": "expected",
       "issue": 895,
       "owner": "sprint-qc-validator",
-      "class": "RULE_SCOPE_TOO_WIDE",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
       "close_by": "2026-12-15",
-      "reason": "policy-inapplicable fund-scoped oracle rows and owner-excluded account dates (F2); remaining rows are data gaps (F10)"
+      "reason": "fund-scoped rows are now flagged by the oracle and not findings (F2, next baseline regeneration); remaining rows are data gaps: Composer account balance, reserve NAVs, John Hancock (F10), and an oracle-scope artefact for owner-excluded account dates"
     },
     {
       "check_id": "expected.capital.strategy_cash.coverage_end",
       "issue": 895,
       "owner": "sprint-qc-validator",
-      "class": "RULE_SCOPE_TOO_WIDE",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
       "close_by": "2026-12-15",
-      "reason": "fund-scoped strategies (F2)"
+      "reason": "fund-scoped strategies: flagged INAPPLICABLE_BY_POLICY by the oracle and skipped (F2); entry closes when a reachability fixture passes the check"
     },
     {
       "check_id": "preservation.report_to_panel",
