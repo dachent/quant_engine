@@ -460,7 +460,9 @@ def test_refusals_20_21_an_empty_identity_read_is_retried_once_and_recorded(
 def test_every_r3_refusal_cause_is_built_or_named_as_not_built() -> None:
     assert sorted(pf.COVERAGE) == list(range(1, 25))
     rows = dict(pf.ROWS)
-    source = Path(__file__).read_text(encoding="utf-8")
+    source = Path(__file__).read_text(encoding="utf-8") + Path(__file__).with_name(
+        "test_release_preflight_g1b.py"
+    ).read_text(encoding="utf-8")
     for cause, where in pf.COVERAGE.items():
         if where.startswith("G1:") and "(not built)" not in where:
             assert where[3:] in dict(pf.G1_ROWS), (
@@ -469,6 +471,8 @@ def test_every_r3_refusal_cause_is_built_or_named_as_not_built() -> None:
             )  # its kill tests: test_release_preflight_g1a.py
         elif where.startswith("G0:") and "(not built)" not in where:
             assert where[3:] in rows, (cause, where)
+        elif where.startswith("G1:") and "(not built)" not in where:
+            assert where[3:] in pf.ROW_TABLE, (cause, where)
         elif where.startswith("guard:"):
             assert where[6:].split(" (")[0] in source or where[6:].startswith(
                 "git-identity-retry"
@@ -485,7 +489,7 @@ def test_every_r3_refusal_cause_is_built_or_named_as_not_built() -> None:
     for match in re.finditer(r"def test_refusals?_(\d+(?:_\d+)*)_", source):
         named.update(int(n) for n in match.group(1).split("_"))
     for cause, where in pf.COVERAGE.items():
-        if where.startswith(("G0:", "guard:")) and "(not built)" not in where:
+        if where.startswith(("G0:", "G1:", "guard:")) and "(not built)" not in where:
             assert cause in named, (cause, where)
 
 

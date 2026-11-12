@@ -35,6 +35,7 @@ from typing import Any
 import release_canary as canary_tool
 import release_driver as driver
 from release_preflight_g1a import G1A_ROWS
+from release_preflight_g1b import ROWS_G1B
 
 GIB = 1 << 30
 RECEIPT_DIR = "preflight"
@@ -338,7 +339,7 @@ ROWS: tuple[tuple[str, Row], ...] = (
 )
 
 # G1 consumer-contract rows (run after the prep chain, before attended); other G1 parts append here
-G1_ROWS: tuple[tuple[str, Row], ...] = (*G1A_ROWS,)
+G1_ROWS: tuple[tuple[str, Row], ...] = (*G1A_ROWS, *ROWS_G1B)
 
 # every row a stage may recheck: the G0 rows, the G1 rows, the G3 spec-pair row and the two canary rows (not G0: the
 # baseline row writes a file and the commit row needs it)
@@ -363,11 +364,11 @@ COVERAGE: dict[int, str] = {
     7: "G1:g1:attended-launch",
     8: "G1:g1:sleeve-facts",
     9: "by design: the first calendar attempt",
-    10: "G1:attribution contract (not built)",
-    11: "G1:attribution contract (not built)",
+    10: "G1:g1:attribution-contract",
+    11: "G1:g1:attribution-contract",
     12: "G2:needs the build (not built)",
     13: "G1:g1:finality-evidence",
-    14: "G0:freshness against the consumer's limit (not built)",
+    14: "G1:g1:factor-freshness",
     15: "G0:authority:pointer-graph",
     16: "G0:inputs:release-inputs",
     17: "G2:payload size at candidate time (not built)",
