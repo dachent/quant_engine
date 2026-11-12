@@ -14,7 +14,7 @@ from datetime import date, timedelta
 import re
 from typing import Any
 
-TRADE_KINDS = ("Buy", "Sell")
+TRADE_KINDS = ("buy", "sell")
 
 
 def walk_cash(
@@ -42,7 +42,7 @@ def walk_cash(
     for t in transactions:
         if t.get("amount") is None:
             continue
-        if t["kind"] in TRADE_KINDS:
+        if str(t["kind"]).casefold() in TRADE_KINDS:
             if not t.get("settle_date"):
                 raise ValueError("MISSING_SETTLE_DATE")
             when = t["settle_date"]
