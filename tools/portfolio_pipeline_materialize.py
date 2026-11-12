@@ -1206,8 +1206,40 @@ def _schwab_selected_point_positions(
     return expected if financial_observation_date <= requested_as_of else None
 
 
+def _source_provenance(observation: object, generation: Path) -> Any:
+    """The receipt's run observation for downstream stages.
+
+    The receipt names the observation file only; downstream readers re-open it from
+    the ``path`` pin, so the located absolute path is restored here, in a stage
+    output (not in the ledger artifact whose generation id must stay world-independent).
+    """
+
+    clone = _canonical_clone(observation)
+    if (
+        isinstance(clone, dict)
+        and isinstance(clone.get("path"), str)
+        and not Path(clone["path"]).is_absolute()
+    ):
+        located = _locate_run_observation(
+            None, generation, clone["path"], clone.get("sha256")
+        )
+        clone["path"] = str(located)
+        original = json.loads(located.read_bytes()).get("providers", {})
+        for row in clone.get("providers", []):
+            ref = (original.get(row.get("provider_id")) or {}).get("finality_evidence")
+            current = row.get("finality_evidence")
+            if (
+                isinstance(ref, dict)
+                and isinstance(current, dict)
+                and ref.get("sha256") == current.get("sha256")
+                and ref.get("size_bytes") == current.get("size_bytes")
+            ):
+                row["finality_evidence"] = dict(ref)
+    return clone
+
+
 def _locate_run_observation(
-    reader: Any, generation: Path, recorded: object, sha256: object
+    reader: Any | None, generation: Path, recorded: object, sha256: object
 ) -> Path:
     """Where the receipt's run observation is on disk.
 
@@ -1219,7 +1251,7 @@ def _locate_run_observation(
     """
 
     text = str(recorded)
-    if Path(text).is_absolute():
+    if reader is not None and Path(text).is_absolute():
         return Path(reader._absolute_regular_path(text, "provider run observation"))
     if Path(text).name != text:
         raise MaterializationError("provider run observation name is not a bare name")
@@ -1692,7 +1724,9 @@ def validate_source_phase(
         "provider_ledger_receipt": _file_definition(
             generation / "admit-or-declare-receipt.json"
         ),
-        "source_provenance": _canonical_clone(receipt.get("run_observation")),
+        "source_provenance": _source_provenance(
+            receipt.get("run_observation"), generation
+        ),
         "status": "PASS",
     }
 
