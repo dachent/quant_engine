@@ -280,8 +280,12 @@
     // by postCutoffCaptureNote (K1, F26), not repeated on every row.
     const parts = [`Provider capture ${formatDate(evidence.generation_as_of_date)}`];
     if (account) parts.push(`${providerName(account.provider_id || evidence.provider_id)} account-live TWR: ${formatDate(account.observed_start)}–${formatDate(account.observed_end)} · ${integer.format(account.return_observations || 0)} returns`);
-    if (provider) parts.push(`${providerName(provider.provider_id || evidence.provider_id)} provider-live book: ${formatDate(provider.observed_start)}–${formatDate(provider.observed_end)} · ${integer.format(provider.return_observations || 0)} returns · governed provider-ledger classification, not brokerage-account authority`);
-    if (!provider && evidence.provider_live) parts.push(`Provider-live book: ${evidence.provider_live.status} · ${evidence.provider_live.reason_code}`);
+    // Layer wording is fixed (LAYER-DESIGN): a model's own record is "Model live", the owner's P123 copy is
+    // "P123 copy (diagnostic)"; the old provider wording is never used because it named both.
+    const layerText = (block, label) => `${label}${block.entity_id ? ` ${block.entity_id}` : ""}: ${formatDate(block.observed_start)}–${formatDate(block.observed_end)} · ${integer.format(block.return_observations || 0)} returns`;
+    if (provider) parts.push(provider.evidence_layer === "MODEL_LIVE" ? `${layerText(provider, "Model live (provider record, none of my trades)")} · not brokerage-account authority` : `${layerText(provider, `${providerName(provider.provider_id || evidence.provider_id)} provider track record`)} · governed provider-ledger classification, not brokerage-account authority`);
+    if (evidence.copy_record) parts.push(layerText(evidence.copy_record, "P123 copy (diagnostic)"));
+    if (!provider && evidence.provider_live) parts.push(`Model live: ${evidence.provider_live.status} · ${evidence.provider_live.reason_code}`);
     if (evidence.current_snapshot) parts.push(`${providerName(provider?.provider_id || evidence.provider_id)} account snapshot: ${formatDate(evidence.current_snapshot.observed_date)}`);
     return parts.join(" · ");
   };
