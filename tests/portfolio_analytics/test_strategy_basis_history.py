@@ -46,15 +46,19 @@ DECLARATION = {
     "schema": "strategy-basis-declaration/1",
     "strategies": [{"strategy_id": AI, "basis": "SLEEVE_EPOCH"}],
 }
-# sha256 of every output of the history generation built from the synthetic fixture by the
-# unmodified main (84b2671e) with no declaration; the switch off must reproduce them
+# sha256 of every output of the history generation built from the synthetic fixture with no
+# declaration; the switch off must reproduce them.  Restated for PORT-HISTORY-TRUTH-2: a
+# strategy with a model-live layer (AI, EU) is no longer built from the account's rows in the
+# research series, so the live-plus-backtest and returns outputs drop those two series and the
+# segments and coverage files carry the new layer admissions and mode statuses.  live-only
+# and excluded are the unmodified main's bytes.
 MAIN_OFF_DIGESTS: dict[str, str] = {
-    "coverage.json": "17de3c924f2ef8ed7082b4e521c1be61c28f56b139ae694aa28ebf073a2af4d9",
+    "coverage.json": "615200bdd5f7938eac5d44c85fd5715fc62da2f78bf43916fbdf6d34c971eae6",
     "excluded.csv": "8eee0f630ee66b2280884623c71acc414e72665c44869949cc203b20a5807360",
     "live-only.csv": "1bb846d9ce46e553449adedb485ff5e84451446c9b841cf749a715abeb270e15",
-    "live-plus-backtest.csv": "1bb846d9ce46e553449adedb485ff5e84451446c9b841cf749a715abeb270e15",
-    "returns.csv": "1bb846d9ce46e553449adedb485ff5e84451446c9b841cf749a715abeb270e15",
-    "segments.csv": "aeaf46e4ccb245d3f881668e5deefb65d942cecc0a43d98403f9538f64fa3cfb",
+    "live-plus-backtest.csv": "af50bf378c0698f7c3c4e1017aca2aae447635c50768423b8f390857bd898f0f",
+    "returns.csv": "af50bf378c0698f7c3c4e1017aca2aae447635c50768423b8f390857bd898f0f",
+    "segments.csv": "a148d61115675c0a58ef230c898fa6f2515b44b150da20d6a32e60eec60fd43e",
 }
 
 
@@ -362,21 +366,30 @@ def test_the_declared_strategy_live_segment_is_the_sleeves_path(
     ).validate(document["strategy_basis_restatement"])
 
 
-def test_returns_and_live_views_carry_the_restated_rows(world: dict[str, Any]) -> None:
+def test_live_view_carries_the_restated_rows_and_the_research_series_does_not(
+    world: dict[str, Any],
+) -> None:
     artifacts, _ = _restated(world)
     expected = {
         row["date"]: row["return"]
         for row in strategy_basis.rows_from_sleeve_facts(_bytes(_facts()), AI)
     }
     series = "AI Factor [P123]"
-    for name in ("live-only.csv", "returns.csv"):
-        rows = [
+
+    def rows_of(name: str) -> list[dict[str, str]]:
+        return [
             row
             for row in csv.DictReader(io.StringIO(artifacts[name].decode("utf-8")))
             if row["series_id"] == series and row["date"] in expected
         ]
-        assert rows, name
-        assert {row["date"]: row["return"] for row in rows} == expected
+
+    live = rows_of("live-only.csv")
+    assert live
+    assert {row["date"]: row["return"] for row in live} == expected
+    # the account's sleeve path is a live-only fact: the AI research series is backtest then
+    # model live, so no restated account row reaches returns.csv (PORT-HISTORY-TRUTH-2)
+    assert rows_of("returns.csv") == []
+    assert rows_of("live-plus-backtest.csv") == []
 
 
 def test_a_declaration_without_an_open_sleeve_fails_closed(
