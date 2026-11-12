@@ -748,6 +748,44 @@ def _verify_committed_manifest(spec: Any, manifest: Any) -> dict[str, object]:
     }
 
 
+def require_checkout_is_spec_code(
+    spec: Any, repository: Path = REPOSITORY_ROOT
+) -> None:
+    """Refuse to verify from a checkout that is not the spec's code identity (R3 refusal 22).
+
+    The verify run from another clone twice reported "layered history committed dependency is
+    unavailable"; its leftovers then broke the driver's own verify. The spec names the code commit (or
+    its tree, under the tree-bound scheme); the executing checkout must be exactly that.
+    """
+
+    def rev(name: str) -> str:
+        done = subprocess.run(
+            ["git", "rev-parse", name],
+            cwd=repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return done.stdout.strip() if done.returncode == 0 else ""
+
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    if dirty:
+        raise QualityControlFailure(
+            "post-release verify must run from a clean checkout"
+        )
+    if spec.code_commit not in {rev("HEAD"), rev("HEAD^{tree}")}:
+        raise QualityControlFailure(
+            "post-release verify must run from the spec's code commit "
+            f"{str(spec.code_commit)[:12]}; this checkout is {rev('HEAD')[:12] or 'not a git checkout'}"
+        )
+
+
 @timed_call("post_release_verify")
 def _post_release(args: argparse.Namespace) -> Path:
     if args.spec is None:
@@ -755,6 +793,7 @@ def _post_release(args: argparse.Namespace) -> Path:
     if args.preflight_receipt is None:
         raise PrerequisiteUnavailable("accepted preflight receipt")
     spec, proof = _load_and_validate_spec(args.spec, profile="post-release-verify")
+    require_checkout_is_spec_code(spec)
     evidence_dir = _evidence_directory(args.evidence_dir)
     preflight = _read_preflight(args.preflight_receipt, spec)
     if preflight.get("plan") != _expected_plan(spec):
