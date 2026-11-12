@@ -216,6 +216,35 @@ def row_release_inputs(run: driver.Run, env: Env) -> None:
     run.recheck_release_inputs()
 
 
+def spec_pair_mismatch(
+    real_spec: Any, replica_spec: Any, real_anchor: Path
+) -> str | None:
+    """G3: what the replica's spec binds must equal what the real spec binds, by the replica gate's own
+    ``topology`` (the function the commit gate runs). Returns the refusal text, or None when equal."""
+
+    from quant_engine.core import replica_anchor
+    from quant_engine.core.replica_gate import topology
+
+    wanted = topology(real_spec, real_anchor)
+    got = topology(replica_spec, replica_anchor(replica_spec), real_anchor)
+    if wanted != got:
+        return "replica ran a different topology than the real spec"
+    return None
+
+
+def row_spec_pair(run: driver.Run, env: Env) -> None:
+    """R3 refusal 19 (second line): a 75-minute lane must not end in a topology refusal. Needs both specs, so it
+    is not a G0 row: it runs right after ``replica-spec`` (the lane stages recheck it at entry)."""
+
+    from quant_engine.core import load_pipeline_spec
+
+    real = load_pipeline_spec(Path(run.expand("{prod_spec}")))
+    replica = load_pipeline_spec(Path(run.expand("{replica_spec}")))
+    problem = spec_pair_mismatch(real, replica, _path(run, "source_workspace"))
+    if problem is not None:
+        raise driver.Refusal(problem)
+
+
 ROWS: tuple[tuple[str, Row], ...] = (
     ("host:free-space", row_free_space),
     ("host:no-live-stage", row_no_live_stage),
@@ -227,6 +256,9 @@ ROWS: tuple[tuple[str, Row], ...] = (
     ("authority:pointer-graph", row_pointer_graph),
     ("authority:no-stale-prepared", row_no_stale_prepared),
 )
+
+# every row a stage may recheck: the G0 rows and the G3 spec-pair row
+ROW_TABLE: dict[str, Row] = {**dict(ROWS), "g3:spec-pair": row_spec_pair}
 
 # R3 refusal number (RULING-D section 2) -> where it is caught. "G0:<row>" is built here with a kill test in
 # tests/portfolio_operations/test_release_preflight.py; "guard:<name>" is a tool guard with its own test;
@@ -250,7 +282,7 @@ COVERAGE: dict[int, str] = {
     16: "G0:inputs:release-inputs",
     17: "G2:payload size at candidate time (not built)",
     18: "G0:host:free-space",
-    19: "G0:config:outside-workspace",
+    19: "G0:config:outside-workspace",  # and G3: g3:spec-pair, rechecked at lane entry
     20: "guard:git-identity-retry (a transient identity read only; a scanner is not detected)",
     21: "guard:git-identity-retry (a transient identity read only; a scanner is not detected)",
     22: "guard:require_checkout_is_spec_code",
@@ -290,7 +322,7 @@ def recheck(run: driver.Run, row_ids: Sequence[str], env: Env | None = None) -> 
     """Run the named rows live; the first FAIL refuses (lane entry and the commit repeat the moving ones)."""
 
     env = env or Env()
-    table = dict(ROWS)
+    table = ROW_TABLE
     for row_id in row_ids:
         if row_id not in table:
             raise driver.Refusal(f"no preflight row {row_id!r}")

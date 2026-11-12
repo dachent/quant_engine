@@ -563,5 +563,7 @@ stage entry (pointers move between the receipt and the lanes). Stale releases ar
 and hash-verified into the archive with a retirement record, then moved to `releases-retired/` (never deleted; the authority
 release is never retired). `post-release-verify` refuses to run from a checkout that is not the spec's code commit (22, 23).
 
+G3 (`g3:spec-pair`) compares the real and replica specs with the replica gate's own `topology` function; `lane-real` and `lane-replica` recheck it at entry, so a topology mismatch (R3 refusal 19) is found in seconds, not after the lane.
+
 Not built yet, and named in `release_preflight.COVERAGE` so a green G0 is not read as "inputs are fine": G1 consumer contracts
-(1-4, 7, 8, 10, 11, 13), G2 product measurements (12, 17), the consumer freshness limit (14) and G3 spec pair.
+(1-4, 7, 8, 10, 11, 13), G2 product measurements (12, 17) and the consumer freshness limit (14).
