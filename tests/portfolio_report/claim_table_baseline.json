@@ -840,13 +840,6 @@
   {
    "file": "apps/portfolio-control-panel/app.js",
    "kinds": [
-    "count"
-   ],
-   "text": "{} provider-live book: {}–{} · {} returns · governed provider-ledger classification, not brokerage-account authority"
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
     "coverage"
    ],
    "text": "{} · {} coverage-qualified TWR segments · systematic weight {}"
