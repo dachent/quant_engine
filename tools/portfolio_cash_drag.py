@@ -2,7 +2,8 @@
 
 Cash drag is the return the benchmark earned on the part of the account that sat in
 cash, less what the cash itself earned: ``sum_t w[t-1] * (r_bench[t] - r_cash[t])``
-with ``w[t-1] = cash[t-1] / nav[t-1]`` (prior-close weights, so a day's own flows
+with ``w[t-1] = max(cash[t-1], 0) / nav[t-1]`` (a negative balance is borrowing,
+leverage, not cash: the leverage rows disclose it, it is never netted here; prior-close weights, so a day's own flows
 never decide it).  It is derived only when the path is complete:
 
 * every observation day of the window carries a NAV and a cash balance, with no gap;
@@ -102,7 +103,7 @@ def derive_cash_drag(
         navs = Decimal(nav[before.isoformat()])
         if navs <= 0:
             return _unavailable(f"nav is not positive on {before.isoformat()}")
-        weight = Decimal(cash[before.isoformat()]) / navs
+        weight = max(Decimal(cash[before.isoformat()]), Decimal(0)) / navs
         drag += weight * (
             Decimal(benchmark_returns[today.isoformat()])
             - Decimal(cash_returns[today.isoformat()])

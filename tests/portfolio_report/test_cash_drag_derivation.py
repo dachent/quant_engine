@@ -72,3 +72,46 @@ def test_exchange_day_windows_weight_a_monday_return_by_the_friday_close() -> No
     )
     # Monday uses Friday's 20% weight, Tuesday uses Monday's 0%
     assert Decimal(out["cash_drag"]) == Decimal("0.006")
+
+
+def test_a_negative_cash_balance_is_borrowing_and_adds_no_drag() -> None:
+    out = cd.derive_cash_drag(**_inputs(cash=_series("2026-01-01", 4, "-300")))
+    assert out["status"] == "EVIDENCED" and Decimal(out["cash_drag"]) == 0
+
+
+def test_spec_wiring_sets_status_from_the_derivation_and_names_unavailable(
+    tmp_path,
+) -> None:
+    import portfolio_cash_drag_spec as spec
+
+    (tmp_path / "a.csv").write_text(
+        "date,nav,cash\n2026-01-01,1000,100\n2026-01-02,1000,100\n2026-01-03,1000,100\n",
+        encoding="utf-8",
+    )
+    rows = [
+        {"series_id": "account:s1", "date": d, "return": "0"}
+        for d in ("2026-01-02", "2026-01-03")
+    ] + [
+        {"series_id": "benchmark:b", "date": d, "return": "0.01"}
+        for d in ("2026-01-02", "2026-01-03")
+    ]
+    row = {"strategy_id": "s1", "reference_series_id": "benchmark:b"}
+    other = {"strategy_id": "s2", "reference_series_id": "benchmark:b"}
+    template = {
+        "comparisons": [dict(row), dict(other)],
+        "benchmark_comparisons": [dict(row), dict(other)],
+    }
+    out, _ = spec.apply(
+        template,
+        {
+            "s1": {"paths": [str(tmp_path / "a.csv")]},
+            "s2": {"unavailable": "no cash path for s2"},
+        },
+        rows,
+        {"2026-01-02": "0", "2026-01-03": "0"},
+    )
+    s1, s2 = out["benchmark_comparisons"]
+    assert s1["cash_drag_status"] == "EVIDENCED" and "0.002" in s1["cash_drag_reason"]
+    assert s2["cash_drag_status"] == "UNAVAILABLE"
+    assert s2["cash_drag_reason"] == "no cash path for s2"
+    assert out["comparisons"][0]["cash_drag_status"] == "EVIDENCED"
