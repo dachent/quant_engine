@@ -8,6 +8,8 @@
 ``lanes``     run lane A (real roots: preflight and plan in parallel, dry-run, findings)
               beside lane B (the replica ceremony). The release hash is printed as soon
               as lane A is PREPARED; ``COMMIT-READY`` only after lane B passes.
+``real-lane`` lane A alone (the driver runs it in a parallel group beside ``ceremony``, so the
+              release hash and findings are readable while the replica ceremony still runs).
 ``verify``    check a receipt against a real spec (the same check the commit gate runs).
 
 The tool only orchestrates the existing release tools with the flags the R2 chain used.
@@ -663,21 +665,23 @@ def _parser() -> argparse.ArgumentParser:
     verify = sub.add_parser("verify")
     verify.add_argument("--receipt", type=Path, required=True)
     verify.add_argument("--real-spec", type=Path, required=True)
-    for name in ("ceremony", "lanes"):
+    for name in ("ceremony", "lanes", "real-lane"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--real-spec", type=Path, required=True)
-        cmd.add_argument("--replica-spec", type=Path, required=True)
+        if name != "real-lane":
+            cmd.add_argument("--replica-spec", type=Path, required=True)
+            cmd.add_argument("--replica-panel-dir", type=Path, required=True)
         cmd.add_argument("--out-dir", type=Path, required=True)
-        cmd.add_argument("--replica-panel-dir", type=Path, required=True)
         cmd.add_argument("--expected", type=Path, required=True)
         cmd.add_argument("--cutoff", required=True)
         cmd.add_argument("--crosswalk", type=Path, required=True)
         for attr, flag in BASIS_ARGS:
             cmd.add_argument(flag, type=Path, dest=attr)
-        cmd.add_argument("--harness-code-commit", required=True)
-        cmd.add_argument("--rehearsal-root", type=Path, required=True)
-        cmd.add_argument("--clean-room", type=Path, required=True)
-        if name == "lanes":
+        if name != "real-lane":
+            cmd.add_argument("--harness-code-commit", required=True)
+            cmd.add_argument("--rehearsal-root", type=Path, required=True)
+            cmd.add_argument("--clean-room", type=Path, required=True)
+        if name != "ceremony":
             cmd.add_argument("--real-panel-dir", type=Path, required=True)
     return parser
 
@@ -701,6 +705,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if a.command == "ceremony":
             return replica_ceremony(a)
+        if a.command == "real-lane":
+            return real_lane(a)
         return lanes(a)
     except (
         OSError,
