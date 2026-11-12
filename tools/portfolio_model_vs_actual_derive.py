@@ -24,7 +24,6 @@ import sys
 from typing import Any
 import zipfile
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import portfolio_model_vs_actual as mva  # noqa: E402
 
