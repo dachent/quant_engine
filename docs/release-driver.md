@@ -311,8 +311,8 @@ the baseline path of `lanes` (R3 reads it from the pinned release inputs).
 ## Commit gate and the replica receipt
 
 `commit_gate.replica_verify` runs `tools/release_replica.py verify` on the receipt. The receipt is
-written only by the `lanes` ceremony and names all seven steps (preflight, dry-run, findings,
-COMMIT, post-release verify, recovery rehearsal, clean-room restore, each rc 0) for the real
+written only by the `lanes` ceremony and names all eight steps (preflight, dry-run, findings,
+COMMIT, post-commit validation, post-release verify, recovery rehearsal, clean-room restore, each rc 0) for the real
 spec's topology and code commit; the driver's gate adds the confirmed release id, the topology of
 the replica spec, a prepared release and unmoved pointers.
 
@@ -405,7 +405,14 @@ requires it) runs `tools/release_post_commit.py verify`. It replaces the hand-ru
 2. `portfolio_qc.py --profile post-release-verify` exits 0 and its receipt is PASS for this spec,
    release and the single preflight receipt, with its authority digest equal to the
    `CURRENT_RELEASE` pointer;
-3. `data_recovery_rehearsal.py` and `verify_release_restore.py` exit 0 against the same real spec,
+3. the validator is re-run on the committed release (#896): the same `validate_generation.py`
+   command as the `findings-panel` stage, given after `--`, plus an explicit `--release-pointer`
+   and its own `--out` (`post-commit/post-commit-findings.json`); `tools/post_commit_validation.py`
+   then requires zero blockers and the same `(check_id, entity, class)` rows as the pre-commit
+   findings (the NOT_READY "no release record" rows of `identity.release_pinned` and
+   `identity.publication_state` may vanish, they may not remain). The receipt records both
+   findings digests;
+4. `data_recovery_rehearsal.py` and `verify_release_restore.py` exit 0 against the same real spec,
    each into a fresh root under `post-commit/`.
 
 The repository must be clean at `code_commit` before and after. The post-commit pointer snapshot

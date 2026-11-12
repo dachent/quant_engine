@@ -88,8 +88,8 @@ def test_every_registered_check_emits_only_its_registered_name(tmp_path: Path) -
 
 def test_the_v16_checks_are_registered_under_the_ids_they_emit() -> None:
     registered = {fn.__name__: name for name, fn in checks.CHECKS}
-    assert registered["check_account_live_window"] == "dates.section_as_of_vs_cutoff"
-    assert registered["check_current_capital_as_of"] == "capital.as_of_cutoff"
+    assert registered["check_account_live_window"] == "dates.account_live_window"
+    assert registered["check_current_capital_as_of"] == "capital.current_capital_as_of"
     assert registered["check_derived_cash_evidence"] == "capital.derived_cash_evidence"
     assert registered["check_evaluation_clock"] == "dates.evaluation_clock"
 

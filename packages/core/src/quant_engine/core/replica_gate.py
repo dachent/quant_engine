@@ -50,6 +50,7 @@ REQUIRED_STEPS: Final[tuple[str, ...]] = (
     "dry-run",
     "validation-findings",
     "commit",
+    "post-commit-validation",
     "post-release-verify",
     "recovery-rehearsal",
     "clean-room-restore",

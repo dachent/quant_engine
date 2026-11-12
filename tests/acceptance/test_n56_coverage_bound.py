@@ -29,7 +29,7 @@ from test_validate_generation import CUTOFF, Spec, build
 from acceptance.validate import checks
 from acceptance.validate.generation import load_generation
 
-CHECK = "capital.as_of_cutoff"
+CHECK = "capital.current_capital_as_of"
 DAY = "2026-09-16"
 BASELINE = runpy.run_path(
     str(REPOSITORY_ROOT / "tests" / "portfolio_baseline" / "test_portfolio_baseline.py")
