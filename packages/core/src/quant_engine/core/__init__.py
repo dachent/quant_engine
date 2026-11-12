@@ -1,6 +1,11 @@
 """Minimal provenance and generation envelope for quant_engine."""
 
-from quant_engine.core.stage_timing import stage as timed_stage, timed as timed_call
+from quant_engine.core.stage_timing import (
+    TIMING_LOG_ENV as STAGE_TIMING_LOG_ENV,
+    stage as timed_stage,
+    summarize as summarize_stage_timing,
+    timed as timed_call,
+)
 
 from quant_engine.core.authority import (
     AdmissionDecision,
@@ -212,6 +217,8 @@ __all__ = [
     "CODE_IDENTITY_COMMIT_SCHEME",
     "CODE_IDENTITY_TREE_SCHEME",
     "timed_call",
+    "STAGE_TIMING_LOG_ENV",
+    "summarize_stage_timing",
     "timed_stage",
     "release_directory_identity",
     "COLD_CACHE_KINDS",

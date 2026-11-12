@@ -60,8 +60,7 @@ from quant_engine.core import (
 )
 
 from quant_engine.core import InterpreterRefusal, require_interpreter
-from quant_engine.core.stage_timing import TIMING_LOG_ENV
-from quant_engine.core.stage_timing import summarize as summarize_stage_timing
+from quant_engine.core import STAGE_TIMING_LOG_ENV, summarize_stage_timing
 import release_cycle_manifest
 
 GRAPH_DEFAULT = (
@@ -1736,8 +1735,8 @@ def _execute_stage(
         timing_dir = run.cycle / "stage-timing"
         timing_dir.mkdir(parents=True, exist_ok=True)
         timing_log = timing_dir / f"{stage['id']}.{attempt}.jsonl"
-        env.setdefault(TIMING_LOG_ENV, str(timing_log))
-        record["timing_log"] = env[TIMING_LOG_ENV]
+        env.setdefault(STAGE_TIMING_LOG_ENV, str(timing_log))
+        record["timing_log"] = env[STAGE_TIMING_LOG_ENV]
         if stdout_to is not None:
             stdout_to.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("wb") as log:
