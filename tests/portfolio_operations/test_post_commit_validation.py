@@ -35,6 +35,16 @@ def test_a_blocker_that_only_exists_after_the_commit_is_refused() -> None:
     assert any("appeared" in p for p in problems)
 
 
+def test_a_first_release_may_lose_its_no_release_row_but_must_not_keep_it() -> None:
+    """Review finding: with no pointer to discover before the commit, the pre-commit run
+    carries NOT_READY identity.release_pinned; the post-commit run must not."""
+
+    row = ("identity.release_pinned", "release", "NOT_READY")
+    assert pcv.compare(_doc([NR, row]), _doc([NR])) == []
+    problems = pcv.compare(_doc([NR, row]), _doc([NR, row]))
+    assert any("committed release was not read" in p for p in problems)
+
+
 def test_a_row_that_vanishes_is_refused() -> None:
     assert any("vanished" in p for p in pcv.compare(_doc([NR]), _doc([])))
 

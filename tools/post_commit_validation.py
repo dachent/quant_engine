@@ -10,7 +10,12 @@ two findings documents:
 
 * the post-commit run has zero ``BLOCKER_*`` rows;
 * the set of ``(check_id, entity, class)`` rows equals the pre-commit set, so a row that
-  appears or disappears across the commit is a refusal.
+  appears or disappears across the commit is a refusal;
+* except that the two checks that read the committed release (``identity.release_pinned``,
+  ``identity.publication_state``) may carry a NOT_READY "no release record" row only
+  before the commit: the post-commit run must have none, which proves the committed
+  release was actually read (a first release in a root has no pointer to discover
+  before its commit).
 
 The receipt records the sha256 of both findings files.
 """
@@ -26,6 +31,7 @@ from typing import Any
 
 RECEIPT_SCHEMA = "qe-post-commit-validation/1"
 Row = tuple[str, str, str]
+COMMIT_DEPENDENT = frozenset({"identity.release_pinned", "identity.publication_state"})
 
 
 class PostCommitValidationError(ValueError):
@@ -65,9 +71,16 @@ def compare(pre: dict[str, Any], post: dict[str, Any]) -> list[str]:
     if pre.get("generation_id") != post.get("generation_id"):
         problems.append("the two runs validated different generations")
     before, after = rows(pre), rows(post)
+    before = {
+        r for r in before if not (r[0] in COMMIT_DEPENDENT and r[2] == "NOT_READY")
+    }
     for row in sorted(after):
         if row[2].startswith("BLOCKER_"):
             problems.append(f"post-commit blocker: {row[0]} {row[1]} {row[2]}")
+        if row[0] in COMMIT_DEPENDENT and row[2] == "NOT_READY":
+            problems.append(
+                f"the committed release was not read: {row[0]} {row[1]} is NOT_READY"
+            )
     for row in sorted(after - before):
         problems.append(f"row appeared after the commit: {' | '.join(row)}")
     for row in sorted(before - after):
@@ -103,8 +116,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     text = json.dumps(receipt, indent=1, sort_keys=True) + "\n"
     if args.receipt is not None:
-        with args.receipt.open("xb") as handle:
-            handle.write(text.encode())
+        try:
+            with args.receipt.open("xb") as handle:
+                handle.write(text.encode())
+        except FileExistsError:
+            print(
+                "post-commit-validation: FAIL: receipt exists (create-only)",
+                file=sys.stderr,
+            )
+            return 1
     print(text, end="")
     return 0 if receipt["status"] == "PASS" else 1
 

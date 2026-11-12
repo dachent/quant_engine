@@ -5270,9 +5270,14 @@ def _derive_strategies_and_portfolio_v3(
             coverage_entity = _coverage_entity(strategy_id, holders)
             if custody_reason:
                 systematic_ok = False
-                output.missing(CASH_METRIC, strategy_id, None, custody_reason)
+                policy_flag = INAPPLICABLE_BY_POLICY if fund_scoped else None
+                output.missing(
+                    CASH_METRIC, strategy_id, None, custody_reason, policy_flag
+                )
                 output.missing(INVESTED_METRIC, strategy_id, None, custody_reason)
-                output.missing(COVERAGE_METRIC, coverage_entity, None, custody_reason)
+                output.missing(
+                    COVERAGE_METRIC, coverage_entity, None, custody_reason, policy_flag
+                )
             elif facts is not None and fund_scoped:
                 output.metric(
                     INVESTED_METRIC,

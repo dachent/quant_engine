@@ -2183,7 +2183,36 @@
         "--log-dir",
         "{post_commit}/logs",
         "--out",
-        "{post_commit}/post-commit-verify.json"
+        "{post_commit}/post-commit-verify.json",
+        "--pre-findings",
+        "{panel_root}/validation/{panel_gid}/findings.json",
+        "--post-findings",
+        "{post_commit}/post-commit-findings.json",
+        "--",
+        "{python}",
+        "{tools}/validate_generation.py",
+        "{panel_root}/generations/{panel_gid}",
+        "--expected",
+        "{expected_baseline_arg}",
+        "--cutoff",
+        "{requested_as_of}",
+        "--crosswalk",
+        "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
+        {
+          "if": "release_inputs_root",
+          "args": [
+            "--strategy-basis",
+            "{release_inputs_strategy_basis}",
+            "--sleeve-facts",
+            "{sleeve_facts}",
+            "--provider-ledger",
+            "{ledger_catalog}",
+            "--ibkr-root",
+            "{ibkr_root}",
+            "--tag-map",
+            "{release_inputs_tag_map}"
+          ]
+        }
       ],
       "outputs": [
         "{post_commit}"

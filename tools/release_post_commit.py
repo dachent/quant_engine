@@ -306,11 +306,18 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
     steps: list[dict[str, Any]] = []
     # Ruling F section 6: the validator is re-run on the committed release (explicit
     # pointer, own --out) and must show zero blockers and the pre-commit row set.
-    validate_argv = _read_object(Path(args.validate_argv), "validator command")["argv"]
-    if not isinstance(validate_argv, list) or not all(
-        isinstance(item, str) for item in validate_argv
+    validate_argv = list(args.validator_argv)
+    if validate_argv[:1] == ["--"]:
+        validate_argv = validate_argv[1:]
+    if (
+        not validate_argv
+        or "--out" in validate_argv
+        or "--release-pointer" in validate_argv
     ):
-        raise Refusal("validator command argv must be a list of strings")
+        raise Refusal(
+            "the validator command after -- must be the pre-commit command "
+            "without --out or --release-pointer"
+        )
     coordination = Path(str(spec["coordination_root"]))
     revalidate = (
         (
@@ -434,13 +441,17 @@ def _parser() -> argparse.ArgumentParser:
         "post-pointers",
         "pre-findings",
         "post-findings",
-        "validate-argv",
         "log-dir",
         "out",
     ):
         v.add_argument(f"--{flag}", required=True)
     v.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     v.add_argument("--tools-dir", default=None)
+    v.add_argument(
+        "validator_argv",
+        nargs=argparse.REMAINDER,
+        help="after --: the pre-commit validate_generation command",
+    )
     return parser
 
 

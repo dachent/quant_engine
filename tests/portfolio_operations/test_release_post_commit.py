@@ -124,11 +124,6 @@ def world(tmp_path: Path) -> dict[str, Any]:
     pre_findings = tmp_path / "validation" / "pre-findings.json"
     pre_findings.parent.mkdir()
     pre_findings.write_text(json.dumps(findings), encoding="utf-8")
-    validate_argv = tmp_path / "validate-argv.json"
-    validate_argv.write_text(
-        json.dumps({"argv": [sys.executable, str(tools / "validate_generation.py")]}),
-        encoding="utf-8",
-    )
     (tools / "validate_generation.py").write_text(
         STUB_VALIDATE_GENERATION, encoding="utf-8"
     )
@@ -231,11 +226,11 @@ def world(tmp_path: Path) -> dict[str, Any]:
         "--post-pointers", str(tmp_path / "post" / "post-commit-pointers.json"),
         "--pre-findings", str(pre_findings),
         "--post-findings", str(tmp_path / "post" / "post-commit-findings.json"),
-        "--validate-argv", str(validate_argv),
         "--log-dir", str(tmp_path / "post" / "logs"),
         "--out", str(tmp_path / "post" / "post-commit-verify.json"),
         "--repo-root", str(repo),
         "--tools-dir", str(tools),
+        "--", sys.executable, str(tools / "validate_generation.py"),
     ]  # fmt: skip
     return {
         "args": args,
@@ -429,3 +424,20 @@ def test_the_manifest_and_graph_wire_the_stage_after_commit() -> None:
     argv = " ".join(item for item in post["argv"] if isinstance(item, str))
     assert "{resolved_cycle}" in argv and "{code_commit}" in argv
     assert "post-commit" in stages["pack-evidence"]["argv"]
+
+
+def test_the_stage_runs_the_same_validator_command_as_the_pre_commit_findings() -> None:
+    """The post-commit validator run must be the pre-commit command (Ruling F section 6
+    item 4): same arguments, plus the explicit pointer and its own --out."""
+
+    graph = json.loads(
+        (REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json").read_bytes()
+    )
+    stages = {stage["id"]: stage for stage in graph["stages"]}
+    post = stages["post-commit-verify"]["argv"]
+    assert "--pre-findings" in post and "--post-findings" in post and "--" in post
+    after = post[post.index("--") + 1 :]
+    pre = stages["findings-panel"]["argv"]
+    # everything but the details file the pre-commit stage adds
+    assert after == pre[: pre.index("--details-out")]
+    assert "--validate-argv" not in post

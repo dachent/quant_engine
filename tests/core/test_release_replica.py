@@ -422,7 +422,10 @@ def test_post_commit_validation_runs_after_the_commit_with_its_own_out(
     pre, post = validators
     assert "--out" not in pre and "--release-pointer" not in pre
     assert post[post.index("--out") + 1].endswith("post-commit-findings.json")
-    assert post[post.index("--release-pointer") + 1].endswith("CURRENT_RELEASE.json")
+    # kill test: the replica's coordination root, not the spec file's path
+    assert post[post.index("--release-pointer") + 1] == str(
+        specs[1].coordination_root / "CURRENT_RELEASE.json"
+    )
     names = [Path(c[1]).name for c in runner.calls]
     assert names.index("post_commit_validation.py") > names.index(
         "validate_generation.py", 3
