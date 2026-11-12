@@ -208,3 +208,23 @@ def test_the_pinned_repository_bounds_cover_the_declared_matrixport_gaps() -> No
     ]
     result = assess_gap_bounds_document({STRATEGY: spans}, document, "0" * 64)
     assert result["status"] == "BOUNDED"
+
+
+@pytest.mark.parametrize(
+    ("schema", "path"),
+    [
+        ("report-data.schema.json", ("properties", "hwm_summary")),
+        ("control-panel-data.schema.json", ("properties", "hwm_summary")),
+    ],
+)
+def test_both_closed_schemas_admit_the_bounded_summary_fields(
+    schema: str, path: tuple[str, ...]
+) -> None:
+    node: Any = json.loads(
+        (REPOSITORY_ROOT / "schemas" / "portfolio" / schema).read_bytes()
+    )
+    for key in path:
+        node = node[key]
+    assert node["additionalProperties"] is False
+    assert "hwm_gap_bound" in node["properties"]
+    assert "hwm_numerical_basis" in node["properties"]
