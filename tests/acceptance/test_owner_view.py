@@ -79,7 +79,6 @@ def test_blocker_is_listed_before_unclassified() -> None:
         doc(finding("a"), finding("b", "BLOCKER_INVARIANT")), today=TODAY
     )
     assert view["items"][0]["class"] == ov.BLOCKER
-    assert ov.verdict(view).startswith("STOP")
 
 
 def test_reconciliation_every_finding_has_an_item_kill() -> None:
@@ -489,3 +488,80 @@ def test_output_is_deterministic_for_a_given_day() -> None:
     first = ov.render_js(ov.build_owner_view(d, today=TODAY))
     second = ov.render_js(ov.build_owner_view(d, today=TODAY))
     assert first == second and "2026-11-11" in first
+
+
+def test_overlapping_entries_never_let_the_harmless_one_win_kill() -> None:
+    f = finding("c.one", entity="ibkr-a", defects=("E1",))
+    reg = [
+        entry(ov.NOT_APPLICABLE, block={"entity_match": ".*"}),
+        entry(ov.REAL_DATA_GAP, block={"entity_match": "ibkr-a"}),
+    ]
+    view = ov.build_owner_view(doc(f), register=reg, today=TODAY)
+    assert [i["class"] for i in view["items"]] == [ov.REAL_DATA_GAP]
+    assert any("disagree" in e for e in view["registry_errors"])
+
+
+def test_decision_only_on_decision_entries_and_owner_record_is_text() -> None:
+    bad = [
+        entry(ov.REAL_DATA_GAP, block={"decision": "malformed"}),
+        entry(ov.REAL_DATA_GAP, block={"owner_record": []}),
+    ]
+    assert len(ov.registry_errors(bad)) == 2
+    view = ov.build_owner_view(
+        doc(finding("c.one", defects=("E1",))), register=bad, today=TODAY
+    )
+    assert view["items"][0]["class"] == ov.UNCLASSIFIED
+
+
+def test_markdown_keeps_distinct_decisions_apart() -> None:
+    f = finding("c.one", observed={"unavailable": ["a", "b"]}, defects=("E1",))
+    reg = [
+        entry(
+            ov.NEEDS_OWNER_DECISION,
+            block={
+                "entity_match": "^a$",
+                "decision": {"question": "A?", "options": ["a1", "a2"]},
+            },
+        ),
+        entry(
+            ov.NEEDS_OWNER_DECISION,
+            block={
+                "entity_match": "^b$",
+                "decision": {"question": "B?", "options": ["b1", "b2"]},
+            },
+        ),
+    ]
+    md = ov.render_markdown(ov.build_owner_view(doc(f), register=reg, today=TODAY))
+    assert "A?" in md and "B?" in md
+
+
+def test_malformed_history_never_blocks_the_run() -> None:
+    view = ov.build_owner_view(
+        doc(finding("a")),
+        history=[("x", []), ("y", {"findings": [1, "s"]})],
+        today=TODAY,
+    )  # type: ignore[list-item]
+    assert view["items"][0]["class"] == ov.UNCLASSIFIED
+
+
+def test_cli_also_findings_join_the_owner_view_not_findings_json(
+    tmp_path: Path,
+) -> None:
+    gen_dir = tvg.build(tmp_path, tvg.CASES["liquid_identity"][2])
+    extra = tmp_path / "targetgen" / "findings.json"
+    extra.parent.mkdir()
+    extra.write_bytes(
+        json.dumps(
+            {"findings": [finding("t.block", "BLOCKER_AUTHORITY", entity="x")]}
+        ).encode()
+    )
+    tvg._cli(str(gen_dir), "--also-findings", str(extra))
+    out = gen_dir.parent.parent / "validation" / tvg.GEN
+    own = json.loads((out / "findings.json").read_bytes())["findings"]
+    view = json.loads((out / "owner-view.json").read_bytes())
+    assert all(f["check_id"] != "t.block" for f in own)
+    assert any(
+        i["entity"] == "targetgen:x" and i["class"] == ov.BLOCKER for i in view["items"]
+    )
+    assert view["source_findings"] == len(own) + 1
+    assert ov.verdict(view).startswith("STOP")
