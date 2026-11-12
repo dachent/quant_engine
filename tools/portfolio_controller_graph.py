@@ -215,6 +215,8 @@ _PATH_STAGES = {
     "schemas/portfolio/baseline-declared-inputs.schema.json": [],
     "tools/release_restore_world.py": [],
     "tools/release_evidence_pack.py": [],
+    # operator-run commit-path canary; writes nothing the release binds, no delivery artifact
+    "tools/release_canary.py": [],
     "tools/check_gitleaks_suppressions.py": [],
     "tools/check_push_policy.py": [],
     "tools/check_repository_boundary.py": [],
