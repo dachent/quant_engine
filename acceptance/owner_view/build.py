@@ -48,6 +48,7 @@ WORDS = {
 REAL = frozenset(
     {BLOCKER, UNCLASSIFIED, NEEDS_OWNER_DECISION, REAL_DATA_GAP, BUILDER_NOT_WIRED}
 )
+KIND_WORDS = {"real": "Real", "checker": "Checker", "accepted": "Accepted"}
 _REQUIRED = ("what", "fix", "who", "how_long")
 _TEMPLATE = re.compile(r"\{([A-Za-z0-9_.]+)\}")
 
@@ -268,6 +269,7 @@ def _item(
         return {
             **common,
             "real_or_checker": "real",
+            "kind_word": KIND_WORDS["real"],
             "what": message
             or f"{finding.get('check_id')} on {entity}: not classified yet.",
             "what_all": message or f"{finding.get('check_id')}: not classified yet.",
@@ -289,6 +291,7 @@ def _item(
     return {
         **common,
         "real_or_checker": real_or_checker(klass),
+        "kind_word": KIND_WORDS[real_or_checker(klass)],
         "what": _fill(block["what"], facts),
         # the same sentence for every entity of a group: the entities go under Where
         "what_all": _fill(

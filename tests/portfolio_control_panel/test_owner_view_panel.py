@@ -65,6 +65,7 @@ def _item(klass: str, what: str, real: str, where: str = "w") -> dict:
         "how_long": "1d",
         "overdue": False,
         "real_or_checker": real,
+        "kind_word": real.capitalize(),
         "decision": None,
     }
 
@@ -107,7 +108,7 @@ def test_missing_owner_view_says_treat_every_gap_as_real() -> None:
         pathname=f"/c/generations/{GEN}/index.html",
         fail=True,
     )
-    assert "treat every gap as real" in out["verdict"]
+    assert "assume the gaps are real" in out["verdict"]
 
 
 def test_page_has_no_static_verdict_and_an_owner_view_slot() -> None:
@@ -138,12 +139,12 @@ def test_rows_that_differ_in_overdue_or_record_stay_apart() -> None:
 
 def test_a_path_outside_generations_says_not_generated() -> None:
     out = _run({"verdict": "", "items": []}, pathname="/c/candidates/x/index.html")
-    assert out.get("src") is None and "treat every gap as real" in out["verdict"]
+    assert out.get("src") is None and "assume the gaps are real" in out["verdict"]
 
 
 def test_a_view_without_an_items_array_says_not_generated() -> None:
     out = _run({"verdict": "x"}, pathname=f"/c/generations/{GEN}/index.html")
-    assert "treat every gap as real" in out["verdict"]
+    assert "assume the gaps are real" in out["verdict"]
 
 
 def test_qa_scripts_tolerate_only_the_missing_owner_view_sidecar() -> None:

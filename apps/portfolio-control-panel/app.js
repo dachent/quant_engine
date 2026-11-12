@@ -3991,7 +3991,7 @@
   // a harness without this page's elements (shell harness, fixtures) has nothing to render into
   if (typeof document === "undefined" || typeof document.getElementById !== "function"
     || !document.getElementById("owner-view-items")) return;
-  const NOT_GENERATED = "Owner view not generated for this release: treat every gap as real.";
+  const NOT_GENERATED = "Owner view not generated for this release: assume the gaps are real.";
   const setVerdict = (text) => {
     const verdict = document.getElementById("owner-view-verdict");
     if (verdict) verdict.textContent = text;
@@ -4023,7 +4023,7 @@
       const lines = [
         `Where: ${[...new Set(rows.map((r) => r.where))].join(", ")}`,
         `Number affected: ${first.number_affected}`,
-        `${first.real_or_checker === "real" ? "Real" : first.real_or_checker === "checker" ? "Checker" : "Accepted"}. Fix: ${first.fix} (${first.who}; ${first.how_long})${first.overdue ? " PAST ITS FIX DATE" : ""}`,
+        `${first.kind_word}. Fix: ${first.fix} (${first.who}; ${first.how_long})${first.overdue ? " PAST ITS FIX DATE" : ""}`,
         `Since: ${first.since ?? "not known"}. Ref: ${ref.check_id ?? ""} ${(ref.defect_ids || []).join(",")}`,
       ];
       if (first.decision) lines.push(`Decision: ${first.decision.question} ${first.decision.options.join(" / ")}`);
