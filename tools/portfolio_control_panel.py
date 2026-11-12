@@ -5537,8 +5537,25 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         else None
     )
     periods = association.get("periods_per_year")
+    # #904 item 11: one rule for whether an alpha may stand as a headline tile.  It
+    # needs a standard error (so a t-statistic) and no hypothetical backtest in the
+    # series it was fitted on; |t| < 2 reads "not distinguishable from zero".
+    if t_stat is None:
+        inference = "NO_STANDARD_ERROR"
+    elif abs(t_stat) < 2:
+        inference = "NOT_DISTINGUISHABLE_FROM_ZERO"
+    else:
+        inference = "DISTINGUISHABLE_FROM_ZERO"
+    if share is not None and share > 0:
+        headline_status = "NOT_A_HEADLINE_INCLUDES_BACKTEST"
+    elif t_stat is None:
+        headline_status = "NOT_A_HEADLINE_NO_STANDARD_ERROR"
+    else:
+        headline_status = "HEADLINE_ALLOWED"
     return {
         "status": "AVAILABLE" if available else "UNAVAILABLE",
+        "inference": inference,
+        "headline_status": headline_status,
         "unavailable_reason": unavailable_reason,
         "window_start": start,
         "window_end": end,
@@ -5573,6 +5590,16 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "factor_as_of_date": factor_end if isinstance(factor_end, str) else None,
         "factor_staleness_days": staleness,
     }
+
+
+def _alpha_headline_status(row: Mapping[str, Any] | None) -> str:
+    if row is None:
+        return "UNAVAILABLE"
+    return str(_alpha_context(row)["headline_status"])
+
+
+def _alpha_headline(row: Mapping[str, Any] | None) -> bool:
+    return _alpha_headline_status(row) == "HEADLINE_ALLOWED"
 
 
 def _factor_analysis(
@@ -9733,11 +9760,26 @@ def _strategy_underwriting(
                     "hybrid_aligned_observations": factor_value(
                         hybrid_factor, "coverage", "aligned_observations"
                     ),
-                    "live_net_alpha": factor_value(
-                        live_factor, "alpha", "net_annualized"
+                    # #904 items 10 and 11: an alpha is a headline only with a standard
+                    # error and no hypothetical backtest in its series; its context
+                    # (t-statistic, inference, backtest share) travels with it
+                    "live_net_alpha": (
+                        factor_value(live_factor, "alpha", "net_annualized")
+                        if _alpha_headline(live_factor)
+                        else None
                     ),
-                    "hybrid_net_alpha": factor_value(
-                        hybrid_factor, "alpha", "net_annualized"
+                    "live_net_alpha_status": _alpha_headline_status(live_factor),
+                    "live_net_alpha_context": (
+                        None if live_factor is None else _alpha_context(live_factor)
+                    ),
+                    "hybrid_net_alpha": (
+                        factor_value(hybrid_factor, "alpha", "net_annualized")
+                        if _alpha_headline(hybrid_factor)
+                        else None
+                    ),
+                    "hybrid_net_alpha_status": _alpha_headline_status(hybrid_factor),
+                    "hybrid_net_alpha_context": (
+                        None if hybrid_factor is None else _alpha_context(hybrid_factor)
                     ),
                     "live_net_alpha_window": _alpha_window(live_factor),
                     "hybrid_net_alpha_window": _alpha_window(hybrid_factor),
