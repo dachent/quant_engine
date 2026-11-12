@@ -14911,7 +14911,7 @@ def test_c4d1a_core_contract_objects_are_identical_and_pinned(
         ),
         "quant_engine.core.strict_json": (
             "packages/core/src/quant_engine/core/strict_json.py",
-            "a41faf372e4298110e96d275769ab2453e689349269f532333d6a09844880cde",
+            "348bb5048676bce1db75ba2f2f482bbddeb71c05d6a98bc9ff1d11e7d1be5316",
         ),
     }
     modules = {
@@ -15293,7 +15293,7 @@ def _c4d1b_parent_core_table() -> tuple[dict[str, object], set[bytes]]:
     expected_pins = {
         "quant_engine.core.snapshots": "ba9e0ee78c84a0c3ec38cab2e778284bcf02335c5958266f0823a04072e4e653",
         "quant_engine.core.contracts": "619c4f0c7ad51fa868a2e0213371310efb337bf6be2797e31150518d6f179fc9",
-        "quant_engine.core.strict_json": "a41faf372e4298110e96d275769ab2453e689349269f532333d6a09844880cde",
+        "quant_engine.core.strict_json": "348bb5048676bce1db75ba2f2f482bbddeb71c05d6a98bc9ff1d11e7d1be5316",
     }
     modules = {
         "quant_engine.core.snapshots": snapshots_module,
