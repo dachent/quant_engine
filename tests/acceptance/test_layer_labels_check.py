@@ -56,3 +56,36 @@ def test_a_headline_over_backtest_fails_and_over_model_live_passes() -> None:
     short = _block(annualized_headline=0.1)
     short["series_labels"][0]["window"]["first"] = "2026-03-01"
     assert _rows({"a": short}) == ["layers.backtest_headline"]
+
+
+def test_a_block_with_labels_and_no_points_is_checked() -> None:
+    """The history bundle's definitions carry labels and no series_points."""
+
+    assert _rows({"a": {"series_labels": [_label()]}}) == []
+    assert _rows({"a": {"series_labels": []}}) == ["layers.series_label"]
+    two = {"series_labels": [_label(), _label(BACKTEST, "2024-01-01")]}
+    assert _rows({"a": two}) == ["layers.one_series"]
+
+
+def test_the_annualised_keys_the_report_emits_are_judged_too() -> None:
+    for key in (
+        "account_live_cagr",
+        "annualized_return_on_net_capital",
+        "cagr",
+    ):
+        bad = {"series_labels": [_label(BACKTEST, "2020-01-01")], key: 0.12}
+        assert _rows({"a": bad}) == ["layers.backtest_headline"], key
+        assert _rows({"a": {"series_labels": [_label()], key: 0.1}}) == [], key
+
+
+def test_a_backtest_segment_beside_a_model_live_series_label_blocks_the_headline() -> (
+    None
+):
+    block = {
+        "series_labels": [_label(MODEL_LIVE, "2025-05-12")],
+        "segment_labels": [_label(BACKTEST, "2020-01-01"), _label()],
+        "cagr": 0.1,
+    }
+    assert _rows({"a": block}) == ["layers.backtest_headline"]
+    block["segment_labels"] = [_label()]
+    assert _rows({"a": block}) == []
