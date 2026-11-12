@@ -196,7 +196,10 @@ def _check_annualization_frequency(
         )
     if not upper:
         return
-    if periods_per_year >= DAILY_PERIODS_PER_YEAR and span_days < _MIN_DERIVATION_SPAN_DAYS:
+    if (
+        periods_per_year >= DAILY_PERIODS_PER_YEAR
+        and span_days < _MIN_DERIVATION_SPAN_DAYS
+    ):
         # a daily declaration is not judged on under four weeks of dates; a coarse one
         # (weekly, monthly) is, at any length
         return

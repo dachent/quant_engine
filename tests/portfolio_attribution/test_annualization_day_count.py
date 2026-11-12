@@ -184,6 +184,6 @@ def test_the_refusal_sentence_reads_once_for_each_direction() -> None:
         observed_end="2026-07-19",
         maximum_observations=8,
     )
-    assert attribution._frequency_refused_comparison({}, dense)[
-        "disposition"
-    ].endswith("are more than the 8 that frequency implies.")
+    assert attribution._frequency_refused_comparison({}, dense)["disposition"].endswith(
+        "are more than the 8 that frequency implies."
+    )
