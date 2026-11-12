@@ -105,6 +105,71 @@ def _twr_row(
     }
 
 
+EPOCH_MANIFEST_SHA = hashlib.sha256(b"epoch-manifest").hexdigest()
+# The constants of the manifest producer (tools/account_strategy_manifest.py), pinned by
+# schemas/portfolio/account-strategy-manifest.schema.json.  They describe the manifest
+# as built, not the release.
+PRODUCER_READINESS = {
+    "authority_status": "SOURCE_BOUND_CANDIDATE",
+    "independent_authority_verification": "NOT_PERFORMED",
+    "publication_readiness": "NOT_READY",
+}
+
+
+def verified_bundle_record(ok_rows: int) -> dict[str, Any]:
+    """The verified-bundle profile's ``meta.account_manifest_verification`` as built."""
+
+    return {
+        "status": "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES",
+        "method": "READ_GENERATION_BUNDLE_EXACT_BYTES_AND_FINANCIAL_MVP_BINDER",
+        "producer_readiness": copy.deepcopy(PRODUCER_READINESS),
+        "publication_readiness": "NOT_READY",
+        "epoch_manifest_source": {
+            "generation_id": hashlib.sha256(b"epoch-generation").hexdigest(),
+            "generation_manifest_sha256": hashlib.sha256(b"gm").hexdigest(),
+            "generation_receipt_sha256": hashlib.sha256(b"gr").hexdigest(),
+            "full_directory_inventory_sha256": hashlib.sha256(b"inv").hexdigest(),
+            "artifact": {
+                "path": "outputs/account-strategy-manifest.json",
+                "sha256": EPOCH_MANIFEST_SHA,
+                "size_bytes": 1000,
+                "schema": {"name": "account-strategy-manifest", "version": "10"},
+            },
+            "crosswalk": {
+                "path": "authority/account-assignment-crosswalk.json",
+                "sha256": hashlib.sha256(b"crosswalk").hexdigest(),
+                "size_bytes": 300,
+                "schema": {
+                    "name": "account-strategy-current-epoch-crosswalk",
+                    "version": "1",
+                },
+            },
+        },
+        "independent_report": {
+            "artifact_id": "verification/independent-verification.json",
+            "sha256": hashlib.sha256(b"report").hexdigest(),
+            "size_bytes": 500,
+            "schema": {
+                "name": "account-manifest-independent-verification",
+                "version": "3",
+            },
+            "report_schema_version": 3,
+            "status": "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES",
+            "subjects_semantic_sha256": hashlib.sha256(b"subjects").hexdigest(),
+            "numeric_verification": {
+                "candidate_count": ok_rows,
+                "comparison_count": ok_rows,
+                "discrepancy_count": 0,
+                "disposition": (
+                    "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
+                    if ok_rows
+                    else "NOT_APPLICABLE_NO_CANDIDATES"
+                ),
+            },
+        },
+    }
+
+
 def _manifest_row(
     account: str,
     strategy: str,
@@ -117,6 +182,7 @@ def _manifest_row(
     return {
         "account_id": account,
         "strategy_id": strategy,
+        "status": "OK",
         "effective_start": START,
         "effective_end": None,
         "start": START,
@@ -468,7 +534,8 @@ def derive_panel(report: dict[str, Any]) -> dict[str, Any]:
         _manifest_row("B1", "beta", "2000", "0", "2200", []),
         _manifest_row("B2", "beta", "2800", "200", "3300", trace),
     ]
-    readiness = {"publication_readiness": "READY", "status": "VERIFIED"}
+    ok_rows = len(manifest)
+    readiness = verified_bundle_record(ok_rows)
     panel: dict[str, Any] = {
         "panel_schema_version": 21,
         "meta": {
@@ -478,7 +545,8 @@ def derive_panel(report: dict[str, Any]) -> dict[str, Any]:
             "correlation_generation_id": "e" * 64,
             "decomposition_generation_id": "f" * 64,
             "account_manifest_verification": readiness,
-            "account_manifest_authority_profile": "VERIFIED",
+            "account_manifest_authority_profile": "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES",
+            "account_manifest_sha256": EPOCH_MANIFEST_SHA,
             "source_clock": copy.deepcopy(report["source_clock"]),
             "release_id": RELEASE,
         },
@@ -496,10 +564,7 @@ def derive_panel(report: dict[str, Any]) -> dict[str, Any]:
         "advisory": {"hwm_limit": "0.15", "correlation_one_stress": "0.10"},
         "account_manifest": {
             "calculation_cutoff_date": CUTOFF,
-            "authority_readiness": {
-                "publication_readiness": "READY",
-                "independent_authority_verification": "PERFORMED",
-            },
+            "authority_readiness": copy.deepcopy(PRODUCER_READINESS),
             "rows": manifest,
         },
         "allocations": [
@@ -1029,13 +1094,15 @@ def build(root: Path, spec: Spec | None = None) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
     candidate: dict[str, Any] = {
-        "state": "PUBLISHED",
+        # Real producers write STAGED for good (portfolio_control_panel._candidate_record);
+        # release state lives only in the release record (D8, Rulings T0-c and F).
+        "state": "STAGED",
         "portfolio_as_of": CUTOFF,
         "report_generation_id": REPORT_GEN,
         "correlation_generation_id": "e" * 64,
         "decomposition_generation_id": "f" * 64,
         "account_manifest_verification": panel["meta"]["account_manifest_verification"],
-        "account_manifest_authority_profile": "VERIFIED",
+        "account_manifest_authority_profile": "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES",
         "artifact_sha256": {rel: _sha(data) for rel, data in sorted(files.items())},
     }
     if embedded_artifacts is not None and spec.embedded_record:
@@ -1790,7 +1857,7 @@ CASES: dict[str, tuple[str, str, Spec]] = {
     "publication_state": (
         "identity.publication_state",
         checks.BLOCKER_AUTHORITY,
-        Spec(candidate=[_set(("state",), "STAGED")]),
+        Spec(candidate=[_set(("account_manifest_authority_profile",), "VERIFIED")]),
     ),
     "release_pinned": (
         "identity.release_pinned",
@@ -2264,7 +2331,7 @@ CASES: dict[str, tuple[str, str, Spec]] = {
     "payload_block_over_budget": (
         "lint.payload_size",
         checks.BLOCKER_REGRESSION,
-        Spec(panel=[_set(("positions",), "x" * 400000)]),
+        Spec(panel=[_set(("positions",), "x" * 600000)]),
     ),
     "payload_unbudgeted_block_over_maximum": (
         "lint.payload_size",

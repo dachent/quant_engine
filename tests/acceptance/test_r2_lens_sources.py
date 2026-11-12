@@ -70,8 +70,9 @@ def _classes(
 BOTH = ["us-economic", "europe-economic"]
 
 
-def test_the_governed_source_set_downgrades(tmp_path: Path) -> None:
-    assert _classes(tmp_path, "ECONOMIC_FACTOR", BOTH) == {checks.NOT_READY}
+def test_the_governed_source_set_is_current_within_its_lag(tmp_path: Path) -> None:
+    # #895 F2 (C3): a lens inside its governed publication lag is current, not a finding
+    assert _classes(tmp_path, "ECONOMIC_FACTOR", BOTH) == set()
 
 
 def test_a_lens_that_omits_one_of_its_governed_sources_still_blocks(
@@ -110,9 +111,10 @@ def test_the_lag_is_read_from_the_plan_policy_id(tmp_path: Path) -> None:
     assert _classes(tmp_path / "late", "ECONOMIC_FACTOR", BOTH, plan) == {
         checks.BLOCKER_AUTHORITY
     }
-    assert _classes(
-        tmp_path / "june", "ECONOMIC_FACTOR", BOTH, plan, as_of="2026-06-30"
-    ) == {checks.NOT_READY}
+    assert (
+        _classes(tmp_path / "june", "ECONOMIC_FACTOR", BOTH, plan, as_of="2026-06-30")
+        == set()
+    )
 
 
 def test_a_policy_id_that_states_no_lag_excuses_nothing(tmp_path: Path) -> None:

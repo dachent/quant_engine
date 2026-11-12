@@ -27,7 +27,7 @@ from test_validate_generation import CUTOFF, Spec, build
 
 from acceptance.validate import checks
 
-CHECK = "capital.as_of_cutoff"
+CHECK = "capital.current_capital_as_of"
 EARLY = "2025-12-05"
 
 

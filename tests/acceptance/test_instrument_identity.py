@@ -22,6 +22,8 @@ from pathlib import Path
 import shutil
 from typing import Any
 
+import pytest
+
 from test_validate_generation import (
     GEN,
     Spec,
@@ -132,27 +134,166 @@ def test_v3_a_stage_pointer_alone_is_not_publication(tmp_path: Path) -> None:
     assert _only(run(gen_dir), PUBLICATION) == []
 
 
-def test_v3_a_committed_release_publication_with_not_ready_records_still_blocks(
+def test_v3_real_build_time_constants_do_not_block_a_committed_release(
     tmp_path: Path,
 ) -> None:
+    """D8 kill test: STAGED / NOT_READY / NOT_PERFORMED are what every real panel holds.
+
+    The old check read them as release state and raised a blocker on every committed
+    release (reproduced on R3).  The fixture now carries the producers' values.
+    """
+
     gen_dir = build(tmp_path, STAGED)
+    assert _only(run(gen_dir), PUBLICATION) == []
+    candidate = json.loads((gen_dir / "candidate.json").read_bytes())
+    assert candidate["state"] == "STAGED"
+    assert candidate["account_manifest_verification"]["publication_readiness"] == (
+        "NOT_READY"
+    )
+
+
+def test_d8_passes_identically_before_and_after_the_commit(tmp_path: Path) -> None:
+    before = build(tmp_path / "before", Spec(post_write=[_drop_release]))
+    after = build(tmp_path / "after", Spec())
+    assert _only(run(before), PUBLICATION) == []
+    assert _only(run(after), PUBLICATION) == []
+
+
+def _both(path: tuple[str, ...], value: Any):
+    """Edit the verification record in the candidate and in the panel meta alike."""
+
+    def candidate(doc: dict[str, Any]) -> None:
+        _set(("account_manifest_verification", *path), value)(doc)
+
+    def panel(doc: dict[str, Any]) -> None:
+        _set(("meta", "account_manifest_verification", *path), value)(doc)
+
+    return Spec(candidate=[candidate], panel=[panel])
+
+
+D8_BAD = {
+    "report_status": _both(("independent_report", "status"), "NOT_ATTESTED"),
+    "record_status": _both(("status",), "NOT_SUPPLIED"),
+    "discrepancy": _both(
+        ("independent_report", "numeric_verification", "discrepancy_count"), 1
+    ),
+    "comparison_short": _both(
+        ("independent_report", "numeric_verification", "comparison_count"), 2
+    ),
+    "candidate_count_vs_rows": _both(
+        ("independent_report", "numeric_verification", "candidate_count"), 2
+    ),
+    "disposition": _both(
+        ("independent_report", "numeric_verification", "disposition"),
+        "NOT_APPLICABLE_NO_CANDIDATES",
+    ),
+    "manifest_sha": _both(("epoch_manifest_source", "artifact", "sha256"), "0" * 64),
+    "report_sha": _both(("independent_report", "sha256"), "not-hex"),
+    "method": _both(("method",), "NONE"),
+    "report_artifact_id": _both(("independent_report", "artifact_id"), "other.json"),
+    "report_size": _both(("independent_report", "size_bytes"), 0),
+    "subjects_digest": _both(("independent_report", "subjects_semantic_sha256"), "x"),
+    "source_generation_id": _both(("epoch_manifest_source", "generation_id"), "ab"),
+    "bool_count": _both(
+        ("independent_report", "numeric_verification", "discrepancy_count"), False
+    ),
+    "float_count": _both(
+        ("independent_report", "numeric_verification", "comparison_count"), 3.0
+    ),
+    "ready_flag": _both(("publication_readiness",), "READY"),
+    "no_source": _both(("epoch_manifest_source", "artifact", "sha256"), "not-a-hash"),
+    "profile": Spec(
+        candidate=[
+            _set(
+                ("account_manifest_authority_profile",), "NOT_SUPPLIED_NON_RELEASEABLE"
+            )
+        ]
+    ),
+    "panel_profile_differs": Spec(
+        panel=[
+            _set(
+                ("meta", "account_manifest_authority_profile"),
+                "INDEPENDENT_EXACT_REBUILD",
+            )
+        ]
+    ),
+    "candidate_panel_record_differs": Spec(
+        candidate=[_set(("account_manifest_verification", "method"), "OTHER")]
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(D8_BAD))
+def test_d8_a_record_that_does_not_certify_the_panel_blocks(
+    tmp_path: Path, name: str
+) -> None:
+    gen_dir = build(tmp_path, D8_BAD[name])
     findings = _only(run(gen_dir), PUBLICATION)
+    assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY], name
+    assert findings[0].defect_ids == ("D8",)
+    # kill: the old check named the build-time constants; the new one names the defect.
+    assert "candidate.state" not in findings[0].observed, name
+    assert findings[0].observed, name
+
+
+def test_d8_blocks_before_the_commit_too(tmp_path: Path) -> None:
+    spec = Spec(
+        post_write=[_drop_release],
+        candidate=D8_BAD["discrepancy"].candidate,
+        panel=D8_BAD["discrepancy"].panel,
+    )
+    findings = _only(run(build(tmp_path, spec)), PUBLICATION)
     assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY]
-    assert "release.json" in findings[0].message
+
+
+def test_d8_exact_rebuild_profile_needs_its_own_status(tmp_path: Path) -> None:
+    def rebuild(doc: dict[str, Any], where: tuple[str, ...]) -> None:
+        _set(
+            where + ("account_manifest_authority_profile",), "INDEPENDENT_EXACT_REBUILD"
+        )(doc)
+        _set(
+            where + ("account_manifest_verification",),
+            {
+                "status": "PANEL_INDEPENDENT_EXACT_REBUILD_VERIFIED",
+                "method": "EXACT_REBUILD_REPORT_BASELINE_CANONICAL_POLICY_AND_TEMPLATE_BOUND",
+                "producer_readiness": {},
+                "publication_readiness": "READY",
+            },
+        )(doc)
+
+    good = Spec(
+        candidate=[lambda d: rebuild(d, ())],
+        panel=[lambda d: rebuild(d, ("meta",))],
+    )
+    assert _only(run(build(tmp_path / "good", good)), PUBLICATION) == []
+    bad = Spec(
+        candidate=[
+            lambda d: rebuild(d, ()),
+            _set(("account_manifest_verification", "status"), "INTERNAL"),
+        ],
+        panel=[
+            lambda d: rebuild(d, ("meta",)),
+            _set(("meta", "account_manifest_verification", "status"), "INTERNAL"),
+        ],
+    )
+    assert len(_only(run(build(tmp_path / "bad", bad)), PUBLICATION)) == 1
 
 
 def test_v3_the_committed_release_decides_not_the_stage_pointer(
     tmp_path: Path,
 ) -> None:
+    bad = D8_BAD["discrepancy"]
     gen_dir = build(
         tmp_path,
         Spec(
-            candidate=[_set(("state",), "STAGED")],
+            candidate=bad.candidate,
+            panel=bad.panel,
             post_write=[_drop_stage_pointer],
         ),
     )
     findings = _only(run(gen_dir), PUBLICATION)
     assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY]
+    assert "release.json" in findings[0].message
 
 
 def test_v3_a_release_that_names_another_generation_does_not_publish_this_one(
@@ -161,7 +302,6 @@ def test_v3_a_release_that_names_another_generation_does_not_publish_this_one(
     gen_dir = build(
         tmp_path,
         Spec(
-            candidate=[_set(("state",), "STAGED")],
             post_write=[_edit_release_target(proposed_generation_id="d" * 64)],
         ),
     )
@@ -223,3 +363,49 @@ def test_v4_no_release_pointer_is_still_not_ready(tmp_path: Path) -> None:
     gen_dir = build(tmp_path, Spec(post_write=[_drop_release]))
     findings = _only(run(gen_dir), RELEASE_PINNED)
     assert [f.klass for f in findings] == [checks.NOT_READY]
+
+
+def test_d8_a_bad_record_is_not_masked_by_an_unreadable_release(tmp_path: Path) -> None:
+    """Kill test (Fable review): the evidence row used to return before Part A."""
+
+    bad = D8_BAD["discrepancy"]
+    gen_dir = build(
+        tmp_path,
+        Spec(candidate=bad.candidate, panel=bad.panel, post_write=[_drop_release]),
+    )
+    findings = _only(run(gen_dir), PUBLICATION)
+    assert checks.BLOCKER_AUTHORITY in {f.klass for f in findings}
+
+
+def test_d8_zero_counts_with_no_manifest_rows_do_not_pass_as_none_equals_none(
+    tmp_path: Path,
+) -> None:
+    def wipe(doc: dict[str, Any]) -> None:
+        doc["account_manifest"] = None
+
+    findings = _only(run(build(tmp_path, Spec(panel=[wipe]))), PUBLICATION)
+    assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY]
+
+
+def test_hardcoded_status_literal_needs_no_readiness_field(tmp_path: Path) -> None:
+    """Kill test: the shell check was armed by the readiness constants; now it is not."""
+
+    from test_validate_generation import BAD_APP_STATUS
+
+    def strip(doc: dict[str, Any]) -> None:
+        doc["account_manifest"].pop("authority_readiness", None)
+
+    spec = Spec(
+        app_js=BAD_APP_STATUS,
+        panel=[strip],
+        candidate=[
+            lambda c: c.pop("state", None),
+            lambda c: c.pop("account_manifest_verification", None),
+        ],
+    )
+    findings = [
+        f
+        for f in run(build(tmp_path, spec))
+        if f.check_id == "code.hardcoded_status_literal"
+    ]
+    assert findings and {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}

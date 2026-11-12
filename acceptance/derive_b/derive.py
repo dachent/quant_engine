@@ -2763,6 +2763,7 @@ def add_not_derivable(
     entity: str,
     reason: str,
     window: str | None = None,
+    applicability: str | None = None,
 ) -> None:
     row: dict[str, object] = {
         "metric_id": metric_id,
@@ -2771,6 +2772,9 @@ def add_not_derivable(
     }
     if window is not None:
         row["window"] = window
+    if applicability is not None:
+        # INAPPLICABLE_BY_POLICY: no such metric exists under the fund-scoped policy.
+        row["applicability"] = applicability
     output["not_derivable"].append(row)
 
 
@@ -4153,12 +4157,14 @@ def derive(
                         "capital.strategy_cash.cutoff",
                         strategy_id,
                         FUND_SCOPED_NO_CASH_LINE_REASON,
+                        applicability="INAPPLICABLE_BY_POLICY",
                     )
                     add_not_derivable(
                         output,
                         COVERAGE_METRIC_ID,
                         coverage_entity(strategy_id, members),
                         FUND_SCOPED_NO_COVERAGE_REASON,
+                        applicability="INAPPLICABLE_BY_POLICY",
                     )
                 else:
                     custody_failures.add(strategy_id)
@@ -4200,12 +4206,14 @@ def derive(
                     "capital.strategy_cash.cutoff",
                     strategy_id,
                     FUND_SCOPED_NO_CASH_LINE_REASON,
+                    applicability="INAPPLICABLE_BY_POLICY",
                 )
                 add_not_derivable(
                     output,
                     COVERAGE_METRIC_ID,
                     coverage_entity(strategy_id, members),
                     FUND_SCOPED_NO_COVERAGE_REASON,
+                    applicability="INAPPLICABLE_BY_POLICY",
                 )
                 continue
             aggregate["strategies"][strategy_id] += custody["cash"]
