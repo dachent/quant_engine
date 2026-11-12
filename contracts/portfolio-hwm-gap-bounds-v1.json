@@ -1,0 +1,41 @@
+{
+  "derivation": "closure leave-one-out over the published daily NAV days; site daily NAV used as span splitter; see the release evidence record sprint-data-reserves",
+  "points": [
+    {
+      "date": "2026-01-27",
+      "max_observed_closure_error": "0.036583571810286264",
+      "nav": "0.8482058",
+      "origin": "ADMITTED_ALTERNATE_SOURCE",
+      "prior_high": "0.9019490523188368",
+      "range_high": "0.8482058",
+      "range_low": "0.8482058",
+      "strategy_id": "robuxio-crypto",
+      "tolerance_relative": "0.005"
+    },
+    {
+      "date": "2026-07-03",
+      "max_observed_closure_error": "0.036583571810286264",
+      "nav": "0.8501657763888592",
+      "origin": "DERIVED_BRIDGE_WITH_CLOSURE",
+      "prior_high": "0.9355697744643229",
+      "range_high": "0.8502470955770289",
+      "range_low": "0.8500323745507405",
+      "strategy_id": "robuxio-crypto",
+      "tolerance_relative": "0.005"
+    },
+    {
+      "date": "2026-10-16",
+      "max_observed_closure_error": "0.036583571810286264",
+      "nav": "0.8954",
+      "origin": "DERIVED_BRIDGE_WITH_CLOSURE",
+      "prior_high": "0.9710087052534618",
+      "range_high": "0.8966248817007879",
+      "range_low": "0.8945066665750266",
+      "strategy_id": "robuxio-crypto",
+      "tolerance_relative": "0.005"
+    }
+  ],
+  "policy_id": "PORT-HWM-3",
+  "rule": "A missing daily NAV point is admitted only from an admitted origin; its upper bound range_high*(1+max(max_observed_closure_error, tolerance_relative)) must be strictly below prior_high. Verdicts are recomputed by quant_engine.portfolio_ledger.hwm_gap_bounds, never read from this file.",
+  "schema": "portfolio-hwm-gap-bounds/1"
+}

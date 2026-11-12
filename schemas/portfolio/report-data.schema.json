@@ -272,6 +272,8 @@
         "hwm_index": {"$ref": "#/$defs/decimal"},
         "hwm_current_drawdown": {"$ref": "#/$defs/decimal"},
         "hwm_maximum_drawdown": {"$ref": "#/$defs/decimal"},
+        "hwm_gap_bound": {"type": "object"},
+        "hwm_numerical_basis": {"const": "PORT-HWM-4_GOVERNED_WITH_BOUNDED_MISSING_POINTS"},
         "hwm_numerical_status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
         "hwm_numerical_reason": {"type": "string", "minLength": 1},
         "nav_coverage": {"$ref": "#/$defs/decimal"},
