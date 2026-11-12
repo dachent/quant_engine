@@ -211,9 +211,9 @@ def test_live_only_grid_is_the_union_with_nulls_and_an_anchor_at_the_last_start(
     a = _line(block, "LIVE_ONLY", "strategy:A one")
     assert a["tri"][0] is None and a["tri"][1] == 1.01
     assert (a["first_week"], a["first_index"], a["last_index"]) == (WEEKS[4], 1, 4)
-    assert a["segments"] == [[1, 4]] and a["origin"] == [[1, 4, "LIVE"]]
+    assert a["segments"] == [[1, 4]] and a["origin"] == [[1, 4, "ACCOUNT_LIVE"]]
     c = _line(block, "LIVE_ONLY", "strategy:C three")
-    assert c["first_index"] == 0 and c["origin"] == [[0, 4, "LIVE"]]
+    assert c["first_index"] == 0 and c["origin"] == [[0, 4, "ACCOUNT_LIVE"]]
     expected = Decimal(1)
     for _ in range(4):
         expected *= (
@@ -257,14 +257,27 @@ def test_hybrid_grid_runs_back_to_the_earliest_line_and_names_the_unfilled_gap()
 def test_hybrid_origin_marks_backtest_mixed_and_live_by_the_live_start() -> None:
     block = tab.build_performance_tab(_panel())
     a = _line(block, "LIVE_PLUS_BACKTEST", "strategy:A one")
-    assert a["origin"] == [[0, 3, "BACKTEST"], [4, 4, "MIXED"], [5, 7, "LIVE"]]
+    assert a["origin"] == [[0, 3, "BACKTEST"], [4, 4, "MIXED"], [5, 7, "ACCOUNT_LIVE"]]
     c = _line(block, "LIVE_PLUS_BACKTEST", "strategy:C three")
     assert c["source_mode"] == "LIVE_ONLY_FALLBACK"
-    assert c["origin"] == [[3, 7, "LIVE"]]
+    assert c["origin"] == [[3, 7, "ACCOUNT_LIVE"]]
     ew = _line(block, "LIVE_PLUS_BACKTEST", "portfolio:equal_weight")
     assert ew["first_index"] == 3 and ew["tri"][2] is None
-    assert ew["origin"][0][2] == "MIXED" and ew["origin"][-1][2] == "LIVE"
+    assert ew["origin"][0][2] == "MIXED" and ew["origin"][-1][2] == "ACCOUNT_LIVE"
     assert "weekly" in ew["definition"] and "never filled with zero" in ew["definition"]
+
+
+def test_one_origin_vocabulary_model_live_is_not_account_live() -> None:
+    """Kill test: a model-live week is never labelled as the owner's account."""
+
+    for flag in ("ORIGIN_MODEL_LIVE", "ORIGIN_PROVIDER_MODEL_LIVE"):
+        assert tab._week_origin(
+            [0, "2026-01-05", "2026-01-09", 5, [flag]], None, "LIVE_PLUS_BACKTEST"
+        ) == ("MODEL_LIVE")
+    assert tab._week_origin(None, None, "LIVE_ONLY") == "ACCOUNT_LIVE"
+    assert {"LIVE", "PROVIDER_MODEL_LIVE"}.isdisjoint(
+        {tab.ORIGIN_ACCOUNT_LIVE, tab.ORIGIN_MODEL_LIVE}
+    )
 
 
 def test_provider_model_and_derived_weeks_take_their_declared_origin() -> None:
@@ -278,14 +291,14 @@ def test_provider_model_and_derived_weeks_take_their_declared_origin() -> None:
     a = _line(block, "LIVE_PLUS_BACKTEST", "strategy:A one")
     assert a["origin"][:4] == [
         [0, 0, "BACKTEST"],
-        [1, 1, "PROVIDER_MODEL_LIVE"],
+        [1, 1, "MODEL_LIVE"],
         [2, 2, "DERIVED"],
         [3, 3, "BACKTEST"],
     ]
     tab.verify_performance_tab(block, panel)
     assert list(_schema_validator().iter_errors(block)) == []
     live_only = _line(block, "LIVE_ONLY", "strategy:A one")
-    assert {run[2] for run in live_only["origin"]} == {"LIVE"}
+    assert {run[2] for run in live_only["origin"]} == {"ACCOUNT_LIVE"}
 
 
 def test_a_gap_after_the_first_common_observation_moves_the_anchor_not_the_grid() -> (
@@ -561,7 +574,8 @@ def _tamper(path: list[Any], value: Any) -> Any:
         _tamper(["modes", "LIVE_ONLY", "lines", 0, "tri", 2], 9.0),
         _tamper(["modes", "LIVE_ONLY", "lines", 3, "tri", 1], 1.0),
         _tamper(
-            ["modes", "LIVE_PLUS_BACKTEST", "lines", 0, "origin"], [[0, 4, "LIVE"]]
+            ["modes", "LIVE_PLUS_BACKTEST", "lines", 0, "origin"],
+            [[0, 4, "ACCOUNT_LIVE"]],
         ),
         _tamper(["modes", "LIVE_ONLY", "common_start_date"], "2026-01-05"),
         _tamper(
@@ -924,7 +938,7 @@ def test_a_strategy_line_carries_the_return_scope_its_row_states() -> None:
     # R-9: in the hybrid mode the weeks before live capital are not that live series, and
     # the label names them from the line's own origin runs
     hybrid = _line(block, "LIVE_PLUS_BACKTEST", "strategy:A one")
-    non_live = [run for run in hybrid["origin"] if run[2] != "LIVE"]
+    non_live = [run for run in hybrid["origin"] if run[2] != "ACCOUNT_LIVE"]
     assert non_live
     assert hybrid["return_scope_label"].startswith(label + " In this mode the weeks ")
     assert hybrid["return_scope_label"].endswith(" are not that live series.")

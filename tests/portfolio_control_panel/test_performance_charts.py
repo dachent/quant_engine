@@ -51,12 +51,12 @@ def _mode() -> dict[str, Any]:
         [
             [0, 1, "BACKTEST"],
             [2, 3, "DERIVED"],
-            [4, 4, "PROVIDER_MODEL_LIVE"],
-            [5, 5, "LIVE"],
+            [4, 4, "MODEL_LIVE"],
+            [5, 5, "ACCOUNT_LIVE"],
         ],
     )
-    beta = _strategy("Beta", 2, [1.02, 1.04, 1.05, 1.07], [[2, 5, "LIVE"]])
-    gamma = _strategy("Gamma", 1, [1.0, 1.01, 1.02, 1.03, 1.04], [[1, 5, "LIVE"]])
+    beta = _strategy("Beta", 2, [1.02, 1.04, 1.05, 1.07], [[2, 5, "ACCOUNT_LIVE"]])
+    gamma = _strategy("Gamma", 1, [1.0, 1.01, 1.02, 1.03, 1.04], [[1, 5, "ACCOUNT_LIVE"]])
     equal = {
         "series_id": "portfolio:equal_weight",
         "display_name": "Equal-weight portfolio",
@@ -251,7 +251,7 @@ def test_origin_styles_are_distinct_and_solid_means_live(tmp_path: Path) -> None
     }
     assert {"5 4", "2 3", "9 3 2 3"} <= dashes and None in dashes
     note = _plain(dom, "#perf-returns-note")
-    assert "dotted = derived" in note and "dash-dot = provider model live" in note
+    assert "dotted = derived" in note and "dash-dot = model live" in note
 
 
 def test_the_available_members_equal_weight_line_is_off_by_default(

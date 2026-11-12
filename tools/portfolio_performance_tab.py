@@ -8,7 +8,7 @@ grows by well under 0.2 MB:
     Per evidence mode (``LIVE_ONLY`` and ``LIVE_PLUS_BACKTEST``) a weekly grid over
     the common window and the lines drawn on it: one total-return index per
     strategy (1.0 immediately before that line's own first week), the equal-weight
-    portfolio, and per point origin runs (``LIVE`` / ``BACKTEST`` / ``MIXED``)
+    portfolio, and per point origin runs (``ACCOUNT_LIVE`` / ``MODEL_LIVE`` / ``BACKTEST`` / ``MIXED``)
     derived from the admitted mode coverage.  The window start is stated with the
     series that sets it.
 
@@ -309,9 +309,13 @@ def _mode_inputs(
     return None
 
 
+ORIGIN_ACCOUNT_LIVE: Final = "ACCOUNT_LIVE"
+ORIGIN_MODEL_LIVE: Final = "MODEL_LIVE"
+
+
 def _week_origin(meta_entry: Any, live_start: date | None, source: str) -> str:
     if source in ("LIVE_ONLY", "LIVE_ONLY_FALLBACK"):
-        return "LIVE"
+        return ORIGIN_ACCOUNT_LIVE
     declared = _flag_origin(meta_entry)
     if declared is not None:
         return declared
@@ -324,7 +328,7 @@ def _week_origin(meta_entry: Any, live_start: date | None, source: str) -> str:
     if end < live_start:
         return "BACKTEST"
     if start >= live_start:
-        return "LIVE"
+        return ORIGIN_ACCOUNT_LIVE
     return "MIXED"
 
 
@@ -338,6 +342,10 @@ def _mondays(first: date, last: date) -> list[date]:
 
 
 ORIGIN_DERIVED_FLAG: Final = "ORIGIN_DERIVED"
+# One vocabulary across ledger, weekly series and panel: BACKTEST, MODEL_LIVE,
+# ACCOUNT_LIVE (the owner's own account), DERIVED, and MIXED where a week spans
+# two.  The weekly flag keeps its historical spelling as an accepted alias.
+ORIGIN_MODEL_LIVE_FLAG: Final = "ORIGIN_MODEL_LIVE"
 ORIGIN_PROVIDER_MODEL_LIVE_FLAG: Final = "ORIGIN_PROVIDER_MODEL_LIVE"
 EW_AVAILABLE_SERIES_ID: Final = "portfolio:equal_weight_available"
 EW_AVAILABLE_DEFINITION: Final = (
@@ -362,8 +370,8 @@ def _flag_origin(meta_entry: Any) -> str | None:
     )
     if ORIGIN_DERIVED_FLAG in flags:
         return "DERIVED"
-    if ORIGIN_PROVIDER_MODEL_LIVE_FLAG in flags:
-        return "PROVIDER_MODEL_LIVE"
+    if ORIGIN_MODEL_LIVE_FLAG in flags or ORIGIN_PROVIDER_MODEL_LIVE_FLAG in flags:
+        return ORIGIN_MODEL_LIVE
     return None
 
 
@@ -1369,7 +1377,7 @@ def _qualified_label(label: str, line: Mapping[str, Any], dates: object) -> str:
             else f"{grid[start]} to {grid[end]} ({flag})"
         )
         for start, end, flag in _sequence(line.get("origin"))
-        if flag != "LIVE" and 0 <= start <= end < len(grid)
+        if flag != ORIGIN_ACCOUNT_LIVE and 0 <= start <= end < len(grid)
     ]
     if not parts:
         return label
@@ -1688,18 +1696,18 @@ def _origin_of(entry: Any, live_start: date | None, source: str) -> str:
     """Pointwise origin rule, written separately from the builder's."""
 
     if source != "LIVE_PLUS_BACKTEST":
-        return "LIVE"
+        return "ACCOUNT_LIVE"
     if isinstance(entry, list) and len(entry) > 4 and isinstance(entry[4], list):
         if "ORIGIN_DERIVED" in entry[4]:
             return "DERIVED"
-        if "ORIGIN_PROVIDER_MODEL_LIVE" in entry[4]:
-            return "PROVIDER_MODEL_LIVE"
+        if "ORIGIN_MODEL_LIVE" in entry[4] or "ORIGIN_PROVIDER_MODEL_LIVE" in entry[4]:
+            return "MODEL_LIVE"
     if live_start is None or not isinstance(entry, list):
         raise _fail("hybrid origin inputs are missing")
     boundary = live_start.isoformat()
     if str(entry[2]) < boundary:
         return "BACKTEST"
-    return "LIVE" if str(entry[1]) >= boundary else "MIXED"
+    return "ACCOUNT_LIVE" if str(entry[1]) >= boundary else "MIXED"
 
 
 def _expect_path(

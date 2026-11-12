@@ -3121,13 +3121,13 @@
   const PERF_BENCHMARK_COLORS = { SPY: "#a8b7c5", SPXL: "#e6c36a" };
   // A line's origin decides its stroke: live evidence is solid, every other origin is dashed in its own pattern.
   const PERF_ORIGIN_STYLES = Object.freeze({
-    LIVE: { name: "solid", dash: null },
+    ACCOUNT_LIVE: { name: "solid", dash: null },
     BACKTEST: { name: "dashed", dash: "5 4" },
     MIXED: { name: "dashed", dash: "5 4" },
     DERIVED: { name: "dotted", dash: "2 3" },
-    PROVIDER_MODEL_LIVE: { name: "dash-dot", dash: "9 3 2 3" },
+    MODEL_LIVE: { name: "dash-dot", dash: "9 3 2 3" },
   });
-  const perfOriginStyle = (origin) => (origin == null ? PERF_ORIGIN_STYLES.LIVE : (PERF_ORIGIN_STYLES[origin] || { name: "dashed", dash: "5 4" }));
+  const perfOriginStyle = (origin) => (origin == null ? PERF_ORIGIN_STYLES.ACCOUNT_LIVE : (PERF_ORIGIN_STYLES[origin] || { name: "dashed", dash: "5 4" }));
   const perfSeriesName = (line) => line.display_name || String(line.series_id || "").replace(/^(strategy|market|portfolio):/, "");
   // The block counts only with an integer schema_version (an omitted key must not read as published).
   const perfTab = () => (data.performance_tab && Number.isInteger(data.performance_tab.schema_version) ? data.performance_tab : null);
@@ -3276,7 +3276,7 @@
       const rows = visibleLines.map((line) => ({ line, point: byTime.get(line.key).get(nearest) })).filter((entry) => entry.point);
       cursor.setAttribute("x1", x(nearest).toFixed(1)); cursor.setAttribute("x2", x(nearest).toFixed(1)); cursor.hidden = false;
       tip.hidden = false;
-      tip.innerHTML = `<strong>Week ending ${safe(perfDate(nearest))}</strong>${rows.map(({ line, point }) => `<div><i style="background:${line.color}"></i>${safe(line.name)}<b>${point.value.toFixed(3)} · ${((point.value - 1) * 100).toFixed(1)}%${point.origin && point.origin !== "LIVE" ? ` · ${safe(humanStatus(point.origin).toLowerCase())}` : ""}</b></div>`).join("")}`;
+      tip.innerHTML = `<strong>Week ending ${safe(perfDate(nearest))}</strong>${rows.map(({ line, point }) => `<div><i style="background:${line.color}"></i>${safe(line.name)}<b>${point.value.toFixed(3)} · ${((point.value - 1) * 100).toFixed(1)}%${point.origin && point.origin !== "ACCOUNT_LIVE" ? ` · ${safe(humanStatus(point.origin).toLowerCase())}` : ""}</b></div>`).join("")}`;
       tip.style.left = `${Math.min(box.width - 240, Math.max(0, (x(nearest) / width) * box.width + 12))}px`;
     });
     svg.addEventListener("mouseleave", () => { tip.hidden = true; cursor.hidden = true; });
@@ -3284,7 +3284,7 @@
       + absent.map((line) => `<span class="perf-legend-item is-missing" title="This line has no value at the rebase week of this view"><i style="background:${line.color}"></i>${safe(line.name)} <b>starts after this window</b></span>`).join("")
       + built.missing.map((item) => `<span class="perf-legend-item is-missing" title="${safe(item.reason)}; no other ETF is substituted"><i style="background:${item.color}"></i>${safe(item.name)} <b>unavailable: ${safe(String(item.reason).toLowerCase().replaceAll("_", " "))}</b></span>`).join("");
     $$("[data-perf-series]").forEach((button) => button.addEventListener("click", () => { const key = button.dataset.perfSeries; if (perfHidden.has(key)) perfHidden.delete(key); else perfHidden.add(key); renderPerformanceReturns(); }));
-    const presentOrigins = [...new Set(rebased.flatMap((line) => line.points.map((point) => point.origin)).filter((origin) => origin != null && origin !== "LIVE"))];
+    const presentOrigins = [...new Set(rebased.flatMap((line) => line.points.map((point) => point.origin)).filter((origin) => origin != null && origin !== "ACCOUNT_LIVE"))];
     const styleNote = presentOrigins.length
       ? presentOrigins.map((origin) => `${perfOriginStyle(origin).name} = ${humanStatus(origin).toLowerCase()}`).join(", ")
       : "";
