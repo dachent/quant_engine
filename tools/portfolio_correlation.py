@@ -43,6 +43,7 @@ RETURN_HEADERS: Final = ("series_id", "date", "return", "evidence_layer")
 RETURN_HEADERS_V2: Final = (*RETURN_HEADERS, "strategy_version")
 EVIDENCE_LAYERS: Final = {
     "ACCOUNT_LIVE",
+    "MODEL_LIVE",
     "PROVIDER_LIVE",
     "OFFICIAL_VEHICLE",
     "PREDECESSOR",
@@ -670,8 +671,14 @@ def _mode_composition(
     backtest_rows_used: Sequence[ReturnRow],
     backtest_rows_excluded: int,
     ignored_version_observations: int,
+    live_layer: str | None = None,
+    layer_flags: Sequence[str] = (),
 ) -> dict[str, object]:
     combined = sorted([*live_rows, *backtest_rows_used], key=lambda item: item.day)
+    layers_present = [
+        *(["BACKTEST"] if backtest_rows_used else []),
+        *([live_layer or definition.live_evidence_layer] if live_rows else []),
+    ]
     return {
         "backtest_evidence_layer": "BACKTEST",
         "backtest_observations_excluded_at_or_after_live_inception": (
@@ -683,7 +690,9 @@ def _mode_composition(
         "canonical_live_series_sha256": _canonical_series_sha256(live_rows)
         if live_rows
         else None,
-        "live_evidence_layer": definition.live_evidence_layer,
+        "layer_flags": list(layer_flags),
+        "layers_present": layers_present,
+        "live_evidence_layer": live_layer or definition.live_evidence_layer,
         "live_inception": live_rows[0].day.isoformat() if live_rows else None,
         "live_observations": len(live_rows),
         "live_version_ref": definition.live_version_ref,
@@ -761,67 +770,56 @@ def _evidence_mode_returns(
             ignored_version_observations=ignored_versions,
         )
 
-        first_live = live[0].day
+        # The research series is backtest strictly before model-live inception plus
+        # the MODEL_LIVE record; the account is never in it.  A strategy without a
+        # model-live source keeps backtest plus account, flagged, never annualised.
+        model = sorted(
+            (item for item in version_rows if item.evidence_layer == "MODEL_LIVE"),
+            key=lambda item: item.day,
+        )
+        research_live = model or live
+        research_layer = "MODEL_LIVE" if model else definition.live_evidence_layer
+        research_flags = () if model else ("NO_MODEL_LIVE_LAYER",)
+        first_live = research_live[0].day
         backtest = sorted(
             (item for item in version_rows if item.evidence_layer == "BACKTEST"),
             key=lambda item: item.day,
         )
         eligible_backtest = [item for item in backtest if item.day < first_live]
         excluded_backtest = len(backtest) - len(eligible_backtest)
-        if not eligible_backtest:
-            modes["LIVE_PLUS_BACKTEST"][definition.series_id] = [
-                ReturnRow(
-                    item.day,
-                    item.value,
-                    "LIVE_PLUS_OPTIONAL_BACKTEST",
-                    item.strategy_version,
-                    item.canonical_value,
-                )
-                for item in live
-            ]
-            compositions["LIVE_PLUS_BACKTEST"][definition.series_id] = (
-                _mode_composition(
-                    definition=definition,
-                    mode="LIVE_PLUS_BACKTEST",
-                    status="AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY",
-                    live_rows=live,
-                    backtest_rows_used=(),
-                    backtest_rows_excluded=excluded_backtest,
-                    ignored_version_observations=ignored_versions,
-                )
+        research_rows = [
+            ReturnRow(
+                item.day,
+                item.value,
+                "LIVE_PLUS_OPTIONAL_BACKTEST",
+                item.strategy_version,
+                item.canonical_value,
             )
-            continue
-        combined = [
-            *(
-                ReturnRow(
-                    item.day,
-                    item.value,
-                    "LIVE_PLUS_OPTIONAL_BACKTEST",
-                    item.strategy_version,
-                    item.canonical_value,
-                )
-                for item in eligible_backtest
-            ),
-            *(
-                ReturnRow(
-                    item.day,
-                    item.value,
-                    "LIVE_PLUS_OPTIONAL_BACKTEST",
-                    item.strategy_version,
-                    item.canonical_value,
-                )
-                for item in live
-            ),
+            for item in (*eligible_backtest, *research_live)
         ]
-        modes["LIVE_PLUS_BACKTEST"][definition.series_id] = combined
+        modes["LIVE_PLUS_BACKTEST"][definition.series_id] = research_rows
+        if model:
+            status = (
+                "AVAILABLE_BACKTEST_PREHISTORY_PLUS_MODEL_LIVE"
+                if eligible_backtest
+                else "AVAILABLE_MODEL_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+            )
+        else:
+            status = (
+                "AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE"
+                if eligible_backtest
+                else "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+            )
         compositions["LIVE_PLUS_BACKTEST"][definition.series_id] = _mode_composition(
             definition=definition,
             mode="LIVE_PLUS_BACKTEST",
-            status="AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE",
-            live_rows=live,
+            status=status,
+            live_rows=research_live,
             backtest_rows_used=eligible_backtest,
             backtest_rows_excluded=excluded_backtest,
             ignored_version_observations=ignored_versions,
+            live_layer=research_layer,
+            layer_flags=research_flags,
         )
     return modes, compositions
 
@@ -1626,17 +1624,27 @@ def _dependence_payload(
                 "correlation_one.components"
             )
             evidence_layer = "CONCEPTUAL_STRESS"
+            layers_present: list[str] = []
             method = "CONCEPTUAL_PRIOR_NO_ACCEPTED_OBSERVATIONS"
             status = "PRIOR_NO_ACCEPTED_OBSERVATIONS"
         else:
             adverse_loss = abs(float(cast(str, maximum_drawdown)))
             authority = f"{spec.source.artifact_id}:{spec.source.expected_sha256}"
+            layers_present = []
             if composition is None:
                 evidence_layer = returns[series_id][0].evidence_layer
             else:
+                layers_present = [
+                    str(item)
+                    for item in cast(
+                        list[object], composition.get("layers_present", [])
+                    )
+                ]
                 live_layer = str(composition.get("live_evidence_layer"))
+                # never a collapsed layer name: a series with backtest rows is the
+                # research series kind, and its layers are listed beside it
                 evidence_layer = (
-                    f"BACKTEST_PLUS_{live_layer}"
+                    "LIVE_PLUS_BACKTEST"
                     if evidence_mode == "LIVE_PLUS_BACKTEST"
                     and int(
                         cast(
@@ -1656,6 +1664,7 @@ def _dependence_payload(
                 "allocation_weight": _number(component.allocation_weight),
                 "authority": authority,
                 "evidence_layer": evidence_layer,
+                "evidence_layers": layers_present,
                 "loss_scale_contribution": _number(
                     component.allocation_weight * adverse_loss
                 ),
