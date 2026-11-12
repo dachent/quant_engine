@@ -254,10 +254,11 @@ def test_hybrid_grid_runs_back_to_the_earliest_line_and_names_the_unfilled_gap()
     assert b["tri"][0] == 0.995 and b["tri"][3] == 0.995
 
 
-def test_hybrid_origin_marks_backtest_mixed_and_live_by_the_live_start() -> None:
+def test_hybrid_origin_marks_backtest_and_live_by_the_live_start() -> None:
     block = tab.build_performance_tab(_panel())
     a = _line(block, "LIVE_PLUS_BACKTEST", "strategy:A one")
-    assert a["origin"] == [[0, 3, "BACKTEST"], [4, 4, "MIXED"], [5, 7, "ACCOUNT_LIVE"]]
+    # the boundary week holds hypothetical days: BACKTEST, never MIXED across layers
+    assert a["origin"] == [[0, 4, "BACKTEST"], [5, 7, "ACCOUNT_LIVE"]]
     c = _line(block, "LIVE_PLUS_BACKTEST", "strategy:C three")
     assert c["source_mode"] == "LIVE_ONLY_FALLBACK"
     assert c["origin"] == [[3, 7, "ACCOUNT_LIVE"]]
@@ -293,7 +294,7 @@ def test_provider_model_and_derived_weeks_take_their_declared_origin() -> None:
         [0, 0, "BACKTEST"],
         [1, 1, "MODEL_LIVE"],
         [2, 2, "DERIVED"],
-        [3, 3, "BACKTEST"],
+        [3, 4, "BACKTEST"],
     ]
     tab.verify_performance_tab(block, panel)
     assert list(_schema_validator().iter_errors(block)) == []
@@ -1461,3 +1462,56 @@ def test_a_restated_strategy_changes_the_residual_label_from_the_panel_data() ->
     assert "gross sleeve NAV" in restated["residual_label"]
     assert restated["residual_cents"] == plain["residual_cents"]
     tab.verify_performance_tab(tab.build_performance_tab(panel), panel)
+
+
+def _model_live_row(flags: bool) -> dict[str, Any]:
+    """A strategy whose research series is backtest then MODEL_LIVE from 2026-01-21."""
+
+    row = _strategy("strategy:M model", None, {WEEKS[5]: "0.01"}, None)
+    hybrid = {week: "0.01" for week in WEEKS}
+    meta = {week: _meta(week) for week in WEEKS}
+    row["values_by_mode"]["LIVE_PLUS_BACKTEST"] = hybrid
+    row["observation_meta_by_mode"]["LIVE_PLUS_BACKTEST"] = meta
+    row["mode_coverage"]["LIVE_PLUS_BACKTEST"] = {
+        "first_week": WEEKS[0],
+        "research_live_inception": "2026-01-21",
+        "research_live_layer": "MODEL_LIVE",
+    }
+    if flags:
+        for week in WEEKS[3:]:
+            meta[week][4] = ["ORIGIN_MODEL_LIVE"]
+    return row
+
+
+def test_unflagged_post_boundary_week_of_a_model_live_strategy_is_model_live() -> None:
+    """Kill test (Gemini 2): the account start is not the research boundary."""
+
+    row = _model_live_row(flags=False)
+    meta = row["observation_meta_by_mode"]["LIVE_PLUS_BACKTEST"]
+    start, layer = tab._research_boundary(row)
+    assert (start, layer) == (date(2026, 1, 21), "MODEL_LIVE")
+    origins = [
+        tab._week_origin(meta[week], start, "LIVE_PLUS_BACKTEST", layer)
+        for week in WEEKS
+    ]
+    # weeks after the account start (2026-02-02) stay MODEL_LIVE, never ACCOUNT_LIVE
+    assert origins == ["BACKTEST"] * 3 + ["MODEL_LIVE"] * 5
+    assert "ACCOUNT_LIVE" not in origins and "MIXED" not in origins
+    verifier = [
+        tab._origin_of(meta[week], start, "LIVE_PLUS_BACKTEST", layer) for week in WEEKS
+    ]
+    assert verifier == origins
+
+
+def test_boundary_week_is_backtest_not_mixed_and_explicit_flags_win() -> None:
+    meta = [3, "2026-01-19", "2026-01-23", "COMPLETE", []]
+    for build in (tab._week_origin, tab._origin_of):
+        assert build(meta, date(2026, 1, 21), "LIVE_PLUS_BACKTEST", "MODEL_LIVE") == (
+            "BACKTEST"
+        )
+    flagged = [3, "2026-01-19", "2026-01-23", "COMPLETE", ["ORIGIN_ACCOUNT_LIVE"]]
+    assert tab._flag_origin(flagged) == "ACCOUNT_LIVE"
+    assert tab._origin_of(flagged, None, "LIVE_PLUS_BACKTEST") == "ACCOUNT_LIVE"
+    back = [3, "2026-01-19", "2026-01-23", "COMPLETE", ["ORIGIN_BACKTEST"]]
+    assert tab._flag_origin(back) == "BACKTEST"
+    assert tab._origin_of(back, None, "LIVE_PLUS_BACKTEST") == "BACKTEST"
