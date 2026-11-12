@@ -126,3 +126,32 @@ def test_no_spans_is_not_a_bounded_gap_set() -> None:
     assert assess_missing_point_bounds([_span("2026-01-27")], None)["status"] == (
         "UNBOUNDED"
     )
+
+
+@pytest.mark.parametrize("bad", ["bad", "-0.1", "NaN"])
+def test_a_present_but_malformed_tolerance_fails_closed(bad: str) -> None:
+    point = _point(origin="ADMITTED_ALTERNATE_SOURCE", tolerance_relative=bad)
+    result = assess_missing_point_bounds([_span("2026-01-27")], [point])
+    assert result["status"] == "UNBOUNDED"
+    assert result["points"][0]["reason"] == "FIELD_INVALID"
+
+
+def test_ambient_decimal_precision_cannot_make_an_unsafe_point_bounded() -> None:
+    from decimal import localcontext
+
+    point = _point(
+        nav="1.00000000000000000000000000001",
+        range_low="1.00000000000000000000000000001",
+        range_high="1.00000000000000000000000000001",
+        prior_high="1.000000000000000000000000000001",
+        max_observed_closure_error="0",
+        tolerance_relative="0",
+    )
+    outcomes = set()
+    for prec in (10, 28, 60):
+        with localcontext() as ctx:
+            ctx.prec = prec
+            outcomes.add(
+                assess_missing_point_bounds([_span("2026-01-27")], [point])["status"]
+            )
+    assert outcomes == {"UNBOUNDED"}

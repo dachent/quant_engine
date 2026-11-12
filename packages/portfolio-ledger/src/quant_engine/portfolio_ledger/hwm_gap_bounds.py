@@ -20,6 +20,7 @@ from the point's own fields; it never trusts a stated ``cannot_create_new_high``
 from __future__ import annotations
 
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
+from fractions import Fraction
 from typing import Any, Final, Mapping, Sequence
 
 from .models import decimal_text
@@ -67,21 +68,36 @@ def _assess_point(point: Mapping[str, Any]) -> dict[str, Any]:
     assert prior_high is not None and closure is not None
     if not (0 < low <= nav <= high) or prior_high <= 0 or closure < 0:
         return {**verdict, "cannot_hide_peak": False, "reason": "FIELD_INVALID"}
-    tolerance = _decimal(point.get("tolerance_relative"))
+    tolerance: Decimal | None = None
+    if point.get("tolerance_relative") is not None:
+        tolerance = _decimal(point.get("tolerance_relative"))
+        if tolerance is None or tolerance < 0:
+            return {**verdict, "cannot_hide_peak": False, "reason": "FIELD_INVALID"}
     # An alternate source is exact to its stated tolerance; a derived bridge is only
     # as good as its worst measured closure.  Take the larger so neither understates.
     bound = max(closure, tolerance) if tolerance is not None else closure
-    upper = high * (Decimal(1) + bound)
-    margin = (prior_high - upper) / prior_high
-    verdict.update(
-        {
-            "bound_relative": format(bound, "f"),
-            "upper_bound_nav": format(upper, "f"),
-            "prior_high": format(prior_high, "f"),
-            "margin_relative": format(margin, "f"),
-        }
-    )
-    if upper >= prior_high:
+    # The safety comparison is exact (rationals), so ambient Decimal precision can
+    # never turn an unsafe point into a bounded one.
+    exact_upper = Fraction(high) * (1 + Fraction(bound))
+    exact_prior = Fraction(prior_high)
+    with localcontext() as ctx:
+        ctx.prec = 34
+        ctx.rounding = ROUND_HALF_EVEN
+        upper = Decimal(exact_upper.numerator) / Decimal(exact_upper.denominator)
+        margin = (
+            Decimal((exact_prior - exact_upper).numerator)
+            / Decimal((exact_prior - exact_upper).denominator)
+            / prior_high
+        )
+        verdict.update(
+            {
+                "bound_relative": format(bound, "f"),
+                "upper_bound_nav": format(upper, "f"),
+                "prior_high": format(prior_high, "f"),
+                "margin_relative": format(margin, "f"),
+            }
+        )
+    if exact_upper >= exact_prior:
         return {
             **verdict,
             "cannot_hide_peak": False,
