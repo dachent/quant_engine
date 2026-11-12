@@ -722,6 +722,7 @@ def _write_verification_ledger(
     caller: str,
     work_counters: Mapping[str, int],
     calls: list[dict[str, Any]],
+    receipt_reused_sha256: str | None = None,
 ) -> None:
     """Record one verifier invocation where it happens; one create-only file each."""
 
@@ -746,6 +747,8 @@ def _write_verification_ledger(
             for row in sorted(calls, key=lambda row: row["calculation_identity"])
         ],
     }
+    if receipt_reused_sha256 is not None:
+        entry["receipt_reused_sha256"] = receipt_reused_sha256
     directory = state_root.resolve() / _VERIFICATION_LEDGER_DIRECTORY
     if directory.is_symlink():
         raise FinancialOutcomeError("financial verification ledger is linked")
@@ -2203,6 +2206,24 @@ def validate_financial_outcomes(
             )
         finally:
             timing.update(work_counters)
+
+
+def record_receipt_reuse(spec: Any, caller: str, receipt_sha256: str) -> None:
+    """Count a boundary whose verification was answered by a hash-bound receipt.
+
+    The verifier did not run, so there is no work to count; the entry still names
+    the caller and the receipt, keeping one ledger file per boundary.
+    """
+
+    if _CALLER_LABEL.fullmatch(caller) is None:
+        raise FinancialOutcomeError("financial verification caller label is invalid")
+    _write_verification_ledger(
+        spec,
+        caller,
+        {key: 0 for key in _WORK_COUNTER_KEYS},
+        [],
+        receipt_reused_sha256=receipt_sha256,
+    )
 
 
 def validate_financial_outcomes_with_deferred_ledger(

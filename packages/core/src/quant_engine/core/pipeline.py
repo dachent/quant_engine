@@ -20,7 +20,7 @@ import threading
 import time
 from typing import Any, BinaryIO, Callable, Final, Mapping, Self, cast
 
-from quant_engine.core import parallel_hash, stage_timing
+from quant_engine.core import parallel_hash, stage_timing, verification_receipt
 from quant_engine.core.authority import FreshnessPolicy
 from quant_engine.core.code_identity import (
     COMMIT_SCHEME,
@@ -1283,7 +1283,58 @@ def _provider_admission_validator() -> Callable[..., None]:
             sys.modules[module_name] = previous
 
 
+def _receipt_identity(spec: PipelineSpec) -> dict[str, object]:
+    return {
+        "spec_sha256": spec.spec_sha256,
+        "state_root": str(spec.state_root.resolve()),
+    }
+
+
 def _verify_financial_outcomes(spec: PipelineSpec, caller: str) -> dict[str, Any]:
+    """Run the verifier, or reuse its hash-bound receipt when every input is unchanged.
+
+    The verifier is a function of its code and the files it reads; the receipt
+    records that read-set (see ``verification_receipt``) and a reuse re-hashes all
+    of it. The per-call ledger entry is still written, marked as a reuse.
+    """
+
+    repo_root = Path(__file__).resolve().parents[5]
+
+    def reused(receipt_sha256: str) -> None:
+        module = _load_financial_outcomes_module()
+        module.record_receipt_reuse(spec, caller, receipt_sha256)
+
+    return verification_receipt.run_with_receipt(
+        "financial_outcomes",
+        _receipt_identity(spec),
+        repo_root=repo_root,
+        state_root=spec.state_root,
+        compute=lambda: _verify_financial_outcomes_live(spec, caller),
+        on_reuse=reused,
+    )
+
+
+def _load_financial_outcomes_module() -> Any:
+    tools_root = Path(__file__).resolve().parents[5] / "tools"
+    path = tools_root / "portfolio_financial_outcomes.py"
+    if path.is_symlink() or not path.is_file():
+        raise PipelineValidationError("financial outcome verifier is unavailable")
+    module_spec = importlib.util.spec_from_file_location(
+        "quant_engine_pipeline_financial_outcomes", path
+    )
+    if module_spec is None or module_spec.loader is None:
+        raise PipelineValidationError("financial outcome verifier is unavailable")
+    module = importlib.util.module_from_spec(module_spec)
+    previous_path = list(sys.path)
+    try:
+        sys.path.insert(0, str(tools_root))
+        module_spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = previous_path
+    return module
+
+
+def _verify_financial_outcomes_live(spec: PipelineSpec, caller: str) -> dict[str, Any]:
     """Run the repository's single product completion verifier at this boundary.
 
     The verifier records every call in its own ledger under ``spec.state_root``;
@@ -1844,6 +1895,19 @@ def _expected_hwm_input_authority(
 
 @stage_timing.timed("product_authority")
 def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | None:
+    repo_root = Path(__file__).resolve().parents[5]
+    return verification_receipt.run_with_receipt(
+        "product_authority",
+        _receipt_identity(spec),
+        repo_root=repo_root,
+        state_root=spec.state_root,
+        compute=lambda: _financial_mvp_product_authority_live(spec),
+    )
+
+
+def _financial_mvp_product_authority_live(
+    spec: PipelineSpec,
+) -> dict[str, Any] | None:
     product_matches = [
         item for item in spec.gates if item.gate_id == _FINANCIAL_MVP_PRODUCT_GATE
     ]
