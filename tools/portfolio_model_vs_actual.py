@@ -757,6 +757,8 @@ def _refuse_stale(
         )
     for entry in declared_unavailable:
         ended = entry.get("window_end") if isinstance(entry, Mapping) else None
+        # A leg with no end date is a standing absence (no model leg exists), not a
+        # stale one; only a leg that names the date it stopped can be judged.
         if ended is not None and date.fromisoformat(str(ended)) < limit:
             raise ModelVsActualError(
                 f"model-versus-actual names an unavailable leg ending {ended} before "
@@ -769,10 +771,16 @@ def build_model_vs_actual(
     audit_input_raw: bytes,
     audit_input_sha256: str,
     *,
-    max_window_lag_days: int | None = MAX_WINDOW_LAG_DAYS,
+    max_window_lag_days: int = MAX_WINDOW_LAG_DAYS,
 ) -> dict[str, Any]:
     """Build the optional ``model_vs_actual`` block."""
 
+    # The staleness refusal always runs: there is no way to switch it off.
+    if not isinstance(max_window_lag_days, int) or isinstance(
+        max_window_lag_days, bool
+    ):
+        raise ModelVsActualError("the staleness bound must be a number of days")
+    lag = max_window_lag_days
     audit = parse_audit_input(audit_input_raw, audit_input_sha256)
     tolerance = _num(audit["closure_tolerance_pp"], "closure_tolerance_pp")
     panel_strategies = {
@@ -818,10 +826,10 @@ def build_model_vs_actual(
         ]
         if primary_id not in {w["window_id"] for w in windows}:
             primary_id = None
-        if max_window_lag_days is not None:
-            _refuse_stale(
-                sid, cutoff, windows, item.get("unavailable") or [], max_window_lag_days
-            )
+        # Every window the input names counts toward freshness, the ones withheld for
+        # ending after the cutoff included: those prove the input is current, they are
+        # not a reason to call it stale.
+        _refuse_stale(sid, cutoff, built, item.get("unavailable") or [], lag)
         for u in item.get("unavailable") or []:
             um = _mapping(u, "unavailable")
             unavailable.append(
@@ -910,7 +918,7 @@ def verify_model_vs_actual(
     audit_input_raw: bytes,
     audit_input_sha256: str,
     *,
-    max_window_lag_days: int | None = MAX_WINDOW_LAG_DAYS,
+    max_window_lag_days: int = MAX_WINDOW_LAG_DAYS,
 ) -> None:
     """Re-derive the block and check the evidence-honesty invariants."""
 

@@ -30,6 +30,9 @@ SYNTHETIC = (
 # points this variable at that file (its sha256 is pinned in the root's manifest.json).
 REAL_INPUT_ENV = "MODEL_VS_ACTUAL_AUDIT_INPUT"
 FRESH_CUTOFF = "2026-11-06"
+# A fixture dated long before the freshness rule states a bound that admits it; the
+# bound is always a number, there is no way to switch the refusal off.
+OLD_FIXTURE_LAG_DAYS = 36500
 SHA = "a" * 64
 
 
@@ -365,7 +368,9 @@ def _panel() -> dict[str, Any]:
 def _build(audit: dict[str, Any] | None = None) -> tuple[dict[str, Any], bytes, str]:
     raw, sha = _raw(audit or _audit())
     return (
-        mva.build_model_vs_actual(_panel(), raw, sha, max_window_lag_days=None),
+        mva.build_model_vs_actual(
+            _panel(), raw, sha, max_window_lag_days=OLD_FIXTURE_LAG_DAYS
+        ),
         raw,
         sha,
     )
@@ -424,12 +429,16 @@ def test_an_unknown_pull_or_component_is_refused() -> None:
     audit["strategies"][0]["windows"][0]["components"][0]["replacing_pull"] = "NOPE"
     raw, sha = _raw(audit)
     with pytest.raises(mva.ModelVsActualError, match="unknown pull"):
-        mva.build_model_vs_actual(_panel(), raw, sha, max_window_lag_days=None)
+        mva.build_model_vs_actual(
+            _panel(), raw, sha, max_window_lag_days=OLD_FIXTURE_LAG_DAYS
+        )
     audit = _audit()
     audit["strategies"][0]["windows"][0]["components"][0]["component_id"] = "magic"
     raw, sha = _raw(audit)
     with pytest.raises(mva.ModelVsActualError, match="vocabulary"):
-        mva.build_model_vs_actual(_panel(), raw, sha, max_window_lag_days=None)
+        mva.build_model_vs_actual(
+            _panel(), raw, sha, max_window_lag_days=OLD_FIXTURE_LAG_DAYS
+        )
 
 
 def test_governed_interest_is_evidenced_and_never_sums_mixed_currencies() -> None:
@@ -489,7 +498,7 @@ def _assert_staged_shape(raw: bytes, *, fresh: bool) -> None:
     if fresh:
         # the governed input is refreshed to the release cutoff it is stamped with
         panel["invested_capital"]["complete_through"] = FRESH_CUTOFF
-    kwargs = {} if fresh else {"max_window_lag_days": None}
+    kwargs = {} if fresh else {"max_window_lag_days": OLD_FIXTURE_LAG_DAYS}
     block = mva.build_model_vs_actual(panel, raw, sha, **kwargs)
     assert _errors(block) == []
     mva.verify_model_vs_actual(block, panel, raw, sha, **kwargs)
@@ -542,14 +551,18 @@ def test_an_unavailable_term_with_an_unknown_pull_is_refused_at_build() -> None:
     audit["strategies"][0]["unavailable"][0]["replacing_pull"] = "TYPO-P9"
     raw, sha = _raw(audit)
     with pytest.raises(mva.ModelVsActualError, match="unknown pull"):
-        mva.build_model_vs_actual(_panel(), raw, sha, max_window_lag_days=None)
+        mva.build_model_vs_actual(
+            _panel(), raw, sha, max_window_lag_days=OLD_FIXTURE_LAG_DAYS
+        )
 
 
 def test_a_window_ending_after_the_cutoff_is_withheld_not_published() -> None:
     audit = _audit()
     audit["strategies"][0]["windows"][0]["end"] = "2026-03-10"  # cutoff is 2026-03-09
     raw, sha = _raw(audit)
-    block = mva.build_model_vs_actual(_panel(), raw, sha, max_window_lag_days=None)
+    block = mva.build_model_vs_actual(
+        _panel(), raw, sha, max_window_lag_days=OLD_FIXTURE_LAG_DAYS
+    )
     first = block["strategies"][0]
     assert first["windows"] == [] and first["primary_window_id"] is None
     assert [w["window_id"] for w in first["epochs"]] == ["E1"]
@@ -571,7 +584,9 @@ def test_a_restated_strategys_parent_account_windows_name_their_basis() -> None:
         "basis": "SLEEVE_EPOCH",
         "parent_account_ids": ["acct-969b9e47"],
     }
-    block = mva.build_model_vs_actual(panel, raw, sha, max_window_lag_days=None)
+    block = mva.build_model_vs_actual(
+        panel, raw, sha, max_window_lag_days=OLD_FIXTURE_LAG_DAYS
+    )
     assert _errors(block) == []
     mva.verify_model_vs_actual(block, panel, raw, sha)
     restated, plain = block["strategies"][0], block["strategies"][1]
@@ -619,3 +634,19 @@ def test_an_unavailable_leg_dated_before_the_cutoff_is_refused() -> None:
     panel = _panel_for_staged()
     with pytest.raises(mva.ModelVsActualError):
         mva.build_model_vs_actual(panel, raw, sha)
+
+
+def test_the_staleness_refusal_cannot_be_switched_off() -> None:
+    raw, sha = _raw(_audit())
+    with pytest.raises(mva.ModelVsActualError, match="staleness bound"):
+        mva.build_model_vs_actual(_panel(), raw, sha, max_window_lag_days=None)  # type: ignore[arg-type]
+
+
+def test_windows_withheld_for_ending_after_the_cutoff_are_not_called_stale() -> None:
+    audit = _audit()
+    for window in audit["strategies"][0]["windows"]:
+        window["end"] = "2026-03-10"  # the cutoff is 2026-03-09
+    audit["strategies"][0]["unavailable"] = []
+    raw, sha = _raw(audit)
+    block = mva.build_model_vs_actual(_panel(), raw, sha)
+    assert block["strategies"][0]["windows"] == []
