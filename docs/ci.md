@@ -151,6 +151,21 @@ workflow permission is read, and workflows cannot approve pull requests.
 CODEOWNERS, the PR template, issue reconciliation, and the local pre-push hook
 remain procedural or defense-in-depth around the server-enforced branch rule.
 
+
+## Failure visibility and triggers (#910)
+
+- pytest runs without `--maxfail`: a red run lists every failing test, not the first.
+- The Quality job writes a junit file and `tools/ci_summary.py` publishes the failing set, the
+  pytest wall time and the slowest tests to the job summary (`if: always()`, so a failed run
+  still gets it; a cancelled run has no junit and the summary says there is no verdict). This is
+  how the windows job publishes its timing; the time budget itself stays the owner's decision (W31).
+- Quality runs on pull requests, on every branch push and on main. The event name is part of the
+  concurrency group, so a push run and the pull_request run of one commit never cancel each other
+  (the price is both run). A newer push to a branch or PR cancels that branch's older run; that
+  run shows "cancelled", which is not a failure and not a verdict. main is never cancelled
+  (`cancel-in-progress` is false on `refs/heads/main`), so every main commit has its own verdict.
+- `tools/ci.py` (the local pre-push equivalent) runs every step and lists all failing steps.
+
 ## Primary references
 
 - [GitHub secure use of Actions](https://docs.github.com/en/actions/reference/security/secure-use)
