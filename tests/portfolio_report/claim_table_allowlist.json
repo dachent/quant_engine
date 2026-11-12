@@ -150,6 +150,11 @@
    "file": "apps/portfolio-control-panel/app.js",
    "pattern": "^(no standard error: not a headline|includes hypothetical backtest: not a live result, no headline)$",
    "justification": "rendered only when the alpha context's headline_status says the alpha is not a headline (no standard error, or a backtest in its series); the status is computed and kill-tested in test_alpha_headline_rule (#904 items 10 and 11)"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^Money-weighted [(]on capital invested[)]: [{][}] over [{][}] days[{][}]$",
+   "justification": "readout line built from the portfolio MWR block's own window_equivalent_cumulative, window_days and value; consistent by construction and recomputed in test_portfolio_twr_conventions and test_portfolio_totals (#904 item 1)"
   }
  ]
 }

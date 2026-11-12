@@ -227,6 +227,26 @@ def _summed_epoch_twr(
     }
 
 
+def _index_return_since(
+    path: Sequence[Mapping[str, Any]], anchor: date, end_index: Decimal
+) -> str | None:
+    """Return of the governed index from its last observation on or before ``anchor``.
+
+    None when the index starts after the anchor: a trailing window is never filled
+    with a shorter one.
+    """
+
+    base: Decimal | None = None
+    for item in path:
+        if _day(item["as_of"], "index date") <= anchor:
+            base = _decimal(item["index"], "index")
+        else:
+            break
+    if base is None or base <= 0:
+        return None
+    return _text(end_index / base - 1)
+
+
 def build_portfolio_twr(
     governed_hwm_proof: Mapping[str, Any] | None,
     rows: Sequence[Mapping[str, Any]],
@@ -253,6 +273,23 @@ def build_portfolio_twr(
         start = _day(first["as_of"], "index start")
         end = _day(last["as_of"], "index end")
         summed = _summed_epoch_twr(rows)
+        window_days = (end - start).days
+        # ACT/365 geometric, from 365 days only (#904 item 1): the same convention and
+        # the same short-window rule as every other annualised return
+        annualised = (
+            _text(
+                (current_index / base_index) ** (Decimal(365) / Decimal(window_days))
+                - 1
+            )
+            if window_days >= ANNUALISATION_MINIMUM_DAYS
+            else None
+        )
+        trailing_12m = _index_return_since(
+            path, end - timedelta(days=365), current_index
+        )
+        year_to_date = _index_return_since(
+            path, date(end.year - 1, 12, 31), current_index
+        )
         difference = None
         if summed["status"] == "AVAILABLE":
             difference = _text(headline - _decimal(summed["value"], "summed twr"))
@@ -267,7 +304,10 @@ def build_portfolio_twr(
         "current_index": _text(current_index),
         "window_start": start.isoformat(),
         "window_end": end.isoformat(),
-        "window_days": (end - start).days,
+        "window_days": window_days,
+        "annualised_act_365": annualised,
+        "trailing_12_months": trailing_12m,
+        "year_to_date": year_to_date,
         "source": {
             "artifact": "hwm_governed_proof",
             "policy_id": governed_hwm_proof.get("policy_id"),

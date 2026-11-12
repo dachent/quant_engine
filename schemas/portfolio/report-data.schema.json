@@ -2627,12 +2627,15 @@
             "window_end": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
           }
         },
-        "headline_minus_summed_epoch_twr": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}
+        "headline_minus_summed_epoch_twr": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "annualised_act_365": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "trailing_12_months": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "year_to_date": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}
       },
       "allOf": [
         {
           "if": {"properties": {"status": {"const": "AVAILABLE"}}, "required": ["status"]},
-          "then": {"required": ["basis", "value", "index_base", "current_index", "window_start", "window_end", "window_days", "source", "summed_epoch_twr", "headline_minus_summed_epoch_twr"]},
+          "then": {"required": ["basis", "value", "index_base", "current_index", "window_start", "window_end", "window_days", "source", "summed_epoch_twr", "headline_minus_summed_epoch_twr", "annualised_act_365", "trailing_12_months", "year_to_date"]},
           "else": {"required": ["reason"]}
         }
       ]

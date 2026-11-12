@@ -1543,6 +1543,8 @@
       : contextualPerformance.filter((row) => !row.strategy_name && row.strategy_mapping_disposition !== "RESERVE_NOT_APPLICABLE" && row.pool_id !== "reserve-capital");
     // The MWR is an XIRR, annualized by construction.  Below one year the annualized rate is not the
     // result of the window, so the cell says so and shows the window-equivalent (derived here).
+    // each figure prints its own window: a TWR that closed at the performance close and an MWR run to the cutoff are not one period
+    const ownWindowNote = (start, end) => (start && end ? `<span class="cell-secondary">${safe(formatDate(start))} to ${safe(formatDate(end))}</span>` : "");
     const mwrBasisNote = (row) => {
       const opened = Date.parse(row.mwr_opening_date);
       const closed = Date.parse(row.mwr_terminal_date);
@@ -1565,7 +1567,7 @@
       const observedStart = row.observed_start || row.effective_start || "—";
       const observedEnd = row.observed_end || row.effective_end || "—";
       const evidence = row.nav_observations != null ? `${integer.format(row.nav_observations)} account NAV observations` : "—";
-      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}${sleeveEpochRowNote(row)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(mwrShortWindow(row) ? mwrShortWindow(row).windowReturn : row.mwr_xirr)}${mwrBasisNote(row)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}${sleeveEpochRowNote(row)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}${ownWindowNote(row.observed_start, row.return_close_date || row.observed_end)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(mwrShortWindow(row) ? mwrShortWindow(row).windowReturn : row.mwr_xirr)}${mwrBasisNote(row)}${ownWindowNote(row.mwr_opening_date, row.mwr_terminal_date)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
     });
     const performanceHeaders = performanceLineageMismatch
       ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
@@ -3404,8 +3406,19 @@
     const summedText = summed && summed.status === "AVAILABLE" && number(summed.cumulative_return ?? summed.value) != null
       ? `Summed-epoch TWR ${pct(summed.cumulative_return ?? summed.value)}${number(readoutBlock.headline_minus_summed_epoch_twr) != null ? `, headline minus summed ${pct(readoutBlock.headline_minus_summed_epoch_twr)}` : ""}`
       : readoutBlock ? `Summed-epoch TWR unavailable: ${String(readoutBlock.summed_epoch_unavailable_reason || (summed && summed.reason) || "not published").toLowerCase().replaceAll("_", " ")}` : "";
+    // #904 item 1: the portfolio return on both bases, money-weighted first.  The index is time-weighted, so most of its gain was earned when little capital was invested; the MWR is the return on the capital that was there.
+    const twrBlock = data.portfolio_twr_cumulative;
+    const mwrBlock = data.portfolio_mwr_annualised;
+    const basesParts = [];
+    if (mwrBlock && mwrBlock.status === "AVAILABLE" && number(mwrBlock.window_equivalent_cumulative) != null) {
+      basesParts.push(`Money-weighted (on capital invested): ${pct(mwrBlock.window_equivalent_cumulative)} over ${integer.format(mwrBlock.window_days)} days${number(mwrBlock.value) != null ? `, ${pct(mwrBlock.value)} a year` : " (under 1 year, no annual rate)"}`);
+    }
+    if (twrBlock && twrBlock.status === "AVAILABLE") {
+      basesParts.push(`Time-weighted index: ${pct(twrBlock.value)} over ${integer.format(twrBlock.window_days)} days${number(twrBlock.annualised_act_365) != null ? `, ${pct(twrBlock.annualised_act_365)} a year (ACT/365)` : ""}${number(twrBlock.trailing_12_months) != null ? `; last 12 months ${pct(twrBlock.trailing_12_months)}` : ""}${number(twrBlock.year_to_date) != null ? `; year to date ${pct(twrBlock.year_to_date)}` : ""}`);
+    }
+    const basesText = basesParts.join(" · ");
     const windowReturn = perfValueZoom === "Max" && published && number(published.cumulative_return) != null ? Number(published.cumulative_return) : !path.length ? null : perfValueZoom === "Max" ? perfIndexReturn(path, perfTime(path[0].as_of), lastTime) : perfIndexReturn(path, from, lastTime);
-    $("#perf-value-readout").innerHTML = `<div class="perf-readout"><div><span>Systematic portfolio value</span><b>${currency(end.total)}</b><small>${safe(formatDate(end.date))}, reserve excluded</small></div><div><span>Change in value, ${safe(perfValueZoom)}</span><b>${currency(end.total - first.total)}</b><small>includes deposits and withdrawals</small></div><div><span>Time-weighted return, ${safe(perfValueZoom)}</span><b>${windowReturn == null ? "—" : pct(windowReturn)}</b><small>${windowReturn == null ? "no governed index in this snapshot" : `${safe(proofLabel)}, levered net NAV basis`}${summedText ? `<br>${safe(summedText)}` : ""}</small></div></div>`;
+    $("#perf-value-readout").innerHTML = `<div class="perf-readout"><div><span>Systematic portfolio value</span><b>${currency(end.total)}</b><small>${safe(formatDate(end.date))}, reserve excluded</small></div><div><span>Change in value, ${safe(perfValueZoom)}</span><b>${currency(end.total - first.total)}</b><small>includes deposits and withdrawals</small></div><div><span>Time-weighted return, ${safe(perfValueZoom)}</span><b>${windowReturn == null ? "—" : pct(windowReturn)}</b><small>${windowReturn == null ? "no governed index in this snapshot" : `${safe(proofLabel)}, levered net NAV basis`}${summedText ? `<br>${safe(summedText)}` : ""}${basesText ? `<br>${safe(basesText)}` : ""}</small></div></div>`;
     const benchmarkLegend = benchmarks.map((item) => (item.available
       ? `<span class="perf-legend-item" title="${safe(item.methodDefinition)}"><i class="perf-dash-swatch" style="border-color:${item.color}"></i>${safe(item.ticker)}, same cash flows <b>${currency(item.end)}</b>${item.difference == null ? "" : `<span class="cell-secondary">portfolio ${item.difference >= 0 ? "ahead by" : "behind by"} ${currency(Math.abs(item.difference))}</span>`}</span>`
       : `<span class="perf-legend-item is-missing" title="${safe(item.reason)}"><i class="perf-dash-swatch" style="border-color:${item.color}"></i>${safe(item.ticker)}, same cash flows <b>unavailable: ${safe(String(item.reason).toLowerCase().replaceAll("_", " "))}</b></span>`)).join("");
