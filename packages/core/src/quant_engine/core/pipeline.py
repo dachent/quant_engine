@@ -1302,11 +1302,11 @@ def _read_only_receipts(
 
     @functools.wraps(function)
     def wrapper(spec: PipelineSpec) -> T:
-        token = verification_receipt.PERSIST.set(False)
+        restore = verification_receipt.PERSIST.set(False)
         try:
             return function(spec)
         finally:
-            verification_receipt.PERSIST.reset(token)
+            verification_receipt.PERSIST.reset(restore)
 
     return wrapper
 
