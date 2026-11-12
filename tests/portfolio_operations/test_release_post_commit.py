@@ -476,3 +476,29 @@ def test_the_stage_runs_the_same_validator_command_as_the_pre_commit_findings() 
     # everything but the details file the pre-commit stage adds
     assert after == pre[: pre.index("--details-out")]
     assert "--validate-argv" not in post
+
+
+@pytest.mark.parametrize(("code", "passes"), [(0, True), (1, False)])
+def test_the_published_panel_render_check_is_a_step_when_the_panel_dir_is_given(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str], code: int, passes: bool
+) -> None:
+    """#912: a failing rendered-UI check refuses the release; without the flag nothing changes."""
+
+    (world["tools"] / "published_render_check.py").write_text(
+        f"import sys\nassert '--panel-dir' in sys.argv and '--out-dir' in sys.argv\nsys.exit({code})\n",
+        encoding="utf-8",
+    )
+    args = [
+        *world["args"][:1],
+        "--published-panel-dir",
+        str(world["tmp"] / "panel"),
+        *world["args"][1:],
+    ]
+    status = tool.main(args)
+    if passes:
+        assert status == 0
+        receipt = json.loads(Path(_flag(args, "--out")).read_bytes())
+        assert "published-render" in [s["step"] for s in receipt["steps"]]
+    else:
+        assert status == 1
+        assert "published-render exited 1" in capsys.readouterr().err
