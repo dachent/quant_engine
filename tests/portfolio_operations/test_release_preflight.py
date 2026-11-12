@@ -464,6 +464,8 @@ def test_every_r3_refusal_cause_is_built_or_named_as_not_built() -> None:
         "test_release_preflight_g1b.py"
     ).read_text(encoding="utf-8")
     for cause, where in pf.COVERAGE.items():
+        if where.startswith("G2:"):
+            continue  # test_release_preflight_g2 checks its own rows and kill tests
         if where.startswith("G1:") and "(not built)" not in where:
             assert where[3:] in dict(pf.G1_ROWS), (
                 cause,

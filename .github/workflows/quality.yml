@@ -173,6 +173,7 @@ jobs:
           tools/release_preflight.py
           tools/release_preflight_g1a.py
           tools/release_preflight_g1b.py
+          tools/release_preflight_g2.py
           tools/check_retained_authority_pins.py
           tools/check_release_validation_findings.py
           tools/check_release_closure.py

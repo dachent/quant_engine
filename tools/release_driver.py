@@ -1521,8 +1521,17 @@ def _no_builtin_work(run: Run, target: Path) -> dict[str, Any]:
     return {}
 
 
+def g2_gate(run: Run, target: Path) -> dict[str, Any]:
+    """G2 product measurements on the panel candidate (``release_preflight_g2``): writes the receipt, refuses on FAIL."""
+
+    import release_preflight_g2
+
+    return release_preflight_g2.builtin_g2(run, target)
+
+
 _BUILTINS: dict[str, Callable[[Run, Path], dict[str, Any]]] = {
     "inputs_only": _no_builtin_work,
+    "g2": g2_gate,
     "provider_generations": provider_generations,
     "replica_provider_generations": replica_provider_generations,
     "remove_replica_attestation": remove_replica_attestation,
