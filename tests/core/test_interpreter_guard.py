@@ -159,6 +159,7 @@ def test_every_other_numeric_entry_point_refuses_another_interpreter(
 # floats must call ``check_entry_interpreter`` (or be a guarded tool above)
 EXCUSED = {
     "capture_quantbase_har": "records a browser capture; no figure is derived",
+    "ci_summary": "reports junit test names and durations; no figure reaches a pin",
     "codex_scope_guard": "scope checks on diffs",
     "issue_guard": "issue bookkeeping",
     "panel_payload_size": "measures bytes of a built panel",
@@ -167,6 +168,7 @@ EXCUSED = {
     "quantbase_har_to_csv": "converts captured text, no arithmetic on figures",
     "yahoo_fetch_driver": "fetches vendor bytes",
     "release_driver": "orchestrates; its python stages are checked by required_python",
+    "release_preflight": "static gate: reads run config and release roots, computes no figure",
     "release_measurements": "wall-clock and size measurements of the run",
     "verify_sleeve_ledger": "re-reads a ledger and compares digests",
 }

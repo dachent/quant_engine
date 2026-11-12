@@ -159,7 +159,7 @@ exit code, log path, output digests and, when the stage writes them, `work_count
 | preparation | `prep-spec` (`release_prepare_inputs.py prep-spec`: the attended preparation spec; pins the calendar authority) |
 | attended | `attended` (QA hold), `qa-browser`, `qa-interaction`, `qa-native`, `resume` |
 | tail | `recipe-probe`, `registries`, `recipe`, `pipeline-spec`, `semantic`, `financial-artifacts`, `provider-generations`, `production-spec` |
-| replica ceremony | `replica-copy`, `replica-provider-generations`, `replica-spec`, `lanes` (real lane: preflight, plan, dry-run, findings; replica lane: preflight, dry-run, findings, commit, post-release verify, rehearsal, clean-room restore) |
+| replica ceremony | `replica-copy`, `replica-provider-generations`, `replica-spec`, `lane-replica` + `lane-real` (one parallel group; real lane: preflight, plan, dry-run, findings; replica lane: preflight, dry-run, findings, commit, post-release verify, rehearsal, clean-room restore) |
 | release | `pack-probe` or `commit` then `pack-evidence` (explicit) |
 
 `preflight`, `plan`, `dry-run`, `findings-panel` and `findings-targets` remain as explicit
@@ -529,3 +529,39 @@ previous pass's configuration is never carried (it is dropped and re-derived), a
 The operator records the pin the command prints (`calendar_authority_sha256`) in the pass evidence, where the release owner's
 direct hash confirmation at commit covers it. Without the seed keys there is no pin, and the `calendar-seed` stage refuses (it needs `calendar_authority_sha256`);
 `config --require-calendar` still writes the pin from an existing authority file for the later `calendar-authority` attempts.
+
+## Parallel groups (the replica ceremony beside the real lane)
+
+Consecutive stages that name the same `parallel_group` run at the same time, as threads of one driver process. Every member
+passes its refusals and moves leftovers aside before any member creates an output (a refusal of one starts none); the state file
+is written under a lock; a failed member fails the run while the others finish and stay recorded. `lane-real` and `lane-replica`
+are one group: when the real lane finishes, the driver prints the release id (`announce_release`) while the ceremony is still
+running, so the owner can read and confirm; `commit` requires both stages and stays gated on the ceremony receipt, so nothing is
+given up. The replica lane is the ceremony command in a full ceremony (`release_replica.py ceremony`); the real lane is
+`release_replica.py real-lane`. `release_replica.py lanes` (both in one process) remains for scripts.
+
+## Upfront QC gates (G0)
+
+`tools/release_preflight.py g0 --config run.json` reads, before any stage runs, every fact a run needs that can be read
+statically, and writes `{cycle}/preflight/g0.json` (PASS or FAIL per row, bound to the config hash and code commit). Rows call
+the consumers' own code (`Run.require_frozen_repo`, `check_config_paths`, core's `read_current_release`); none restates a rule.
+Only PASS and FAIL exist: a row that cannot be checked fails, and there is no declared exception.
+
+| Row | Refusals of R3 it covers |
+|---|---|
+| `host:free-space` (config `free_space_floor_gb`, `scratch_roots`) | 18 |
+| `host:no-live-stage`, `repo:frozen` (identity read retried once, recorded) | 20, 21 |
+| `config:paths` (pins, graph path rules, `evidence_dest` outside the cycle, no links) | 5, 24 |
+| `config:outside-workspace` (`artifact_inputs`, `pinned_files`, `replica_relative_ok`) | 19 |
+| `inputs:release-inputs`, `inputs:cutoff-stated` (`release_cutoffs` for releases A and B, `release_label`) | 6, 16 |
+| `authority:pointer-graph` (`authority_roots`) | 15 |
+| `authority:no-stale-prepared` | stale PREPARED releases |
+
+`attended` declares `needs_gate: ["g0"]`; `lane-real`, `lane-replica` and `commit` declare `recheck` rows that run live at
+stage entry (pointers move between the receipt and the lanes). Stale releases are retired with
+`release_preflight.py retire --coordination-root D --release-id ID --ticket N --archive-dir A`: the release directory is copied
+and hash-verified into the archive with a retirement record, then moved to `releases-retired/` (never deleted; the authority
+release is never retired). `post-release-verify` refuses to run from a checkout that is not the spec's code commit (22, 23).
+
+Not built yet, and named in `release_preflight.COVERAGE` so a green G0 is not read as "inputs are fine": G1 consumer contracts
+(1-4, 7, 8, 10, 11, 13), G2 product measurements (12, 17), the consumer freshness limit (14) and G3 spec pair.

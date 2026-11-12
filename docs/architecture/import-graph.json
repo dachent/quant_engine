@@ -679,6 +679,11 @@
       1
     ],
     [
+      "release_driver",
+      "release_preflight",
+      1
+    ],
+    [
       "release_fresh_world",
       "release_hwm_calendar",
       1
@@ -726,6 +731,11 @@
     [
       "release_pre_chain",
       "portfolio_current_dependence",
+      1
+    ],
+    [
+      "release_preflight",
+      "release_driver",
       1
     ],
     [
