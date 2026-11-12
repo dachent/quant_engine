@@ -2,49 +2,290 @@
  "schema_version": 1,
  "contract": "capture-sources-v1",
  "readers": {
-  "model_vs_actual": {"file": "tools/portfolio_model_vs_actual.py", "symbol": "build_model_vs_actual", "config_key": "model_vs_actual_input"},
-  "hwm": {"file": "tools/portfolio_attended_preparation.py", "symbol": "_validate_hwm_authority_inputs"},
-  "reserve_nav": {"file": "tools/portfolio_baseline.py", "symbol": "_current_reserve"},
-  "total_liquid": {"file": "tools/portfolio_baseline.py", "symbol": "total_liquid"},
-  "retained_excluded": {"file": "tools/portfolio_baseline.py", "symbol": "_retained_excluded_accounts"},
-  "cash_drag": {"file": "tools/portfolio_report.py", "symbol": "cash_drag_status"},
-  "margin_setting": {"file": "tools/leverage_disclosure.py", "symbol": "account_financing"}
+  "model_vs_actual": {
+   "file": "tools/portfolio_model_vs_actual.py",
+   "symbol": "build_model_vs_actual",
+   "config_key": "model_vs_actual_input"
+  },
+  "hwm": {
+   "file": "tools/portfolio_attended_preparation.py",
+   "symbol": "_validate_hwm_authority_inputs"
+  },
+  "reserve_nav": {
+   "file": "tools/portfolio_baseline.py",
+   "symbol": "_current_reserve"
+  },
+  "retained_excluded": {
+   "file": "tools/portfolio_baseline.py",
+   "symbol": "_retained_excluded_accounts"
+  },
+  "margin_setting": {
+   "file": "tools/leverage_disclosure.py",
+   "symbol": "account_financing_rows"
+  }
  },
  "stage_modes": {
   "EXISTING_RECORDER": "capture_stage.tool is an existing recorder or stage; S1 runs it under capture_action_guard",
   "DERIVE_FROM_RETAINED": "no pull: read-only extract from hashed retained source runs, coverage and identity checked",
-  "NEW_STAGE_REQUIRED": "no recorder exists yet; the source is declared so the refresh lists it and S0 reports BLOCKED_NOT_WIRED"
+  "NEW_STAGE_REQUIRED": "no runnable recorder yet (a derivation library may exist); the source is declared so the refresh lists it and S0 reports BLOCKED_NOT_WIRED"
  },
  "sources": [
-  {"source_id": "schwab_balances_nav", "provider": "SCHWAB", "transport": "BROWSER_SIGNED_IN", "credential_ref": null, "cdp_port": 9334, "window_hosts": ["client.schwab.com"],
-   "capture_stage": {"mode": "EXISTING_RECORDER", "tool": "tools/schwab_capture_driver.py"}, "login_stop": true,
-   "freshness": {"max_age_days": 7}, "closure_checks": ["sum_equals_total", "stability"], "admits": ["reserve_nav", "total_liquid"], "owner_declared_ok": false},
-  {"source_id": "schwab_daily_cash", "provider": "SCHWAB", "transport": "BROWSER_SIGNED_IN", "credential_ref": null, "cdp_port": 9334, "window_hosts": ["client.schwab.com"],
-   "capture_stage": {"mode": "NEW_STAGE_REQUIRED", "tool": null, "derivation": "tools/capture_stages/schwab_cash.py"}, "login_stop": true,
-   "freshness": {"max_age_days": 7}, "closure_checks": ["cash_walk", "statement_cash"], "admits": ["cash_drag"], "owner_declared_ok": false},
-  {"source_id": "john_hancock_nav", "provider": "JOHN_HANCOCK", "transport": "BROWSER_SIGNED_IN", "credential_ref": null, "cdp_port": 9334, "window_hosts": ["johnhancock.com"],
-   "capture_stage": {"mode": "EXISTING_RECORDER", "tool": "tools/capture_stages/statement_browser.py"}, "login_stop": true,
-   "freshness": {"max_age_days": 100}, "closure_checks": ["nav_identity", "expected_dates"], "admits": ["reserve_nav", "total_liquid"], "owner_declared_ok": false},
-  {"source_id": "composer_balance", "provider": "COMPOSER", "transport": "BROWSER_SIGNED_IN", "credential_ref": null, "cdp_port": 9334, "window_hosts": ["composer.trade"],
-   "capture_stage": {"mode": "EXISTING_RECORDER", "tool": "tools/capture_stages/statement_browser.py"}, "login_stop": true,
-   "freshness": {"max_age_days": 35}, "closure_checks": ["sum_equals_total", "expected_dates"], "admits": ["retained_excluded", "total_liquid"], "owner_declared_ok": false},
-  {"source_id": "ibkr_flex_history", "provider": "IBKR", "transport": "FLEX_TOKEN_VAULT", "credential_ref": "ibkr-flex-token-20260902", "cdp_port": null,
-   "capture_stage": {"mode": "DERIVE_FROM_RETAINED", "tool": "tools/capture_stages/ibkr_equity_history.py", "pull_tool": "packages/ibkr/src/quant_engine/ibkr/capture"}, "login_stop": false,
-   "freshness": {"max_age_days": 7}, "closure_checks": ["coverage", "nav_identity", "bridge_receipt"], "admits": ["cash_drag", "reserve_nav"], "owner_declared_ok": false},
-  {"source_id": "matrixport_margin", "provider": "MATRIXPORT", "transport": "CREDENTIAL_MANAGER", "source_kind": "owner-login-or-credential-manager", "credential_ref": "BIT.com-API", "cdp_port": null,
-   "capture_stage": {"mode": "EXISTING_RECORDER", "tool": "packages/matrixport", "margin_setting": "NOT_READABLE_BY_API: the margin/leverage setting is on the Phoenix Prime host which uses separate credentials (none stored on this workstation) and a live read needs issue authority; owner step: read the setting in the signed-in Matrixport product page or declare it with a hashed screenshot (owner_declared_ok with owner_evidence)"}, "login_stop": false,
-   "freshness": {"max_age_days": 7}, "closure_checks": ["hwm_gap_bound", "stability"], "admits": ["margin_setting", "hwm"], "owner_declared_ok": false},
-  {"source_id": "governed_price_tqqq_shv", "provider": "MARKET_DATA", "transport": "PUBLIC_HTTP", "credential_ref": null, "cdp_port": null,
-   "capture_stage": {"mode": "NEW_STAGE_REQUIRED", "tool": null}, "login_stop": false,
-   "freshness": {"max_age_days": 7}, "closure_checks": ["coverage", "stability"], "admits": [], "owner_declared_ok": false},
-  {"source_id": "p123_model_live", "provider": "PORTFOLIO123", "transport": "BROWSER_SIGNED_IN", "credential_ref": null, "cdp_port": 9334, "window_hosts": ["portfolio123.com"],
-   "capture_stage": {"mode": "EXISTING_RECORDER", "tool": "tools/p123_cdp_recorder.py"}, "login_stop": true,
-   "freshness": {"max_age_days": 7}, "closure_checks": ["stability"], "admits": ["model_vs_actual"], "owner_declared_ok": false},
-  {"source_id": "tt_qsi_series", "provider": "TURINGTRADER", "transport": "PUBLIC_HTTP", "credential_ref": null, "cdp_port": null, "probe_url": "https://firebasestorage.googleapis.com/",
-   "capture_stage": {"mode": "EXISTING_RECORDER", "tool": "tools/tt_public_capture.py"}, "login_stop": false,
-   "freshness": {"max_age_days": 7}, "closure_checks": ["coverage"], "admits": [], "owner_declared_ok": false},
-  {"source_id": "vtma_volatis_robuxio_models", "provider": "QUANTBASE", "transport": "BROWSER_SIGNED_IN", "credential_ref": null, "cdp_port": 9334, "window_hosts": ["getquantbase.com"],
-   "capture_stage": {"mode": "EXISTING_RECORDER", "tool": "tools/capture_quantbase_har.py"}, "login_stop": true,
-   "freshness": {"max_age_days": 7}, "closure_checks": ["stability"], "admits": [], "owner_declared_ok": false}
+  {
+   "source_id": "schwab_balances_nav",
+   "provider": "SCHWAB",
+   "transport": "BROWSER_SIGNED_IN",
+   "credential_ref": null,
+   "cdp_port": 9334,
+   "window_hosts": [
+    "client.schwab.com"
+   ],
+   "capture_stage": {
+    "mode": "EXISTING_RECORDER",
+    "tool": "tools/schwab_capture_driver.py"
+   },
+   "login_stop": true,
+   "freshness": {
+    "max_age_days": 7
+   },
+   "closure_checks": [
+    "sum_equals_total",
+    "stability"
+   ],
+   "admits": [
+    "reserve_nav"
+   ],
+   "owner_declared_ok": false
+  },
+  {
+   "source_id": "schwab_daily_cash",
+   "provider": "SCHWAB",
+   "transport": "BROWSER_SIGNED_IN",
+   "credential_ref": null,
+   "cdp_port": 9334,
+   "window_hosts": [
+    "client.schwab.com"
+   ],
+   "capture_stage": {
+    "mode": "NEW_STAGE_REQUIRED",
+    "tool": null,
+    "derivation": "tools/capture_stages/schwab_cash.py"
+   },
+   "login_stop": true,
+   "freshness": {
+    "max_age_days": 7
+   },
+   "closure_checks": [
+    "cash_walk",
+    "statement_cash"
+   ],
+   "admits": [],
+   "owner_declared_ok": false
+  },
+  {
+   "source_id": "john_hancock_nav",
+   "provider": "JOHN_HANCOCK",
+   "transport": "BROWSER_SIGNED_IN",
+   "credential_ref": null,
+   "cdp_port": 9334,
+   "window_hosts": [
+    "johnhancock.com"
+   ],
+   "capture_stage": {
+    "mode": "NEW_STAGE_REQUIRED",
+    "tool": null,
+    "derivation": "tools/capture_stages/statement_browser.py"
+   },
+   "login_stop": true,
+   "freshness": {
+    "max_age_days": 100
+   },
+   "closure_checks": [
+    "nav_identity",
+    "expected_dates"
+   ],
+   "admits": [
+    "reserve_nav"
+   ],
+   "owner_declared_ok": false,
+   "check_params": {
+    "nav_identity": {
+     "chain": false
+    }
+   }
+  },
+  {
+   "source_id": "composer_balance",
+   "provider": "COMPOSER",
+   "transport": "BROWSER_SIGNED_IN",
+   "credential_ref": null,
+   "cdp_port": 9334,
+   "window_hosts": [
+    "composer.trade"
+   ],
+   "capture_stage": {
+    "mode": "NEW_STAGE_REQUIRED",
+    "tool": null,
+    "derivation": "tools/capture_stages/statement_browser.py"
+   },
+   "login_stop": true,
+   "freshness": {
+    "max_age_days": 35
+   },
+   "closure_checks": [
+    "sum_equals_total",
+    "expected_dates"
+   ],
+   "admits": [
+    "retained_excluded"
+   ],
+   "owner_declared_ok": false,
+   "check_params": {
+    "sum_equals_total": {
+     "tol_per_part": "0.005"
+    }
+   }
+  },
+  {
+   "source_id": "ibkr_flex_history",
+   "provider": "IBKR",
+   "transport": "FLEX_TOKEN_VAULT",
+   "credential_ref": "ibkr-flex-token-20260902",
+   "cdp_port": null,
+   "capture_stage": {
+    "mode": "DERIVE_FROM_RETAINED",
+    "tool": "tools/capture_stages/ibkr_equity_history.py",
+    "pull_tool": "packages/ibkr/src/quant_engine/ibkr/capture"
+   },
+   "login_stop": false,
+   "freshness": {
+    "max_age_days": 7
+   },
+   "closure_checks": [
+    "coverage",
+    "nav_identity",
+    "bridge_receipt"
+   ],
+   "admits": [
+    "reserve_nav"
+   ],
+   "owner_declared_ok": false
+  },
+  {
+   "source_id": "matrixport_margin",
+   "provider": "MATRIXPORT",
+   "transport": "CREDENTIAL_MANAGER",
+   "source_kind": "owner-login-or-credential-manager",
+   "credential_ref": "BIT.com-API",
+   "cdp_port": null,
+   "capture_stage": {
+    "mode": "EXISTING_RECORDER",
+    "tool": "packages/matrixport",
+    "margin_setting": "NOT_READABLE_BY_API: the margin/leverage setting is on the Phoenix Prime host which uses separate credentials (none stored on this workstation) and a live read needs issue authority; owner step: read the setting in the signed-in Matrixport product page or declare it with a hashed screenshot (owner_declared_ok with owner_evidence)"
+   },
+   "login_stop": false,
+   "freshness": {
+    "max_age_days": 7
+   },
+   "closure_checks": [
+    "hwm_gap_bound",
+    "stability"
+   ],
+   "admits": [
+    "margin_setting",
+    "hwm"
+   ],
+   "owner_declared_ok": false
+  },
+  {
+   "source_id": "governed_price_tqqq_shv",
+   "provider": "MARKET_DATA",
+   "transport": "PUBLIC_HTTP",
+   "credential_ref": null,
+   "cdp_port": null,
+   "capture_stage": {
+    "mode": "NEW_STAGE_REQUIRED",
+    "tool": null
+   },
+   "login_stop": false,
+   "freshness": {
+    "max_age_days": 7
+   },
+   "closure_checks": [
+    "coverage",
+    "stability"
+   ],
+   "admits": [],
+   "owner_declared_ok": false
+  },
+  {
+   "source_id": "p123_model_live",
+   "provider": "PORTFOLIO123",
+   "transport": "BROWSER_SIGNED_IN",
+   "credential_ref": null,
+   "cdp_port": 9334,
+   "window_hosts": [
+    "portfolio123.com"
+   ],
+   "capture_stage": {
+    "mode": "EXISTING_RECORDER",
+    "tool": "tools/p123_cdp_recorder.py"
+   },
+   "login_stop": true,
+   "freshness": {
+    "max_age_days": 7
+   },
+   "closure_checks": [
+    "stability"
+   ],
+   "admits": [
+    "model_vs_actual"
+   ],
+   "owner_declared_ok": false
+  },
+  {
+   "source_id": "tt_qsi_series",
+   "provider": "TURINGTRADER",
+   "transport": "PUBLIC_HTTP",
+   "credential_ref": null,
+   "cdp_port": null,
+   "probe_url": "https://firebasestorage.googleapis.com/",
+   "capture_stage": {
+    "mode": "EXISTING_RECORDER",
+    "tool": "tools/tt_public_capture.py"
+   },
+   "login_stop": false,
+   "freshness": {
+    "max_age_days": 7
+   },
+   "closure_checks": [
+    "coverage"
+   ],
+   "admits": [],
+   "owner_declared_ok": false
+  },
+  {
+   "source_id": "vtma_volatis_robuxio_models",
+   "provider": "QUANTBASE",
+   "transport": "BROWSER_SIGNED_IN",
+   "credential_ref": null,
+   "cdp_port": 9334,
+   "window_hosts": [
+    "getquantbase.com"
+   ],
+   "capture_stage": {
+    "mode": "NEW_STAGE_REQUIRED",
+    "tool": null,
+    "derivation": "tools/capture_quantbase_har.py"
+   },
+   "login_stop": true,
+   "freshness": {
+    "max_age_days": 7
+   },
+   "closure_checks": [
+    "stability"
+   ],
+   "admits": [],
+   "owner_declared_ok": false
+  }
  ]
 }

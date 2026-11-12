@@ -248,6 +248,14 @@ _PATH_STAGES = {
     "tools/capture_action_guard.py": [],
     # Rehearsal (DRY-) root rules shared by the live capture recorders.
     "tools/capture_dry_run.py": [],
+    # #913 capture pipeline: declared sources, S0-S5, weekly refresh table and stage libraries. Read only by the
+    # attended preparation when a spec carries a captured_inputs block; no stage reads a captured file otherwise.
+    "contracts/capture-sources-v1.json": [],
+    "tools/capture_pipeline.py": [],
+    "tools/capture_refresh.py": [],
+    "tools/capture_stages/ibkr_equity_history.py": [],
+    "tools/capture_stages/schwab_cash.py": [],
+    "tools/capture_stages/statement_browser.py": [],
     # Attaches to the owner's signed-in Portfolio123 tab and saves a fixed,
     # hash-pinned allowlist of read-only exports into a create-only directory; the
     # staging CLI and the generation read only the files and manifest they are handed.

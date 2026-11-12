@@ -6,8 +6,8 @@ reports success; the public probe is one GET of the declared URL.
 
     python tools/capture_refresh.py --cutoff 2026-11-06 --pins <pins.json> --evidence-root <dir> [--contracts <file>]
 
-Exit code: 0 every source fresh; 3 a login, credential, probe or stage is blocked or unverifiable (the table names the
-owner step); 4 nothing is blocked but at least one source is ready to be captured.
+Exit code: 0 fresh; 3 owner action needed (login, window, credential, unreachable, probe error; the table names the
+owner step); 4 ready to capture; 5 only not-wired or unverifiable-by-design sources remain.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Mapping, Sequence
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -47,28 +48,47 @@ LOGIN_PATH_MARKERS = (
     "signin",
     "sign-in",
     "signon",
+    "logon",
     "sso",
     "oauth",
-    "auth",
-    "logon",
     "session-expired",
     "timeout",
+    "timedout",
 )
 _NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def _host_matches(url: str, suffixes: Sequence[str]) -> bool:
-    host = (urlsplit(url).hostname or "").lower()
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:  # one malformed tab URL must not break every source
+        return False
     return any(host == s or host.endswith("." + s) for s in suffixes)
 
 
+def _is_wall(url: str) -> bool:
+    """A login/sign-on/SSO/timeout page by its path SEGMENTS, or a login marker in the query or fragment."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    segments = [s for s in re.split(r"[/#?&=]+", parts.path.lower()) if s]
+    tail = (parts.query + " " + parts.fragment).lower()
+    return any(s in LOGIN_PATH_MARKERS for s in segments) or any(
+        m in tail for m in ("login", "signin", "signon", "sso")
+    )
+
+
 def cdp_window_state(
-    source: Source, *, fetch: Callable[[int], Sequence[Mapping[str, Any]]] | None = None
+    source: Source,
+    *,
+    fetch: Callable[[int], Sequence[Mapping[str, Any]]] | None = None,
 ) -> str:
-    """Read-only. Only tabs whose HOST is one of the source's declared ``window_hosts`` count (a tab on another site,
-    a new-tab page or a query string that merely mentions the provider never does). No such tab: ABSENT. A matching
-    tab whose path names a login/sign-on/SSO/timeout page is a wall; the window is OK only when at least one matching
-    tab is NOT a wall. A bad or unexpected CDP reply is ABSENT (never an exception)."""
+    """Read-only. Only tabs whose HOST is one of the source's declared ``window_hosts`` count (another site, a new-tab page
+    or a query string that merely mentions the provider never does). No such tab: ABSENT. A matching tab on a login /
+    sign-on / SSO / timeout path (or with such a marker in its query or fragment) is a wall; the window is OK only when
+    at least one matching tab is not a wall. A bad CDP reply is ABSENT (never an exception). This is URL evidence only:
+    a public page on the same domain still reads OK, and the stage re-checks the page it lands on (``expect`` marker)."""
     if source.cdp_port is None or not source.window_hosts:
         return WINDOW_ABSENT
     try:
@@ -92,10 +112,7 @@ def cdp_window_state(
     ]
     if not mine:
         return WINDOW_ABSENT
-    walls = [
-        any(m in urlsplit(u).path.lower() for m in LOGIN_PATH_MARKERS) for u in mine
-    ]
-    return WINDOW_LOGIN_WALL if all(walls) else WINDOW_OK
+    return WINDOW_LOGIN_WALL if all(_is_wall(u) for u in mine) else WINDOW_OK
 
 
 def vault_ok(secret: str) -> bool:
@@ -128,6 +145,24 @@ def http_ok(source: Source) -> bool:
         return False
 
 
+def cmdkey_ok(name: str) -> bool:
+    """Existence of a Windows credential-manager target, never its secret (``cmdkey /list:<target>`` prints only the
+    target, type and user)."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name):
+        return False
+    try:
+        r = subprocess.run(  # noqa: S603
+            ["cmdkey", f"/list:{name}"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0 and "target:" in r.stdout.lower()
+
+
 def format_table(rows: list[dict[str, str]]) -> str:
     head = ("source", "reason", "status", "as_of", "owner_step")
     width = (
@@ -143,12 +178,22 @@ def format_table(rows: list[dict[str, str]]) -> str:
 
 
 def exit_code(rows: list[dict[str, str]]) -> int:
-    if any(
-        r["status"].startswith("BLOCKED") or r["status"] == "UNVERIFIABLE_BY_DESIGN"
-        for r in rows
-    ):
+    """0 every source fresh; 3 the owner has something to do (login, window, credential, unreachable source, probe error:
+    ask for all of them in one message); 4 nothing for the owner but at least one source is ready to be captured; 5 only
+    sources that cannot run yet (stage not wired) or cannot be checked by design remain."""
+    owner = (
+        "BLOCKED_LOGIN",
+        "BLOCKED_NO_WINDOW",
+        "BLOCKED_CREDENTIAL",
+        "BLOCKED_UNREACHABLE",
+        "BLOCKED_PROBE_ERROR",
+    )
+    statuses = {r["status"] for r in rows}
+    if statuses & set(owner):
         return 3
-    return 4 if any(r["status"] == "READY" for r in rows) else 0
+    if "READY" in statuses:
+        return 4
+    return 5 if statuses - {"SKIP_FRESH"} else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -164,8 +209,18 @@ def main(argv: list[str] | None = None) -> int:
         / "capture-sources-v1.json",
     )
     a = ap.parse_args(argv)
-    doc = json.loads(a.pins.read_text(encoding="utf-8")) if a.pins.exists() else {}
-    pins = doc.get("pins", {}) if doc.get("schema_version") == 2 else {}
+    pins: dict[str, Any] = {}
+    if a.pins.exists():
+        doc = json.loads(a.pins.read_text(encoding="utf-8"))
+        if (
+            not isinstance(doc, dict)
+            or doc.get("schema_version") != 2
+            or not isinstance(doc.get("pins"), dict)
+        ):
+            raise SystemExit(
+                "PIN_SCHEMA: refusing to treat an unknown pin file as empty"
+            )
+        pins = doc["pins"]
     rows = refresh_table(
         load_sources(a.contracts, repo_root=Path(__file__).resolve().parents[1]),
         pins=pins,
@@ -173,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         window_state=cdp_window_state,
         vault_ok=vault_ok,
         http_ok=http_ok,
+        store_ok=cmdkey_ok,
         evidence_root=a.evidence_root,
     )
     print(format_table(rows))

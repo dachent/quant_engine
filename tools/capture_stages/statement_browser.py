@@ -16,6 +16,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 import re
+import shutil
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -28,6 +29,17 @@ LOGIN_MARKERS = (
     "two-factor",
     "captcha",
     "session has timed out",
+)
+SEGMENT_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,99}")
+RESERVED = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
 )
 LOGIN_URL_MARKERS = ("login", "signin", "sign-in", "sso", "auth")
 
@@ -60,44 +72,65 @@ def capture_pages(
     allowed_origin: str,
     settle: Any = None,
 ) -> list[str]:
-    """Visit each ``{"name", "url"}`` in the plan, write ``<name>.txt`` create-only (LF bytes) and return the names.
+    """Visit each ``{"name", "url", "expect"}`` in the plan and write ``<name>.txt`` (LF bytes) into a NEW directory.
 
-    Refuses a URL outside ``allowed_origin`` before navigating, stops at the first login wall (nothing from the wall
-    page is written) and never overwrites an existing capture.
+    Every plan item needs an ``expect`` marker (text the signed-in statement page must contain; without it a long
+    sign-in or time-out page could be taken for a capture). Names are plain ``[A-Za-z0-9_][A-Za-z0-9._-]*`` (no path
+    syntax, no ``:`` streams). Refuses a URL outside ``allowed_origin`` before navigating and a landing page outside it
+    afterwards, stops at the first login wall or page missing its marker, and writes nothing to ``out_dir`` unless the
+    WHOLE plan succeeded: pages go to a staging directory next to it that is renamed on completion, so a wall on page
+    two leaves no partial capture to be hashed or resumed over. ``out_dir`` must not exist.
     """
     out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    if out.exists():
+        raise FileExistsError(str(out))
+    staging = out.with_name(f".{out.name}.staging")
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
     written: list[str] = []
-    for item in plan:
-        url, name = item["url"], item["name"]
-        if "/" in name or "\\" in name or name.startswith("."):
-            raise ValueError("PLAN_NAME")
-        if (
-            urlsplit(url)._replace(path="", query="", fragment="").geturl()
-            != allowed_origin
-        ):
-            raise ValueError("PLAN_ORIGIN")
-        page.goto(url)
-        if settle is not None:
-            settle(page)
-        text = page.inner_text("body")
-        wall = is_login_wall(page.url, text)
-        landed = urlsplit(page.url)._replace(path="", query="", fragment="").geturl()
-        if landed != allowed_origin and not wall:
-            raise ValueError(
-                "REDIRECT_ORIGIN"
-            )  # a redirect off the allowed origin is never captured
-        if wall or (item.get("expect") and item["expect"] not in text):
-            raise StageBlocked(
-                "BLOCKED_LOGIN"
-            )  # a wall, or a page without its expected marker, is the owner's to clear
-        with (out / f"{name}.txt").open("x", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
-        written.append(name)
+    try:
+        for item in plan:
+            url, name = item["url"], item["name"]
+            if (
+                not SEGMENT_RE.fullmatch(name)
+                or name.endswith(".")
+                or name.split(".")[0].upper() in RESERVED
+            ):
+                raise ValueError("PLAN_NAME")
+            if not item.get("expect"):
+                raise ValueError("PLAN_EXPECT")
+            if (
+                urlsplit(url)._replace(path="", query="", fragment="").geturl()
+                != allowed_origin
+            ):
+                raise ValueError("PLAN_ORIGIN")
+            page.goto(url)
+            if settle is not None:
+                settle(page)
+            text = page.inner_text("body")
+            wall = is_login_wall(page.url, text)
+            landed = (
+                urlsplit(page.url)._replace(path="", query="", fragment="").geturl()
+            )
+            if landed != allowed_origin and not wall:
+                raise ValueError(
+                    "REDIRECT_ORIGIN"
+                )  # a redirect off the allowed origin is never captured
+            if wall or item["expect"] not in text:
+                raise StageBlocked(
+                    "BLOCKED_LOGIN"
+                )  # a wall, or a page without its marker, is the owner's to clear
+            with (staging / f"{name}.txt").open(
+                "x", encoding="utf-8", newline="\n"
+            ) as fh:
+                fh.write(text)
+            written.append(name)
+        staging.rename(out)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return written
-
-
-# ----------------------------------------------------------------------------- parsers
 
 
 def _dec(s: str) -> Decimal:
@@ -108,17 +141,24 @@ def parse_jh_statement(text: str) -> dict[str, Any]:
     """John Hancock quarterly statement: period, opening and closing balance and the right-column activity items.
 
     ``items`` are the signed amounts between the opening and closing values of the period summary, so
-    ``opening + sum(items) == closing`` is the closure check (:func:`capture_pipeline.check_nav_identity`).
+    ``opening + sum(items) == closing`` is the closure check (:func:`capture_pipeline.check_nav_identity`). A shape that
+    does not parse raises ``ValueError`` with a stable code, never a raw ``AttributeError``/``StopIteration``.
     """
     lines = text.split("\n")
     m = re.search(r"STATEMENT PERIOD: (\S+) - (\S+)", lines[0])
-    if not m:
-        raise ValueError("JH_PERIOD")
-    start = datetime.strptime(m.group(1), "%m/%d/%Y").date()
-    end = datetime.strptime(m.group(2), "%m/%d/%Y").date()
-    opening = _dec(re.search(r"Opening Balance\s+\$\s*([\d,\.]+)", text).group(1))  # type: ignore[union-attr]
-    closing = _dec(re.search(r"Closing Balance\s+\$\s*([\d,\.]+)", text).group(1))  # type: ignore[union-attr]
-    start_line = next(k for k, line in enumerate(lines) if "For the period" in line)
+    ob = re.search(r"Opening Balance\s+\$\s*([\d,\.]+)", text)
+    cb = re.search(r"Closing Balance\s+\$\s*([\d,\.]+)", text)
+    start_line = next(
+        (k for k, line in enumerate(lines) if "For the period" in line), None
+    )
+    if not (m and ob and cb) or start_line is None:
+        raise ValueError("JH_SHAPE")
+    try:
+        start = datetime.strptime(m.group(1), "%m/%d/%Y").date()
+        end = datetime.strptime(m.group(2), "%m/%d/%Y").date()
+    except ValueError as exc:
+        raise ValueError("JH_PERIOD") from exc
+    opening, closing = _dec(ob.group(1)), _dec(cb.group(1))
     values: list[Decimal] = []
     for line in lines[start_line : start_line + 12]:
         found = re.findall(r"-?\$?-?[\d,]+\.\d\d", line)
