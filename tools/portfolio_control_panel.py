@@ -4097,6 +4097,9 @@ def _suppress_unmatched_strategy_performance(
         row["account_live_cagr_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["account_live_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["nav_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+        for evidence_field in ("cost_evidence_status", "benchmark_evidence_status"):
+            if evidence_field in row:
+                row[evidence_field] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["benchmark_assignment_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["benchmark_comparison_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["benchmark_comparison_disposition"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"

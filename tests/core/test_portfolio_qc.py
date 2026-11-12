@@ -477,6 +477,8 @@ def test_post_release_uses_existing_release_inputs_without_extra_qa_directories(
     monkeypatch.setattr(
         qc, "_load_and_validate_spec", lambda _path, **_kwargs: (spec, _proof())
     )
+    # the synthetic spec names no real commit; the checkout guard has its own tests (test_release_preflight)
+    monkeypatch.setattr(qc, "require_checkout_is_spec_code", lambda *_a, **_k: None)
     monkeypatch.setattr(qc, "_read_committed_release", lambda _spec: object())
     monkeypatch.setattr(qc, "_verify_committed_manifest", lambda *_args: {})
     assert (

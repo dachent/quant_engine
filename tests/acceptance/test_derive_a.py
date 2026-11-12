@@ -5041,3 +5041,22 @@ def test_manifestless_call_without_declared_cutoff_fails_closed(tmp_path: Path) 
         "owner-declared cutoff artifact absent" in r["reason"]
         for r in document["not_derivable"]
     )
+
+
+def test_fund_scoped_cash_rows_are_flagged_inapplicable_by_policy(
+    tmp_path: Path,
+) -> None:
+    """#895 F2: the oracle states that fund-scoped cash and coverage do not exist, so the
+    validator does not read them as gaps.  Kill test: the flag was absent."""
+
+    manifest = _manifest_tree_v3(tmp_path, policy_document=_fund_policy())
+    document = _run_v3(tmp_path, manifest)
+    flagged = {
+        row["metric_id"]
+        for row in document["not_derivable"]
+        if row.get("applicability") == "INAPPLICABLE_BY_POLICY"
+    }
+    assert flagged == {
+        "capital.strategy_cash.cutoff",
+        "date.strategy_cash.coverage_end",
+    }

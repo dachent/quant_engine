@@ -56,11 +56,11 @@ def _findings(tmp_path: Path, as_of: str, keys: list[str], plan: bool = True):
     return [f for f in run(gen_dir, repo_root=root) if f.check_id == SECTION]
 
 
-def test_v10_a_lens_ending_in_the_eligible_month_is_not_ready(tmp_path: Path) -> None:
+def test_v10_a_lens_ending_in_the_eligible_month_is_current(tmp_path: Path) -> None:
+    # C3 (#895 F2): a lens inside its governed publication lag is current, not a finding;
+    # it used to be four NOT_READY rows on every release.
     findings = _findings(tmp_path, "2026-07-31", ["us-economic", "europe-economic"])
-    assert findings
-    assert {f.klass for f in findings} == {checks.NOT_READY}
-    assert "publication lag" in findings[0].message
+    assert findings == []
 
 
 def test_v10_a_lens_that_ends_before_the_eligible_month_still_blocks(

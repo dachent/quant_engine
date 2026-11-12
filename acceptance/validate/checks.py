@@ -34,7 +34,7 @@ from pathlib import Path
 import re
 from typing import Any, cast
 
-from . import facts_bindings, shell, sleeve_basis
+from . import facts_bindings, payload_rule, shell, sleeve_basis
 from .generation import (
     APP,
     PAYLOAD_FILES,
@@ -88,6 +88,10 @@ _AVAILABLE_PREFIXES = (
     "VERIFIED",
     "GOVERNED",
 )
+# The one non-available after-tax status that satisfies E6: the owner's declared
+# pre-tax reporting scope (record OR-901-AFTER-TAX). The producer constant
+# portfolio_attribution.AFTER_TAX_STATUS_NOT_APPLICABLE must equal it (tested).
+AFTER_TAX_NOT_APPLICABLE = "NOT_APPLICABLE_PRE_TAX_REPORTING_SCOPE"
 _NOT_READY_VALUES = frozenset({"REQUIRED_NOT_READY", "NOT_READY"})
 _UNADMITTED_FLOW_PATHS = frozenset(
     {"NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"}
@@ -2007,42 +2011,6 @@ def check_embedded_payload_copies(ctx: Context) -> Iterator[Finding]:
             )
 
 
-def _readiness(ctx: Context) -> dict[str, Any]:
-    values: dict[str, Any] = {}
-    for label, value in (
-        ("candidate.state", ctx.gen.candidate.get("state")),
-        (
-            "candidate.account_manifest_verification.publication_readiness",
-            node(
-                ctx.gen.candidate,
-                "account_manifest_verification",
-                "publication_readiness",
-            ),
-        ),
-        (
-            "panel.account_manifest.authority_readiness.publication_readiness",
-            node(
-                ctx.panel,
-                "account_manifest",
-                "authority_readiness",
-                "publication_readiness",
-            ),
-        ),
-        (
-            "panel.account_manifest.authority_readiness.independent_authority_verification",
-            node(
-                ctx.panel,
-                "account_manifest",
-                "authority_readiness",
-                "independent_authority_verification",
-            ),
-        ),
-    ):
-        if value is not None:
-            values[label] = value
-    return values
-
-
 # The panel's root in a coordinated release (packages/core pipeline: ``portfolio-panel``).
 PANEL_ROOT_ID = "portfolio-panel"
 _RELEASE_ROOT_ID = re.compile(r"[a-z][a-z0-9-]*")
@@ -2169,34 +2137,165 @@ def _is_published(ctx: Context) -> tuple[bool, str | None]:
     return True, found[0][1]
 
 
+_RELEASABLE_MANIFEST_PROFILES = (
+    "INDEPENDENT_EXACT_REBUILD",
+    "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES",
+)
+_VERIFIED_BUNDLE_PROFILE = "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"
+_REBUILD_PROFILE = "INDEPENDENT_EXACT_REBUILD"
+
+
+def _verification_defects(ctx: Context) -> dict[str, Any]:
+    """Why the bound manifest-verification record does not certify the panel.
+
+    D8 (Rulings D8-3a, T0-c, F): ``candidate.state`` and the manifest authority
+    readiness fields are build-time constants (STAGED, NOT_READY, NOT_PERFORMED) that
+    the publisher itself requires; they are not release state.  What a published panel
+    must carry is a record, bound by hash and written before the commit, that code
+    other than the manifest producer recomputed the manifest with no discrepancy.
+    """
+
+    candidate = ctx.gen.candidate
+    meta = node(ctx.panel, "meta")
+    meta = meta if isinstance(meta, dict) else {}
+    profile = candidate.get("account_manifest_authority_profile")
+    record = candidate.get("account_manifest_verification")
+    panel_record = meta.get("account_manifest_verification")
+    defects: dict[str, Any] = {}
+    if profile not in _RELEASABLE_MANIFEST_PROFILES:
+        defects["candidate.account_manifest_authority_profile"] = profile
+        return defects
+    if meta.get("account_manifest_authority_profile") != profile:
+        defects["panel.meta.account_manifest_authority_profile"] = meta.get(
+            "account_manifest_authority_profile"
+        )
+    if not isinstance(record, dict) or record != panel_record:
+        defects["candidate.account_manifest_verification"] = (
+            "absent or differs from panel.meta.account_manifest_verification"
+        )
+        return defects
+    if profile == _REBUILD_PROFILE:
+        for field, wanted in (
+            ("status", "PANEL_INDEPENDENT_EXACT_REBUILD_VERIFIED"),
+            (
+                "method",
+                "EXACT_REBUILD_REPORT_BASELINE_CANONICAL_POLICY_AND_TEMPLATE_BOUND",
+            ),
+            ("publication_readiness", "READY"),
+        ):
+            if record.get(field) != wanted:
+                defects[f"account_manifest_verification.{field}"] = record.get(field)
+        return defects
+    if record.get("method") != (
+        "READ_GENERATION_BUNDLE_EXACT_BYTES_AND_FINANCIAL_MVP_BINDER"
+    ):
+        defects["account_manifest_verification.method"] = record.get("method")
+    report = record.get("independent_report")
+    report = report if isinstance(report, dict) else {}
+    numeric = report.get("numeric_verification")
+    numeric = numeric if isinstance(numeric, dict) else {}
+    if record.get("status") != "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES":
+        defects["account_manifest_verification.status"] = record.get("status")
+    if report.get("status") != "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES":
+        defects["independent_report.status"] = report.get("status")
+    for key in ("candidate_count", "comparison_count", "discrepancy_count"):
+        if type(numeric.get(key)) is not int or numeric[key] < 0:
+            defects[f"numeric_verification.{key}"] = numeric.get(key)
+    if numeric.get("discrepancy_count") != 0:
+        defects["numeric_verification.discrepancy_count"] = numeric.get(
+            "discrepancy_count"
+        )
+    if numeric.get("comparison_count") != numeric.get("candidate_count"):
+        defects["numeric_verification.comparison_count"] = numeric.get(
+            "comparison_count"
+        )
+    rows = node(ctx.panel, "account_manifest", "rows")
+    ok_rows = (
+        sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "OK")
+        if isinstance(rows, list)
+        else None
+    )
+    if ok_rows is None or numeric.get("candidate_count") != ok_rows:
+        defects["numeric_verification.candidate_count"] = {
+            "recorded": numeric.get("candidate_count"),
+            "recomputed_ok_rows": ok_rows,
+        }
+    expected_disposition = (
+        "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
+        if ok_rows
+        else "NOT_APPLICABLE_NO_CANDIDATES"
+    )
+    if numeric.get("disposition") != expected_disposition:
+        defects["numeric_verification.disposition"] = numeric.get("disposition")
+    source_sha = node(record, "epoch_manifest_source", "artifact", "sha256")
+    if (
+        not isinstance(source_sha, str)
+        or not _RELEASE_DIGEST.fullmatch(source_sha)
+        or source_sha != meta.get("account_manifest_sha256")
+    ):
+        defects["epoch_manifest_source.artifact.sha256"] = source_sha
+    if record.get("publication_readiness") != "NOT_READY":
+        defects["account_manifest_verification.publication_readiness"] = record.get(
+            "publication_readiness"
+        )
+    if not isinstance(record.get("producer_readiness"), dict):
+        defects["account_manifest_verification.producer_readiness"] = record.get(
+            "producer_readiness"
+        )
+    for where, value in (
+        ("independent_report.sha256", report.get("sha256")),
+        (
+            "independent_report.subjects_semantic_sha256",
+            report.get("subjects_semantic_sha256"),
+        ),
+        (
+            "epoch_manifest_source.generation_id",
+            node(record, "epoch_manifest_source", "generation_id"),
+        ),
+        (
+            "epoch_manifest_source.generation_manifest_sha256",
+            node(record, "epoch_manifest_source", "generation_manifest_sha256"),
+        ),
+    ):
+        if not isinstance(value, str) or not _RELEASE_DIGEST.fullmatch(value):
+            defects[where] = value
+    if report.get("artifact_id") != "verification/independent-verification.json":
+        defects["independent_report.artifact_id"] = report.get("artifact_id")
+    size = report.get("size_bytes")
+    if type(size) is not int or size < 1:
+        defects["independent_report.size_bytes"] = size
+    return defects
+
+
 def check_publication_state(ctx: Context) -> Iterator[Finding]:
-    """D8: a published generation cannot declare itself not ready / unverified."""
+    """D8: the panel binds a clean independent manifest verification (any time).
+
+    Evaluated before and after the commit; it reads the bound verification record,
+    never the build-time readiness constants or ``candidate.state`` (sealed facts).
+    """
 
     evidence = _release_evidence_finding(ctx, "identity.publication_state", "D8")
     if evidence is not None:
+        # An unreadable release record must not hide a bad verification record.
         yield evidence
-        return
-    published, where = _is_published(ctx)
-    if not published:
-        return
-    readiness = _readiness(ctx)
-    contradictions = {
-        key: value
-        for key, value in readiness.items()
-        if value in ("STAGED", "NOT_READY", "NOT_PERFORMED", "REQUIRED_NOT_READY")
-    }
-    if contradictions:
+    defects = _verification_defects(ctx)
+    if defects:
+        published, where = _is_published(ctx)
         yield _finding(
             "identity.publication_state",
             BLOCKER_AUTHORITY,
             "generation",
-            contradictions,
-            {"state": "PUBLISHED", "readiness": "READY/VERIFIED"},
+            defects,
+            {
+                "account_manifest_verification": "releasable profile, clean "
+                "independent report, zero discrepancies, matching hashes"
+            },
             CANDIDATE,
-            "$.state",
+            "$.account_manifest_verification",
             ("D8",),
-            f"generation is PUBLISHED ({where}) while its own records say not "
-            "ready or not independently verified",
+            "the panel does not bind a clean independent verification of its "
+            "account manifest"
+            + (f" (generation is PUBLISHED: {where})" if published else ""),
         )
 
 
@@ -5268,6 +5367,29 @@ def _view_ids(
     ]
 
 
+_HISTORY_ONLY_ROLE = "HISTORY_ONLY_NO_CURRENT_ASSIGNMENT"
+
+
+def _history_only_accounts(
+    ctx: Context, file: str, path: Sequence[str | int], key: str
+) -> set[str]:
+    """Accounts whose every row in the view carries the history-only role label.
+
+    The builder names an account with no current assignment (``_label_account_roles``);
+    the validator still decides which accounts are outside the current universe, and
+    uses the label only to tell a disclosed history row from an unlabelled one.
+    """
+
+    document = ctx.report if file == REPORT else ctx.panel
+    value = node(document, *path)
+    roles: dict[str, set[Any]] = {}
+    if isinstance(value, list):
+        for row in value:
+            if isinstance(row, dict) and row.get(key) is not None:
+                roles.setdefault(str(row[key]), set()).add(row.get("account_role"))
+    return {a for a, seen in roles.items() if seen == {_HISTORY_ONLY_ROLE}}
+
+
 def check_active_universe(ctx: Context) -> Iterator[Finding]:
     """D9: every current view carries exactly the active strategy universe."""
 
@@ -5474,10 +5596,11 @@ def check_inactive_accounts(ctx: Context) -> Iterator[Finding]:
             for account, count in sorted(counts.items())
             if account in reference.excluded_accounts
         }
+        disclosed = _history_only_accounts(ctx, file, path, key)
         unknown = {
             account: count
             for account, count in sorted(counts.items())
-            if account not in reference.excluded_accounts
+            if account not in reference.excluded_accounts and account not in disclosed
         }
         if excluded:
             yield _finding(
@@ -8113,8 +8236,10 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
             klass = NOT_READY
             message = _bound_message(bound, "section")
         elif lag is not None:
-            klass = NOT_READY
-            message = lag
+            # C3 (#895 F2): a lens that ends in the last month its governed sources can
+            # have published (recomputed above from the plan's own lag policy) is current
+            # for those sources.  Only a lens older than the policy allows is a finding.
+            continue
         elif is_available(status) or after:
             klass = BLOCKER_AUTHORITY
             message = (
@@ -8590,7 +8715,12 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
         unavailable = sorted(
             str(row.get("strategy_id"))
             for row in summary
-            if field_name in row and not is_available(row.get(field_name))
+            if field_name in row
+            and not is_available(row.get(field_name))
+            and not (
+                field_name == "after_tax_status"
+                and row.get(field_name) == AFTER_TAX_NOT_APPLICABLE
+            )
         )
         if unavailable:
             yield _finding(
@@ -8825,14 +8955,6 @@ def check_hardcoded_status(ctx: Context) -> Iterator[Finding]:
     template interpolation — contradicts a payload that says NOT_READY/NOT_PERFORMED.
     """
 
-    readiness = _readiness(ctx)
-    not_ready = {
-        k: v
-        for k, v in readiness.items()
-        if v in ("NOT_READY", "NOT_PERFORMED", "REQUIRED_NOT_READY", "STAGED")
-    }
-    if not not_ready:
-        return
     literals = []
     if ctx.gen.app_js:
         literals += shell.hard_coded_statuses(APP, ctx.gen.app_js)
@@ -8843,12 +8965,13 @@ def check_hardcoded_status(ctx: Context) -> Iterator[Finding]:
             "code.hardcoded_status_literal",
             BLOCKER_AUTHORITY,
             f"{item.file}:line {item.line}",
-            {"literal": item.literal, "context": item.context, "payload": not_ready},
-            "status rendered from the readiness payload",
+            {"literal": item.literal, "context": item.context},
+            "status rendered from the payload, never from a literal",
             item.file,
             f"line {item.line}",
             ("D8",),
-            "shell renders a literal positive status while the payload says not ready",
+            "shell renders a literal positive status; a sealed shell may never state "
+            "release status (the release record does)",
         )
 
 
@@ -9619,10 +9742,168 @@ def _physical_sizes(ctx: Context) -> dict[str, int]:
     return sizes
 
 
+_GENERATION_ID_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _previous_panel_pointer(ctx: Context) -> tuple[str, str] | None | bool:
+    """``(generation_id, manifest_sha256)`` of the panel generation the previous release
+    published, or ``None`` (no previous release), or ``True`` (this candidate is already
+    committed and its predecessor is not recorded).
+
+    Three sources, in this order: (1) a committed release target that pins this
+    generation records its ``previous_pointer``; (2) the release ``CURRENT_RELEASE``
+    names, while this candidate is not in it, is the previous release, whose panel target
+    is the baseline; (3) a ``CURRENT.json`` that names another generation.  A stage
+    root's ``CURRENT.json`` names the candidate itself before publication, so it is never
+    read as "already committed".  Every source must carry the manifest hash.
+    """
+
+    pinned = _release_targets(ctx)
+    if pinned:
+        for target, _ in pinned:
+            recorded = target.get("previous_pointer")
+            if isinstance(recorded, dict):
+                return _pointer_pair(
+                    recorded.get("generation_id"), recorded.get("manifest_sha256")
+                )
+        return True
+    manifest = ctx.gen.external.release_manifest
+    targets = manifest.get("targets") if isinstance(manifest, dict) else None
+    if isinstance(targets, list):
+        for target in targets:
+            if (
+                isinstance(target, dict)
+                and target.get("root_id") == PANEL_ROOT_ID
+                and target.get("proposed_generation_id") != ctx.gen.generation_id
+            ):
+                return _pointer_pair(
+                    target.get("proposed_generation_id"),
+                    target.get("proposed_manifest_sha256"),
+                )
+    pointer = ctx.gen.external.current_pointer
+    if (
+        isinstance(pointer, dict)
+        and pointer.get("generation_id") != ctx.gen.generation_id
+    ):
+        return _pointer_pair(
+            pointer.get("generation_id"), pointer.get("manifest_sha256")
+        )
+    return None
+
+
+def _pointer_pair(generation_id: Any, manifest_sha256: Any) -> tuple[str, str] | None:
+    if (
+        isinstance(generation_id, str)
+        and isinstance(manifest_sha256, str)
+        and _GENERATION_ID_RE.fullmatch(generation_id)
+        and _GENERATION_ID_RE.fullmatch(manifest_sha256)
+    ):
+        return generation_id, manifest_sha256
+    return None
+
+
+def _previous_payload(
+    ctx: Context, cached: Mapping[str, int]
+) -> tuple[dict[str, int] | None, dict[str, int] | None, int | None, bool, Any]:
+    """#893: ``(blocks, physical, added_days, unknown, schema)`` of the previous committed panel.
+
+    ``unknown`` is True when this candidate is already committed and its predecessor
+    cannot be found or verified: only the ceiling applies.  ``(None, None, None, False,
+    None)``: no usable previous release, the reviewed floors apply.  A predecessor
+    directory is looked for beside the candidate and in the committed panel root next to
+    the release root; its ``generation.json`` must hash to the recorded manifest hash and
+    it must not be dated after the candidate.
+    """
+
+    pair = _previous_panel_pointer(ctx)
+    committed = pair is True or bool(_release_targets(ctx))
+    if not isinstance(pair, tuple):
+        return None, None, None, committed, None
+    previous_id, expected_sha = pair
+    key = f"payload_previous:{previous_id}"
+    if key not in ctx._cache:
+        roots = [ctx.gen.gen_dir.parent]
+        release_pointer = ctx.gen.external.release_pointer_path
+        if release_pointer:
+            roots.append(
+                Path(release_pointer).parent.parent / "control-panel" / "generations"
+            )
+        result: tuple[Any, ...] = (None, None, None, None)
+        for root in roots:
+            previous_dir = root / previous_id
+            try:
+                manifest_bytes = (previous_dir / GENERATION_MANIFEST).read_bytes()
+                if hashlib.sha256(manifest_bytes).hexdigest() != expected_sha:
+                    continue
+                panel = json.loads((previous_dir / PANEL).read_bytes())
+                previous_candidate = json.loads((previous_dir / CANDIDATE).read_bytes())
+                embedded = getattr(ctx.gen.scan, "report_embedded_only", False)
+                files = {
+                    path.relative_to(previous_dir).as_posix(): path.stat().st_size
+                    for path in previous_dir.rglob("*")
+                    if path.is_file()
+                    and not (
+                        embedded and path.relative_to(previous_dir).as_posix() == REPORT
+                    )
+                }
+                physical = {"total_bytes": sum(files.values())}
+                for name, rel in (
+                    ("index_html_bytes", "index.html"),
+                    ("dashboard_data_json_bytes", "data/dashboard_data.json"),
+                    ("dashboard_data_js_bytes", "data/dashboard_data.js"),
+                ):
+                    if rel in files:
+                        physical[name] = files[rel]
+                days = payload_rule.added_days(
+                    previous_candidate.get("portfolio_as_of"),
+                    ctx.gen.candidate.get("portfolio_as_of"),
+                )
+                if isinstance(panel, dict) and days is not None:
+                    result = (
+                        payload_block_bytes(panel),
+                        physical,
+                        days,
+                        panel.get("panel_schema_version"),
+                    )
+                    break
+            except (OSError, ValueError):
+                continue
+        ctx._cache[key] = result
+    blocks, physical, days, schema = ctx._cache[key]
+    if blocks is None:
+        return None, None, None, committed, None
+    return blocks, physical, days, False, schema
+
+
+def _effective_payload_budget(ctx: Context) -> tuple[dict[str, Any] | None, str]:
+    """The file budget with every limit recomputed by the relative rule (#893), cached."""
+
+    budget, source = _payload_budget(ctx)
+    if budget is None:
+        return None, source
+    if "payload_effective" not in ctx._cache:
+        cached = ctx._cache.get("payload_block_bytes")
+        if not isinstance(cached, dict):
+            cached = payload_block_bytes(ctx.panel)
+            ctx._cache["payload_block_bytes"] = cached
+        blocks, physical, days, unknown, schema = _previous_payload(ctx, cached)
+        ctx._cache["payload_effective"] = payload_rule.derive_budget(
+            budget,
+            blocks,
+            physical,
+            days,
+            previous_unknown=unknown,
+            allowances=payload_rule.active_allowances(
+                schema, ctx.panel.get("panel_schema_version")
+            ),
+        )
+    return ctx._cache["payload_effective"], source
+
+
 def _payload_budget_findings(ctx: Context) -> Iterator[Finding]:
     """#540: the payload against its committed budget; every overrun blocks (regression)."""
 
-    budget, source = _payload_budget(ctx)
+    budget, source = _effective_payload_budget(ctx)
     if budget is None:
         yield _finding(
             "lint.payload_size",
@@ -9652,8 +9933,8 @@ def _payload_budget_findings(ctx: Context) -> Iterator[Finding]:
             PANEL,
             f"$.{entity}" if entity in cached else "(payload size)",
             ("F5",),
-            f"{text}: {measured} B > {limit} B (payload_budget.json); raising a budget "
-            "is an explicit edit in the change that grows the block",
+            f"{text}: {measured} B > {limit} B (payload_budget.json, relative to the previous release, #893); "
+            "raising a budget is an explicit edit in the change that grows the block",
         )
 
 
@@ -9667,7 +9948,28 @@ def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
         for rel, value in scan.files.items()
         if not (scan.report_embedded_only and rel == REPORT)
     }
-    large = {rel: size for rel, (size, _) in sorted(files.items()) if size > 50_000_000}
+    # #895 A6: a file with a committed budget is "large" only past that budget; the
+    # fixed 50 MB threshold stays for files the budget does not name.
+    # the committed floors, not the recomputed limits: a warning that moved with the
+    # relative rule or the ceiling would hide a file the rule itself let grow
+    effective, _ = _payload_budget(ctx)
+    file_limits = {
+        "index.html": "index_html_bytes",
+        "data/dashboard_data.json": "dashboard_data_json_bytes",
+        "data/dashboard_data.js": "dashboard_data_js_bytes",
+    }
+
+    def _large_at(rel: str) -> int:
+        key = file_limits.get(rel)
+        if effective is not None and key in effective["physical"]:
+            # over its budget is a blocker already; the warning is for files that are
+            # also past 50 MB, whatever their budget
+            return max(50_000_000, int(effective["physical"][key]))
+        return 50_000_000
+
+    large = {
+        rel: size for rel, (size, _) in sorted(files.items()) if size > _large_at(rel)
+    }
     by_sha: dict[str, list[str]] = {}
     for rel, (size, digest) in files.items():
         if size > 10_000_000:
@@ -10986,6 +11288,24 @@ def _is_owner_exclusion(
     )
 
 
+_POLICY_INAPPLICABLE_METRICS = frozenset(
+    {"capital.strategy_cash.cutoff", COVERAGE_END_METRIC}
+)
+
+
+def _is_policy_inapplicable(row: Mapping[str, Any]) -> bool:
+    """A fund-scoped strategy has no derived cash line, so no cash or coverage end.
+
+    The oracle states it (``applicability``); the validator honours it only for the two
+    metrics the fund-scoped policy removes, so a wrong flag cannot hide another gap.
+    """
+
+    return (
+        row.get("applicability") == "INAPPLICABLE_BY_POLICY"
+        and row.get("metric_id") in _POLICY_INAPPLICABLE_METRICS
+    )
+
+
 def expected_exclusions(ctx: Context) -> list[dict[str, Any]]:
     """Oracle not-derivable performance rows of owner-excluded accounts.
 
@@ -11003,6 +11323,15 @@ def expected_exclusions(ctx: Context) -> list[dict[str, Any]]:
         }
         for row in ctx.expected_not_derivable
         if _is_owner_exclusion(row, owner_excluded)
+    ] + [
+        {
+            "metric_id": row.get("metric_id"),
+            "entity": row.get("entity"),
+            "disposition": "INAPPLICABLE_BY_POLICY",
+            "reason": row.get("reason"),
+        }
+        for row in ctx.expected_not_derivable
+        if _is_policy_inapplicable(row)
     ]
 
 
@@ -11022,7 +11351,7 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
         return
     owner_excluded = _owner_excluded_accounts(ctx)
     for row in ctx.expected_not_derivable:
-        if _is_owner_exclusion(row, owner_excluded):
+        if _is_owner_exclusion(row, owner_excluded) or _is_policy_inapplicable(row):
             continue
         yield _finding(
             "expected.not_derivable",
@@ -11298,7 +11627,7 @@ def check_account_live_window(ctx: Context) -> Iterator[Finding]:
         end = _canonical_iso_day(raw)
         if end is None:
             yield _finding(
-                "dates.section_as_of_vs_cutoff",
+                "dates.account_live_window",
                 BLOCKER_AUTHORITY,
                 entity,
                 {"as_of": raw, "status": status},
@@ -11318,7 +11647,7 @@ def check_account_live_window(ctx: Context) -> Iterator[Finding]:
             else None
         )
         yield _finding(
-            "dates.section_as_of_vs_cutoff",
+            "dates.account_live_window",
             NOT_READY if bound is not None else BLOCKER_AUTHORITY,
             entity,
             {"as_of": raw, "status": status},
@@ -11394,7 +11723,7 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
     ) -> None:
         findings.append(
             _finding(
-                "capital.as_of_cutoff",
+                "capital.current_capital_as_of",
                 klass,
                 entity,
                 observed,
@@ -12001,8 +12330,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("status.gate_note_contradiction", check_gate_notes),
     ("dates.freshness_vs_cutoff", check_freshness),
     ("dates.section_as_of_vs_cutoff", check_section_dates),
-    ("dates.section_as_of_vs_cutoff", check_account_live_window),
-    ("capital.as_of_cutoff", check_current_capital_as_of),
+    ("dates.account_live_window", check_account_live_window),
+    ("capital.current_capital_as_of", check_current_capital_as_of),
     (CASH_EVIDENCE_CHECK, check_derived_cash_evidence),
     ("dates.evaluation_clock", check_evaluation_clock),
     (BOUNDS_CHECK, check_value_basis_bound),
