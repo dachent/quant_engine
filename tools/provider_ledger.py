@@ -7805,15 +7805,7 @@ def _refresh_strategy_evidence(
         top_generation = provider_generations.get(top_provider_id)
         refreshed_row = {
             **prior,
-            "evidence_layer": (
-                "ACCOUNT_LIVE"
-                if account_rows
-                else "MODEL_LIVE"
-                if model_rows
-                else "COPY_RECORD"
-                if copy_rows and not provider_rows and not prior_provider
-                else "PROVIDER_LIVE"
-            ),
+            "evidence_layer": ("ACCOUNT_LIVE" if account_rows else "PROVIDER_LIVE"),
             "generation_as_of_date": (
                 provider_as_of_dates[top_provider_id].isoformat()
                 if top_generation is not None
@@ -7911,10 +7903,12 @@ def _refresh_strategy_evidence(
             # model's own live record (layer MODEL_LIVE) and `copy_record` the owner's
             # P123 copy; each is recomputed from this generation, never carried.
             refreshed_row.pop("provider", None)
-            refreshed_row.pop("provider_live", None)
+            if model_rows:
+                refreshed_row.pop("provider_live", None)
             prior_copy = prior_provider
             prior_provider = {}
             accepted_provider_rows = []
+            copy_entity_id = str(copy_rows[0]["entity_id"]) if copy_rows else None
             for key, layer_rows in (
                 ("provider", model_rows),
                 ("copy_record", copy_rows),
@@ -7940,6 +7934,14 @@ def _refresh_strategy_evidence(
                         else {}
                     ),
                     "entity_id": entities[0],
+                    **(
+                        {
+                            "copy_entity_id": copy_entity_id,
+                            "model_entity_id": entities[0],
+                        }
+                        if key == "provider" and copy_entity_id
+                        else {}
+                    ),
                     "evidence_layer": "MODEL_LIVE"
                     if key == "provider"
                     else "COPY_RECORD",
@@ -8039,6 +8041,12 @@ def _require_distinct_provider_live_blocks(
         )
 
 
+def _p123_copy_id(provider: Mapping[str, Any]) -> Any:
+    """The owner's copy id: a refreshed block names it, a declaration is the copy itself."""
+
+    return provider.get("copy_entity_id") or provider.get("entity_id")
+
+
 def _portfolio123_provider_returns(
     provider_ref: Mapping[str, Any],
     manifest: GenerationManifest,
@@ -8053,7 +8061,7 @@ def _portfolio123_provider_returns(
             or item.get("provider_id") == "portfolio123"
         )
         and item.get("generation_id") == manifest.generation_id
-        and item["provider"].get("entity_id") not in {None, ""}
+        and _p123_copy_id(item["provider"]) not in {None, ""}
     ]
     if not p123_rows:
         return []
@@ -8116,7 +8124,7 @@ def _portfolio123_provider_returns(
             "Portfolio123 managed performance is unreadable"
         ) from exc
     selected: dict[str, dict[str, str]] = {
-        _text(item["provider"].get("entity_id"), "Portfolio123 entity_id"): {}
+        _text(_p123_copy_id(item["provider"]), "Portfolio123 entity_id"): {}
         for item in p123_rows
     }
     model_entity_ids = {
@@ -8162,7 +8170,7 @@ def _portfolio123_provider_returns(
     result: list[dict[str, Any]] = []
     required_fields = {"data", "date", "dateLast", "panels"}
     for p123 in p123_rows:
-        entity_id = _text(p123["provider"].get("entity_id"), "Portfolio123 entity_id")
+        entity_id = _text(_p123_copy_id(p123["provider"]), "Portfolio123 entity_id")
         fields = selected[entity_id]
         if not required_fields <= set(fields):
             raise ProviderLedgerError(

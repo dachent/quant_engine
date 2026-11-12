@@ -218,13 +218,16 @@ def compare_strategy_evidence(
     }
     live_layers = {
         EvidenceLayer.ACCOUNT_LIVE,
-        EvidenceLayer.COPY_RECORD,
         EvidenceLayer.OFFICIAL_VEHICLE,
         EvidenceLayer.PROVIDER_LIVE,
     }
     layers = {left.evidence_layer, right.evidence_layer}
     model_vs_actual = bool(layers & model_layers) and bool(layers & live_layers)
-    same_layer = left.evidence_layer is right.evidence_layer
+    # A COPY_RECORD is a diagnostic: it never concatenates with anything, itself included.
+    same_layer = (
+        left.evidence_layer is right.evidence_layer
+        and left.evidence_layer is not EvidenceLayer.COPY_RECORD
+    )
     return EvidenceComparison(
         VersionMatchStatus.MATCHED,
         model_vs_actual,

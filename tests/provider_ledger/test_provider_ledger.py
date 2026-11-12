@@ -10323,6 +10323,15 @@ def test_p123_book_is_model_live_and_the_copy_is_a_copy_record(tmp_path: Path) -
         _identity(manifest),
         {"portfolio123": date(2026, 1, 6)},
     )[0]
+    # A refreshed row fed back as the next declaration yields the same two paths.
+    again = ledger._portfolio123_provider_returns(
+        provider_ref, manifest, [{**refreshed, "generation_id": manifest.generation_id}]
+    )
+    assert [
+        (r["evidence_layer"], r["entity_id"], r["date"], r["return"]) for r in again
+    ] == [
+        (r["evidence_layer"], r["entity_id"], r["date"], r["return"]) for r in returned
+    ]
     assert refreshed["provider"]["evidence_layer"] == "MODEL_LIVE"
     assert refreshed["provider"]["entity_id"] == "model-book"
     assert refreshed["copy_record"]["entity_id"] == "exact-eu-model"

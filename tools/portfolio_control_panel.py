@@ -751,7 +751,7 @@ def _validated_strategy_evidence(
         )
         paths = [
             (name, _object(row[name], f"strategy evidence {name}"))
-            for name in ("account", "provider")
+            for name in ("account", "provider", "copy_record")
             if row.get(name) is not None
         ]
         if not paths:
