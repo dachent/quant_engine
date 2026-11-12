@@ -112,7 +112,7 @@ def test_a_sparse_reference_is_refused_not_weighted_by_one_days_cash() -> None:
         cash_returns={"2026-01-09": "0", "2026-01-16": "0", "2026-01-23": "0"},
         statement_cash={"2026-01-09": "100"},
     )
-    assert out["status"] == "UNAVAILABLE" and "gap" in out["reason"]
+    assert out["status"] == "UNAVAILABLE"
 
 
 def test_a_negative_cash_balance_is_borrowing_and_adds_no_drag() -> None:
@@ -307,7 +307,7 @@ def test_an_exchange_holiday_has_a_zero_cash_return_but_an_open_day_without_one_
     # 2026-01-19 is the MLK holiday: BIL has no close, the cash instrument did not move
     days = ("2026-01-16", "2026-01-19", "2026-01-20")
     account = _account(tmp_path, first="2026-01-02", count=30)
-    stmt = _csv(tmp_path / "s.csv", "statement_date,stmt_cash", ["2026-01-09,100"])
+    stmt = _csv(tmp_path / "s.csv", "statement_date,stmt_cash", ["2026-01-16,100"])
     account["statement_csv"] = stmt
     rows = _returns(account_days=days, reference_days=days)
     ok = _derive({"accounts": [account]}, rows, {"2026-01-16": "0", "2026-01-20": "0"})
@@ -360,3 +360,68 @@ def test_a_non_positive_final_day_nav_is_unavailable() -> None:
     nav["2026-01-04"] = "0"
     out = cd.derive_cash_drag(**_inputs(nav=nav))
     assert out["status"] == "UNAVAILABLE" and "2026-01-04" in out["reason"]
+
+
+def test_a_trading_day_the_reference_has_no_return_for_is_a_hole_not_skipped() -> None:
+    # Tue 2026-01-06 .. Thu 2026-01-08 missing from the reference: a 4-day span the old
+    # gap guard let through, with Friday weighted by Monday's cash
+    out = cd.derive_cash_drag(
+        start="2026-01-05",
+        end="2026-01-09",
+        nav=_series("2026-01-01", 12, "1000"),
+        cash=_series("2026-01-01", 12, "100"),
+        benchmark_returns={"2026-01-05": "0.01", "2026-01-09": "0.01"},
+        cash_returns={"2026-01-05": "0", "2026-01-09": "0"},
+        statement_cash={"2026-01-05": "100"},
+        opening_day="2026-01-02",
+    )
+    assert out["status"] == "UNAVAILABLE" and "2026-01-06" in out["reason"]
+
+
+def test_statement_figures_outside_the_window_do_not_close_it() -> None:
+    out = cd.derive_cash_drag(**_inputs(statement_cash={"2025-12-31": "100"}))
+    assert out["status"] == "UNAVAILABLE" and "inside the window" in out["reason"]
+
+
+def test_the_opening_day_must_precede_the_window() -> None:
+    out = cd.derive_cash_drag(**_inputs(opening_day="2026-01-03"))
+    assert out["status"] == "UNAVAILABLE" and "opening day" in out["reason"]
+
+
+def test_rows_before_the_funding_date_never_enter_the_strategy_balances(
+    tmp_path,
+) -> None:
+    a = Path(
+        _csv(
+            tmp_path / "a.csv",
+            "date,nav,cash",
+            ["2026-01-05,1000,900", "2026-01-06,1000,10", "2026-01-07,1000,10"],
+        )
+    )
+    nav, cash = spec.combine([(a, "2026-01-06")])
+    assert "2026-01-05" not in nav and cash["2026-01-06"] == "10"
+
+
+def test_a_repeated_return_date_in_a_series_refuses(tmp_path) -> None:
+    rows = _returns() + [
+        {"series_id": "benchmark:b", "date": "2026-01-05", "return": "999"}
+    ]
+    out = _derive({"accounts": [_account(tmp_path)]}, rows)
+    assert out["status"] == "UNAVAILABLE" and "repeated return date" in out["reason"]
+
+
+def test_bil_closes_missing_on_open_days_are_not_a_one_day_return(tmp_path) -> None:
+    f = tmp_path / "s.json"
+    f.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {"Ticker": "BIL", "Date": "2026-01-05T00:00:00", "Close": 100.0},
+                    # Tue-Thu closes missing: Fri's move is four days, not one
+                    {"Ticker": "BIL", "Date": "2026-01-09T00:00:00", "Close": 101.0},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert spec.bil_returns(f) == {}

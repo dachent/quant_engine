@@ -23,7 +23,7 @@ from __future__ import annotations
 import copy
 import csv
 import json
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -33,7 +33,6 @@ from quant_engine.core.market_calendar import is_nyse_trading_day
 from portfolio_cash_drag import STATUS_EVIDENCED, STATUS_UNAVAILABLE, derive_cash_drag
 
 ROW_LISTS = ("comparisons", "benchmark_comparisons")
-MAX_BIL_GAP_DAYS = 4
 
 
 def _decimal(text: str, what: str) -> Decimal:
@@ -88,13 +87,19 @@ def combine(
     parts = []
     for path, funded_from in accounts:
         nav, cash = read_balances(path)
-        if min(nav) > _iso(funded_from):
+        funded = _iso(funded_from)
+        if min(nav) > funded:
             raise ValueError(
                 f"{path.name}: capture starts {min(nav)}, after the declared "
                 f"funding date {funded_from}"
             )
-        parts.append((nav, cash))
-    firsts = [min(n) for n, _ in parts]
+        parts.append(
+            (
+                {d: v for d, v in nav.items() if d >= funded},
+                {d: v for d, v in cash.items() if d >= funded},
+            )
+        )
+    firsts = [_iso(f) for _, f in accounts]
     lasts = [max(n) for n, _ in parts]
     days = {d for n, _ in parts for d in n}
     nav_out: dict[str, str] = {}
@@ -124,6 +129,7 @@ def statement_figures(
     per_account: list[dict[str, Decimal]] = []
     for account in accounts:
         _, cash = read_balances(Path(account["path"]))
+        cash = {d: v for d, v in cash.items() if d >= _iso(account["funded_from"])}
         figures: dict[str, Decimal] = {}
         if "statement_csv" in account:
             with Path(account["statement_csv"]).open(
@@ -142,6 +148,8 @@ def statement_figures(
                         raise ValueError(
                             f"daily cash does not close to the statement on {day}"
                         )
+                    if day in figures:
+                        raise ValueError(f"repeated statement date {day}")
                     figures[day] = figure
         else:
             summary = json.loads(
@@ -152,7 +160,7 @@ def statement_figures(
                 raise ValueError("broker history has NAV-identity mismatch days")
             figures = {day: Decimal(value) for day, value in cash.items()}
         per_account.append(figures)
-    firsts = [min(read_balances(Path(a["path"]))[0]) for a in accounts]
+    firsts = [_iso(a["funded_from"]) for a in accounts]
     out: dict[str, str] = {}
     for day in sorted({d for f in per_account for d in f}):
         existing = [
@@ -173,6 +181,16 @@ def _find_account(summary: Any, key: str) -> dict[str, Any]:
             if found:
                 return found
     return {}
+
+
+def _trading_days_between(d0: str, d1: str) -> bool:
+    day = date.fromisoformat(d0) + timedelta(days=1)
+    end = date.fromisoformat(d1)
+    while day < end:
+        if is_nyse_trading_day(day):
+            return True
+        day += timedelta(days=1)
+    return False
 
 
 def bil_returns(style_json: Path) -> dict[str, str]:
@@ -197,14 +215,22 @@ def bil_returns(style_json: Path) -> dict[str, str]:
     for (d0, c0), (d1, c1) in zip(ordered, ordered[1:], strict=False):
         # a return across a missing close is not a one-day return: leave the day out,
         # and the derivation refuses if it needs it
-        if (date.fromisoformat(d1) - date.fromisoformat(d0)).days > MAX_BIL_GAP_DAYS:
+        if _trading_days_between(d0, d1):
             continue
         out[d1] = str(c1 / c0 - 1)
     return out
 
 
 def series(rows: list[dict[str, str]], series_id: str) -> dict[str, str]:
-    return {r["date"]: r["return"] for r in rows if r["series_id"] == series_id}
+    out: dict[str, str] = {}
+    for r in rows:
+        if r["series_id"] != series_id:
+            continue
+        if r["date"] in out:
+            raise ValueError(f"{series_id}: repeated return date {r['date']}")
+        _decimal(r["return"], f"{series_id} return {r['date']}")
+        out[r["date"]] = r["return"]
+    return out
 
 
 def _unavailable(reason: str) -> dict[str, Any]:
@@ -220,8 +246,11 @@ def derive_strategy(
 ) -> dict[str, Any]:
     if "unavailable" in source:
         return _unavailable(str(source["unavailable"]))
-    account = series(returns_rows, f"account:{strategy_id}")
-    reference = series(returns_rows, reference_series_id)
+    try:
+        account = series(returns_rows, f"account:{strategy_id}")
+        reference = series(returns_rows, reference_series_id)
+    except ValueError as error:
+        return _unavailable(f"return series refused: {error}")
     if not account or not reference:
         return _unavailable("no account or benchmark return series")
     low, high = min(account), max(account)
@@ -269,8 +298,8 @@ def derive_strategy(
     return {
         "status": STATUS_EVIDENCED,
         "reason": (
-            f"cash drag {out['cash_drag']} cumulative, {out['reason']}; benchmark "
-            f"{reference_series_id}, cash yield BIL, positive cash per account only"
+            f"cash drag {out['cash_drag']} cumulative, {out['reason']}; "
+            f"reference {reference_series_id}, cash yield BIL, positive cash per account only"
         ),
     }
 

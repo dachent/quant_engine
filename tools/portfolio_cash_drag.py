@@ -19,9 +19,11 @@ the caller binds them to hashed captures.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Final
+
+from quant_engine.core.market_calendar import is_nyse_trading_day
 
 STATUS_EVIDENCED: Final = "EVIDENCED"
 STATUS_UNAVAILABLE: Final = "UNAVAILABLE"
@@ -85,7 +87,27 @@ def derive_cash_drag(
     )
     if not before_first:
         return _unavailable(f"no nav before {days[0].isoformat()}")
+    if before_first[-1] >= days[0]:
+        return _unavailable("the opening day is not before the first observation")
     prior = [before_first[-1], *days[:-1]]
+    # every exchange day between the opening day and the end is an observation: a
+    # trading day the reference has no return for is a hole, never skipped
+    observed = {*days}
+    cursor = prior[0] + timedelta(days=1)
+    while cursor <= days[-1]:
+        if cursor not in observed and is_nyse_trading_day(cursor):
+            return _unavailable(
+                f"the reference has no return on trading day {cursor.isoformat()}"
+            )
+        cursor += timedelta(days=1)
+    window = {
+        k: v
+        for k, v in statement_cash.items()
+        if prior[0] <= date.fromisoformat(k) <= days[-1]
+    }
+    if not window:
+        return _unavailable("no statement cash figure inside the window")
+    statement_cash = window
     for label, series, needed in (
         ("nav", nav, [*prior, *days]),
         ("cash", cash, [*prior, *days]),
