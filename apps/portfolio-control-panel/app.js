@@ -2357,6 +2357,7 @@
       visibleBasis,
     ];
     if (ctx.headline_status === "NOT_A_HEADLINE_INCLUDES_BACKTEST") lines.push("includes hypothetical backtest: not a live result, no headline");
+    if (ctx.headline_status === "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE") lines.push("window under a year or not a live series: no headline");
     if (ctx.factor_as_of_date) lines.push(`Factors as of ${formatDate(ctx.factor_as_of_date)}${number(ctx.factor_staleness_days) == null ? "" : ` (${integer.format(ctx.factor_staleness_days)} days before the cutoff)`}`);
     const title = `Annualized: ${humanStatus(ctx.annualisation_basis || "UNAVAILABLE").toLowerCase()} · ${humanStatus(ctx.annualisation || "UNAVAILABLE").toLowerCase()} · ${number(ctx.periods_per_year) == null ? "periods per year not published" : `${integer.format(ctx.periods_per_year)} periods per year`}`;
     return { basisStatus, mixedBasis, lines, title };
