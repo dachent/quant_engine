@@ -516,7 +516,8 @@ def test_vendor_basis_label_states_the_per_day_compounding(tmp_path: Path) -> No
     blended, live, _levels, _boundary = _trade_files(tmp_path)
     _rows, definition = history._grizzly_vendor_basis(blended, live)
     assert "COMPOUNDED_PER_CALENDAR_DAY" in definition["method"]
-    assert "COMPOUNDED_PER_CALENDAR_DAY" in (
-        definition["series_labels"][0]["basis"]["return_basis"]
+    assert (
+        "COMPOUNDED_PER_CALENDAR_DAY"
+        in (definition["series_labels"][0]["basis"]["return_basis"])
     )
     assert "BETWEEN_TRADE_EVENTS" not in json.dumps(definition)

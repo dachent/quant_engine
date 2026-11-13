@@ -158,6 +158,8 @@ def test_every_other_numeric_entry_point_refuses_another_interpreter(
 # tools that handle floats but reach no pin, with the reason; every other tool that does arithmetic on
 # floats must call ``check_entry_interpreter`` (or be a guarded tool above)
 EXCUSED = {
+    "portfolio_model_vs_actual_derive": "derives from hashed inputs and verifies its own closure; reaches no pin",
+    "capture_governed_price": "records vendor price bars as bytes; no figure reaches a pin",
     "capture_quantbase_har": "records a browser capture; no figure is derived",
     "ci_summary": "reports junit test names and durations; no figure reaches a pin",
     "codex_scope_guard": "scope checks on diffs",

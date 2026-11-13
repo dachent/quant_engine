@@ -266,6 +266,10 @@ jobs:
           tools/quantbase_fund_days.py
           tools/series_label.py
           tools/published_render_check.py
+          tools/capture_governed_price.py
+          tools/portfolio_model_vs_actual_derive.py
+          tools/portfolio_cash_drag.py
+          tools/portfolio_cash_drag_spec.py
       - name: Resolve controller graph change range
         id: controller_graph_range
         shell: bash

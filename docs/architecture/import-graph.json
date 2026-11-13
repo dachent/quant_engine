@@ -335,6 +335,11 @@
     ],
     [
       "portfolio_control_panel",
+      "series_label",
+      1
+    ],
+    [
+      "portfolio_control_panel",
       "sleeve_disclosures",
       1
     ],
@@ -410,6 +415,11 @@
     ],
     [
       "portfolio_grizzly_signal_replay",
+      "portfolio_layer_series",
+      1
+    ],
+    [
+      "portfolio_grizzly_signal_replay",
       "portfolio_strategy_history",
       1
     ],
@@ -445,6 +455,11 @@
     ],
     [
       "portfolio_implementation_sleeve_basis",
+      "series_label",
+      1
+    ],
+    [
+      "portfolio_implementation_sleeve_basis",
       "strategy_basis",
       1
     ],
@@ -467,6 +482,11 @@
       "portfolio_invested_capital",
       "provider_ledger",
       3
+    ],
+    [
+      "portfolio_layer_series",
+      "series_label",
+      1
     ],
     [
       "portfolio_model_vs_actual_derive",
@@ -665,12 +685,37 @@
     ],
     [
       "portfolio_strategy_history",
+      "portfolio_layer_series",
+      1
+    ],
+    [
+      "portfolio_strategy_history",
       "portfolio_strategy_backtests",
+      1
+    ],
+    [
+      "portfolio_strategy_history",
+      "series_label",
       1
     ],
     [
       "portfolio_target_series",
       "strategy_basis",
+      1
+    ],
+    [
+      "portfolio_weekly_returns",
+      "series_label",
+      1
+    ],
+    [
+      "provider_ledger",
+      "account_financing",
+      1
+    ],
+    [
+      "provider_ledger",
+      "quantbase_fund_days",
       1
     ],
     [
