@@ -115,6 +115,7 @@ jobs:
           tools/matrixport_generation.py
           tools/portfolio123_generation.py
           tools/schwab_generation.py
+          tools/statement_nav_generation.py
           tools/quantbase_generation.py
           tools/portfolio_provenance.py
           tools/provider_ledger.py
