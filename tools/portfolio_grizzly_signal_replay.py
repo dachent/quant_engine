@@ -32,6 +32,7 @@ import tempfile
 from typing import Any, Final, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from portfolio_layer_series import REPLICA_DISPLAY_NAME, series_label
 from portfolio_strategy_history import excel_cell_date, xlsx_sheet_rows
 from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
@@ -526,6 +527,23 @@ def build(
                 "signal_count": len(signals),
             },
         },
+        # The replay is the DERIVED segment between the vendor simulation end and the
+        # account start. It is a hypothetical replica of the vendor's signals on SPXL:
+        # not vendor-published, not the owner's account. Own label, never vendor history.
+        "display_name": REPLICA_DISPLAY_NAME,
+        "segment_role": "DERIVED_SIGNAL_REPLAY_NOT_VENDOR_PUBLISHED",
+        "series_labels": [
+            series_label(
+                entity_id=f"grizzlybulls signal replay {policy.series_id}",
+                entity_role="VENDOR_REPLICA",
+                first=rows[0]["date"],
+                last=rows[-1]["date"],
+                observations=len(rows),
+                return_basis=f"DERIVED_SIGNAL_REPLAY:{policy.return_basis}",
+                cost_basis="GROSS",
+                leverage_factor=3,
+            ).to_dict()
+        ],
         "returns_artifact_id": "returns.csv",
         "selector_authority": "OWNER_SELECTION_REQUIRED",
         "series_id": policy.series_id,

@@ -20,7 +20,7 @@ accepted return or capital value.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 import json
 import re
@@ -75,6 +75,11 @@ COMPONENTS: Final = (
 COMPONENT_LABELS: Final = dict(COMPONENTS)
 _INTEREST_CLASSIFICATION: Final = "BROKER_DEBIT_INTEREST"
 _WINDOW_KINDS: Final = frozenset({"ALIGNED", "EPOCH"})
+
+
+# A strategy whose newest window ends more than this many days before the panel cutoff is
+# stale: the block would carry an "as of" stamp the numbers do not reach (RULING-E D4).
+MAX_WINDOW_LAG_DAYS: Final = 7
 
 
 class ModelVsActualError(ValueError):
@@ -733,11 +738,49 @@ def _portfolio_bridge(strategies: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     }
 
 
+def _refuse_stale(
+    strategy_id: str,
+    cutoff: str,
+    windows: Sequence[Mapping[str, Any]],
+    declared_unavailable: Sequence[Any],
+    max_lag_days: int,
+) -> None:
+    """Refuse a strategy whose windows stop short of the cutoff it is stamped with."""
+
+    cutoff_day = date.fromisoformat(cutoff)
+    limit = cutoff_day - timedelta(days=max_lag_days)
+    newest = max((date.fromisoformat(str(w["end"])) for w in windows), default=None)
+    if newest is None or newest < limit:
+        raise ModelVsActualError(
+            f"model-versus-actual is stale for {strategy_id}: newest window ends "
+            f"{newest} against cutoff {cutoff}"
+        )
+    for entry in declared_unavailable:
+        ended = entry.get("window_end") if isinstance(entry, Mapping) else None
+        # A leg with no end date is a standing absence (no model leg exists), not a
+        # stale one; only a leg that names the date it stopped can be judged.
+        if ended is not None and date.fromisoformat(str(ended)) < limit:
+            raise ModelVsActualError(
+                f"model-versus-actual names an unavailable leg ending {ended} before "
+                f"the {cutoff} cutoff for {strategy_id}; refresh the input"
+            )
+
+
 def build_model_vs_actual(
-    panel: Mapping[str, Any], audit_input_raw: bytes, audit_input_sha256: str
+    panel: Mapping[str, Any],
+    audit_input_raw: bytes,
+    audit_input_sha256: str,
+    *,
+    max_window_lag_days: int = MAX_WINDOW_LAG_DAYS,
 ) -> dict[str, Any]:
     """Build the optional ``model_vs_actual`` block."""
 
+    # The staleness refusal always runs: there is no way to switch it off.
+    if not isinstance(max_window_lag_days, int) or isinstance(
+        max_window_lag_days, bool
+    ):
+        raise ModelVsActualError("the staleness bound must be a number of days")
+    lag = max_window_lag_days
     audit = parse_audit_input(audit_input_raw, audit_input_sha256)
     tolerance = _num(audit["closure_tolerance_pp"], "closure_tolerance_pp")
     panel_strategies = {
@@ -783,6 +826,10 @@ def build_model_vs_actual(
         ]
         if primary_id not in {w["window_id"] for w in windows}:
             primary_id = None
+        # Every window the input names counts toward freshness, the ones withheld for
+        # ending after the cutoff included: those prove the input is current, they are
+        # not a reason to call it stale.
+        _refuse_stale(sid, cutoff, built, item.get("unavailable") or [], lag)
         for u in item.get("unavailable") or []:
             um = _mapping(u, "unavailable")
             unavailable.append(
@@ -870,10 +917,17 @@ def verify_model_vs_actual(
     panel: Mapping[str, Any],
     audit_input_raw: bytes,
     audit_input_sha256: str,
+    *,
+    max_window_lag_days: int = MAX_WINDOW_LAG_DAYS,
 ) -> None:
     """Re-derive the block and check the evidence-honesty invariants."""
 
-    expected = build_model_vs_actual(panel, audit_input_raw, audit_input_sha256)
+    expected = build_model_vs_actual(
+        panel,
+        audit_input_raw,
+        audit_input_sha256,
+        max_window_lag_days=max_window_lag_days,
+    )
     if json.dumps(block, sort_keys=True) != json.dumps(expected, sort_keys=True):
         raise ModelVsActualError("model_vs_actual differs from its re-derivation")
     pulls = {p["pull_id"] for p in block["pulls"]}

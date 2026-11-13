@@ -723,8 +723,9 @@ def _refresh_p123_eu_version(contract: dict[str, Any], generation_id: str) -> No
             version_refs["p123-eu"] = version
     for correction_id in (
         "p123-eu-backtest",
-        "p123-eu-provider-live",
+        "p123-eu-copy-record",
         "p123-eu-account-live",
+        "p123-eu-model-live",
     ):
         correction = next(
             row
@@ -774,7 +775,7 @@ def _append_p123_performance_receipt(
     correction = next(
         row
         for row in contract["history_corrections"]["corrections"]
-        if row["correction_id"] == "p123-eu-provider-live"
+        if row["correction_id"] == "p123-eu-copy-record"
     )
     correction["source_receipts"].append(
         {
@@ -935,7 +936,7 @@ def _synthetic_history_contract(
         not isinstance(product, dict)
         or product.get("product_id") != "FINANCIAL_MVP"
         or not isinstance(history, dict)
-        or history.get("policy_id") != "PORT-HISTORY-TRUTH-1"
+        or history.get("policy_id") != "PORT-HISTORY-TRUTH-2"
     ):
         raise TargetSeriesError("synthetic financial MVP history contract differs")
 
@@ -1100,6 +1101,28 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         {
             "as_of_date": as_of,
             "catalog_schema_version": 1,
+            # The model book's own live record (MODEL_LIVE) and the copy P123 keeps
+            # of the owner following it (COPY_RECORD) sit beside the selected rows.
+            "provider_strategy_returns": [
+                {
+                    "date": observed,
+                    "entity_id": "live-ai",
+                    "evidence_layer": layer,
+                    "return": str(index / 500),
+                    "return_basis": "OBSERVED",
+                    "return_type": "TOTAL",
+                    "strategy_id": "p123-ai-factor",
+                    "strategy_name": series["p123-ai-factor"],
+                }
+                for layer, dates in (
+                    (
+                        "MODEL_LIVE",
+                        ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08"],
+                    ),
+                    ("COPY_RECORD", ["2026-01-06", "2026-01-07"]),
+                )
+                for index, observed in enumerate(dates, start=1)
+            ],
             "strategy_evidence": evidence,
             "strategy_returns": ledger_rows,
         },
@@ -1430,8 +1453,9 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
             version_refs["p123-eu"] = p123_version
     for correction_id in (
         "p123-eu-backtest",
-        "p123-eu-provider-live",
+        "p123-eu-copy-record",
         "p123-eu-account-live",
+        "p123-eu-model-live",
     ):
         correction = next(
             row
@@ -1456,9 +1480,26 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         effective_start="2025-12-06",
         effective_end=None,
     )
+    # The twin hands over to the model book on the fixture's first live day.
     _update_correction_interval(
         contract,
-        "p123-eu-provider-live",
+        "p123-ai-model-live",
+        observed_start="2026-01-05",
+        observed_end=None,
+        effective_start=None,
+        effective_end=None,
+    )
+    _update_correction_interval(
+        contract,
+        "p123-eu-model-live",
+        observed_start="2025-11-21",
+        observed_end=None,
+        effective_start=None,
+        effective_end=None,
+    )
+    _update_correction_interval(
+        contract,
+        "p123-eu-copy-record",
         observed_start="2025-11-14",
         observed_end="2025-11-21",
         effective_start="2025-11-14",
@@ -1467,7 +1508,7 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
     p123_provider_correction = next(
         row
         for row in contract["history_corrections"]["corrections"]
-        if row["correction_id"] == "p123-eu-provider-live"
+        if row["correction_id"] == "p123-eu-copy-record"
     )
     p123_provider_correction["derived_evidence_identity"] = {
         "calendar": "WEEKDAY_SOURCE_CALENDAR",
@@ -2148,7 +2189,7 @@ def _p123_two_vintage_fixture(tmp_path: Path) -> tuple[dict[str, Any], Path]:
     correction = next(
         row
         for row in contract["history_corrections"]["corrections"]
-        if row["correction_id"] == "p123-eu-provider-live"
+        if row["correction_id"] == "p123-eu-copy-record"
     )
     correction["source_receipts"] = receipts
     _write_json(fixture["contract_path"], contract)
@@ -2177,7 +2218,7 @@ def test_layered_history_p123_two_vintages_remain_bound(
         correction = next(
             row
             for row in contract["history_corrections"]["corrections"]
-            if row["correction_id"] == "p123-eu-provider-live"
+            if row["correction_id"] == "p123-eu-copy-record"
         )
         correction["source_receipts"][1]["sha256"] = "f" * 64
         _write_json(fixture["contract_path"], contract)
@@ -3576,6 +3617,201 @@ def test_layered_history_rejects_dynamic_validator_with_different_core(
         target_series._history_contract(default_contract)
 
 
+def _admit_p123_ai_model_live(fixture: dict[str, Any]) -> None:
+    """Admit the P123 AI model-live layer the way the release carrier would.
+
+    The twin's exact product version is asserted too, so the sim-twin backtest
+    before model-live inception is admitted and the research series is complete.
+    """
+
+    contract_path = fixture["contract_path"]
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    _targets, evidence_content, _proof, _manifest = (
+        target_series.build_provider_ledger_targets(
+            fixture["provider_ledger_manifest_path"],
+            fixture["provider_ledger_catalog_path"],
+        )
+    )
+    version = target_series._strategy_version(
+        "p123-live-sim-twin",
+        {
+            "generation_id": json.loads(
+                fixture["portfolio123_manifest_path"].read_text(encoding="utf-8")
+            )["generation_id"],
+            "provider_entity_id": "live-ai",
+            "relationship_sha256": hashlib.sha256(
+                fixture["portfolio123_relationships_path"].read_bytes()
+            ).hexdigest(),
+            "relationship_type": "live_sim_twin",
+            "simulation_entity_id": "sim-ai",
+            "strategy_evidence_sha256": hashlib.sha256(evidence_content).hexdigest(),
+        },
+    )
+    next(
+        row for row in contract["strategies"] if row["strategy_id"] == "p123-ai-factor"
+    )["strategy_version"] = {
+        "status": "EVIDENCED",
+        "version_ref": version,
+        "compatibility": "EXACT_MATCH",
+        "authority": "SYNTHETIC",
+    }
+    for source in contract["source_segments"]:
+        refs = source["strategy_version"]["version_refs"]
+        if "p123-ai-factor" in refs:
+            refs["p123-ai-factor"] = version
+    correction = next(
+        row
+        for row in contract["history_corrections"]["corrections"]
+        if row["correction_id"] == "p123-ai-model-live"
+    )
+    correction["readiness"] = "READY"
+    correction["blockers"] = []
+    correction["mode_admission"] = {
+        "LIVE_ONLY": "NOT_APPLICABLE",
+        "LIVE_PLUS_BACKTEST": "INCLUDE_MODEL_LIVE_RESEARCH",
+    }
+    _write_json(contract_path, contract)
+    _refresh_materialized_segment_identities(fixture)
+
+
+def _p123_ai_hybrid(artifacts: dict[str, bytes], name: str) -> list[dict[str, str]]:
+    return [
+        row
+        for row in csv.DictReader(io.StringIO(artifacts[name].decode("utf-8")))
+        if row["series_id"] == "AI Factor [P123]"
+    ]
+
+
+def test_research_series_is_backtest_then_model_live_and_never_the_account(
+    tmp_path: Path, synthetic_history_authority: None
+) -> None:
+    """Kill tests: account never in the research series; copy never in a series."""
+
+    fixture = _history_fixture(tmp_path)
+    _admit_p123_ai_model_live(fixture)
+    artifacts, manifest_content = _build(fixture)
+
+    hybrid = _p123_ai_hybrid(artifacts, "live-plus-backtest.csv")
+    assert {row["evidence_layer"] for row in hybrid} == {"BACKTEST", "MODEL_LIVE"}
+    backtest_dates = [r["date"] for r in hybrid if r["evidence_layer"] == "BACKTEST"]
+    model_dates = [r["date"] for r in hybrid if r["evidence_layer"] == "MODEL_LIVE"]
+    # The backtest ends strictly before model-live inception, whatever the account does.
+    assert backtest_dates and max(backtest_dates) < min(model_dates) == "2026-01-05"
+    # The my-live series is the account alone.
+    live_only = _p123_ai_hybrid(artifacts, "live-only.csv")
+    assert {row["evidence_layer"] for row in live_only} == {"ACCOUNT_LIVE"}
+    # No copy-record row reaches any series or segment.
+    for name in ("segments.csv", "live-only.csv", "live-plus-backtest.csv"):
+        text = artifacts[name].decode("utf-8")
+        assert "COPY_RECORD" not in text
+    segments = list(
+        csv.DictReader(io.StringIO(artifacts["segments.csv"].decode("utf-8")))
+    )
+    by_segment = {
+        row["segment_id"]: (row["evidence_layer"], row["mode_admission"])
+        for row in segments
+        if row["strategy_id"] == "p123-ai-factor"
+    }
+    assert by_segment["p123-ai-factor:model-live"] == (
+        "MODEL_LIVE",
+        "INCLUDE_MODEL_LIVE_RESEARCH",
+    )
+    assert by_segment["p123-ai-factor:account-live"] == (
+        "ACCOUNT_LIVE",
+        "INCLUDE_SELECTED_LIVE",
+    )
+    # A simulation row on or after model-live inception is retained, not admitted.
+    assert by_segment["p123-ai-factor:backtest-not-admitted"][1] == (
+        "REQUIRED_NOT_READY_OVERLAP"
+    )
+    coverage = json.loads(artifacts["coverage.json"])
+    p123 = next(
+        row for row in coverage["strategies"] if row["strategy_id"] == "p123-ai-factor"
+    )
+    assert p123["modes"]["LIVE_PLUS_BACKTEST"]["status"] == "AVAILABLE"
+    # The verifier equality-checks what the generator emitted.
+    validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=manifest_content,
+        contract_path=fixture["contract_path"],
+    )
+
+
+def test_verifier_refuses_the_account_inside_the_research_series(
+    tmp_path: Path, synthetic_history_authority: None
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    _admit_p123_ai_model_live(fixture)
+    artifacts, manifest_content = _build(fixture)
+    manifest = json.loads(manifest_content)
+
+    segments = list(
+        csv.DictReader(io.StringIO(artifacts["segments.csv"].decode("utf-8")))
+    )
+    account = [
+        row
+        for row in segments
+        if row["strategy_id"] == "p123-ai-factor"
+        and row["evidence_layer"] == "ACCOUNT_LIVE"
+    ]
+    assert account
+    rows = list(
+        csv.DictReader(io.StringIO(artifacts["live-plus-backtest.csv"].decode("utf-8")))
+    )
+    spliced = [
+        *rows,
+        *({field: row[field] for field in rows[0]} for row in account),
+    ]
+    spliced.sort(
+        key=lambda row: (
+            row["series_id"],
+            row["date"],
+            0 if row["evidence_layer"] == "BACKTEST" else 1,
+        )
+    )
+    content = _csv_bytes(tuple(rows[0]), spliced)
+    tampered = copy.deepcopy(artifacts)
+    _replace_output(tampered, manifest, "live-plus-backtest.csv", content)
+    _replace_output(tampered, manifest, "returns.csv", content)
+    with pytest.raises(TargetSeriesError, match="mode projection differs"):
+        validate_layered_history_generation(
+            artifacts=tampered,
+            manifest_content=_reidentify_manifest(manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+
+def test_unadmitted_model_live_keeps_the_account_out_and_the_strategy_not_ready(
+    tmp_path: Path, synthetic_history_authority: None
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    artifacts, manifest_content = _build(fixture)
+
+    hybrid = _p123_ai_hybrid(artifacts, "live-plus-backtest.csv")
+    assert "ACCOUNT_LIVE" not in {row["evidence_layer"] for row in hybrid}
+    assert "MODEL_LIVE" not in {row["evidence_layer"] for row in hybrid}
+    coverage = json.loads(artifacts["coverage.json"])
+    p123 = next(
+        row for row in coverage["strategies"] if row["strategy_id"] == "p123-ai-factor"
+    )
+    assert p123["modes"]["LIVE_ONLY"]["status"] == "AVAILABLE"
+    assert p123["modes"]["LIVE_PLUS_BACKTEST"]["status"] == "REQUIRED_NOT_READY"
+    # The unadmitted layer decides first, whatever the backtest's own state: the
+    # research series is never AVAILABLE for want of its model-live layer, and the
+    # reason does not hide behind a backtest reason (this fixture is not pre-admitted).
+    for strategy in ("p123-ai-factor", "p123-eu"):
+        row = next(r for r in coverage["strategies"] if r["strategy_id"] == strategy)
+        assert row["modes"]["LIVE_PLUS_BACKTEST"] == {
+            "reason": "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED",
+            "status": "REQUIRED_NOT_READY",
+        }
+    validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=manifest_content,
+        contract_path=fixture["contract_path"],
+    )
+
+
 def test_layered_history_real_contract_parser_rejects_unknown_top_level_key(
     tmp_path: Path,
 ) -> None:
@@ -3747,7 +3983,7 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
             "required_not_ready_strategy_ids"
         ]
     )
-    assert coverage["correction_resolutions"]["p123-eu-provider-live"] == {
+    assert coverage["correction_resolutions"]["p123-eu-copy-record"] == {
         "calendar": "WEEKDAY_SOURCE_CALENDAR",
         "cash_added_treatment": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",
         "equity_overlap_observations": 7,
@@ -4998,8 +5234,10 @@ def test_layered_history_does_not_admit_pre_live_p123_ai_without_product_version
     p123 = next(
         row for row in coverage["strategies"] if row["strategy_id"] == "p123-ai-factor"
     )
+    # the version refusal is the backtest resolution's (above); the mode's reason is the
+    # unadmitted model-live layer, which decides the research series first
     assert p123["modes"]["LIVE_PLUS_BACKTEST"] == {
-        "reason": "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED",
+        "reason": "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED",
         "status": "REQUIRED_NOT_READY",
     }
 
@@ -5741,7 +5979,7 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
     p123_proof_artifacts = dict(artifacts)
     p123_proof_manifest = json.loads(manifest_content)
     p123_proof_coverage = json.loads(artifacts["coverage.json"])
-    p123_proof = p123_proof_coverage["correction_resolutions"]["p123-eu-provider-live"]
+    p123_proof = p123_proof_coverage["correction_resolutions"]["p123-eu-copy-record"]
     p123_proof["raw_level_observations"] = 8
     p123_proof["return_observations"] = 7
     p123_proof["equity_overlap_observations"] = 8
@@ -5885,7 +6123,7 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
     p123_provider = next(
         row
         for row in semantic_bypass["history_corrections"]["corrections"]
-        if row["correction_id"] == "p123-eu-provider-live"
+        if row["correction_id"] == "p123-eu-copy-record"
     )
     p123_provider["readiness"] = "READY"
     p123_provider["blockers"] = []

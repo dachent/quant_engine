@@ -1678,11 +1678,24 @@ def test_stale_account_live_ledger_kind_rebuilds_retained_history(
         if row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
     ]
     live_only.sort(key=lambda row: (row["series_id"], row["date"]))
+    # The research series: backtest then model live; the account only for a
+    # strategy that has no model-live layer (PORT-HISTORY-TRUTH-2).
+    model_live_strategies = {
+        correction["strategy_id"]
+        for correction in json.loads(fixture["contract_path"].read_bytes())[
+            "history_corrections"
+        ]["corrections"]
+        if correction["evidence_layer"] == "MODEL_LIVE"
+    }
     hybrid = [
         {field: row[field] for field in fields}
         for row in segments
         if row["mode_admission"]
-        in {"INCLUDE_SELECTED_LIVE", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+        in {"INCLUDE_MODEL_LIVE_RESEARCH", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+        or (
+            row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+            and row["strategy_id"] not in model_live_strategies
+        )
     ]
     hybrid.sort(
         key=lambda row: (

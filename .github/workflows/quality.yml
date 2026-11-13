@@ -134,6 +134,7 @@ jobs:
           tools/portfolio_pipeline_materialize.py
           tools/portfolio_controller_graph.py
           tools/portfolio_financial_mvp_contract.py
+          tools/portfolio_layer_series.py
           tools/data_pipeline.py
           tools/data_recovery_rehearsal.py
           tools/release_replica.py

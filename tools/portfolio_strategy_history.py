@@ -28,6 +28,14 @@ from zipfile import BadZipFile, ZipFile
 from quant_engine.core import check_entry_interpreter
 from quant_engine.core.contracts import canonical_json_bytes
 
+import portfolio_layer_series as layer_series
+from series_label import SeriesLabel
+
+
+_ROBUXIO_SERIES_ID: Final = "Robuxio Crypto (High Sharpe High Vol)"
+_ROBUXIO_GAV_SERIES_ID: Final = "Robuxio Crypto (High Sharpe High Vol) [GAV gross]"
+_GRIZZLY_SERIES_ID: Final = "GrizzlyBears VTMA"
+_GRIZZLY_VENDOR_SERIES_ID: Final = "GrizzlyBears VTMA [vendor 1x]"
 
 RETURN_FIELDS: Final = (
     "series_id",
@@ -246,6 +254,7 @@ def _return_rows(
     series_id: str,
     version: str,
     values: Iterable[tuple[date, Decimal]],
+    evidence_layer: str = "BACKTEST",
 ) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     seen: set[date] = set()
@@ -258,7 +267,7 @@ def _return_rows(
                 "series_id": series_id,
                 "date": observed.isoformat(),
                 "return": _canonical_return(period_return),
-                "evidence_layer": "BACKTEST",
+                "evidence_layer": evidence_layer,
                 "strategy_version": version,
             }
         )
@@ -1024,6 +1033,106 @@ def _robuxio_track_record(
     return rows, definition
 
 
+def _robuxio_series(
+    generation_root: Path,
+    strategy_version: str,
+    *,
+    net_nav_csv: Path | None = None,
+    model_live_inception: date = layer_series.ROBUXIO_MODEL_LIVE_INCEPTION,
+) -> list[tuple[list[dict[str, str]], dict[str, object]]]:
+    """Robuxio backtest series, each carrying one layer label (#902).
+
+    The provider track-record generation is the benchmark cumulative path, which
+    is GROSS of fees. Without the site NAV file it is the only path available and
+    is labelled GROSS. With the NAV file the research series is the NET NAV
+    balance chain, ends strictly before model-live inception, and the gross path
+    becomes a separate series that is never chained into the net one.
+    """
+
+    gross_rows, gross_definition = _robuxio_track_record(
+        generation_root, strategy_version
+    )
+    gross_label = layer_series.series_label(
+        entity_id=layer_series.ROBUXIO_GROSS_ENTITY,
+        entity_role="VENDOR_SERIES",
+        first=gross_rows[0]["date"],
+        last=gross_rows[-1]["date"],
+        observations=len(gross_rows),
+        return_basis="PROVIDER_PUBLISHED_CUMULATIVE_RETURN_TO_DAILY_RETURN",
+        cost_basis="GROSS",
+    )
+    if net_nav_csv is None:
+        layer_series.attach_label(gross_definition, gross_label)
+        return [(gross_rows, gross_definition)]
+    try:
+        net_values, net_facts = layer_series.net_returns_from_nav(
+            net_nav_csv.read_bytes(), before=model_live_inception
+        )
+    except (OSError, layer_series.LayerSeriesError) as exc:
+        raise StrategyHistoryError(f"Robuxio NET NAV is not admissible: {exc}") from exc
+    net_source = _source_identity(net_nav_csv, "robuxio-site-nav-csv-net")
+    net_rows = _return_rows(_ROBUXIO_SERIES_ID, strategy_version, net_values)
+    net_definition = _definition(
+        series_id=_ROBUXIO_SERIES_ID,
+        version=strategy_version,
+        rows=net_rows,
+        history_status="ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
+        compatibility_basis="OWNER_LAYER_RULING_SITE_NAV_NET_IS_RESEARCH_BASIS",
+        frequency="DAILY_CONTINUOUS",
+        implementation_status="MODEL_TO_ACCOUNT_RECONCILIATION_RETAINED_SEPARATELY",
+        method="SITE_NAV_BALANCE_CHAIN_STRICTLY_BEFORE_MODEL_LIVE_INCEPTION",
+        source=net_source,
+    ) | {"model_live_inception": model_live_inception.isoformat(), **net_facts}
+    layer_series.attach_label(
+        net_definition,
+        layer_series.series_label(
+            entity_id=layer_series.ROBUXIO_NET_ENTITY,
+            entity_role="VENDOR_SERIES",
+            first=net_rows[0]["date"],
+            last=net_rows[-1]["date"],
+            observations=len(net_rows),
+            return_basis="SITE_NAV_BALANCE_CHAIN",
+            cost_basis="NET",
+        ),
+    )
+    cut = model_live_inception.isoformat()
+    kept = [
+        {**row, "series_id": _ROBUXIO_GAV_SERIES_ID}
+        for row in gross_rows
+        if row["date"] < cut
+    ]
+    if len(kept) < 2:
+        raise StrategyHistoryError("Robuxio GAV history is empty before model live")
+    try:
+        layer_series.require_reaches(
+            date.fromisoformat(kept[-1]["date"]), model_live_inception, "GAV history"
+        )
+    except layer_series.LayerSeriesError as exc:
+        raise StrategyHistoryError(f"Robuxio GAV history: {exc}") from exc
+    gav_definition = dict(gross_definition) | {
+        "observed_end": kept[-1]["date"],
+        "observed_start": kept[0]["date"],
+        "required_for_analysis": False,
+        "return_observations": len(kept),
+        "series_id": _ROBUXIO_GAV_SERIES_ID,
+        "model_live_inception": cut,
+        "comparison_of_series_id": _ROBUXIO_SERIES_ID,
+    }
+    layer_series.attach_label(
+        gav_definition,
+        layer_series.series_label(
+            entity_id=layer_series.ROBUXIO_GROSS_ENTITY,
+            entity_role="VENDOR_SERIES",
+            first=kept[0]["date"],
+            last=kept[-1]["date"],
+            observations=len(kept),
+            return_basis="PROVIDER_PUBLISHED_CUMULATIVE_RETURN_TO_DAILY_RETURN",
+            cost_basis="GROSS",
+        ),
+    )
+    return [(net_rows, net_definition), (kept, gav_definition)]
+
+
 def _p123_eu_designer_curve(
     generation_root: Path, strategy_version: str
 ) -> tuple[list[dict[str, str]], dict[str, object]]:
@@ -1074,14 +1183,14 @@ def _p123_eu_designer_curve(
         raise StrategyHistoryError("EU designer-model catalog series differs")
 
     rows: list[dict[str, str]] = []
-    model_live = 0
+    model_live_rows: list[dict[str, str]] = []
     reader = csv.DictReader(io.StringIO(returns_bytes.decode("utf-8")))
     for row in reader:
         layer = row.get("evidence_layer")
-        if layer == "PROVIDER_MODEL_LIVE":
-            model_live += 1
-            continue
-        if layer != "BACKTEST":
+        # The provider's own record after its launch is the model's live layer
+        # (MODEL_LIVE): admitted here as a layer of its own, never relabelled as
+        # backtest and never the owner's account.
+        if layer not in {"BACKTEST", "PROVIDER_MODEL_LIVE"}:
             raise StrategyHistoryError(
                 "EU designer-model carries an unexpected evidence layer"
             )
@@ -1089,12 +1198,13 @@ def _p123_eu_designer_curve(
         value = _decimal(row.get("return"), "EU designer-model return")
         if value <= -1:
             raise StrategyHistoryError("EU designer-model return is invalid")
-        rows.append(
+        target = rows if layer == "BACKTEST" else model_live_rows
+        target.append(
             {
                 "series_id": "EU [P123]",
                 "date": observed.isoformat(),
                 "return": format(value.normalize(), "f"),
-                "evidence_layer": "BACKTEST",
+                "evidence_layer": "BACKTEST" if layer == "BACKTEST" else "MODEL_LIVE",
                 "strategy_version": strategy_version,
             }
         )
@@ -1108,6 +1218,18 @@ def _p123_eu_designer_curve(
         raise StrategyHistoryError(
             "EU designer-model prehistory reaches the provider launch"
         )
+    model_live_dates = [row["date"] for row in model_live_rows]
+    if model_live_dates != sorted(set(model_live_dates)):
+        raise StrategyHistoryError("EU designer-model live calendar is not ordered")
+    if model_live_dates and model_live_dates[0] <= dates[-1]:
+        raise StrategyHistoryError("EU designer-model live overlaps the backtest")
+    if model_live_dates and model_live_dates[0] < provider_launch:
+        # Nothing between the backtest's last day and the provider's launch is the
+        # model's live record; a row dated there is neither layer.
+        raise StrategyHistoryError(
+            "EU designer-model live precedes the provider launch"
+        )
+    model_live = len(model_live_rows)
     definition: dict[str, object] = {
         "compatibility_basis": "OWNER_LAYER_RULING_DESIGNER_MODEL_IS_PRODUCT_DESIGN_HISTORY",
         "coverage_disposition": "COMPLETE_STRICTLY_BEFORE_PROVIDER_LAUNCH",
@@ -1121,7 +1243,12 @@ def _p123_eu_designer_curve(
         "observed_start": dates[0],
         "provider_currency": str(series.get("currency") or ""),
         "provider_launch": provider_launch,
-        "provider_model_live_observations_not_admitted": model_live,
+        # The model-live rows travel in the bundle as their own layer.  The
+        # series' observed_end / return_observations describe the BACKTEST rows
+        # only, so every consumer of those fields reads the prehistory it did.
+        "model_live_observations": model_live,
+        "model_live_start": model_live_dates[0] if model_live_dates else None,
+        "model_live_end": model_live_dates[-1] if model_live_dates else None,
         "provider_revision_dates": list(series.get("provider_revision_dates") or []),
         "required_for_analysis": True,
         "return_observations": len(rows),
@@ -1136,7 +1263,41 @@ def _p123_eu_designer_curve(
         ],
         "strategy_version": strategy_version,
     }
-    return rows, definition
+    # One labelled series per layer: the series label is the BACKTEST rows' (what
+    # observed_end and return_observations describe); the MODEL_LIVE rows travel
+    # beside it as a segment label of their own layer, never under the backtest's.
+    entity = "Portfolio123 EU designer-model equity curve"
+    layer_series.attach_label(
+        definition,
+        layer_series.series_label(
+            entity_id=entity,
+            entity_role="DESIGNER_MODEL",
+            first=dates[0],
+            last=dates[-1],
+            observations=len(rows),
+            return_basis="PROVIDER_PUBLISHED_MODEL_EQUITY_CURVE_LEVEL_RATIO",
+            cost_basis="NET",
+            currency=str(series.get("currency") or "USD"),
+        ),
+        segments=(
+            [
+                SeriesLabel(
+                    layer="MODEL_LIVE",
+                    entity_id=entity,
+                    entity_role="DESIGNER_MODEL",
+                    first=model_live_dates[0],
+                    last=model_live_dates[-1],
+                    observations=model_live,
+                    currency=str(series.get("currency") or "USD"),
+                    return_basis="PROVIDER_PUBLISHED_MODEL_EQUITY_CURVE_LEVEL_RATIO",
+                    cost_basis="NET",
+                )
+            ]
+            if model_live_rows
+            else []
+        ),
+    )
+    return [*rows, *model_live_rows], definition
 
 
 def _p123_eu_backtest(
@@ -1518,6 +1679,8 @@ def _grizzly(
         )
     if len(values) < 1_000:
         raise StrategyHistoryError("Grizzly retained simulation is unexpectedly short")
+    exact_end = max(item[0] for item in values)
+    derived_window: tuple[date, date] | None = None
     extra_sources: list[dict[str, object]] = []
     manual_validation: dict[str, object] | None = None
     extension_validation: dict[str, object] | None = None
@@ -1549,6 +1712,7 @@ def _grizzly(
             as_of_date=as_of_date,
         )
         values.extend(extended)
+        derived_window = (extended[0][0], extended[-1][0])
         extra_sources.extend([*manual_sources, *price_sources])
     version = _version(
         "grizzlybears-vtma-current-model",
@@ -1567,9 +1731,9 @@ def _grizzly(
             ),
         },
     )
-    accepted = _return_rows("GrizzlyBears VTMA", version, values)
-    return accepted, _definition(
-        series_id="GrizzlyBears VTMA",
+    accepted = _return_rows(_GRIZZLY_SERIES_ID, version, values)
+    definition = _definition(
+        series_id=_GRIZZLY_SERIES_ID,
         version=version,
         rows=accepted,
         history_status=(
@@ -1615,6 +1779,126 @@ def _grizzly(
             else {}
         ),
     }
+    return accepted, _label_grizzly_replica(
+        definition, accepted, exact_end=exact_end, derived_window=derived_window
+    )
+
+
+def _label_grizzly_replica(
+    definition: dict[str, object],
+    rows: Sequence[Mapping[str, str]],
+    *,
+    exact_end: date,
+    derived_window: tuple[date, date] | None,
+) -> dict[str, object]:
+    """Label the SPXL line as the hypothetical 3x replica it is (#903).
+
+    The vendor's own SPXL simulation ends at ``exact_end``. Any later row is the
+    signal-state-times-SPXL derivation: a replay of the vendor's logged signals,
+    neither vendor-published nor the owner's account. It keeps its own segment
+    label inside the replica series instead of passing as vendor history.
+    """
+
+    exact_basis = "VENDOR_SPXL_SIMULATION_DAY_RET"
+    derived_basis = "DERIVED_SIGNAL_STATE_TIMES_SPXL_ADJ_CLOSE_NOT_VENDOR_PUBLISHED"
+
+    def replica(part: Sequence[Mapping[str, str]], return_basis: str) -> SeriesLabel:
+        return layer_series.series_label(
+            entity_id=layer_series.GRIZZLY_REPLICA_ENTITY,
+            entity_role="VENDOR_REPLICA",
+            first=part[0]["date"],
+            last=part[-1]["date"],
+            observations=len(part),
+            return_basis=return_basis,
+            cost_basis="GROSS",
+            leverage_factor=3,
+        )
+
+    exact_rows = [row for row in rows if row["date"] <= exact_end.isoformat()]
+    segments = [replica(exact_rows, exact_basis)]
+    if derived_window is not None:
+        derived_rows = [row for row in rows if row["date"] > exact_end.isoformat()]
+        if derived_rows:
+            segments.append(replica(derived_rows, derived_basis))
+    return layer_series.attach_label(
+        definition,
+        replica(
+            rows,
+            f"{exact_basis}_THEN_{derived_basis}" if len(segments) > 1 else exact_basis,
+        ),
+        segments=segments,
+        display_name=layer_series.REPLICA_DISPLAY_NAME,
+        replica_of={
+            "instrument": "SPXL",
+            "leverage_factor": 3,
+            "vendor_basis_series_id": _GRIZZLY_VENDOR_SERIES_ID,
+        },
+        vendor_exact_observed_end=exact_end.isoformat(),
+    )
+
+
+def _grizzly_vendor_basis(
+    blended_path: Path, live_path: Path
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    """The vendor-stated 1x line, from the vendor's blended trade file (#903).
+
+    The model level the vendor prints at each trade event is the vendor basis
+    (S&P 500, 1x). It is a series of its own, never the 3x replica. Events from
+    the vendor's first live-only record onward are the vendor's live period, not
+    backtest, and are left out of this backtest series.
+    """
+
+    blended, blended_source = _grizzly_trade_history(
+        blended_path, "grizzlybulls-all-backtest-live-trade-history"
+    )
+    live, live_source = _grizzly_trade_history(
+        live_path, "grizzlybulls-live-only-trade-history"
+    )
+    boundary = live[0]["observed"]
+    try:
+        values = layer_series.event_returns_from_levels(
+            [(item["observed"], item["model"]) for item in blended], before=boundary
+        )
+    except layer_series.LayerSeriesError as exc:
+        raise StrategyHistoryError(f"Grizzly vendor basis: {exc}") from exc
+    version = _version(
+        "grizzlybears-vtma-vendor-basis-1x",
+        {
+            "method": "vendor model level at each trade event, before vendor live",
+            "source_sha256": [blended_source["sha256"], live_source["sha256"]],
+        },
+    )
+    rows = _return_rows(_GRIZZLY_VENDOR_SERIES_ID, version, values)
+    definition = _definition(
+        series_id=_GRIZZLY_VENDOR_SERIES_ID,
+        version=version,
+        rows=rows,
+        history_status="ACCEPTED_EXACT_VERSION_HISTORY",
+        compatibility_basis="VENDOR_STATED_1X_MODEL_LEVELS_NOT_THE_3X_SPXL_REPLICA",
+        frequency="TRADE_EVENT_IRREGULAR",
+        implementation_status="MODEL_TO_ACCOUNT_RECONCILIATION_RETAINED_SEPARATELY",
+        method="VENDOR_MODEL_LEVEL_RATIO_COMPOUNDED_PER_CALENDAR_DAY",
+        source=blended_source,
+    ) | {
+        "comparison_of_series_id": _GRIZZLY_SERIES_ID,
+        "required_for_analysis": False,
+        "source_artifacts": [blended_source, live_source],
+        "vendor_live_boundary": boundary.isoformat(),
+    }
+    layer_series.attach_label(
+        definition,
+        layer_series.series_label(
+            entity_id=layer_series.GRIZZLY_VENDOR_ENTITY,
+            entity_role="VENDOR_SERIES",
+            first=rows[0]["date"],
+            last=rows[-1]["date"],
+            observations=len(rows),
+            return_basis="VENDOR_MODEL_LEVEL_RATIO_COMPOUNDED_PER_CALENDAR_DAY",
+            cost_basis="GROSS",
+        ),
+        display_name=layer_series.VENDOR_BASIS_DISPLAY_NAME,
+    )
+    return rows, definition
 
 
 def _tt(
@@ -2332,6 +2616,9 @@ def build_bundle(
     portfolio123_generation_root: Path | None = None,
     robuxio_track_record_generation: Path | None = None,
     robuxio_strategy_version: str | None = None,
+    robuxio_net_nav_csv: Path | None = None,
+    robuxio_model_live_inception: str | None = None,
+    grizzly_vendor_basis_series: bool = False,
     p123_eu_designer_model_generation: Path | None = None,
     p123_eu_strategy_version: str | None = None,
     live_inceptions: Mapping[str, str] | None = None,
@@ -2343,14 +2630,31 @@ def build_bundle(
     volatis_disposition = _volatis_disposition(
         volatis_pricehistory_csv, accepted_as_of=accepted_as_of
     )
-    robuxio_part: tuple[list[dict[str, str]], dict[str, object]] | None = None
+    robuxio_parts: list[tuple[list[dict[str, str]], dict[str, object]]] = []
     if (robuxio_track_record_generation is None) != (robuxio_strategy_version is None):
         raise StrategyHistoryError(
             "Robuxio track-record generation and product version are one input"
         )
+    if robuxio_net_nav_csv is not None and robuxio_track_record_generation is None:
+        raise StrategyHistoryError(
+            "Robuxio NET NAV needs the track-record generation for its GAV series"
+        )
     if robuxio_track_record_generation is not None:
-        robuxio_part = _robuxio_track_record(
-            robuxio_track_record_generation, str(robuxio_strategy_version)
+        try:
+            robuxio_inception = (
+                date.fromisoformat(robuxio_model_live_inception)
+                if robuxio_model_live_inception is not None
+                else layer_series.ROBUXIO_MODEL_LIVE_INCEPTION
+            )
+        except ValueError as exc:
+            raise StrategyHistoryError(
+                "Robuxio model-live inception is invalid"
+            ) from exc
+        robuxio_parts = _robuxio_series(
+            robuxio_track_record_generation,
+            str(robuxio_strategy_version),
+            net_nav_csv=robuxio_net_nav_csv,
+            model_live_inception=robuxio_inception,
         )
     p123_eu_designer_part: tuple[list[dict[str, str]], dict[str, object]] | None = None
     if (p123_eu_designer_model_generation is None) != (
@@ -2402,6 +2706,17 @@ def build_bundle(
                 "backtest_prehistory"
             )
         p123_eu_part = (rows, definition)
+    grizzly_vendor_parts: list[tuple[list[dict[str, str]], dict[str, object]]] = []
+    if grizzly_vendor_basis_series:
+        if grizzly_blended_trade_history is None or grizzly_live_trade_history is None:
+            raise StrategyHistoryError(
+                "Grizzly vendor basis needs the blended and live trade files"
+            )
+        grizzly_vendor_parts = [
+            _grizzly_vendor_basis(
+                grizzly_blended_trade_history, grizzly_live_trade_history
+            )
+        ]
     parts = (
         _grizzly(
             grizzly_workbook,
@@ -2432,7 +2747,8 @@ def build_bundle(
             as_of_date=accepted_as_of,
         ),
         *((p123_eu_part,) if p123_eu_part is not None else ()),
-        *((robuxio_part,) if robuxio_part is not None else ()),
+        *robuxio_parts,
+        *grizzly_vendor_parts,
     )
     rows = [row for accepted, _ in parts for row in accepted]
     definitions = [definition for _accepted, definition in parts]
@@ -2458,8 +2774,10 @@ def build_bundle(
         for history_row in rows:
             row_series_id = history_row["series_id"]
             boundary = boundaries.get(row_series_id)
-            if boundary is not None and date.fromisoformat(history_row["date"]) >= (
-                boundary
+            if (
+                boundary is not None
+                and history_row.get("evidence_layer") != "MODEL_LIVE"
+                and date.fromisoformat(history_row["date"]) >= boundary
             ):
                 excluded_by_series[row_series_id] = (
                     excluded_by_series.get(row_series_id, 0) + 1
@@ -2472,7 +2790,15 @@ def build_bundle(
             boundary = boundaries.get(series_id)
             if boundary is None:
                 continue
-            series_rows = [item for item in rows if item["series_id"] == series_id]
+            all_rows = [item for item in rows if item["series_id"] == series_id]
+            series_rows = [
+                item for item in all_rows if item.get("evidence_layer") != "MODEL_LIVE"
+            ]
+            if not series_rows and all_rows:
+                # a series that is entirely MODEL_LIVE has no hypothetical row for
+                # the account boundary to cap and is never deleted by it
+                layer_series.refresh_labels(definition, all_rows)
+                continue
             if not series_rows:
                 raise StrategyHistoryError(
                     f"live inception excludes the whole history: {series_id}"
@@ -2487,6 +2813,7 @@ def build_bundle(
                 definition["coverage_disposition"] = (
                     "COMPLETE_STRICTLY_BEFORE_ACCOUNT_LIVE_INCEPTION"
                 )
+            layer_series.refresh_labels(definition, all_rows)
 
     rows.sort(key=lambda item: (item["series_id"], item["date"]))
     if any(date.fromisoformat(row["date"]) > accepted_as_of for row in rows):
@@ -3092,6 +3419,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio123-generation-root", type=Path)
     parser.add_argument("--robuxio-track-record-generation", type=Path)
     parser.add_argument("--robuxio-strategy-version")
+    parser.add_argument(
+        "--robuxio-net-nav-csv",
+        type=Path,
+        help="Site NAV file: the NET research basis; the GAV path becomes its own series.",
+    )
+    parser.add_argument("--robuxio-model-live-inception", metavar="YYYY-MM-DD")
+    parser.add_argument(
+        "--grizzly-vendor-basis-series",
+        action="store_true",
+        help="Also emit the vendor-stated 1x line as its own labelled series.",
+    )
     parser.add_argument("--p123-eu-designer-model-generation", type=Path)
     parser.add_argument("--p123-eu-strategy-version")
     parser.add_argument("--as-of-date", required=True)
@@ -3196,6 +3534,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             portfolio123_generation_root=args.portfolio123_generation_root,
             robuxio_track_record_generation=args.robuxio_track_record_generation,
             robuxio_strategy_version=args.robuxio_strategy_version,
+            robuxio_net_nav_csv=args.robuxio_net_nav_csv,
+            robuxio_model_live_inception=args.robuxio_model_live_inception,
+            grizzly_vendor_basis_series=args.grizzly_vendor_basis_series,
             p123_eu_designer_model_generation=(args.p123_eu_designer_model_generation),
             p123_eu_strategy_version=args.p123_eu_strategy_version,
             as_of_date=args.as_of_date,
