@@ -60,7 +60,11 @@ from quant_engine.core import (
 )
 
 from quant_engine.core import InterpreterRefusal, require_interpreter
-from quant_engine.core import STAGE_TIMING_LOG_ENV, summarize_stage_timing
+from quant_engine.core import (
+    RECEIPT_MODE_ENV,
+    STAGE_TIMING_LOG_ENV,
+    summarize_stage_timing,
+)
 import release_cycle_manifest
 
 GRAPH_DEFAULT = (
@@ -1770,6 +1774,11 @@ def _execute_stage(
         timing_log = timing_dir / f"{stage['id']}.{attempt}.jsonl"
         env.setdefault(STAGE_TIMING_LOG_ENV, str(timing_log))
         record["timing_log"] = env[STAGE_TIMING_LOG_ENV]
+        # Cross-process verification receipts (#885): a verifier that already passed on
+        # byte-identical inputs and code is not re-run by a later stage; every input in
+        # its recorded read-set is re-hashed first. An operator value (off/refresh) wins.
+        env.setdefault(RECEIPT_MODE_ENV, "persist")
+        record["receipts_mode"] = env[RECEIPT_MODE_ENV]
         if stdout_to is not None:
             stdout_to.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("wb") as log:
