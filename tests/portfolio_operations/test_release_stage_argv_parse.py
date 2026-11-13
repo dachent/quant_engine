@@ -27,15 +27,13 @@ ROOTS = {
     "{tools}": REPO_ROOT / "tools",
     "{mvp2}": REPO_ROOT / "ops" / "mvp2-release" / "scripts",
 }
-# a refusal about the VALUE of a dummy argument is not an argv mismatch
-STRUCTURAL = (
-    "unrecognized arguments",
-    "the following arguments are required",
-    "expected one argument",
-    "expected at least one argument",
-    "ambiguous option",
-    "invalid choice: 'x'",
+# a refusal about the VALUE of a dummy argument is not an argv mismatch; these are about the SHAPE of the command
+STRUCTURAL = re.compile(
+    r"unrecognized arguments|the following arguments are required|expected (one|at least one|\d+) arguments?"
+    r"|ambiguous option|invalid choice: 'x'|not allowed with argument|one of the arguments .* is required"
 )
+# a typed option takes the first of these its `type=` accepts (so int/float/date options are not value refusals)
+PROBES = ("x", "1", "1.0", "2026-01-01")
 
 
 class _Parsed(BaseException):
@@ -58,6 +56,27 @@ def _flatten(items: list[Any]) -> list[str]:
 
 def _dummy(arg: str) -> str:
     return re.sub(r"\{[^{}]+\}", "x", arg)
+
+
+def _typed(parser: argparse.ArgumentParser, args: list[str]) -> list[str]:
+    """Replace each option's dummy "x" with a value its own choices/type accept (registries, ints, dates)."""
+    options = {o: act for act in parser._actions for o in act.option_strings}
+    out = list(args)
+    for i, token in enumerate(out[:-1]):
+        action = options.get(token)
+        if action is None or out[i + 1] != "x":
+            continue
+        if action.choices:
+            out[i + 1] = str(next(iter(action.choices)))
+        elif callable(action.type):
+            for probe in PROBES:
+                try:
+                    action.type(probe)
+                except Exception:
+                    continue
+                out[i + 1] = probe
+                break
+    return out
 
 
 def _command(argv: list[str]) -> tuple[Path, list[str]] | None:
@@ -85,37 +104,44 @@ def _stages() -> list[tuple[str, Path, list[str]]]:
     return found
 
 
-@pytest.mark.parametrize(("stage_id", "script", "args"), _stages())
-def test_stage_argv_parses_under_its_tools_parser(
-    stage_id: str,
-    script: Path,
-    args: list[str],
-    monkeypatch: pytest.MonkeyPatch,
+def _check(
+    stage_id: str, script: Path, args: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     if "argparse" not in script.read_text(encoding="utf-8"):
         pytest.skip(f"{script.name} does not use argparse")
     original_known = argparse.ArgumentParser.parse_known_args
     original_args = argparse.ArgumentParser.parse_args
-    inside_parse_args = []
+    active: list[
+        bool
+    ] = []  # nesting: parse_args and subparsers call parse_known_args inside
 
     def known(self: argparse.ArgumentParser, a: Any = None, ns: Any = None) -> Any:
-        result = original_known(self, a, ns)
-        if inside_parse_args:
+        nested = bool(active)
+        active.append(True)
+        try:
+            result = original_known(
+                self, _typed(self, list(sys.argv[1:] if a is None else a)), ns
+            )
+        finally:
+            active.pop()
+        if nested:
             return (
                 result  # parse_args reports leftover arguments itself, through error()
             )
+        if result[1]:
+            raise _Mismatch(f"unrecognized arguments: {' '.join(result[1])}")
         raise _Parsed(result)
 
     def parse_args(self: argparse.ArgumentParser, a: Any = None, ns: Any = None) -> Any:
-        inside_parse_args.append(True)
+        active.append(True)
         try:
             result = original_args(self, a, ns)
         finally:
-            inside_parse_args.pop()
+            active.pop()
         raise _Parsed(result)
 
     def error(self: argparse.ArgumentParser, message: str) -> Any:
-        if any(token in message for token in STRUCTURAL):
+        if STRUCTURAL.search(message):
             raise _Mismatch(message)
         raise _Parsed(message)  # a value refusal: the flags themselves were accepted
 
@@ -133,3 +159,61 @@ def test_stage_argv_parses_under_its_tools_parser(
         pytest.fail(f"stage {stage_id}: {script.name} refuses its argv: {exc}")
     except SystemExit as exc:
         pytest.fail(f"stage {stage_id}: {script.name} exited {exc.code} before parsing")
+    pytest.fail(f"stage {stage_id}: {script.name} returned without parsing its argv")
+
+
+@pytest.mark.parametrize(("stage_id", "script", "args"), _stages())
+def test_stage_argv_parses_under_its_tools_parser(
+    stage_id: str,
+    script: Path,
+    args: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _check(stage_id, script, args, monkeypatch)
+
+
+TOY = {
+    "known_leftover": ("p.parse_known_args()", ["--a", "x", "--nope"]),
+    "exclusive": (
+        "g = p.add_mutually_exclusive_group(required=True)\n"
+        "g.add_argument('--b')\ng.add_argument('--c')\np.parse_args()",
+        ["--a", "x", "--b", "x", "--c", "x"],
+    ),
+    "one_of_required": (
+        "g = p.add_mutually_exclusive_group(required=True)\n"
+        "g.add_argument('--b')\ng.add_argument('--c')\np.parse_args()",
+        ["--a", "x"],
+    ),
+    "arity": (
+        "p.add_argument('--d', nargs=2)\np.parse_args()",
+        ["--a", "x", "--d", "x"],
+    ),
+    "no_parse": ("pass", ["--a", "x"]),
+}
+
+
+def _toy(tmp_path: Path, body: str) -> Path:
+    script = tmp_path / "toy.py"
+    script.write_bytes(
+        (
+            "import argparse\np = argparse.ArgumentParser()\n"
+            f"p.add_argument('--a', type=int)\n{body}\n"
+        ).encode("utf-8")
+    )
+    return script
+
+
+@pytest.mark.parametrize("case", sorted(TOY))
+def test_the_argv_test_rejects_a_mismatched_toy_script(
+    case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body, args = TOY[case]
+    with pytest.raises(pytest.fail.Exception):
+        _check(case, _toy(tmp_path, body), args, monkeypatch)
+
+
+def test_a_typed_option_gets_a_value_its_type_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = "p.add_argument('--m', choices=['q'])\np.parse_args()"
+    _check("typed", _toy(tmp_path, body), ["--a", "x", "--m", "x"], monkeypatch)
