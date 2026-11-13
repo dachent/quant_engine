@@ -77,7 +77,7 @@ def test_virtual_root_has_only_accepted_workspace_members() -> None:
             "packages/web-contracts",
         ]
     }
-    assert root["project"]["requires-python"] == ">=3.11,<3.14"  # type: ignore[index]
+    assert root["project"]["requires-python"] == ">=3.11.5,<3.14"  # type: ignore[index]
 
 
 def test_alpaca_package_is_private_and_method_allowlisted() -> None:
