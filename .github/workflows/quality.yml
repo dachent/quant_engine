@@ -120,6 +120,7 @@ jobs:
           tools/portfolio_provenance.py
           tools/provider_ledger.py
           tools/portfolio_baseline.py
+          tools/statement_reserve_nav.py
           tools/portfolio_report.py
           tools/portfolio_control_panel.py
           tools/portfolio_decomposition.py
