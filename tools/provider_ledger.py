@@ -13,6 +13,7 @@ import argparse
 import base64
 from collections import defaultdict
 import csv
+import dataclasses
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from functools import wraps
@@ -9592,6 +9593,7 @@ def _admissions(
     quantbase_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
     matrixport_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
     matrixport_anchor_coverage: Mapping[str, Mapping[str, Any]] | None = None,
+    reserve_nav_windows: Mapping[str, Sequence[tuple[date, date, str]]] | None = None,
 ) -> tuple[ProviderFactAdmission, ...]:
     provider_authority = (
         set(_PROVIDER_CATALOGS)
@@ -9695,46 +9697,71 @@ def _admissions(
             if provider_id in {"matrixport", "quantbase", "schwab"}
             else "finalized_history_coverage"
         )
-        admissions.append(
-            ProviderFactAdmission(
-                provider_id=provider_id,
-                fact_type=fact_type,
-                evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
-                disposition=(
-                    AdmissionDisposition.AUTHORITATIVE
-                    if mapping_status == "MAPPED" and provider_id in provider_authority
-                    else AdmissionDisposition.REFERENCE_ONLY
-                ),
-                effective_start=start,
-                effective_end=end,
-                account_id=account_id,
-                account_reconciliation_sha256=hashlib.sha256(
-                    canonical_json_bytes(
-                        {
-                            "account_id": account_id,
-                            "fact_type": fact_type,
-                            "provider_id": provider_id,
-                            "records": [
-                                {
-                                    "record_id": str(item["record_id"]),
-                                    "source_record_id": str(
-                                        item.get("source_record_id") or ""
-                                    ),
-                                }
-                                for item in sorted(
-                                    rows, key=lambda row: str(row["record_id"])
-                                )
-                            ],
-                            **(
-                                {coverage_key: dict(coverage_claim)}
-                                if coverage_claim is not None
-                                else {}
-                            ),
-                        }
-                    )
-                ).hexdigest(),
-            )
+        base_admission = ProviderFactAdmission(
+            provider_id=provider_id,
+            fact_type=fact_type,
+            evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
+            disposition=(
+                AdmissionDisposition.AUTHORITATIVE
+                if mapping_status == "MAPPED" and provider_id in provider_authority
+                else AdmissionDisposition.REFERENCE_ONLY
+            ),
+            effective_start=start,
+            effective_end=end,
+            account_id=account_id,
+            account_reconciliation_sha256=hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "account_id": account_id,
+                        "fact_type": fact_type,
+                        "provider_id": provider_id,
+                        "records": [
+                            {
+                                "record_id": str(item["record_id"]),
+                                "source_record_id": str(
+                                    item.get("source_record_id") or ""
+                                ),
+                            }
+                            for item in sorted(
+                                rows, key=lambda row: str(row["record_id"])
+                            )
+                        ],
+                        **(
+                            {coverage_key: dict(coverage_claim)}
+                            if coverage_claim is not None
+                            else {}
+                        ),
+                    }
+                )
+            ).hexdigest(),
         )
+        declared_windows = (
+            (reserve_nav_windows or {}).get(account_id)
+            if fact_type == "nav_observations" and mapping_status != "MAPPED"
+            else None
+        )
+        if declared_windows:
+            # The owner declared this account a RESERVE with admit windows (#900): its NAV
+            # is authoritative inside each declared window, proven by the window's closure
+            # basis.  Closure windows keep the observed span; a bridge window carries no
+            # observations of its own, so it is admitted as declared.
+            for w_start, w_end, basis in declared_windows:
+                lo, hi = (
+                    (w_start, w_end)
+                    if basis == "DERIVED_BRIDGE_WITH_CLOSURE"
+                    else (max(start, w_start), min(end, w_end))
+                )
+                if lo <= hi:
+                    admissions.append(
+                        dataclasses.replace(
+                            base_admission,
+                            disposition=AdmissionDisposition.AUTHORITATIVE,
+                            effective_start=lo,
+                            effective_end=hi,
+                        )
+                    )
+        else:
+            admissions.append(base_admission)
     for provider_id, coverage in provider_flow_coverage.items():
         for account_id in sorted(
             set(coverage)

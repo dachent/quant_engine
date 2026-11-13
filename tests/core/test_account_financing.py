@@ -165,3 +165,33 @@ def test_a_sleeve_role_naming_an_undeclared_ledger_account_or_no_window_is_refus
     ):
         with pytest.raises(af.FinancingDeclarationError):
             af.load_sleeve_roles(_with_roles([bad]))
+
+
+def test_reserve_nav_windows_come_only_from_account_live_reserves_with_closed_windows() -> (
+    None
+):
+    acct = "account-" + "a" * 16
+    raw = _with_roles(
+        [
+            _role(
+                sleeve_alias="live",
+                ledger_account_id=acct,
+                nav_authority="ACCOUNT_LIVE",
+                admit_windows=[
+                    {
+                        "start": "2026-01-01",
+                        "end": "2026-01-02",
+                        "basis": "EXACT_FLOW_CLOSURE",
+                    },
+                    {"start": "2026-01-03", "end": None, "basis": "EXACT_FLOW_CLOSURE"},
+                ],
+            ),
+            _role(sleeve_alias="statement"),
+            _role(sleeve_alias="excluded", role="EXCLUDED_IMMATERIAL"),
+        ]
+    )
+    windows = af.reserve_nav_windows(af.load_sleeve_roles(raw))
+    assert list(windows) == [acct]
+    assert [(w[0].isoformat(), w[1].isoformat()) for w in windows[acct]] == [
+        ("2026-01-01", "2026-01-02")
+    ]

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import date
 import json
 import re
 from typing import Final
@@ -234,4 +235,30 @@ def load_sleeve_roles(raw: bytes) -> dict[str, SleeveRole]:
             tuple(parsed),
             row["evidence_ref"],
         )
+    return out
+
+
+def reserve_nav_windows(
+    roles: Mapping[str, SleeveRole],
+) -> dict[str, list[tuple[date, date, str]]]:
+    """Ledger account id -> the declared windows in which its RESERVE NAV is authoritative.
+
+    Only an account-live reserve with a ledger id and a closed window counts; statement
+    reserves (no ledger account) and open-ended windows are not NAV admission inputs.
+    """
+
+    out: dict[str, list[tuple[date, date, str]]] = {}
+    for role in roles.values():
+        if (
+            role.role != "RESERVE"
+            or role.nav_authority != "ACCOUNT_LIVE"
+            or role.ledger_account_id is None
+        ):
+            continue
+        for start, end, basis in role.admit_windows:
+            if end is None:
+                continue
+            out.setdefault(role.ledger_account_id, []).append(
+                (date.fromisoformat(start), date.fromisoformat(end), basis)
+            )
     return out
