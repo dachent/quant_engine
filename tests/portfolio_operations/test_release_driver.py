@@ -762,6 +762,7 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "source_workspace",
         "replica_workspace",
         "code_commit",
+        "retire_ticket",  # release_preflight retire-stale (sprint-qc-upfront)
         "retained_cache_base",
         "disclosure_inputs",
         "candidate_commit",
