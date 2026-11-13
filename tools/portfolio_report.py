@@ -5049,6 +5049,7 @@ def _accounts(
     derived_values: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     latest = _latest_nav(catalog)
+    cutoff = catalog.get("as_of_date")
     synthetic_controls = strategy_product_controls is not None and all(
         re.fullmatch(r"strategy-[0-9]+", strategy_id)
         for strategy_id in strategy_product_controls
@@ -5091,6 +5092,10 @@ def _accounts(
         elif account_id in latest:
             as_of, value = latest[account_id]
             status = "AVAILABLE_LATEST_OBSERVATION"
+            if isinstance(cutoff, str) and as_of < cutoff:
+                # A last observation dated before the cutoff is retained history,
+                # labelled as such; it never claims to be a current-capital value.
+                status = "HISTORICAL_LAST_OBSERVATION"
         else:
             as_of, value, status = None, None, "UNAVAILABLE_NO_NAV"
         account_row = {
