@@ -10,9 +10,35 @@
     "schema_version": {"const": 1},
     "artifact_id": {"const": "account-financing-declaration"},
     "as_of_date": {"type": "string", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$"},
-    "accounts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/account"}}
+    "accounts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/account"}},
+    "sleeve_roles": {"type": "array", "items": {"$ref": "#/$defs/sleeve_role"}}
   },
   "$defs": {
+    "sleeve_role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sleeve_alias", "role", "ledger_account_id", "nav_authority", "admit_windows", "evidence_ref"],
+      "properties": {
+        "sleeve_alias": {"type": "string", "minLength": 1},
+        "role": {"enum": ["RESERVE", "EXCLUDED_IMMATERIAL", "HISTORICAL_ONLY"]},
+        "ledger_account_id": {"type": ["string", "null"], "pattern": "^account-[0-9a-f]{16}$"},
+        "nav_authority": {"enum": ["ACCOUNT_LIVE", "STATEMENT", "NONE"]},
+        "admit_windows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["start", "end", "basis"],
+            "properties": {
+              "start": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+              "end": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+              "basis": {"enum": ["EXACT_FLOW_CLOSURE", "EXACT_IDENTITY_CLOSURE", "ACCOUNT_LIVE_RESIDUAL_MARKET", "DERIVED_BRIDGE_WITH_CLOSURE", "STATEMENT_POINTS"]}
+            }
+          }
+        },
+        "evidence_ref": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
     "account": {
       "type": "object",
       "additionalProperties": false,

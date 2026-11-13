@@ -1206,6 +1206,66 @@ def _schwab_selected_point_positions(
     return expected if financial_observation_date <= requested_as_of else None
 
 
+def _source_provenance(observation: object, generation: Path) -> Any:
+    """The receipt's run observation for downstream stages.
+
+    The receipt names the observation file only; downstream readers re-open it from
+    the ``path`` pin, so the located absolute path is restored here, in a stage
+    output (not in the ledger artifact whose generation id must stay world-independent).
+    """
+
+    clone = _canonical_clone(observation)
+    if (
+        isinstance(clone, dict)
+        and isinstance(clone.get("path"), str)
+        and not Path(clone["path"]).is_absolute()
+    ):
+        located = _locate_run_observation(
+            None, generation, clone["path"], clone.get("sha256")
+        )
+        clone["path"] = str(located)
+        original = json.loads(located.read_bytes()).get("providers", {})
+        for row in clone.get("providers", []):
+            ref = (original.get(row.get("provider_id")) or {}).get("finality_evidence")
+            current = row.get("finality_evidence")
+            if (
+                isinstance(ref, dict)
+                and isinstance(current, dict)
+                and ref.get("sha256") == current.get("sha256")
+                and ref.get("size_bytes") == current.get("size_bytes")
+            ):
+                row["finality_evidence"] = dict(ref)
+    return clone
+
+
+def _locate_run_observation(
+    reader: Any | None, generation: Path, recorded: object, sha256: object
+) -> Path:
+    """Where the receipt's run observation is on disk.
+
+    The receipt names the file, not the world it was built in (#907: an absolute path
+    moved the ledger generation id between byte-identical worlds).  A bare name is
+    found beside the generation or under one of its nearest ancestors, and only the
+    file whose bytes hash to the recorded sha256 is accepted.  A legacy absolute path
+    is still honoured.
+    """
+
+    text = str(recorded)
+    if reader is not None and Path(text).is_absolute():
+        return Path(reader._absolute_regular_path(text, "provider run observation"))
+    if Path(text).name != text:
+        raise MaterializationError("provider run observation name is not a bare name")
+    for ancestor in list(generation.resolve().parents)[:6]:
+        for candidate in (ancestor / text, *sorted(ancestor.glob(f"*/{text}"))):
+            if (
+                candidate.is_file()
+                and not candidate.is_symlink()
+                and hashlib.sha256(candidate.read_bytes()).hexdigest() == sha256
+            ):
+                return candidate
+    raise MaterializationError("provider run observation file is not beside the world")
+
+
 def _provider_admission_authority(
     generation: Path,
     contract: Mapping[str, Any],
@@ -1349,8 +1409,8 @@ def _provider_admission_authority(
         module_spec.loader.exec_module(reader)
         try:
             observation = reader._object(observation, "provider run observation")
-            observation_path = reader._absolute_regular_path(
-                observation["path"], "provider run observation"
+            observation_path = _locate_run_observation(
+                reader, generation, observation["path"], observation["sha256"]
             )
             observed, digest, size = reader._verified_json(
                 observation_path,
@@ -1664,7 +1724,9 @@ def validate_source_phase(
         "provider_ledger_receipt": _file_definition(
             generation / "admit-or-declare-receipt.json"
         ),
-        "source_provenance": _canonical_clone(receipt.get("run_observation")),
+        "source_provenance": _source_provenance(
+            receipt.get("run_observation"), generation
+        ),
         "status": "PASS",
     }
 

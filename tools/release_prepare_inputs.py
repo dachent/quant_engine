@@ -121,6 +121,7 @@ CARRIED_OPTIONAL = frozenset(
 # inputs of one cycle only: never carried; absent unless the run names them (``--pin``)
 PER_CYCLE_OPTIONAL = frozenset(
     {
+        "account_financing",
         "implementation_model_book_perf",
         "model_vs_actual_input",
         "vendor_gap_fills",

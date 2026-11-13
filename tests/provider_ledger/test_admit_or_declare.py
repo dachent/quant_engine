@@ -1428,18 +1428,9 @@ def test_finality_requires_selected_native_sources_and_account_scope(
         ledger._validate_observed_finality_evidence("schwab", substituted)
 
 
-@pytest.mark.parametrize(
-    ("field", "expected_message"),
-    (
-        ("observed_inventory_count", "counts or digests"),
-        ("observed_admitted_item_count", "counts or digests"),
-        ("historical_admitted_item_count", "historical comparison"),
-        ("historical_admitted_item_set_sha256", "historical comparison"),
-    ),
-)
-def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, expected_message: str
-) -> None:
+def _stage_world(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, bytes, dict[str, Any], Path, dict[str, object]]:
     """Exercise the real stage/verify producer seam with existing synthetic inputs.
 
     The fixture supplies only source-bound provider facts; the test keeps the
@@ -1603,13 +1594,37 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
     monkeypatch.setattr(ledger, "_quantbase_flow_coverage", lambda *_args: {})
 
     staged = ledger.stage_candidate(spec_path)
+    return authority, policy_before, staged, spec_path, coverage_call
+
+
+@pytest.mark.parametrize(
+    ("field", "expected_message"),
+    (
+        ("observed_inventory_count", "counts or digests"),
+        ("observed_admitted_item_count", "counts or digests"),
+        ("historical_admitted_item_count", "historical comparison"),
+        ("historical_admitted_item_set_sha256", "historical comparison"),
+    ),
+)
+def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, expected_message: str
+) -> None:
+    authority, policy_before, staged, spec_path, coverage_call = _stage_world(
+        tmp_path, monkeypatch
+    )
     assert staged["state"] == "STAGED"
     assert coverage_call["required_accounts"] == {"synthetic-ibkr"}
     assert not (tmp_path / "staged" / "CURRENT.json").exists()
     assert canonical_json_bytes(authority["sources"]) == policy_before
 
     generation = tmp_path / "staged" / "generations" / str(staged["generation_id"])
-    receipt = json.loads((generation / "admit-or-declare-receipt.json").read_bytes())
+    receipt_bytes = (generation / "admit-or-declare-receipt.json").read_bytes()
+    # Kill test (#907 item 5): the receipt is a ledger artifact, so an absolute world
+    # path in it moves the ledger generation id between byte-identical worlds.
+    assert str(tmp_path).encode() not in receipt_bytes
+    assert str(tmp_path).replace("\\", "\\\\").encode() not in receipt_bytes
+    receipt = json.loads(receipt_bytes)
+    assert receipt["run_observation"]["path"] == "run-observation.json"
     assert receipt["run_observation"]["financial_cutoff"] == DAY.isoformat()
     assert {
         row["provider_id"] for row in receipt["run_observation"]["providers"]
@@ -1635,6 +1650,38 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
                 str(row["provider_id"]): row for row in receipt["provider_generations"]
             },
         )
+
+
+def test_the_same_data_in_two_differently_named_worlds_has_one_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill test (#907 item 5): nothing the receipt records depends on the directory
+    the world was built in.
+
+    The synthetic evidence files themselves name their own root, so their hashes
+    legitimately differ between worlds; every other receipt field, and the whole
+    provider ledger, must be byte-identical.  With absolute paths in the receipt this
+    fails (and so did the ledger generation id of two identical real worlds).
+    """
+
+    receipts: list[dict[str, Any]] = []
+    ledgers: list[bytes] = []
+    for name in ("world-F", "w-proof"):
+        world = tmp_path / name
+        world.mkdir()
+        _auth, _before, staged, _spec, _cov = _stage_world(world, monkeypatch)
+        generation = world / "staged" / "generations" / str(staged["generation_id"])
+        receipt = json.loads(
+            (generation / "admit-or-declare-receipt.json").read_bytes()
+        )
+        observation = receipt["run_observation"]
+        observation["sha256"] = observation["size_bytes"] = None
+        for row in observation["providers"]:
+            row["finality_evidence"]["sha256"] = None
+        receipts.append(receipt)
+        ledgers.append((generation / "provider-ledger.json").read_bytes())
+    assert receipts[0] == receipts[1]
+    assert ledgers[0] == ledgers[1]
 
 
 def test_account_nav_claimed_by_two_providers_fails_closed(

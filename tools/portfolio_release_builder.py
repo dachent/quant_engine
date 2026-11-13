@@ -733,6 +733,7 @@ def _recipe(path: Path) -> dict[str, Any]:
             "implementation_sleeve_basis",
             "model_vs_actual_input",
             "nested_tag_map",
+            "account_financing",
             "sleeve_disclosure_sources",
             "sleeve_facts",
             "source_clock",
@@ -849,6 +850,7 @@ def _recipe(path: Path) -> dict[str, Any]:
         "strategy_basis",
         "sleeve_facts",
         "implementation_sleeve_basis",
+        "account_financing",
     ):
         if optional_file in recipe:
             definition = recipe[optional_file]
@@ -1047,6 +1049,7 @@ def create_recipe(
     sleeve_disclosure_sources_path: Path | None = None,
     strategy_basis_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
+    account_financing_path: Path | None = None,
     implementation_sleeve_basis_path: Path | None = None,
     weekly_gap_fill_spec_path: Path | None = None,
     vendor_gap_fills_path: Path | None = None,
@@ -1192,6 +1195,10 @@ def create_recipe(
         payload["strategy_basis"] = _file_definition(strategy_basis_path.resolve())
     if sleeve_facts_path is not None:
         payload["sleeve_facts"] = _file_definition(sleeve_facts_path.resolve())
+    if account_financing_path is not None:
+        payload["account_financing"] = _file_definition(
+            account_financing_path.resolve()
+        )
     if implementation_sleeve_basis_path is not None:
         payload["implementation_sleeve_basis"] = _file_definition(
             implementation_sleeve_basis_path.resolve()
@@ -5360,6 +5367,7 @@ def build_report_candidate(
     sleeve_disclosure_sources_path: Path | None = None,
     strategy_basis_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
+    account_financing_path: Path | None = None,
     implementation_sleeve_basis_path: Path | None = None,
 ) -> dict[str, Any]:
     hwm_arguments = _governed_hwm_arguments(
@@ -5452,6 +5460,11 @@ def build_report_candidate(
             else ()
         ),
         *(
+            ("--account-financing", str(account_financing_path))
+            if account_financing_path is not None
+            else ()
+        ),
+        *(
             ("--implementation-sleeve-basis", str(implementation_sleeve_basis_path))
             if implementation_sleeve_basis_path is not None
             else ()
@@ -5541,6 +5554,7 @@ def build_report(
     sleeve_disclosure_sources_path: Path | None = None,
     strategy_basis_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
+    account_financing_path: Path | None = None,
     implementation_sleeve_basis_path: Path | None = None,
 ) -> dict[str, Any]:
     if workbook_runtime_path is not None:
@@ -5626,6 +5640,7 @@ def build_report(
         sleeve_disclosure_sources_path=sleeve_disclosure_sources_path,
         strategy_basis_path=strategy_basis_path,
         sleeve_facts_path=sleeve_facts_path,
+        account_financing_path=account_financing_path,
         implementation_sleeve_basis_path=implementation_sleeve_basis_path,
     )
     candidate_dir = Path(_text(candidate.get("candidate_dir"), "report candidate"))
@@ -7051,7 +7066,12 @@ def build_stage(
     )
     optional_report_paths = {
         f"{key}_path": _path(recipe[key]["path"], f"{key}.path")
-        for key in ("strategy_basis", "sleeve_facts", "implementation_sleeve_basis")
+        for key in (
+            "strategy_basis",
+            "sleeve_facts",
+            "implementation_sleeve_basis",
+            "account_financing",
+        )
         if isinstance(recipe.get(key), dict)
     }
     implementation_reconciliation = _path(
