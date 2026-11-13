@@ -1263,11 +1263,16 @@ _LENS_WORKERS_ENV = "QE_LENS_WORKERS"
 _LensBuild = tuple[str, list[dict[str, Any]]]
 
 
+_MAX_LENS_WORKERS = 16
+
+
 def _lens_worker_count(jobs: int) -> int:
     """Concurrent lens builds; ``QE_LENS_WORKERS=1`` keeps the serial walk."""
     configured = os.environ.get(_LENS_WORKERS_ENV)
     if configured is None:
-        requested = max(1, (os.cpu_count() or 1) // 4)
+        # #889: half the logical CPUs (16 on the 32-thread release machine; RULING-A 6.4
+        # measured 2,671 worker-seconds over 48 lens builds, 490 s wall on 8 workers)
+        requested = max(1, (os.cpu_count() or 1) // 2)
     else:
         try:
             requested = int(configured)
@@ -1275,7 +1280,7 @@ def _lens_worker_count(jobs: int) -> int:
             requested = 0
         if requested < 1:
             raise VerticalBuildError(f"{_LENS_WORKERS_ENV} must be a positive integer")
-    return max(1, min(jobs, requested, 8))
+    return max(1, min(jobs, requested, _MAX_LENS_WORKERS))
 
 
 def _build_lenses(
