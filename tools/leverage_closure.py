@@ -17,7 +17,7 @@ a reader can see why an account is, or is not, covered.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -128,13 +128,7 @@ def financing_cost_closure(
             >= epoch_start
         )
     ]
-    covered = (
-        bool(accruals)
-        and not unavailable
-        and not unexplained
-        and not unmapped
-        and checked > 0
-    )
+    covered = bool(accruals) and not unavailable and not unexplained and checked > 0
     return Closure(
         "FINANCING_COST_ACCRUAL_ROLLFORWARD",
         covered,
@@ -145,7 +139,14 @@ def financing_cost_closure(
             "unavailable_rows": unavailable,
             "unexplained_steps": sorted(unexplained)[:20],
             "unexplained_step_count": len(unexplained),
-            "unmapped_rows_in_epoch": len(unmapped),
+            # Strategy attribution is not account closure: a reserve account has no strategy
+            # interval, and a posting before an account's first assignment has none yet.  Such
+            # rows are real account costs that roll forward; they are counted and explained
+            # here, never dropped and never a reason to withhold the account's closure.
+            "strategy_unmapped_rows": len(unmapped),
+            "strategy_unmapped_reasons": dict(
+                sorted(Counter(str(r.get("mapping_reason")) for r in unmapped).items())
+            ),
             "statement_days": len(days),
         },
     )
