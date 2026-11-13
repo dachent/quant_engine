@@ -1321,6 +1321,29 @@ def _validated_inputs(
         )
     if _date(evaluated_on, "evaluated_on") < cutoff:
         raise AttendedPreparationError("evaluated_on precedes financial cutoff")
+    if "captured_inputs" in config:
+        # weekly-refresh specs read only captured, admitted, hash-verified inputs (#913)
+        import capture_pipeline as _capture
+
+        contract = ROOT / "contracts" / "capture-sources-v1.json"
+        try:
+            config = _capture.resolve_captured_inputs(
+                config,
+                cutoff=cutoff,
+                sources=_capture.load_sources(contract, repo_root=ROOT),
+                readers=_capture.load_readers(contract, repo_root=ROOT),
+            )
+        except _capture.CaptureRefused as exc:
+            raise AttendedPreparationError(f"captured inputs: {exc.code}") from exc
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            OSError,
+        ) as exc:  # corrupt pin file, odd shapes: stable, not raw
+            raise AttendedPreparationError(
+                f"captured inputs: MALFORMED ({type(exc).__name__})"
+            ) from exc
     _pins(config, "preparation specification")
     retained_generations = config.get("retained_verified_generations")
     if isinstance(retained_generations, Mapping) and isinstance(
