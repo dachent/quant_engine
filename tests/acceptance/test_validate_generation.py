@@ -3664,18 +3664,80 @@ def test_a_receipt_carrying_benchmark_account_return_is_the_epoch_splice(
     ] == ["returns.benchmark_account_return"]
 
 
-def test_a_receipt_carrying_benchmark_window_cut_inside_a_span_is_not_ready(
+def _benchmark_findings(tmp_path: Path, *mutators: Mutator) -> list[Any]:
+    findings = run(build(tmp_path, Spec(report=[_span_payload, *mutators])))
+    return [f for f in findings if f.check_id == "returns.benchmark_account_return"]
+
+
+def _benchmark_metrics(**changes: str) -> Mutator:
+    def mutate(report: dict[str, Any]) -> None:
+        metrics = report["strategy_attribution"]["benchmark_comparisons"][0]["metrics"]
+        metrics.update(changes)
+
+    return mutate
+
+
+def test_a_receipt_carrying_benchmark_window_cut_inside_a_span_is_a_blocker(
     tmp_path: Path,
 ) -> None:
-    def cut(report: dict[str, Any]) -> None:
-        _span_payload(report)
-        report["strategy_attribution"]["benchmark_comparisons"][0]["metrics"][
-            "observed_end"
-        ] = SPAN_MISSING
+    """An edge inside a span declines the splice; sibling B2 reports it BLOCKER_INVARIANT."""
 
-    findings = run(build(tmp_path, Spec(report=[cut])))
-    got = [f for f in findings if f.check_id == "returns.benchmark_account_return"]
+    got = _benchmark_findings(
+        tmp_path,
+        _benchmark_metrics(observed_end=SPAN_MISSING, account_cumulative_return="0.9"),
+    )
+    assert [f.klass for f in got] == [checks.BLOCKER_INVARIANT]
+    assert got[0].pointer.endswith("metrics.observed_end")
+
+
+def test_a_forged_benchmark_account_return_in_an_empty_window_is_not_silent(
+    tmp_path: Path,
+) -> None:
+    """No live row in the window: the value has nothing to be compared with, so it
+    takes the no-live-series NOT_READY path instead of being skipped."""
+
+    got = _benchmark_findings(
+        tmp_path,
+        _benchmark_metrics(
+            observed_start="2027-01-01",
+            observed_end="2027-01-05",
+            account_cumulative_return="0.9",
+        ),
+    )
     assert [f.klass for f in got] == [checks.NOT_READY]
+    assert got[0].observed["live_series_rows"] == 0
+
+
+def test_a_forged_benchmark_account_return_over_a_ragged_span_is_a_blocker(
+    tmp_path: Path,
+) -> None:
+    """A ragged receipt span (starts at the last published row) is skipped, not
+    verified: the window holding it cannot be anchored, and a forged value is a finding."""
+
+    def ragged(report: dict[str, Any]) -> None:
+        receipt = report["strategy_history_contract"]["epoch_hpr_receipts"][0][
+            "receipt"
+        ]
+        receipt["observed_end"] = "2026-09-18"
+        receipt["span_return_receipts"].append(
+            {
+                "end_endpoint_sha256": "1" * 64,
+                "missing_source_date": "2026-09-18",
+                "return": "0",
+                "span_days": 2,
+                "span_end_date": "2026-09-19",
+                "span_start_date": CUTOFF,
+                "start_endpoint_sha256": "2" * 64,
+                "subscription_events_in_span": 0,
+            }
+        )
+
+    got = _benchmark_findings(
+        tmp_path,
+        ragged,
+        _benchmark_metrics(observed_end="2026-09-20", account_cumulative_return="0.9"),
+    )
+    assert [f.klass for f in got] == [checks.BLOCKER_INVARIANT]
 
 
 def _benchmark_daily(report: dict[str, Any]) -> None:
