@@ -48,6 +48,18 @@ def _until(rows: Sequence[Mapping[str, Any]], cutoff: str) -> list[Mapping[str, 
     return [r for r in rows if day(r) <= cutoff]
 
 
+# A net base cash balance below zero by less than one base-currency unit is rounding dust
+# (a closed account keeps a fractional negative balance for months), not borrowing.
+NET_BASE_DEBIT_DUST: Final = Decimal("1")
+
+
+def _is_borrowing(value: object) -> bool:
+    try:
+        return value is not None and Decimal(str(value)) < -NET_BASE_DEBIT_DUST
+    except ArithmeticError:
+        return False
+
+
 def _debit_evidence(
     liability: Sequence[Mapping[str, Any]],
     cost: Sequence[Mapping[str, Any]],
@@ -58,6 +70,7 @@ def _debit_evidence(
         if r.get("aggregation_level") == "BASE_SUMMARY"
         and r.get("measurement_basis") == "TRADE_DATE_CASH_BALANCE"
         and r.get("classification") == "NET_CASH_DEBIT_BALANCE"
+        and _is_borrowing((r.get("amount") or {}).get("value"))
     }
     currency_days = {
         r["as_of_date"]
