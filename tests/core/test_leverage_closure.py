@@ -169,3 +169,37 @@ def test_an_unavailable_cash_day_counts_as_missing_not_as_absent_history() -> No
     closure, _ = lc.borrowed_principal(rows, DAYS, DAYS[-1], "USD")
     assert not closure.covered
     assert closure.evidence["missing_days"] == 1
+
+
+def test_a_reserve_accounts_unmapped_cutoff_exposure_and_nav_still_close() -> None:
+    exposure = [
+        {
+            "as_of_date": "2026-01-07",
+            "mapping_status": "UNMAPPED",
+            "amount": _amt("140"),
+        }
+    ]
+    nav = [
+        {"as_of_date": "2026-01-07", "mapping_status": "UNMAPPED", "nav": _amt("100")}
+    ]
+    closure, gross, value = lc.gross_exposure(exposure, nav, "2026-01-07")
+    assert closure.covered and (gross, value) == (140, 100)
+    duplicated = [*exposure, *exposure]
+    assert not lc.gross_exposure(duplicated, nav, "2026-01-07")[0].covered
+
+
+def test_a_provider_without_an_accrual_series_closes_on_its_cash_postings() -> None:
+    """Schwab states margin interest only as posted cash (six postings on the reserve)."""
+
+    posting = {
+        "classification": "BROKER_DEBIT_INTEREST",
+        "measurement_basis": "CASH_POSTING",
+        "source_amount": _amt("-11.26"),
+    }
+    result = lc.financing_cost_closure([posting, posting], DAYS, DAYS[-1], None)
+    assert result.covered and result.evidence["postings"] == 2
+    unpriced = {**posting, "source_amount": {"status": "UNAVAILABLE", "value": None}}
+    assert not lc.financing_cost_closure(
+        [posting, unpriced], DAYS, DAYS[-1], None
+    ).covered
+    assert not lc.financing_cost_closure([], DAYS, DAYS[-1], None).covered

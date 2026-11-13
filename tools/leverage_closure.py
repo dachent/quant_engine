@@ -62,6 +62,22 @@ def financing_cost_closure(
         if str(r.get("as_of_date") or r.get("period_end") or "") <= cutoff
     ]
     accruals = [r for r in rows if r.get("measurement_basis") in _ACCRUAL_BASES]
+    if not accruals:
+        # A provider with no accrual series (Schwab) states its cost only as posted cash
+        # entries.  The postings are the whole cost then: closure is every posting being an
+        # available amount; a posting with no amount, or no posting at all, is not covered.
+        postings = [r for r in rows if r.get("measurement_basis") == "CASH_POSTING"]
+        priced = [r for r in postings if _value(r) is not None]
+        return Closure(
+            "FINANCING_COST_POSTINGS_ONLY",
+            bool(postings) and len(priced) == len(postings),
+            {
+                "accrual_series": "NONE_PROVIDED",
+                "postings": len(postings),
+                "unavailable_postings": len(postings) - len(priced),
+                "statement_days": len(days),
+            },
+        )
     by_currency: dict[str, dict[str, dict[str, Decimal]]] = defaultdict(
         lambda: defaultdict(dict)
     )
@@ -209,18 +225,17 @@ def gross_exposure(
     nav_rows: Iterable[Mapping[str, Any]],
     cutoff: str,
 ) -> tuple[Closure, Decimal | None, Decimal | None]:
-    """Cutoff gross position value (MAPPED, AVAILABLE) and NAV."""
+    """Cutoff gross position value and NAV (AVAILABLE, one row each).
+
+    Strategy mapping is not required: a reserve account has no strategy interval, and its
+    account-level gross exposure and NAV are exactly as real.  Exactly one row each, so a
+    duplicated or missing cutoff row still withholds the closure.
+    """
 
     gross = [
-        _value(r, "amount")
-        for r in exposure_rows
-        if str(r.get("as_of_date")) == cutoff and r.get("mapping_status") == "MAPPED"
+        _value(r, "amount") for r in exposure_rows if str(r.get("as_of_date")) == cutoff
     ]
-    navs = [
-        _value(r, "nav")
-        for r in nav_rows
-        if str(r.get("as_of_date")) == cutoff and r.get("mapping_status") == "MAPPED"
-    ]
+    navs = [_value(r, "nav") for r in nav_rows if str(r.get("as_of_date")) == cutoff]
     gross_values = [v for v in gross if v is not None]
     nav_values = [v for v in navs if v is not None]
     covered = len(gross_values) == 1 and len(nav_values) == 1 and nav_values[0] != 0
