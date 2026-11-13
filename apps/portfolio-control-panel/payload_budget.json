@@ -8,7 +8,7 @@
     "blocks": {
       "decomposition_lenses": 221211161,
       "weekly_returns": 27853584,
-      "leverage_disclosures": 19429280,
+      "leverage_disclosures": 22229451,
       "factor_analysis": 2479761,
       "account_manifest": 1740634,
       "invested_capital": 999253,
@@ -20,8 +20,8 @@
       "hwm_governed_proof": 121036,
       "performance_tab": 393155,
       "orthogonal_risk_attribution": 169425,
-      "strategy_underwriting": 73721,
-      "model_vs_actual": 148040,
+      "strategy_underwriting": 84723,
+      "model_vs_actual": 195139,
       "account_summary": 5344,
       "advisory": 2614,
       "allocations": 4316,
@@ -49,7 +49,7 @@
       "panel_schema_version": 2,
       "performance": 54213,
       "portfolio_mwr_annualised": 456,
-      "portfolio_twr_cumulative": 909,
+      "portfolio_twr_cumulative": 1278,
       "position_snapshots": 336,
       "provenance": 11479,
       "provider_counts": 63,
@@ -62,7 +62,7 @@
   "blocks": {
     "decomposition_lenses": 223424000,
     "weekly_returns": 28133000,
-    "leverage_disclosures": 19624000,
+    "leverage_disclosures": 22452000,
     "factor_analysis": 2505000,
     "account_manifest": 1759000,
     "invested_capital": 1010000,
@@ -74,8 +74,8 @@
     "hwm_governed_proof": 123000,
     "performance_tab": 398000,
     "orthogonal_risk_attribution": 172000,
-    "strategy_underwriting": 75000,
-    "model_vs_actual": 150000,
+    "strategy_underwriting": 86000,
+    "model_vs_actual": 198000,
     "account_summary": 6000,
     "advisory": 3000,
     "allocations": 5000,
@@ -103,7 +103,7 @@
     "panel_schema_version": 1000,
     "performance": 55000,
     "portfolio_mwr_annualised": 1000,
-    "portfolio_twr_cumulative": 1000,
+    "portfolio_twr_cumulative": 2000,
     "position_snapshots": 1000,
     "provenance": 12000,
     "provider_counts": 1000,
@@ -118,11 +118,12 @@
     "performance": "New top-level block (distinct from performance_tab) carried since R2: 54048 B on R2 b216a53e, 54055 B on R2.1. It was unlisted and sat 4 KB over the 50000 B unlisted-block threshold, so the checker flagged it on every generation. Within 7 B between R2 and R2.1. Limit = committed + 3%, rounded up to 1000 B.",
     "performance_tab": "R2.1 re-measure 381004 B (schema 3: union grid, flow-matched benchmarks), against 375785 B on the r21-integration panel the previous limit was cut from. The limit is re-cut at committed + 3% (393000 B, was 388000 B at 98.2% of committed) so the block has the same headroom every other block has.",
     "weekly_returns": "R2.1 re-measure 27773144 B against 27317555 B at R2 (+1.7%). Per-observation series are the block this budget exists to watch, so the limit is re-cut at committed + 3% (28607000 B, was 28138000 B at 97.4% of committed); further growth needs its own reason.",
-    "strategy_underwriting": "R2.2 d7d26c09 measured 73615 B against 64495 B committed (+9120 B, +14.1%). The block holds seven rows and the growth is one layer: evidence_layers.implementation_reconciliation, which mirrors the strategy's implementation_reconciliation row and now carries the account-basis legs for the strategies whose implementation is bridged (grizzlybears-vtma 3054 to 7742 B, tt-portfolio 5849 to 10279 B on the 4dcb46c1 panel), while p123-ai-factor's layer is the sleeve bridge and falls from 14250 to 560 B. The mirror of the strategies row is existing design, not new duplication; trimming was declined because the layer is the disclosure the underwriting row stands on. The basis statements of R2.2 do not change this block. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block strategy_underwriting.",
-    "model_vs_actual": "R2.2 bae512c5 measured 138438 B and +1587 B more with the final-seat basis statements: the p123-ai-factor windows and epochs (10 rows, each +basis and basis_label, about 150 B) and its portfolio-bridge line now say they are the parent account's figures (the audit input measures the whole parent account, not the restated sleeve): 140025 B. No window, epoch or component is added or duplicated; the sleeve comparison stays in governed_reference. Trimming was declined because the label is the statement the owner's basis ruling requires. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block model_vs_actual; to be confirmed on the final build.",
+    "strategy_underwriting": "R2.2 d7d26c09 measured 73615 B against 64495 B committed (+9120 B, +14.1%). The block holds seven rows and the growth is one layer: evidence_layers.implementation_reconciliation, which mirrors the strategy's implementation_reconciliation row and now carries the account-basis legs for the strategies whose implementation is bridged (grizzlybears-vtma 3054 to 7742 B, tt-portfolio 5849 to 10279 B on the 4dcb46c1 panel), while p123-ai-factor's layer is the sleeve bridge and falls from 14250 to 560 B. The mirror of the strategies row is existing design, not new duplication; trimming was declined because the layer is the disclosure the underwriting row stands on. The basis statements of R2.2 do not change this block. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block strategy_underwriting. Raised for release A (A3 findings): measured 84723 B against the 75000 B floor (+14.9% over the R2.2 measure); the growth is the underwriting evidence layers of release A. Limit = measured + 1%, rounded up to 1000 B (86000 B).",
+    "model_vs_actual": "R2.2 bae512c5 measured 138438 B and +1587 B more with the final-seat basis statements: the p123-ai-factor windows and epochs (10 rows, each +basis and basis_label, about 150 B) and its portfolio-bridge line now say they are the parent account's figures (the audit input measures the whole parent account, not the restated sleeve): 140025 B. No window, epoch or component is added or duplicated; the sleeve comparison stays in governed_reference. Trimming was declined because the label is the statement the owner's basis ruling requires. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block model_vs_actual; to be confirmed on the final build. Raised for release A (A3 findings): measured 195139 B against the 150000 B floor (+31.8% over the R2.2 measure); the growth is the model-versus-actual bridge rows added for release A. No window, epoch or component is duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (198000 B).",
     "factor_analysis": "R3 generation db452885 measured 2479776 B against 2339068 B at the R3 projection (R2 b216a53e x 1.10): +140708 B (6.0%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (2505000 B, was 2363000 B) by tools/panel_payload_size.py --raise-all.",
-    "leverage_disclosures": "R3 generation db452885 measured 19429280 B against 17594568 B at the R3 projection (R2 b216a53e x 1.10): +1834712 B (10.4%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (19624000 B, was 17771000 B) by tools/panel_payload_size.py --raise-all.",
-    "account_manifest": "R3 generation db452885 measured 1740636 B against 1713348 B at the R3 projection (R2 b216a53e x 1.10): +27288 B (1.6%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (1759000 B, was 1731000 B) by tools/panel_payload_size.py --raise-all."
+    "leverage_disclosures": "R3 generation db452885 measured 19429280 B against 17594568 B at the R3 projection (R2 b216a53e x 1.10): +1834712 B (10.4%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (19624000 B, was 17771000 B) by tools/panel_payload_size.py --raise-all. Raised again for release A (A3 lane-replica findings): measured 22229451 B against the 20596000 B the relative rule allowed (+14.4% over the R3 measure). The growth is the E8 block: account_financing rows now carried in the leverage disclosures. No entry is duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (22452000 B) by tools/panel_payload_size.py raise_budgets.",
+    "account_manifest": "R3 generation db452885 measured 1740636 B against 1713348 B at the R3 projection (R2 b216a53e x 1.10): +27288 B (1.6%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (1759000 B, was 1731000 B) by tools/panel_payload_size.py --raise-all.",
+    "portfolio_twr_cumulative": "Raised for release A (A3 findings): measured 1278 B against the 1000 B floor (committed 909 B); the block now carries the cumulative figures of the release A window. Limit = measured + 1%, rounded up to 1000 B (2000 B)."
   },
   "unlisted_block_max_bytes": 50000,
   "other_blocks_max_bytes": 400000,
@@ -1814,6 +1815,37 @@
         }
       },
       "reason": "#893: restores measured + 1 % for every block and physical file as the explicit reviewed floor; weekly growth is handled by the relative rule in acceptance/validate/payload_rule.py, which computes limits from the previous committed release under a ceiling of 1.5 x committed_bytes."
+    },
+    {
+      "generation": "release-A A3 lane-replica findings (lint.payload_size)",
+      "margin": 0.01,
+      "rule": "limit = ceil(measured x (1 + margin) / 1000) x 1000",
+      "blocks": {
+        "leverage_disclosures": {
+          "before": 19429280,
+          "after": 22229451,
+          "previous_limit": 19624000,
+          "limit": 22452000
+        },
+        "model_vs_actual": {
+          "before": 148040,
+          "after": 195139,
+          "previous_limit": 150000,
+          "limit": 198000
+        },
+        "portfolio_twr_cumulative": {
+          "before": 909,
+          "after": 1278,
+          "previous_limit": 1000,
+          "limit": 2000
+        },
+        "strategy_underwriting": {
+          "before": 73721,
+          "after": 84723,
+          "previous_limit": 75000,
+          "limit": 86000
+        }
+      }
     }
   ]
 }
