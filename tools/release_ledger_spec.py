@@ -49,7 +49,12 @@ OBSERVATION_NAME = "run-observation.json"
 SPEC_NAME = "ledger-spec.json"
 LEDGER_OUTPUT = "ledger"
 PROVENANCE_CATALOG = "portfolio-provenance.json"
-CARRIED = ("strategy_inputs", "strategy_provider_map", "portfolio_fx_rates")
+CARRIED = (
+    "strategy_inputs",
+    "strategy_provider_map",
+    "portfolio_fx_rates",
+    "account_roles",
+)
 REGENERATED = (
     "as_of_date",
     "financial_mvp",
@@ -295,6 +300,8 @@ def build(
     }
     if "portfolio_fx_rates" in predecessor_spec:
         spec["portfolio_fx_rates"] = predecessor_spec["portfolio_fx_rates"]
+    if "account_roles" in predecessor_spec:
+        spec["account_roles"] = predecessor_spec["account_roles"]
     return {"observation": observation, "spec": spec, "out": out}
 
 

@@ -13,12 +13,14 @@ import argparse
 import base64
 from collections import defaultdict
 import csv
+import dataclasses
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from functools import wraps
 import hashlib
 import importlib.util
 import io
+import itertools
 import json
 from pathlib import Path
 import re
@@ -29,6 +31,7 @@ from typing import Any, Callable, Final, Mapping, NamedTuple, Sequence
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
+import account_financing
 import quantbase_fund_days
 
 from quant_engine.core import check_entry_interpreter
@@ -2547,15 +2550,11 @@ def _load_spec(path: Path) -> dict[str, Any]:
     expected = base_keys | ({"financial_mvp"} if version == SCHEMA_VERSION else set())
     allowed = {frozenset(expected)}
     if version == SCHEMA_VERSION:
-        optional = ("portfolio_fx_rates", "run_observation")
+        optional = ("portfolio_fx_rates", "run_observation", "account_roles")
         allowed.update(
             frozenset({*expected, *subset})
-            for subset in (
-                (),
-                (optional[0],),
-                (optional[1],),
-                optional,
-            )
+            for size in range(len(optional) + 1)
+            for subset in itertools.combinations(optional, size)
         )
     if frozenset(spec) not in allowed or version not in {1, SCHEMA_VERSION}:
         raise ProviderLedgerError("provider-ledger spec keys or version differ")
@@ -3981,6 +3980,27 @@ def _contract_fx_segment(financial_contract: Mapping[str, Any]) -> dict[str, Any
     if len(segments) != 1:
         raise ProviderLedgerError("portfolio FX contract segment is absent")
     return segments[0]
+
+
+def _reserve_nav_windows(value: object) -> dict[str, list[tuple[date, date, str]]]:
+    """The declared reserve NAV windows (#900) from the pinned governed declaration."""
+
+    ref = _object(value, "account_roles")
+    if set(ref) != {"path", "sha256", "size_bytes"}:
+        raise ProviderLedgerError("account_roles reference keys differ")
+    path = _absolute_regular_path(ref["path"], "account_roles.path")
+    raw = path.read_bytes()
+    if (
+        hashlib.sha256(raw).hexdigest() != ref["sha256"]
+        or len(raw) != ref["size_bytes"]
+    ):
+        raise ProviderLedgerError("account_roles identity differs")
+    try:
+        return account_financing.reserve_nav_windows(
+            account_financing.load_sleeve_roles(raw)
+        )
+    except account_financing.FinancingDeclarationError as exc:
+        raise ProviderLedgerError(f"account_roles is invalid: {exc}") from exc
 
 
 def _portfolio_fx_rates(
@@ -9672,6 +9692,7 @@ def _admissions(
     quantbase_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
     matrixport_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
     matrixport_anchor_coverage: Mapping[str, Mapping[str, Any]] | None = None,
+    reserve_nav_windows: Mapping[str, Sequence[tuple[date, date, str]]] | None = None,
 ) -> tuple[ProviderFactAdmission, ...]:
     provider_authority = (
         set(_PROVIDER_CATALOGS)
@@ -9775,46 +9796,71 @@ def _admissions(
             if provider_id in {"matrixport", "quantbase", "schwab"}
             else "finalized_history_coverage"
         )
-        admissions.append(
-            ProviderFactAdmission(
-                provider_id=provider_id,
-                fact_type=fact_type,
-                evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
-                disposition=(
-                    AdmissionDisposition.AUTHORITATIVE
-                    if mapping_status == "MAPPED" and provider_id in provider_authority
-                    else AdmissionDisposition.REFERENCE_ONLY
-                ),
-                effective_start=start,
-                effective_end=end,
-                account_id=account_id,
-                account_reconciliation_sha256=hashlib.sha256(
-                    canonical_json_bytes(
-                        {
-                            "account_id": account_id,
-                            "fact_type": fact_type,
-                            "provider_id": provider_id,
-                            "records": [
-                                {
-                                    "record_id": str(item["record_id"]),
-                                    "source_record_id": str(
-                                        item.get("source_record_id") or ""
-                                    ),
-                                }
-                                for item in sorted(
-                                    rows, key=lambda row: str(row["record_id"])
-                                )
-                            ],
-                            **(
-                                {coverage_key: dict(coverage_claim)}
-                                if coverage_claim is not None
-                                else {}
-                            ),
-                        }
-                    )
-                ).hexdigest(),
-            )
+        base_admission = ProviderFactAdmission(
+            provider_id=provider_id,
+            fact_type=fact_type,
+            evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
+            disposition=(
+                AdmissionDisposition.AUTHORITATIVE
+                if mapping_status == "MAPPED" and provider_id in provider_authority
+                else AdmissionDisposition.REFERENCE_ONLY
+            ),
+            effective_start=start,
+            effective_end=end,
+            account_id=account_id,
+            account_reconciliation_sha256=hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "account_id": account_id,
+                        "fact_type": fact_type,
+                        "provider_id": provider_id,
+                        "records": [
+                            {
+                                "record_id": str(item["record_id"]),
+                                "source_record_id": str(
+                                    item.get("source_record_id") or ""
+                                ),
+                            }
+                            for item in sorted(
+                                rows, key=lambda row: str(row["record_id"])
+                            )
+                        ],
+                        **(
+                            {coverage_key: dict(coverage_claim)}
+                            if coverage_claim is not None
+                            else {}
+                        ),
+                    }
+                )
+            ).hexdigest(),
         )
+        declared_windows = (
+            (reserve_nav_windows or {}).get(account_id)
+            if fact_type == "nav_observations" and mapping_status != "MAPPED"
+            else None
+        )
+        if declared_windows:
+            # The owner declared this account a RESERVE with admit windows (#900): its NAV
+            # is authoritative inside each declared window, proven by the window's closure
+            # basis.  Closure windows keep the observed span; a bridge window carries no
+            # observations of its own, so it is admitted as declared.
+            for w_start, w_end, basis in declared_windows:
+                lo, hi = (
+                    (w_start, w_end)
+                    if basis == "DERIVED_BRIDGE_WITH_CLOSURE"
+                    else (max(start, w_start), min(end, w_end))
+                )
+                if lo <= hi:
+                    admissions.append(
+                        dataclasses.replace(
+                            base_admission,
+                            disposition=AdmissionDisposition.AUTHORITATIVE,
+                            effective_start=lo,
+                            effective_end=hi,
+                        )
+                    )
+        else:
+            admissions.append(base_admission)
     for provider_id, coverage in provider_flow_coverage.items():
         for account_id in sorted(
             set(coverage)
@@ -10809,6 +10855,9 @@ def build_catalog(
         if "portfolio_fx_rates" in spec
         else None
     )
+    reserve_nav_windows = (
+        _reserve_nav_windows(spec["account_roles"]) if "account_roles" in spec else None
+    )
     provenance, provenance_artifact = _provenance(spec)
     accounts, strategies, assignments = _assignment_index(
         provenance, _object(authority.get("contract"), "financial MVP contract")
@@ -11165,6 +11214,7 @@ def build_catalog(
             provider_roots["quantbase"],
             {_CSV_FACT_ACCOUNT[_QUANTBASE]},
         ),
+        reserve_nav_windows=reserve_nav_windows,
     )
     admit_or_declare, admit_or_declare_bytes = _admit_or_declare_receipt(
         authority,
