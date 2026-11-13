@@ -730,6 +730,7 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
         "pre-chain",
         "prep-spec",
         "attended",
+        "g2",  # G2 product gate (#884): not a pass-26 command, a builtin between attended and QA
         "qa-browser",
         "qa-interaction",
         "qa-native",

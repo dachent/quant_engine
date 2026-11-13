@@ -15,8 +15,8 @@ Usage::
 run configuration and code identity. Run G0 again at lane entry and immediately before the commit: pointers move
 between the first run and those moments (R3 refusal 15).
 
-Not built here (named, so a green G0 is not read as "inputs are fine"): the consumer-contract gate G1, the product
-measurements G2 and the spec-pair gate G3 (see COVERAGE).
+Not built here (named, so a green G0 is not read as "inputs are fine"): the consumer-contract gate G1 (see
+COVERAGE). G2 (product measurements on the panel candidate) is ``release_preflight_g2``; G3 (spec pair) is a row here.
 """
 
 from __future__ import annotations
@@ -32,7 +32,10 @@ import shutil
 import sys
 from typing import Any
 
+import release_canary as canary_tool
 import release_driver as driver
+from release_preflight_g1a import G1A_ROWS
+from release_preflight_g1b import ROWS_G1B
 
 GIB = 1 << 30
 RECEIPT_DIR = "preflight"
@@ -47,10 +50,15 @@ def _free_bytes(path: Path) -> int:
 
 
 class Env:
-    """The few things a test must replace: free disk space."""
+    """The few things a test must replace: free disk space and the canary."""
 
-    def __init__(self, free_bytes: DiskUsage = _free_bytes) -> None:
+    def __init__(
+        self,
+        free_bytes: DiskUsage = _free_bytes,
+        canary: Callable[..., dict[str, Any]] = canary_tool.canary,
+    ) -> None:
         self.free_bytes = free_bytes
+        self.canary = canary
 
 
 Row = Callable[[driver.Run, Env], None]  # raises driver.Refusal with the reason
@@ -244,6 +252,105 @@ def row_spec_pair(run: driver.Run, env: Env) -> None:
         raise driver.Refusal(problem)
 
 
+CANARY_BASELINE = "canary-baseline.json"
+
+# the capital-input generation and the receipt of the invested-capital build: both record file pins
+PIN_FILES = (
+    ("capital-input generation", "preparation/capital-input-generation.json"),
+    ("invested-capital result", "preparation/invested-capital-result.json"),
+)
+
+
+def row_pins_resolve(run: driver.Run, env: Env) -> None:
+    """Every {path, sha256, size_bytes} pin of the capital-input generation and its receipt resolves where it will
+    be read: the attended preparation's own pin check re-opens the file (no symlink, regular file) and recomputes its
+    hash and size. The label of the failing pin is in the refusal (``<label> is unavailable`` / ``pin differs``).
+    Exists only after ``attended`` wrote them, so it is a recheck row (lane entry, commit), not a G0/G1 row."""
+
+    import portfolio_attended_preparation as preparation
+
+    for name, relative in PIN_FILES:
+        document = _path(run, "run") / relative
+        if not document.is_file():
+            raise driver.Refusal(f"{name} is unavailable: {document}")
+        try:
+            preparation.verify_pins(driver.read_json(document), name)
+        except preparation.AttendedPreparationError as exc:
+            raise driver.Refusal(str(exc)) from exc
+
+
+# every run-config key a G0 row reads (a release config template must carry them; a test checks one does)
+CONFIG_KEYS = (
+    "free_space_floor_gb",
+    "scratch_roots",
+    "coordination_root",
+    "authority_roots",
+    "source_workspace",
+    "artifact_inputs",
+    "replica_relative_ok",
+    "pinned_files",
+    "evidence_dest",
+    "release_cutoffs",
+    "release_label",
+    "requested_as_of",
+    "release_inputs_root",
+)
+
+
+def _canary_inputs(run: driver.Run) -> tuple[list[Path], list[Path]]:
+    """The roots the commit writes to (coordination root and every authority root) and the bound files."""
+
+    roots = [_path(run, "coordination_root")]
+    authority = run.config.get("authority_roots")
+    if not isinstance(authority, dict) or not authority:
+        raise driver.Refusal("run config lacks authority_roots (root id to directory)")
+    roots += [Path(v) for v in authority.values()]
+    bound = [Path(item) for item in dict(run.config.get("pinned_files", {}))]
+    return list(dict.fromkeys(roots)), bound
+
+
+def _canary_fail(receipt: Mapping[str, Any]) -> str:
+    return "; ".join(
+        f"{c.get('id')}: {c.get('detail')}"
+        for c in receipt.get("checks", [])
+        if c.get("status") == "FAIL"
+    )[:400]
+
+
+def row_canary_baseline(run: driver.Run, env: Env) -> None:
+    """RULING-D 4.3: before the long lanes, exercise the real (synced) volume once and record the environment
+    fingerprint and step timings. A canary FAIL refuses now, not after a 75-minute lane. Writes the baseline
+    the commit compares with; run it at lane entry only (it replaces an earlier baseline of this cycle)."""
+
+    roots, bound = _canary_inputs(run)
+    receipt = env.canary(roots, bound)
+    if receipt.get("status") != "PASS":
+        raise driver.Refusal(f"commit-path canary failed: {_canary_fail(receipt)}")
+    driver.write_json(run.cycle / RECEIPT_DIR / CANARY_BASELINE, dict(receipt))
+
+
+def row_canary_commit_path(run: driver.Run, env: Env) -> None:
+    """The commit runs only if the canary, run again now against the baseline taken at lane entry, passes (no step
+    far slower than recorded, no bound file a cloud placeholder) and the environment fingerprint is unchanged
+    (a Windows update, a new OneDrive client or another interpreter between baseline and commit)."""
+
+    path = run.cycle / RECEIPT_DIR / CANARY_BASELINE
+    if not path.is_file():
+        raise driver.Refusal(
+            f"no canary baseline at {path}: the lane stage records it at entry"
+        )
+    baseline = driver.read_json(path)
+    roots, bound = _canary_inputs(run)
+    receipt = env.canary(roots, bound, baseline=baseline)
+    if receipt.get("status") != "PASS":
+        raise driver.Refusal(f"commit-path canary failed: {_canary_fail(receipt)}")
+    changes = canary_tool.diff_fingerprints(baseline, receipt)
+    if changes:
+        raise driver.Refusal(
+            f"environment fingerprint changed since the baseline: {changes[:3]}"
+        )
+
+
 ROWS: tuple[tuple[str, Row], ...] = (
     ("host:free-space", row_free_space),
     ("host:no-live-stage", row_no_live_stage),
@@ -256,30 +363,41 @@ ROWS: tuple[tuple[str, Row], ...] = (
     ("authority:no-stale-prepared", row_no_stale_prepared),
 )
 
-# every row a stage may recheck: the G0 rows and the G3 spec-pair row
-ROW_TABLE: dict[str, Row] = {**dict(ROWS), "g3:spec-pair": row_spec_pair}
+# G1 consumer-contract rows (run after the prep chain, before attended); other G1 parts append here
+G1_ROWS: tuple[tuple[str, Row], ...] = (*G1A_ROWS, *ROWS_G1B)
+
+# every row a stage may recheck: the G0 rows, the G1 rows, the G3 spec-pair row and the two canary rows (not G0: the
+# baseline row writes a file and the commit row needs it)
+ROW_TABLE: dict[str, Row] = {
+    **dict(ROWS),
+    **dict(G1_ROWS),
+    "g3:spec-pair": row_spec_pair,
+    "pins:resolve-in-world": row_pins_resolve,
+    "canary:baseline": row_canary_baseline,
+    "canary:commit-path": row_canary_commit_path,
+}
 
 # R3 refusal number (RULING-D section 2) -> where it is caught. "G0:<row>" is built here with a kill test in
 # tests/portfolio_operations/test_release_preflight.py; "guard:<name>" is a tool guard with its own test;
 # everything else is named, not built, and a green G0 does not cover it.
 COVERAGE: dict[int, str] = {
-    1: "G1:ledger-spec finality validators (not built)",
-    2: "G1:ledger-spec finality validators (not built)",
-    3: "G1:ledger-spec provider header (not built)",
-    4: "G1:ledger-spec strategy evidence (not built)",
+    1: "G1:g1:ledger-spec",
+    2: "G1:g1:ledger-spec",
+    3: "G1:g1:ledger-spec",
+    4: "G1:g1:ledger-spec",
     5: "G0:config:paths",
     6: "G0:inputs:release-inputs",
-    7: "G1:attended identity validation (not built)",
-    8: "G1:sleeve-facts admission (not built)",
+    7: "G1:g1:attended-launch",
+    8: "G1:g1:sleeve-facts",
     9: "by design: the first calendar attempt",
-    10: "G1:attribution contract (not built)",
-    11: "G1:attribution contract (not built)",
-    12: "G2:needs the build (not built)",
-    13: "G1:finality evidence reader (not built)",
-    14: "G0:freshness against the consumer's limit (not built)",
+    10: "G1:g1:attribution-contract",
+    11: "G1:g1:attribution-contract",
+    13: "G1:g1:finality-evidence",
+    14: "G1:g1:factor-freshness",
+    12: "G2:g2:validator-findings",
     15: "G0:authority:pointer-graph",
     16: "G0:inputs:release-inputs",
-    17: "G2:payload size at candidate time (not built)",
+    17: "G2:g2:payload-size",
     18: "G0:host:free-space",
     19: "G0:config:outside-workspace",  # and G3: g3:spec-pair, rechecked at lane entry
     20: "guard:git-identity-retry (a transient identity read only; a scanner is not detected)",
@@ -287,6 +405,7 @@ COVERAGE: dict[int, str] = {
     22: "guard:require_checkout_is_spec_code",
     23: "guard:require_checkout_is_spec_code",
     24: "G0:config:paths",
+    25: "recheck:pins:resolve-in-world",  # not an R3 refusal: the pins of a relocated world (found after R3)
 }
 
 
@@ -296,18 +415,23 @@ def config_sha256(run: driver.Run) -> str:
     ).hexdigest()
 
 
-def run_g0(run: driver.Run, env: Env | None = None) -> dict[str, Any]:
+def run_gate(
+    run: driver.Run,
+    gate: str,
+    rows_to_run: Sequence[tuple[str, Row]],
+    env: Env | None = None,
+) -> dict[str, Any]:
     env = env or Env()
     rows = []
-    for row_id, fn in ROWS:
+    for row_id, fn in rows_to_run:
         try:
             fn(run, env)
             rows.append({"row": row_id, "status": "PASS", "detail": ""})
         except (driver.Refusal, OSError, ValueError, KeyError) as exc:
             rows.append({"row": row_id, "status": "FAIL", "detail": str(exc)[:400]})
     return {
-        "kind": "release-preflight-g0-v1",
-        "gate": "G0",
+        "kind": f"release-preflight-{gate.lower()}-v1",
+        "gate": gate,
         "config_sha256": config_sha256(run),
         "code_commit": run.values["code_commit"],
         "git_retries": list(run.git_retries),
@@ -315,6 +439,17 @@ def run_g0(run: driver.Run, env: Env | None = None) -> dict[str, Any]:
         "status": "PASS" if all(r["status"] == "PASS" for r in rows) else "FAIL",
         "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+
+
+def run_g0(run: driver.Run, env: Env | None = None) -> dict[str, Any]:
+    return run_gate(run, "G0", ROWS, env)
+
+
+def run_g1(run: driver.Run, env: Env | None = None) -> dict[str, Any]:
+    """The consumer-contract gate: after the prep chain, before ``attended`` (needs the ledger spec and the
+    preparation spec)."""
+
+    return run_gate(run, "G1", G1_ROWS, env)
 
 
 def recheck(run: driver.Run, row_ids: Sequence[str], env: Env | None = None) -> None:
@@ -354,7 +489,7 @@ def verify_receipt(run: driver.Run, gate: str) -> None:
     receipt = driver.read_json(path)
     rows = receipt.get("rows")
     if (
-        receipt.get("kind") != "release-preflight-g0-v1"
+        receipt.get("kind") != f"release-preflight-{gate.lower()}-v1"
         or not isinstance(rows, list)
         or not rows
     ):
@@ -375,6 +510,10 @@ def verify_receipt(run: driver.Run, gate: str) -> None:
         raise driver.Refusal(
             f"gate {gate} receipt is for another run configuration or code identity"
         )
+    if "candidate_id" in receipt and receipt["candidate_id"] != run.expand(
+        "{candidate_id}"
+    ):
+        raise driver.Refusal(f"gate {gate} receipt is for another panel candidate")
     failed = [r.get("row") for r in rows if r.get("status") != "PASS"]
     if receipt.get("status") != "PASS" or failed:
         raise driver.Refusal(f"gate {gate} receipt is FAIL: {failed[:4]}")
@@ -429,19 +568,54 @@ def retire_release(
     return destination
 
 
+def retire_stale(
+    coordination_root: Path,
+    ticket: str,
+    archive_dir: Path,
+    keep: Sequence[str] = (),
+) -> list[str]:
+    """Retire every non-terminal release except those named in ``keep`` (an abandoned run's leftovers). An
+    unreadable release directory is refused, not skipped: it needs a person to look at it."""
+
+    retired = []
+    for entry in non_terminal_releases(coordination_root):
+        release_id, _, state = entry.partition(":")
+        if release_id in keep:
+            continue
+        if state == "UNREADABLE":
+            raise driver.Refusal(
+                f"release {release_id[:12]} is unreadable: not retired"
+            )
+        retire_release(coordination_root, release_id, ticket, archive_dir)
+        retired.append(release_id)
+    return retired
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    g0 = sub.add_parser("g0")
-    g0.add_argument("--config", type=Path, required=True)
-    g0.add_argument("--graph", type=Path)
+    for name in ("g0", "g1"):
+        gate_parser = sub.add_parser(name)
+        gate_parser.add_argument("--config", type=Path, required=True)
+        gate_parser.add_argument("--graph", type=Path)
     retire = sub.add_parser("retire")
     retire.add_argument("--coordination-root", type=Path, required=True)
     retire.add_argument("--release-id", required=True)
     retire.add_argument("--ticket", required=True)
     retire.add_argument("--archive-dir", type=Path, required=True)
+    stale = sub.add_parser("retire-stale")
+    stale.add_argument("--coordination-root", type=Path, required=True)
+    stale.add_argument("--ticket", required=True)
+    stale.add_argument("--archive-dir", type=Path, required=True)
+    stale.add_argument("--keep", action="append", default=[], metavar="RELEASE_ID")
     args = parser.parse_args(argv)
     try:
+        if args.command == "retire-stale":
+            done = retire_stale(
+                args.coordination_root, args.ticket, args.archive_dir, args.keep
+            )
+            print(f"retired {len(done)} release(s)")
+            return 0
         if args.command == "retire":
             moved = retire_release(
                 args.coordination_root,
@@ -452,11 +626,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"retired {args.release_id[:12]} to {moved}")
             return 0
         run = driver.load_run(args.config, args.graph)
-        receipt = run_g0(run)
+        receipt = (run_g0 if args.command == "g0" else run_g1)(run)
         path = write_receipt(run, receipt)
         for row in receipt["rows"]:
             print(f"{row['status']:4} {row['row']} {row['detail']}")
-        print(f"G0 {receipt['status']}: {path}")
+        print(f"{receipt['gate']} {receipt['status']}: {path}")
         return 0 if receipt["status"] == "PASS" else 1
     except driver.Refusal as refusal:
         print(f"refused: {refusal}", file=sys.stderr)

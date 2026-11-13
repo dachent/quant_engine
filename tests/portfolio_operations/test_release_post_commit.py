@@ -502,3 +502,59 @@ def test_the_published_panel_render_check_is_a_step_when_the_panel_dir_is_given(
     else:
         assert status == 1
         assert "published-render exited 1" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", ["rehearsal-fails", "restore-fails"])
+def test_a_non_blocking_rehearsal_that_fails_is_recorded_and_never_refuses(
+    world: dict[str, Any], mode: str
+) -> None:
+    """RULING-D 5.2: the release is verified before the rehearsal runs; its failure is a recorded finding."""
+
+    (world["tools"] / "mode.txt").write_text(mode, encoding="utf-8")
+    out = world["tmp"] / "post" / "rehearsal-receipt.json"
+    assert (
+        tool.main(
+            [*world["args"][:-3], "--rehearsal-out", str(out), *world["args"][-3:]]
+        )
+        == 0
+    )
+    main_receipt = json.loads(Path(_flag(world["args"], "--out")).read_bytes())
+    assert main_receipt["rehearsal"] == "NON_BLOCKING"
+    assert [s["step"] for s in main_receipt["steps"]] == [
+        "post-release-verify",
+        "post-commit-validate",
+        "post-commit-validation",
+    ]
+    receipt = json.loads(out.read_bytes())
+    assert receipt["status"] == "FAIL" and receipt["blocking"] is False
+    assert [s["step"] for s in receipt["steps"]] == [
+        "recovery-rehearsal",
+        "clean-room-restore",
+    ]
+
+
+def test_a_non_blocking_rehearsal_that_passes_is_recorded_pass(
+    world: dict[str, Any],
+) -> None:
+    out = world["tmp"] / "post" / "rehearsal-receipt.json"
+    assert (
+        tool.main(
+            [*world["args"][:-3], "--rehearsal-out", str(out), *world["args"][-3:]]
+        )
+        == 0
+    )
+    assert json.loads(out.read_bytes())["status"] == "PASS"
+
+
+def test_a_failing_gate_step_still_refuses_with_a_non_blocking_rehearsal(
+    world: dict[str, Any],
+) -> None:
+    (world["tools"] / "mode.txt").write_text("qc-fails", encoding="utf-8")
+    out = world["tmp"] / "post" / "rehearsal-receipt.json"
+    assert (
+        tool.main(
+            [*world["args"][:-3], "--rehearsal-out", str(out), *world["args"][-3:]]
+        )
+        == 1
+    )
+    assert not out.exists()

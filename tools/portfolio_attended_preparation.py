@@ -349,6 +349,12 @@ def _pins(value: object, label: str) -> None:
             _pins(nested, f"{label}[{index}]")
 
 
+def verify_pins(value: object, label: str) -> None:
+    """Public entry of the consumer's own pin check (release preflight re-opens every pin where it will be read)."""
+
+    _pins(value, label)
+
+
 def _date(value: object, label: str) -> str:
     if not isinstance(value, str):
         raise AttendedPreparationError(f"{label} is invalid")
@@ -1909,6 +1915,9 @@ def _build_sleeve_facts(
     except (OSError, sleeve_release.SleeveFactsReleaseError) as exc:
         raise AttendedPreparationError(f"sleeve facts are refused: {exc}") from exc
     return sleeve_release.selected_paths(selection, destination)
+
+
+build_sleeve_facts = _build_sleeve_facts  # public name: the release preflight (G1) calls the same builder
 
 
 def _preparation_input_identity(

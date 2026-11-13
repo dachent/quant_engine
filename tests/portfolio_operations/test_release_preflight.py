@@ -10,6 +10,7 @@ from datetime import UTC, date, datetime
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import subprocess
 import sys
 from typing import Any
@@ -389,7 +390,7 @@ def test_the_shipped_graph_gates_attended_and_rechecks_the_moving_facts() -> Non
             (REPO_ROOT / "ops/mvp2-release/release-stages.json").read_text("utf-8")
         )["stages"]
     }
-    assert stages["attended"]["needs_gate"] == ["g0"]
+    assert stages["attended"]["needs_gate"] == ["g0", "g1"]
     for stage_id in ("lane-real", "lane-replica", "commit"):
         assert "repo:frozen" in stages[stage_id]["recheck"]
     table = pf.ROW_TABLE
@@ -457,12 +458,30 @@ def test_refusals_20_21_an_empty_identity_read_is_retried_once_and_recorded(
 
 
 def test_every_r3_refusal_cause_is_built_or_named_as_not_built() -> None:
-    assert sorted(pf.COVERAGE) == list(range(1, 25))
+    assert sorted(pf.COVERAGE) == list(range(1, 26))
     rows = dict(pf.ROWS)
-    source = Path(__file__).read_text(encoding="utf-8")
+    source = Path(__file__).read_text(encoding="utf-8") + "".join(
+        Path(__file__).with_name(name).read_text(encoding="utf-8")
+        for name in ("test_release_preflight_g1a.py", "test_release_preflight_g1b.py")
+    )
     for cause, where in pf.COVERAGE.items():
-        if where.startswith("G0:") and "(not built)" not in where:
+        if where.startswith("recheck:"):
+            assert where[8:] in pf.ROW_TABLE, (
+                cause,
+                where,
+            )  # its kill test: test_release_usable.py
+            continue
+        if where.startswith("G2:"):
+            continue  # test_release_preflight_g2 checks its own rows and kill tests
+        if where.startswith("G1:") and "(not built)" not in where:
+            assert where[3:] in dict(pf.G1_ROWS), (
+                cause,
+                where,
+            )  # its kill tests: test_release_preflight_g1a.py
+        elif where.startswith("G0:") and "(not built)" not in where:
             assert where[3:] in rows, (cause, where)
+        elif where.startswith("G1:") and "(not built)" not in where:
+            assert where[3:] in pf.ROW_TABLE, (cause, where)
         elif where.startswith("guard:"):
             assert where[6:].split(" (")[0] in source or where[6:].startswith(
                 "git-identity-retry"
@@ -479,7 +498,7 @@ def test_every_r3_refusal_cause_is_built_or_named_as_not_built() -> None:
     for match in re.finditer(r"def test_refusals?_(\d+(?:_\d+)*)_", source):
         named.update(int(n) for n in match.group(1).split("_"))
     for cause, where in pf.COVERAGE.items():
-        if where.startswith(("G0:", "guard:")) and "(not built)" not in where:
+        if where.startswith(("G0:", "G1:", "guard:")) and "(not built)" not in where:
             assert cause in named, (cause, where)
 
 
@@ -601,3 +620,171 @@ def test_refusal_19_the_spec_pair_row_is_the_replica_gates_own_topology(
             pf.spec_pair_mismatch(real, _pair_spec(replica_base, **other), real_base)
             or ""
         ), other
+
+
+# -- commit-path canary wiring (RULING-D 4.3) ----------------------------------------------------
+
+
+def _canary_env(
+    status: str = "PASS", fingerprint: str = "fp1"
+) -> tuple[pf.Env, list[Any]]:
+    calls: list[Any] = []
+
+    def fake(roots: Any, bound: Any = None, *, baseline: Any = None) -> dict[str, Any]:
+        calls.append((list(roots), list(bound or []), baseline))
+        checks = [{"id": "fs_ops:x", "status": status, "detail": "slow rename"}]
+        return {
+            "status": status,
+            "checks": checks,
+            "fingerprint": {"build": fingerprint},
+        }
+
+    return pf.Env(canary=fake), calls
+
+
+def _baseline_path(w: dict[str, Any]) -> Path:
+    run = driver.load_run(w["config"], w["graph"])
+    return run.cycle / pf.RECEIPT_DIR / pf.CANARY_BASELINE
+
+
+def test_canary_baseline_row_records_the_baseline_over_the_commit_roots(
+    gworld: dict[str, Any],
+) -> None:
+    run = driver.load_run(gworld["config"], gworld["graph"])
+    env, calls = _canary_env()
+    pf.recheck(run, ["canary:baseline"], env)
+    roots, _bound, baseline = calls[0]
+    assert baseline is None
+    assert roots == [gworld["coordination"], gworld["root"]]
+    assert driver.read_json(_baseline_path(gworld))["status"] == "PASS"
+
+
+def test_a_failing_canary_at_lane_entry_refuses_and_records_no_baseline(
+    gworld: dict[str, Any],
+) -> None:
+    run = driver.load_run(gworld["config"], gworld["graph"])
+    env, _ = _canary_env("FAIL")
+    with pytest.raises(driver.Refusal, match="commit-path canary failed: fs_ops:x"):
+        pf.recheck(run, ["canary:baseline"], env)
+    assert not _baseline_path(gworld).exists()
+
+
+def test_the_commit_refuses_without_a_canary_baseline(gworld: dict[str, Any]) -> None:
+    run = driver.load_run(gworld["config"], gworld["graph"])
+    env, calls = _canary_env()
+    with pytest.raises(driver.Refusal, match="no canary baseline"):
+        pf.recheck(run, ["canary:commit-path"], env)
+    assert calls == []
+
+
+def test_the_commit_canary_runs_against_the_recorded_baseline(
+    gworld: dict[str, Any],
+) -> None:
+    run = driver.load_run(gworld["config"], gworld["graph"])
+    env, calls = _canary_env()
+    pf.recheck(run, ["canary:baseline"], env)
+    pf.recheck(run, ["canary:commit-path"], env)
+    assert calls[1][2] == driver.read_json(_baseline_path(gworld))
+
+
+def test_a_commit_path_regression_or_slow_volume_refuses_the_commit(
+    gworld: dict[str, Any],
+) -> None:
+    run = driver.load_run(gworld["config"], gworld["graph"])
+    env, _ = _canary_env()
+    pf.recheck(run, ["canary:baseline"], env)
+    failing, _ = _canary_env("FAIL")
+    with pytest.raises(driver.Refusal, match="commit-path canary failed"):
+        pf.recheck(run, ["canary:commit-path"], failing)
+
+
+def test_a_changed_environment_fingerprint_refuses_the_commit(
+    gworld: dict[str, Any],
+) -> None:
+    run = driver.load_run(gworld["config"], gworld["graph"])
+    pf.recheck(run, ["canary:baseline"], _canary_env(fingerprint="fp1")[0])
+    with pytest.raises(driver.Refusal, match="fingerprint changed"):
+        pf.recheck(run, ["canary:commit-path"], _canary_env(fingerprint="fp2")[0])
+
+
+def test_the_real_canary_passes_baseline_then_commit_on_a_clean_volume(
+    gworld: dict[str, Any],
+) -> None:
+    run = driver.load_run(gworld["config"], gworld["graph"])
+    pf.recheck(run, ["canary:baseline"])
+    pf.recheck(run, ["canary:commit-path"])
+
+
+def test_the_stage_graph_wires_the_canary_into_lane_real_and_commit() -> None:
+    graph = json.loads(
+        (
+            Path(driver.__file__).parents[1] / "ops/mvp2-release/release-stages.json"
+        ).read_text(encoding="utf-8")
+    )
+    stages = {s["id"]: s for s in graph["stages"]}
+    assert "canary:baseline" in stages["lane-real"]["recheck"]
+    assert "canary:commit-path" in stages["commit"]["recheck"]
+    assert {"canary:baseline", "canary:commit-path"} <= set(pf.ROW_TABLE)
+    assert not {"canary:baseline", "canary:commit-path"} & {r for r, _ in pf.ROWS}
+
+
+def test_the_driver_refuses_a_commit_stage_with_no_baseline(
+    gworld: dict[str, Any],
+) -> None:
+    stage = {
+        "id": "gated",
+        "recheck": ["canary:commit-path"],
+        "outputs": ["{cycle}/gated.txt"],
+        "argv": ["{python}", "-c", "open(r'{cycle}/gated.txt','w').write('x')"],
+    }
+    graph = _graph(gworld, [stage])
+    assert (
+        driver.main(["run", "--config", str(gworld["config"]), "--graph", str(graph)])
+        == 2
+    )
+
+
+# -- release A configuration template ------------------------------------------------------------
+
+
+def _template() -> dict[str, Any]:
+    path = (
+        Path(driver.__file__).parents[1]
+        / "ops/mvp2-release/run-config.release-a.example.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_the_release_a_template_carries_every_g0_key_and_the_stated_cutoff() -> None:
+    config = _template()
+    assert not [k for k in pf.CONFIG_KEYS if k not in config]
+    assert config["release_label"] == "A"
+    assert config["release_cutoffs"]["A"] == config["requested_as_of"] == "2026-11-06"
+    assert config["ceremony"] == "full" and float(config["free_space_floor_gb"]) > 0
+    run = SimpleNamespace(
+        config=config,
+        values={k: str(v) for k, v in config.items() if isinstance(v, (str, int))},
+    )
+    pf.row_cutoff_stated(run, pf.Env())  # type: ignore[arg-type]
+
+
+def test_the_release_a_template_holds_placeholders_only() -> None:
+    def leaves(value: Any) -> list[str]:
+        if isinstance(value, dict):
+            return [x for v in value.values() for x in leaves(v)]
+        if isinstance(value, list):
+            return [x for v in value for x in leaves(v)]
+        return [value] if isinstance(value, str) else []
+
+    for item in leaves(_template()):
+        assert (
+            item.startswith("<")
+            or item
+            in {
+                "A",
+                "2026-11-06",
+                "full",
+                "release",
+            }
+            or item.startswith("Release A")
+        ), item

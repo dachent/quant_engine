@@ -1102,7 +1102,7 @@
     },
     {
       "id": "attended",
-      "needs_gate": ["g0"],
+      "needs_gate": ["g0", "g1"],
       "requires": [
         "pre-chain",
         "prep-spec"
@@ -1230,9 +1230,45 @@
       ]
     },
     {
-      "id": "qa-browser",
+      "id": "g2",
       "requires": [
         "attended"
+      ],
+      "builtin": "g2",
+      "validator_argv": [
+        "{python}",
+        "{tools}/validate_generation.py",
+        "{run}/stages/panel/candidates/{candidate_id}",
+        "--expected",
+        "{expected_baseline_arg}",
+        "--cutoff",
+        "{requested_as_of}",
+        "--out",
+        "{cycle}/preflight/g2-findings.json",
+        {
+          "if": "release_inputs_root",
+          "args": [
+            "--strategy-basis",
+            "{release_inputs_strategy_basis}",
+            "--sleeve-facts",
+            "{sleeve_facts}",
+            "--provider-ledger",
+            "{ledger_catalog}",
+            "--ibkr-root",
+            "{ibkr_root}",
+            "--tag-map",
+            "{release_inputs_tag_map}"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qa-browser",
+      "requires": [
+        "g2"
+      ],
+      "needs_gate": [
+        "g2"
       ],
       "env": {
         "PLAYWRIGHT_MODULE": "{playwright_module}",
@@ -1926,7 +1962,7 @@
     },
     {
       "id": "lane-replica",
-      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph", "g3:spec-pair"],
+      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph", "g3:spec-pair", "pins:resolve-in-world"],
       "only_ceremony": "full",
       "requires": [
         "replica-spec"
@@ -1987,7 +2023,7 @@
     },
     {
       "id": "lane-real",
-      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph", "g3:spec-pair"],
+      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph", "g3:spec-pair", "canary:baseline", "pins:resolve-in-world"],
       "requires": [
         "replica-spec"
       ],
@@ -2021,6 +2057,17 @@
         "{requested_as_of}",
         "--crosswalk",
         "{crosswalk}",
+        {
+          "if": "retire_ticket",
+          "args": [
+            "--coordination-root",
+            "{coordination_root}",
+            "--retire-ticket",
+            "{retire_ticket}",
+            "--archive-dir",
+            "{evidence_dest}/retired-releases"
+          ]
+        },
         {
           "if": "release_inputs_root",
           "args": [
@@ -2137,7 +2184,7 @@
     {
       "id": "commit",
       "explicit": true,
-      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph"],
+      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph", "canary:commit-path", "pins:resolve-in-world"],
       "requires": [
         "lane-replica",
         "lane-real"
@@ -2218,6 +2265,8 @@
         "{post_commit}/logs",
         "--out",
         "{post_commit}/post-commit-verify.json",
+        "--rehearsal-out",
+        "{post_commit}/rehearsal-receipt.json",
         "--published-panel-dir",
         "{panel_root}/generations/{panel_gid}",
         "--pre-findings",

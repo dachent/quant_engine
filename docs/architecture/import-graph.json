@@ -714,6 +714,11 @@
       1
     ],
     [
+      "release_driver",
+      "release_preflight_g2",
+      1
+    ],
+    [
       "release_fresh_world",
       "release_hwm_calendar",
       1
@@ -765,7 +770,82 @@
     ],
     [
       "release_preflight",
+      "portfolio_attended_preparation",
+      1
+    ],
+    [
+      "release_preflight",
+      "release_canary",
+      1
+    ],
+    [
+      "release_preflight",
       "release_driver",
+      1
+    ],
+    [
+      "release_preflight",
+      "release_preflight_g1a",
+      1
+    ],
+    [
+      "release_preflight",
+      "release_preflight_g1b",
+      1
+    ],
+    [
+      "release_preflight_g1a",
+      "portfolio_attended_preparation",
+      1
+    ],
+    [
+      "release_preflight_g1a",
+      "portfolio_pipeline_materialize",
+      1
+    ],
+    [
+      "release_preflight_g1a",
+      "portfolio_report",
+      1
+    ],
+    [
+      "release_preflight_g1a",
+      "provider_ledger",
+      1
+    ],
+    [
+      "release_preflight_g1a",
+      "release_driver",
+      1
+    ],
+    [
+      "release_preflight_g1b",
+      "portfolio_decomposition",
+      1
+    ],
+    [
+      "release_preflight_g1b",
+      "portfolio_report",
+      1
+    ],
+    [
+      "release_preflight_g1b",
+      "release_driver",
+      1
+    ],
+    [
+      "release_preflight_g2",
+      "panel_payload_size",
+      1
+    ],
+    [
+      "release_preflight_g2",
+      "release_driver",
+      1
+    ],
+    [
+      "release_preflight_g2",
+      "release_preflight",
       1
     ],
     [
@@ -781,6 +861,11 @@
     [
       "release_public_bundles",
       "portfolio_public_style_sources",
+      1
+    ],
+    [
+      "release_replica",
+      "release_preflight",
       1
     ],
     [
