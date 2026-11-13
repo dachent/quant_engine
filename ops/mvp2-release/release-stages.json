@@ -563,6 +563,13 @@
           ]
         },
         {
+          "if": "statement_reserves",
+          "args": [
+            "--statement-reserves",
+            "{statement_reserves}"
+          ]
+        },
+        {
           "for_each": "baseline_roots",
           "args": [
             "--root",

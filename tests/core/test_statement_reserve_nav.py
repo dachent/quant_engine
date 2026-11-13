@@ -85,3 +85,18 @@ def test_the_reserve_and_total_liquid_inputs_become_available_with_the_statement
         latest={},
     )
     assert empty["status"] == "NOT_READY_AT_CUTOFF"
+
+
+def test_an_owner_excluded_account_yields_only_its_latest_point_on_or_before_the_cutoff() -> (
+    None
+):
+    facts = srn.statement_reserve_facts(
+        _catalog(), date(2026, 11, 6), role="EXCLUDED_IMMATERIAL"
+    )
+    assert facts["nav"] == facts["admissions"] == facts["assignments"] == []
+    assert [(m["as_of_date"], m["value"]) for m in facts["excluded"]] == [
+        ("2026-09-30", "110.00")
+    ]
+    assert facts["excluded"][0]["label"] == "EXCLUDED_IMMATERIAL:john_hancock"
+    with pytest.raises(srn.StatementReserveError, match="role is unknown"):
+        srn.statement_reserve_facts(_catalog(), date(2026, 11, 6), role="OTHER")

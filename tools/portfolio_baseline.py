@@ -3744,6 +3744,7 @@ def _build_current_capital(
     policy_exclusions: Mapping[str, date],
     provider_catalog: Mapping[str, Any] | None = None,
     custody_authority: Mapping[str, Any] | None = None,
+    statement_excluded: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Publish the current capital view from NAV facts at ``valuation_date``."""
 
@@ -3958,11 +3959,15 @@ def _build_current_capital(
             f"before {vd}: " + ", ".join(not_ready_excluded),
         )
     else:
+        statement_total, statement_day = _statement_excluded_total(statement_excluded)
+        retained_days = [
+            day for day in (oldest(excluded), statement_day) if day is not None
+        ]
         retained = _aggregate(
             _CAPITAL_AVAILABLE,
-            total_of(excluded),
-            oldest(excluded),
-            excluded_ids,
+            _exact_sum([total_of(excluded), statement_total]),
+            min(retained_days) if retained_days else None,
+            [*excluded_ids, *_statement_excluded_ids(statement_excluded)],
             None,
         )
 
@@ -4250,6 +4255,7 @@ def _current_capital_checks(
     nav: Sequence[Mapping[str, Any]],
     provider_admissions: Sequence[Mapping[str, Any]],
     provider_catalog: Mapping[str, Any] | None = None,
+    statement_excluded: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Reconcile the published block with an independent recompute.
 
@@ -4269,6 +4275,7 @@ def _current_capital_checks(
             nav,
             provider_admissions,
             provider_catalog,
+            statement_excluded,
         )
     except BaselineValidationError as exc:
         return [
@@ -4289,6 +4296,7 @@ def _reconcile_current_capital(
     nav: Sequence[Mapping[str, Any]],
     provider_admissions: Sequence[Mapping[str, Any]],
     provider_catalog: Mapping[str, Any] | None = None,
+    statement_excluded: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     rows = _objects(current_capital.get("strategies"), "current_capital.strategies")
     scopes = {
@@ -4377,6 +4385,7 @@ def _reconcile_current_capital(
             valuation_date=valuation_date,
         ),
         valuation_date,
+        statement_excluded,
     )
     return [capital_check, identity_check]
 
@@ -4463,6 +4472,7 @@ def _expected_aggregates(
     scopes: Mapping[str, str],
     recomputed: Mapping[str, tuple[Decimal | None, date | None, tuple[str, ...]]],
     reserve: tuple[Decimal | None, date | None, tuple[str, ...]],
+    statement_excluded: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, tuple[Decimal | None, date | None]]:
     """What each aggregate must be, given the recomputed members."""
 
@@ -4488,7 +4498,9 @@ def _expected_aggregates(
         systematic = (None, None)
     expected: dict[str, tuple[Decimal | None, date | None]] = {
         "reserve": (reserve[0], reserve[1]),
-        "retained_excluded": total(settled(_SCOPE_RETAINED_EXCLUDED)),
+        "retained_excluded": _with_statement_excluded(
+            total(settled(_SCOPE_RETAINED_EXCLUDED)), statement_excluded
+        ),
         "systematic": systematic,
     }
     if all(value is not None for value, _ in expected.values()):
@@ -4509,8 +4521,9 @@ def _capital_identity_check(
     recomputed: Mapping[str, tuple[Decimal | None, date | None, tuple[str, ...]]],
     reserve: tuple[Decimal | None, date | None, tuple[str, ...]],
     valuation_date: date,
+    statement_excluded: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
-    expected = _expected_aggregates(scopes, recomputed, reserve)
+    expected = _expected_aggregates(scopes, recomputed, reserve, statement_excluded)
     mismatches: list[dict[str, Any]] = []
     statuses: dict[str, str] = {}
     for name in (*_AGGREGATE_COMPONENTS, "total_liquid"):
@@ -6340,6 +6353,33 @@ def _load_hwm_inputs_envelope(
     return envelope, hwm_artifact, hwm_link, acceptance_doc
 
 
+def _statement_excluded_total(
+    items: Sequence[Mapping[str, Any]],
+) -> tuple[Decimal, date | None]:
+    """Sum and oldest day of the owner-excluded accounts' statement points (#900)."""
+
+    values = [
+        _decimal(item.get("value"), "statement excluded value") or Decimal(0)
+        for item in items
+    ]
+    days = [_date(item.get("as_of_date"), "statement excluded date") for item in items]
+    return _exact_sum(values), (min(days) if days else None)
+
+
+def _statement_excluded_ids(items: Sequence[Mapping[str, Any]]) -> list[str]:
+    return [f"statement:{item.get('label')}" for item in items]
+
+
+def _with_statement_excluded(
+    pair: tuple[Decimal | None, date | None], items: Sequence[Mapping[str, Any]]
+) -> tuple[Decimal | None, date | None]:
+    if pair[0] is None or not items:
+        return pair
+    total, day = _statement_excluded_total(items)
+    days = [d for d in (pair[1], day) if d is not None]
+    return _exact_sum([pair[0], total]), (min(days) if days else None)
+
+
 def _statement_reserve_facts(
     value: object, as_of: date
 ) -> dict[str, list[dict[str, Any]]]:
@@ -6349,12 +6389,15 @@ def _statement_reserve_facts(
         "assignments": [],
         "nav": [],
         "admissions": [],
+        "excluded": [],
     }
     for pin in pins:
         try:
             raw = Path(_text(pin.get("path"), "statement reserve path")).read_bytes()
             facts = statement_reserve_nav.statement_reserve_facts(
-                statement_reserve_nav.verified_catalog(raw, pin), as_of
+                statement_reserve_nav.verified_catalog(raw, pin),
+                as_of,
+                role=str(pin.get("role", "RESERVE")),
             )
         except (OSError, statement_reserve_nav.StatementReserveError) as exc:
             raise BaselineValidationError(f"statement reserve input: {exc}") from exc
@@ -6408,6 +6451,7 @@ def build_catalog(
     reference_flows: list[dict[str, Any]] = []
     custody_authority: dict[str, Any] = {}
     fx_authority: dict[str, Any] = {}
+    statement_excluded: list[dict[str, Any]] = []
     if spec["schema_version"] == 2:
         schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
             spec["provider_generations"], roots, accounts, as_of
@@ -6478,6 +6522,7 @@ def build_catalog(
             accounts = [*accounts, *statement_facts["accounts"]]
             assignments = [*assignments, *statement_facts["assignments"]]
             provider_admissions = [*provider_admissions, *statement_facts["admissions"]]
+            statement_excluded = statement_facts["excluded"]
         reference_flows = _objects(
             provider_catalog.get("flows"), "provider-ledger.flows"
         )
@@ -6609,6 +6654,7 @@ def build_catalog(
         policy_exclusions=_hwm_policy_exclusions(),
         provider_catalog=provider_catalog if custody_authority else None,
         custody_authority=custody_authority or None,
+        statement_excluded=statement_excluded,
     )
     current_checks = _current_capital_checks(
         current_capital,
@@ -6616,6 +6662,7 @@ def build_catalog(
         nav=nav,
         provider_admissions=provider_admissions,
         provider_catalog=provider_catalog if custody_authority else None,
+        statement_excluded=statement_excluded,
     )
     if any(check["status"] == "FAIL" for check in current_checks):
         raise BaselineValidationError(
