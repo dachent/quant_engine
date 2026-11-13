@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from typing import Any
 
-from tools import series_label
+import series_label
 
 SERIES_KEY = "series_points"
 LABELS_KEY = "series_labels"
