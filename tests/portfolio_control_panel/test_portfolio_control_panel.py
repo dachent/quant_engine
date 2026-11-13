@@ -4802,6 +4802,31 @@ def test_report_dependence_identity_does_not_replace_report_artifact_identity(
         row for row in data["provenance"] if row["artifact"] == "portfolio-hwm-policy"
     )
     assert hwm_policy_provenance["as_of_date"] == "2026-07-30"
+    # #895 F9: the panel states the HWM policy identity once. When the report already
+    # carries the identical row the panel does not repeat it (preservation of the report
+    # row must not read as a duplicated one); the kill case is the old unconditional append.
+    assert [
+        r for r in data["provenance"] if r["artifact"] == "portfolio-hwm-policy"
+    ] == [hwm_policy_provenance]
+    repeated = json.loads(json.dumps(report))
+    repeated["provenance"] = [*repeated.get("provenance", []), hwm_policy_provenance]
+    repeated_root = tmp_path / "report-with-hwm-row"
+    repeated_source = tmp_path / "report-with-hwm-row.json"
+    _publish_report(repeated_root, repeated_source, repeated)
+    again = panel.build_candidate(
+        repeated_root,
+        inputs["legacy"],
+        tmp_path / "out-with-hwm-row",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    again_data = json.loads(
+        (Path(again["candidate_dir"]) / "data" / "dashboard_data.json").read_bytes()
+    )
+    assert [
+        r for r in again_data["provenance"] if r["artifact"] == "portfolio-hwm-policy"
+    ] == [hwm_policy_provenance]
 
 
 def test_partial_hybrid_eligibility_keeps_the_hybrid_mode(

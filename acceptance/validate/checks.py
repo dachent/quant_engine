@@ -7893,6 +7893,26 @@ def _dated_sections(
             ("C2",),
             ("c2_descriptive", row),
         )
+    # M5 (#895 F2): the provider reference comparisons carry their own observed end,
+    # published beside the benchmark ones. A provider series that ended before the
+    # cutoff is a stale input; it is labelled NOT_READY with its true end date, never a
+    # commit refusal for staleness itself (a non-date value or one after the cutoff is
+    # refused like the benchmark rows; an absent end date is skipped, the schema owns it).
+    provider_rows = node(ctx.report, "strategy_attribution", "comparisons")
+    for position, row in enumerate(
+        provider_rows if isinstance(provider_rows, list) else []
+    ):
+        if not isinstance(row, dict) or row.get("observed_end") is None:
+            continue
+        yield (
+            f"provider-comparison:{row.get('strategy_id')}",
+            REPORT,
+            f"$.strategy_attribution.comparisons[{position}].observed_end",
+            row.get("observed_end"),
+            row.get("status"),
+            ("M5",),
+            ("m5_provider_series", row),
+        )
     # The alias is only one published view. Check every mode, retaining a
     # divergent alias but avoiding duplicate findings for the same date claim.
     lens_views: list[tuple[str, str, list[Any]]] = []
@@ -8008,6 +8028,13 @@ def _date_role_is_valid(role: tuple[str, Any], status: Any, value: Any) -> bool:
             and end is not None
             and start <= end
             and value == row.get("observed_end")
+        )
+    if kind == "m5_provider_series":
+        return (
+            isinstance(detail.get("strategy_id"), str)
+            and bool(detail["strategy_id"].strip())
+            and _canonical_iso_day(value) is not None
+            and value == detail.get("observed_end")
         )
     if kind == "c4_historical":
         key, metadata = detail
@@ -8285,6 +8312,10 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
                 "provider counted as current at the common EOD although its data ends earlier",
             )
         elif day < cutoff:
+            if _finite_provider_without_active_account(ctx, row):
+                # C5 (#895 F2): a finite-boundary provider that no active account of the
+                # crosswalk draws on ends where its selected manifest ends, by design.
+                continue
             yield _finding(
                 "dates.source_clock",
                 NOT_READY,
@@ -8314,6 +8345,46 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
                 ("C5",),
                 "recurring source is stale at the cutoff (labelled STALE)",
             )
+
+
+_FINITE_BOUNDARY_BASIS = "FINITE_SELECTED_MANIFEST_BOUNDARY"
+
+
+def _finite_provider_without_active_account(
+    ctx: Context, row: Mapping[str, Any]
+) -> bool:
+    """Recomputed, not read from the label: the row says finite and not applicable, and
+    the authoritative crosswalk shows no account of that provider active at the cutoff.
+
+    A missing or unreadable crosswalk, or a provider the crosswalk names with an active
+    account, leaves the finding in place; the producer's own label alone grants nothing.
+    """
+
+    finality = row.get("finality")
+    source = row.get("source_id")
+    crosswalk = ctx.gen.external.crosswalk
+    crosswalk_rows = rows(crosswalk, "rows") if isinstance(crosswalk, dict) else []
+    if (
+        row.get("applies_to_latest_common_eod") is not False
+        or not isinstance(finality, Mapping)
+        or finality.get("basis") != _FINITE_BOUNDARY_BASIS
+        or not isinstance(source, str)
+        or not source.strip()
+        or not crosswalk_rows
+    ):
+        return False
+    wanted = source.strip().casefold()
+    known = {
+        item["provider"].strip().casefold()
+        for item in crosswalk_rows
+        if isinstance(item.get("provider"), str)
+    }
+    return wanted in known and not any(
+        isinstance(item.get("provider"), str)
+        and item["provider"].strip().casefold() == wanted
+        and _epoch_covers_cutoff(item, ctx.cutoff)
+        for item in crosswalk_rows
+    )
 
 
 def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
@@ -8761,14 +8832,40 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
     disclosures = rows(ctx.report, "leverage_disclosures")
     if disclosures:
         reference = universe(ctx)
-        applicable = sorted(
-            reference.active_accounts
-            if reference is not None
-            else {
-                str(row["account_id"])
+        # E8 scope (#894/#895): the check applies to levered accounts. An account is
+        # outside it only when the report itself states ACCOUNT_FINANCING_STATE rows for
+        # it and every one reads NOT_LEVERED; an account with no state row, a LEVERED or
+        # INCIDENTAL_DEBIT one, or an unreadable classification stays applicable, so a
+        # missing declaration never narrows the check.
+        not_levered = {
+            account
+            for account in {
+                str(row.get("account_id"))
                 for row in disclosures
-                if row.get("account_id") is not None
+                if row.get("data_class") == "ACCOUNT_FINANCING"
+                and row.get("measurement_basis") == "ACCOUNT_FINANCING_STATE"
             }
+            if all(
+                row.get("classification") == "NOT_LEVERED"
+                and is_available(row.get("coverage_status"))
+                and "UNVERIFIED" not in str(row.get("coverage_reason"))
+                for row in disclosures
+                if str(row.get("account_id")) == account
+                and row.get("data_class") == "ACCOUNT_FINANCING"
+                and row.get("measurement_basis") == "ACCOUNT_FINANCING_STATE"
+            )
+        }
+        applicable = sorted(
+            (
+                reference.active_accounts
+                if reference is not None
+                else {
+                    str(row["account_id"])
+                    for row in disclosures
+                    if row.get("account_id") is not None
+                }
+            )
+            - not_levered
         )
         for measure, entity, basis in (
             (
@@ -8796,6 +8893,8 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
                     )
             if applicable:
                 gap = bool(state)
+            elif reference is not None and not_levered:
+                gap = False  # every active account states NOT_LEVERED: nothing to cover
             else:
                 gap = not any(
                     is_available(row.get("coverage_status")) for row in measured

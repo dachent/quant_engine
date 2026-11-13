@@ -76,9 +76,9 @@
       "check_id": "preservation.report_to_panel",
       "issue": 895,
       "owner": "sprint-qc-validator",
-      "class": "BUILDER_BUG",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
       "close_by": "2026-12-15",
-      "reason": "portfolio-hwm-policy provenance row appended by both builders (F9)"
+      "reason": "F9 fixed in the panel builder (test_report_dependence_identity_does_not_replace_report_artifact_identity); the validator-side pass awaits a full-chain fixture"
     },
     {
       "check_id": "lint.payload_size",
@@ -92,9 +92,9 @@
       "check_id": "lint.internal_tokens_displayed",
       "issue": 895,
       "owner": "sprint-qc-validator",
-      "class": "BUILDER_NOT_WIRED",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
       "close_by": "2026-12-15",
-      "reason": "known_gap tokens are not humanised (F9)"
+      "reason": "F3 fixed: the panel humanises gate-note tokens (test_operator_readable_gate_notes); validator pass awaits a full-chain fixture"
     },
     {
       "check_id": "lint.invested_capital_vs_contributions",
@@ -990,9 +990,9 @@
       "check_id": "preservation.report_to_panel",
       "issue": 895,
       "owner": "sprint-qc-validator",
-      "class": "BUILDER_BUG",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
       "close_by": "2026-12-15",
-      "reason": "portfolio-hwm-policy provenance row appended by both builders (F9)",
+      "reason": "F9 fixed in the panel builder (test_report_dependence_identity_does_not_replace_report_artifact_identity); the validator-side pass awaits a full-chain fixture",
       "defect": "NONE",
       "owner_view": {
         "owner_class": "BUILDER_NOT_WIRED",
@@ -1009,9 +1009,9 @@
       "check_id": "lint.internal_tokens_displayed",
       "issue": 895,
       "owner": "sprint-qc-validator",
-      "class": "BUILDER_NOT_WIRED",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
       "close_by": "2026-12-15",
-      "reason": "known_gap tokens are not humanised (F9)",
+      "reason": "F3 fixed: the panel humanises gate-note tokens (test_operator_readable_gate_notes); validator pass awaits a full-chain fixture",
       "defect": "F3",
       "owner_view": {
         "owner_class": "REAL_DATA_GAP",
