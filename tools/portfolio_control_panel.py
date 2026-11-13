@@ -50,6 +50,7 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.core import inventory_identity
+import series_label
 import sleeve_disclosures
 import strategy_basis_lens_moves
 from portfolio_private_stage import validate_private_stage_target
@@ -5528,6 +5529,41 @@ def _available_prefixed(status: object) -> str:
     return text if text.startswith("AVAILABLE_") else "AVAILABLE_" + text
 
 
+def _fit_segments(
+    row: Mapping[str, Any], start: Any, end: Any, observations: int
+) -> list[series_label.SeriesLabel]:
+    """The labelled segment a factor fit was run on, for `headline_allowed`."""
+
+    if not (isinstance(start, str) and isinstance(end, str)):
+        return []
+    layer = row.get("evidence_layer")
+    if layer is None:
+        layer = "ACCOUNT_LIVE"  # composition already fails closed on backtest
+    if layer not in {"ACCOUNT_LIVE", "PROVIDER_LIVE"}:
+        return []  # BACKTEST, hybrid or unknown: never a live segment
+    model_only = layer == "PROVIDER_LIVE"
+    # the fit's window opens at the close before its first aligned return
+    try:
+        start = (date.fromisoformat(start) - timedelta(days=1)).isoformat()
+    except ValueError:
+        return []
+    try:
+        return [
+            series_label.SeriesLabel(
+                layer="MODEL_LIVE" if model_only else "ACCOUNT_LIVE",
+                entity_id=str(row.get("series_id") or "fit"),
+                entity_role="MODEL_BOOK" if model_only else "ACCOUNT",
+                first=start,
+                last=end,
+                observations=max(observations, 1),
+                currency="USD",
+                return_basis="FACTOR_FIT",
+            )
+        ]
+    except (series_label.SeriesLabelError, ValueError):
+        return []
+
+
 def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
     """What a reader needs next to an alpha tile: window, n, SE, t, backtest share, basis.
 
@@ -5622,6 +5658,12 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         headline_status = "NOT_A_HEADLINE_COMPOSITION_UNKNOWN"
     elif t_stat is None:
         headline_status = "NOT_A_HEADLINE_NO_STANDARD_ERROR"
+    elif not series_label.headline_allowed(
+        _fit_segments(row, start, end, used if isinstance(used, int) else 1)
+    ):
+        # sprint-p123's layer rule: only MODEL_LIVE / ACCOUNT_LIVE segments, over
+        # at least one year
+        headline_status = "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE"
     else:
         headline_status = "HEADLINE_ALLOWED"
     return {

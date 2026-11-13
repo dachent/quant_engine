@@ -153,7 +153,7 @@
   },
   {
    "file": "apps/portfolio-control-panel/app.js",
-   "pattern": "^(no standard error: not a headline|includes hypothetical backtest: not a live result, no headline)$",
+   "pattern": "^(no standard error: not a headline|includes hypothetical backtest: not a live result, no headline|window under a year or not a live series: no headline)$",
    "justification": "rendered only when the alpha context's headline_status says the alpha is not a headline (no standard error, or a backtest in its series); the status is computed and kill-tested in test_alpha_headline_rule (#904 items 10 and 11)"
   },
   {
