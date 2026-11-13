@@ -60,18 +60,28 @@ def _dummy(arg: str) -> str:
     return re.sub(r"\{[^{}]+\}", "x", arg)
 
 
+def _command(argv: list[str]) -> tuple[Path, list[str]] | None:
+    if len(argv) < 2 or argv[0] != "{python}":
+        return None
+    root = next((r for r in ROOTS if argv[1].startswith(r + "/")), None)
+    if root is None:
+        return None  # -m modules and node scripts are not argparse scripts of this repo
+    return ROOTS[root] / argv[1][len(root) + 1 :], [_dummy(x) for x in argv[2:]]
+
+
 def _stages() -> list[tuple[str, Path, list[str]]]:
     found = []
     for stage in GRAPH["stages"]:
         argv = _flatten(stage.get("argv", []))
-        if len(argv) < 2 or argv[0] != "{python}":
-            continue
-        head = argv[1]
-        root = next((r for r in ROOTS if head.startswith(r + "/")), None)
-        if root is None:
-            continue  # -m modules and node scripts are not argparse scripts of this repo
-        script = ROOTS[root] / head[len(root) + 1 :]
-        found.append((stage["id"], script, [_dummy(a) for a in argv[2:]]))
+        command = _command(argv)
+        if command is not None:
+            found.append((stage["id"], *command))
+        if (
+            "--" in argv
+        ):  # a command passed through after "--" (post-commit-verify's validator)
+            tail = _command(argv[argv.index("--") + 1 :])
+            if tail is not None:
+                found.append((f"{stage['id']} (after --)", *tail))
     return found
 
 
