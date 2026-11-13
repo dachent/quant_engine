@@ -32,6 +32,8 @@ from typing import (
 )
 from zoneinfo import ZoneInfo
 
+import statement_reserve_nav
+
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -481,6 +483,8 @@ def _load_spec(spec_path: Path) -> dict[str, Any]:
         keys.add("provider_generations")
     elif version == SPEC_SCHEMA_VERSION:
         keys.add("provider_ledger")
+        if "statement_reserves" in spec:
+            keys.add("statement_reserves")
     _strict_keys(
         spec,
         keys,
@@ -6336,6 +6340,29 @@ def _load_hwm_inputs_envelope(
     return envelope, hwm_artifact, hwm_link, acceptance_doc
 
 
+def _statement_reserve_facts(
+    value: object, as_of: date
+) -> dict[str, list[dict[str, Any]]]:
+    pins = _objects(value, "spec.statement_reserves")
+    merged: dict[str, list[dict[str, Any]]] = {
+        "accounts": [],
+        "assignments": [],
+        "nav": [],
+        "admissions": [],
+    }
+    for pin in pins:
+        try:
+            raw = Path(_text(pin.get("path"), "statement reserve path")).read_bytes()
+            facts = statement_reserve_nav.statement_reserve_facts(
+                statement_reserve_nav.verified_catalog(raw, pin), as_of
+            )
+        except (OSError, statement_reserve_nav.StatementReserveError) as exc:
+            raise BaselineValidationError(f"statement reserve input: {exc}") from exc
+        for key in merged:
+            merged[key].extend(facts[key])
+    return merged
+
+
 def build_catalog(
     spec_path: Path,
 ) -> tuple[dict[str, Any], GenerationManifest, bytes]:
@@ -6441,6 +6468,16 @@ def build_catalog(
         provider_admissions = _objects(
             provider_catalog.get("admissions"), "provider-ledger.admissions"
         )
+        if "statement_reserves" in spec:
+            # #900 (B): statement NAV points of reserve accounts that are not provider-ledger
+            # providers, read from hash-pinned catalogs (latest on or before the cutoff).
+            statement_facts = _statement_reserve_facts(
+                spec["statement_reserves"], as_of
+            )
+            nav = [*nav, *statement_facts["nav"]]
+            accounts = [*accounts, *statement_facts["accounts"]]
+            assignments = [*assignments, *statement_facts["assignments"]]
+            provider_admissions = [*provider_admissions, *statement_facts["admissions"]]
         reference_flows = _objects(
             provider_catalog.get("flows"), "provider-ledger.flows"
         )
