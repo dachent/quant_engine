@@ -6230,6 +6230,28 @@ def check_benchmark_account_return(ctx: Context) -> Iterator[Finding]:
         pointer = f"$.strategy_attribution.benchmark_comparisons[{position}].metrics"
         if shown is None:
             continue
+        if strategy in epoch_receipts(ctx):
+            # A receipt-carrying strategy's comparison publishes the epoch headline
+            # (daily rows times the verified HPR spans), not the daily-only compound:
+            # compare it with the same splice the comparison is built from.
+            spliced = splice_window(ctx, strategy, start, end)
+            if spliced.value is None:
+                if spliced.edge is None:
+                    # an unverified span: the receipt checks already report it
+                    continue
+                yield _finding(
+                    "returns.benchmark_account_return",
+                    NOT_READY,
+                    strategy,
+                    {"benchmark_account_cumulative_return": shown},
+                    "an epoch splice of the live series over the benchmark window",
+                    REPORT,
+                    f"{pointer}.account_cumulative_return",
+                    ("B3",),
+                    f"benchmark account return cannot be spliced: {spliced.declined}",
+                )
+                continue
+            computed, count = spliced.value, spliced.rows
         if (
             count == 0
             and row.get("account_series_source") == RETAINED_ACCOUNT_SOURCE
