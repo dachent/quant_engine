@@ -20,6 +20,7 @@ from functools import wraps
 import hashlib
 import importlib.util
 import io
+import itertools
 import json
 from pathlib import Path
 import re
@@ -29,6 +30,8 @@ import tempfile
 from typing import Any, Callable, Final, Mapping, NamedTuple, Sequence
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
+
+import account_financing
 
 from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
@@ -2471,15 +2474,11 @@ def _load_spec(path: Path) -> dict[str, Any]:
     expected = base_keys | ({"financial_mvp"} if version == SCHEMA_VERSION else set())
     allowed = {frozenset(expected)}
     if version == SCHEMA_VERSION:
-        optional = ("portfolio_fx_rates", "run_observation")
+        optional = ("portfolio_fx_rates", "run_observation", "account_roles")
         allowed.update(
             frozenset({*expected, *subset})
-            for subset in (
-                (),
-                (optional[0],),
-                (optional[1],),
-                optional,
-            )
+            for size in range(len(optional) + 1)
+            for subset in itertools.combinations(optional, size)
         )
     if frozenset(spec) not in allowed or version not in {1, SCHEMA_VERSION}:
         raise ProviderLedgerError("provider-ledger spec keys or version differ")
@@ -3902,6 +3901,27 @@ def _contract_fx_segment(financial_contract: Mapping[str, Any]) -> dict[str, Any
     if len(segments) != 1:
         raise ProviderLedgerError("portfolio FX contract segment is absent")
     return segments[0]
+
+
+def _reserve_nav_windows(value: object) -> dict[str, list[tuple[date, date, str]]]:
+    """The declared reserve NAV windows (#900) from the pinned governed declaration."""
+
+    ref = _object(value, "account_roles")
+    if set(ref) != {"path", "sha256", "size_bytes"}:
+        raise ProviderLedgerError("account_roles reference keys differ")
+    path = _absolute_regular_path(ref["path"], "account_roles.path")
+    raw = path.read_bytes()
+    if (
+        hashlib.sha256(raw).hexdigest() != ref["sha256"]
+        or len(raw) != ref["size_bytes"]
+    ):
+        raise ProviderLedgerError("account_roles identity differs")
+    try:
+        return account_financing.reserve_nav_windows(
+            account_financing.load_sleeve_roles(raw)
+        )
+    except account_financing.FinancingDeclarationError as exc:
+        raise ProviderLedgerError(f"account_roles is invalid: {exc}") from exc
 
 
 def _portfolio_fx_rates(
@@ -10756,6 +10776,9 @@ def build_catalog(
         if "portfolio_fx_rates" in spec
         else None
     )
+    reserve_nav_windows = (
+        _reserve_nav_windows(spec["account_roles"]) if "account_roles" in spec else None
+    )
     provenance, provenance_artifact = _provenance(spec)
     accounts, strategies, assignments = _assignment_index(
         provenance, _object(authority.get("contract"), "financial MVP contract")
@@ -11112,6 +11135,7 @@ def build_catalog(
             provider_roots["quantbase"],
             {_CSV_FACT_ACCOUNT[_QUANTBASE]},
         ),
+        reserve_nav_windows=reserve_nav_windows,
     )
     admit_or_declare, admit_or_declare_bytes = _admit_or_declare_receipt(
         authority,
