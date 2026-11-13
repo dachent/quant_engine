@@ -455,3 +455,44 @@ def test_relative_generation_and_repo_paths_refuse(world: World) -> None:
     )
     _refuses(world, "ROOT_MISSING", ledger_generation=Path("rel") / "x")
     _refuses(world, "ROOT_MISSING", repo_root=Path("."))
+
+
+def _pins_file(world: World, catalog: bytes, *, sha: str | None = None) -> Path:
+    catalog_path = world.tmp / "statement-catalog.json"
+    catalog_path.write_bytes(catalog)
+    pins = world.tmp / "statement-reserves.json"
+    pins.write_text(
+        json.dumps(
+            [
+                {
+                    "path": str(catalog_path),
+                    "sha256": sha or _sha(catalog),
+                    "size_bytes": len(catalog),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return pins
+
+
+def test_statement_reserves_reach_the_baseline_spec_only_when_pinned(
+    world: World,
+) -> None:
+    """#900 (B): present => the spec carries the verified pins; absent => as before."""
+
+    assert "statement_reserves" not in world.build()
+    catalog = b'{"catalog_schema_version": 1}'
+    spec = tool.build(**world.kwargs(), statement_reserves=_pins_file(world, catalog))
+    assert spec["statement_reserves"][0]["sha256"] == _sha(catalog)
+    assert spec["statement_reserves"][0]["size_bytes"] == len(catalog)
+
+
+def test_a_statement_reserve_pin_that_differs_from_its_file_refuses(
+    world: World,
+) -> None:
+    _refuses(
+        world,
+        "HASH_MISMATCH",
+        statement_reserves=_pins_file(world, b"{}", sha="0" * 64),
+    )

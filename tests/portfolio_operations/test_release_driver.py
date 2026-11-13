@@ -802,6 +802,7 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "vendor_gap_fills",
         "model_vs_actual_input",
         "account_financing",
+        "statement_reserves",
         "implementation_model_book_perf",
         "prep_pins",
         "prep_pin_root_key",

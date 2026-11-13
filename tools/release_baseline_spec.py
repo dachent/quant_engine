@@ -256,6 +256,35 @@ def _ledger_cross_check(
     return _sha256(catalog_bytes)
 
 
+def _statement_reserve_pins(path: Path) -> list[dict[str, Any]]:
+    """The per-cycle statement reserve pins (#900): a JSON list of
+    {path, sha256, size_bytes} of statement NAV generation catalogs, each verified."""
+
+    pins = _read_json(path, "statement reserves")
+    if not isinstance(pins, list) or not pins:
+        raise BaselineSpecError(
+            "INVALID", "statement reserves must be a non-empty list"
+        )
+    out: list[dict[str, Any]] = []
+    for pin in pins:
+        if not isinstance(pin, dict) or set(pin) != {"path", "sha256", "size_bytes"}:
+            raise BaselineSpecError("INVALID", "a statement reserve pin has wrong keys")
+        _pinned_file(
+            Path(str(pin["path"])),
+            str(pin["sha256"]),
+            "statement reserve catalog",
+            pin["size_bytes"] if isinstance(pin["size_bytes"], int) else -1,
+        )
+        out.append(
+            {
+                "path": str(pin["path"]),
+                "sha256": str(pin["sha256"]),
+                "size_bytes": int(pin["size_bytes"]),
+            }
+        )
+    return out
+
+
 def build(
     *,
     resolved_cycle: Path,
@@ -267,6 +296,7 @@ def build(
     provenance_generation: Path,
     ledger_generation: Path,
     repo_root: Path,
+    statement_reserves: Path | None = None,
 ) -> dict[str, Any]:
     resolved = _resolved_cycle(resolved_cycle)
     cutoff = resolved["cutoff"]
@@ -371,6 +401,8 @@ def build(
         },
         "replay": declared["replay"],
     }
+    if statement_reserves is not None:
+        spec["statement_reserves"] = _statement_reserve_pins(statement_reserves)
     _schema_check(spec, SPEC_SCHEMA, "SPEC_SCHEMA", "built baseline spec")
     return spec
 
@@ -441,6 +473,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     b.add_argument("--provenance-generation", type=Path, required=True)
     b.add_argument("--ledger-generation", type=Path, required=True)
     b.add_argument("--repo-root", type=Path, default=REPO_ROOT)
+    b.add_argument("--statement-reserves", type=Path)
     b.add_argument("--out", type=Path, required=True)
     d = commands.add_parser("declare")
     d.add_argument("--previous-spec", type=Path, required=True)
@@ -459,6 +492,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provenance_generation=args.provenance_generation,
                 ledger_generation=args.ledger_generation,
                 repo_root=args.repo_root,
+                statement_reserves=args.statement_reserves,
             )
             _create_only(args.out, _canonical(spec))
             print(json.dumps({"baseline_spec_sha256": _sha256(_canonical(spec))}))
