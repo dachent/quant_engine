@@ -373,7 +373,21 @@
         "--provenance-generation-dir",
         "{prov_generation}",
         "--repo-root",
-        "{repo_root}"
+        "{repo_root}",
+        {
+          "if": "account_roles",
+          "args": [
+            "--account-roles",
+            "{account_roles}"
+          ]
+        },
+        {
+          "if": "quantbase_fill_closes",
+          "args": [
+            "--quantbase-fill-closes",
+            "{quantbase_fill_closes}"
+          ]
+        }
       ],
       "checks": [
         {
