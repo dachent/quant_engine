@@ -41,9 +41,13 @@ def verified_catalog(raw: bytes, pin: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def statement_reserve_facts(
-    catalog: Mapping[str, Any], cutoff: date
+    catalog: Mapping[str, Any], cutoff: date, role: str = "RESERVE"
 ) -> dict[str, list[dict[str, Any]]]:
-    """Accounts, reserve-pool assignments, NAV rows and admissions up to the cutoff."""
+    """Accounts, reserve-pool assignments, NAV rows and admissions up to the cutoff.
+
+    ``role`` EXCLUDED_IMMATERIAL (an owner-excluded account): no reserve facts; only its
+    latest statement point on or before the cutoff, as a retained-excluded member.
+    """
 
     accounts: Sequence[Mapping[str, Any]] = catalog.get("accounts") or []
     if len(accounts) != 1:
@@ -60,8 +64,32 @@ def statement_reserve_facts(
         ),
         key=lambda item: item[0],
     )
+    empty: dict[str, list[dict[str, Any]]] = {
+        "accounts": [],
+        "assignments": [],
+        "nav": [],
+        "admissions": [],
+        "excluded": [],
+    }
     if not points:
-        return {"accounts": [], "assignments": [], "nav": [], "admissions": []}
+        return empty
+    if role == "EXCLUDED_IMMATERIAL":
+        day, row = points[-1]
+        provider = str(account.get("provider", "")).lower()
+        return {
+            **empty,
+            "excluded": [
+                {
+                    "account_id": account_id,
+                    "as_of_date": day.isoformat(),
+                    "label": "EXCLUDED_IMMATERIAL:" + provider,
+                    "record_id": row.get("record_id"),
+                    "value": str(row["nav"]["value"]),
+                }
+            ],
+        }
+    if role != "RESERVE":
+        raise StatementReserveError("statement reserve role is unknown")
     admissions: list[dict[str, Any]] = []
     for index, (day, _row) in enumerate(points):
         end = (
@@ -97,4 +125,5 @@ def statement_reserve_facts(
             for _day, row in points
         ],
         "admissions": admissions,
+        "excluded": [],
     }

@@ -267,7 +267,11 @@ def _statement_reserve_pins(path: Path) -> list[dict[str, Any]]:
         )
     out: list[dict[str, Any]] = []
     for pin in pins:
-        if not isinstance(pin, dict) or set(pin) != {"path", "sha256", "size_bytes"}:
+        if not isinstance(pin, dict) or not (
+            {"path", "sha256", "size_bytes"}
+            <= set(pin)
+            <= {"path", "sha256", "size_bytes", "role"}
+        ):
             raise BaselineSpecError("INVALID", "a statement reserve pin has wrong keys")
         _pinned_file(
             Path(str(pin["path"])),
@@ -280,6 +284,7 @@ def _statement_reserve_pins(path: Path) -> list[dict[str, Any]]:
                 "path": str(pin["path"]),
                 "sha256": str(pin["sha256"]),
                 "size_bytes": int(pin["size_bytes"]),
+                **({"role": str(pin["role"])} if "role" in pin else {}),
             }
         )
     return out

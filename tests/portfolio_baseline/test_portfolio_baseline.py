@@ -5785,3 +5785,58 @@ def test_an_absent_cutoff_reproduces_the_r21_new_york_relabel_exactly(
     assert legacy["as_of_basis"] == baseline.POSITION_AS_OF_BASIS_CAPTURED_AFTER_CLOSE
     assert "valuation_cutoff" not in legacy
     assert {k: v for k, v in keyed.items() if k != "valuation_cutoff"} == legacy
+
+
+def test_an_owner_excluded_statement_account_joins_retained_excluded_and_total_liquid() -> (
+    None
+):
+    """#900 (B): Composer's latest statement point is a retained-excluded member."""
+
+    case = _cc_case()
+    case["provider_admissions"] = [
+        row for row in case["provider_admissions"] if row["account_id"] != "acct-r1"
+    ] + [
+        _cc_admission("acct-r1", "AUTHORITATIVE"),
+        _cc_admission("acct-r2", "AUTHORITATIVE"),
+    ]
+    case["nav"].append(_cc_nav("acct-r2", "2026-09-17", "10"))
+    case["nav"].append(_cc_nav("acct-z1", "2026-09-01", "2.5", source_key="manual"))
+    statement = [
+        {
+            "account_id": "account-" + "c" * 16,
+            "as_of_date": "2026-08-31",
+            "label": "EXCLUDED_IMMATERIAL:composer",
+            "value": "20",
+        }
+    ]
+
+    block = baseline._build_current_capital(**case, statement_excluded=statement)
+
+    assert block["retained_excluded"]["current_value"]["value"] == "27.5"
+    assert (
+        "statement:EXCLUDED_IMMATERIAL:composer"
+        in (block["retained_excluded"]["components"])
+    )
+    assert block["total_liquid"]["current_value"]["value"] == "1537.5"
+
+    def identity(**extra: Any) -> dict[str, Any]:
+        rows = baseline._current_capital_checks(
+            block,
+            assignments=case["assignments"],
+            nav=case["nav"],
+            provider_admissions=case["provider_admissions"],
+            **extra,
+        )
+        return {row["check_id"]: row for row in rows}["capital-identity-at-cutoff"]
+
+    assert identity(statement_excluded=statement)["status"] == "PASS"
+    # the independent recompute reads the same statement members: without them the
+    # published retained-excluded value no longer reconciles
+    assert identity()["status"] == "FAIL"
+    # and with no statement member the capital view is exactly what it was
+    assert (
+        baseline._build_current_capital(**case)["total_liquid"]["current_value"][
+            "value"
+        ]
+        == "1517.5"
+    )
