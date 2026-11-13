@@ -10956,7 +10956,7 @@ def build_catalog(
             manifest=manifest,
             root=root,
             fx_rates=fx_rates if provider_id == "matrixport" else None,
-            fill_closes=fill_closes if provider_id == "quantbase" else None,
+            fill_closes=fill_closes,
             requested_as_of=as_of if run_observation is not None else None,
             financial_cutoff=(
                 min(
