@@ -43,7 +43,7 @@ from quant_engine.portfolio_ledger import (
     HwmCoverageError,
     validate_admit_or_declare_receipt,
 )
-from quant_engine.portfolio_ledger.provider_admission import run_observation_identity
+from quant_engine.portfolio_ledger import run_observation_identity
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )

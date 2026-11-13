@@ -67,7 +67,7 @@ from quant_engine.portfolio_ledger import (
     validate_dataset_dispositions,
     validate_provider_authority,
 )
-from quant_engine.portfolio_ledger.provider_admission import run_observation_identity
+from quant_engine.portfolio_ledger import run_observation_identity
 from quant_engine.portfolio_ledger.returns import (
     AVAILABLE,
     DATE_ONLY,
