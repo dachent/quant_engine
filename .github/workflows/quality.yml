@@ -257,6 +257,7 @@ jobs:
           tools/account_financing.py
           tools/leverage_closure.py
           tools/leverage_disclosure.py
+          tools/quantbase_fund_days.py
           tools/series_label.py
           tools/published_render_check.py
       - name: Resolve controller graph change range

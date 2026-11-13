@@ -29,6 +29,8 @@ from typing import Any, Callable, Final, Mapping, NamedTuple, Sequence
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
+import quantbase_fund_days
+
 from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
     AdapterIdentity,
@@ -1673,6 +1675,54 @@ def _matrixport_capital_anchors(
     return anchors
 
 
+def _quantbase_restated_days(
+    manifest: GenerationManifest,
+    root: Path,
+    run_id: str,
+    price_rows: Sequence[Mapping[str, Any]],
+    fill_closes: Mapping[str, Mapping[date, Decimal]],
+) -> dict[date, quantbase_fund_days.FundDay]:
+    """Fund-day values with each day's fills included (#909)."""
+
+    activity_rel = Path("csv/account_activity.csv")
+    artifact = _find_manifest_artifact(
+        manifest, f"source/{activity_rel.as_posix()}", "quantbase account activity"
+    )
+    rows = _verified_csv_rows(
+        _exact_file(
+            root / "source-runs" / run_id / "artifacts",
+            activity_rel,
+            "quantbase account activity",
+        ),
+        artifact.sha256,
+        {"activity_type", "filled_at", "fund", "fund_title", "quantity", "symbol"},
+        "quantbase account activity",
+    )
+    fund_id = _quantbase_fund_id(rows)
+    legs: list[quantbase_fund_days.Leg] = []
+    for row in rows:
+        filled_at = str(row.get("filled_at") or "").strip()
+        if row.get("activity_type") != "order" or row.get("fund") != fund_id:
+            continue
+        if not filled_at:
+            continue
+        quantity = _observed_decimal(row.get("quantity"), "quantbase order quantity")
+        if quantity is None:
+            continue
+        stamp = _utc_timestamp(filled_at, "quantbase order filled_at")
+        legs.append(
+            (date.fromisoformat(stamp[:10]), str(row.get("symbol") or ""), quantity)
+        )
+    dashboard: dict[date, Decimal] = {}
+    for price_row in price_rows:
+        value = _observed_decimal(price_row.get("value"), "quantbase Volatis value")
+        if value is not None and value > 0:
+            dashboard[_quantbase_day(price_row["time"], "quantbase Volatis time")] = (
+                value
+            )
+    return quantbase_fund_days.corrected_values(dashboard, legs, fill_closes)
+
+
 def _quantbase_nav_observations(
     generation_id: str,
     manifest: GenerationManifest,
@@ -1683,8 +1733,14 @@ def _quantbase_nav_observations(
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
     financial_cutoff: date | None = None,
     cutoff_findings: list[dict[str, Any]] | None = None,
+    fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Admit Quantbase Volatis daily dashboard values as strategy NAV observations."""
+    """Admit Quantbase Volatis daily dashboard values as strategy NAV observations.
+
+    The dashboard value of a day with fills is its pre-fill holdings at that day's
+    close (#909).  With governed ``fill_closes`` the day is restated to its post-fill
+    holdings (see ``quantbase_fund_days``); without them the dashboard value is kept.
+    """
     account_id = _CSV_FACT_ACCOUNT[_QUANTBASE]
     run_id = _run_id(
         _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
@@ -1705,6 +1761,9 @@ def _quantbase_nav_observations(
     rows = _verified_csv_rows(
         path, artifact.sha256, {"time", "value"}, "quantbase Volatis pricehistory"
     )
+    restated: dict[date, quantbase_fund_days.FundDay] = {}
+    if fill_closes is not None:
+        restated = _quantbase_restated_days(manifest, root, run_id, rows, fill_closes)
     observations: list[dict[str, Any]] = []
     for row in rows:
         value = _observed_decimal(row.get("value"), "quantbase Volatis value")
@@ -1729,10 +1788,27 @@ def _quantbase_nav_observations(
         # Same wrapped {currency, status, value} money shape as the catalog
         # providers — downstream readers require it.
         wrapped = {"currency": "USD", "status": "AVAILABLE", "value": row["value"]}
+        fund_day = restated.get(day)
+        if fund_day is not None and fund_day.status == quantbase_fund_days.RESTATED:
+            wrapped = {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": format(fund_day.value.quantize(Decimal("0.01")), "f"),
+            }
         observations.append(
             {
                 "account_id": account_id,
                 "as_of_date": source_id,
+                **(
+                    {
+                        "fill_restatement": {
+                            "dashboard_value": row["value"],
+                            "status": fund_day.status,
+                        }
+                    }
+                    if fund_day is not None
+                    else {}
+                ),
                 "evidence_layer": "ACCOUNT_LIVE",
                 "generation_id": generation_id,
                 "mapping_status": mapping_status,
