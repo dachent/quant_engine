@@ -35,7 +35,7 @@ from quant_engine.core import (
     hash_file,
     stage_generation,
 )
-from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import canonical_json_bytes
 
 SPEC_SCHEMA_VERSION = 1
 CATALOG_SCHEMA_VERSION = 1
