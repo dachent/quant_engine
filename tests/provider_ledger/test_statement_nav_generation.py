@@ -367,3 +367,14 @@ def test_generation_is_deterministic_and_stage_never_writes_current(
     assert Decimal(str(first[0]["nav_observations"][0]["nav"]["value"])) == Decimal(
         "1089.90"
     )  # type: ignore[index]
+
+
+def test_nav_rows_have_the_shape_the_ledger_reader_needs(tmp_path: Path) -> None:
+    catalog, manifest, _ = gen.build_generation(_composer(tmp_path))
+    ids = {a.artifact_id for a in manifest.artifacts}
+    row = catalog["nav_observations"][0]  # type: ignore[index]
+    assert row["record_id"] == "composer:2026-01-31"
+    assert row["nav"] == {"currency": "USD", "status": "AVAILABLE", "value": "1089.90"}
+    assert row["value_basis"] == "ACCOUNT_VALUE"
+    assert row["source_artifact_id"] in ids
+    assert not {"mapping_status", "provider_id"} & set(row)

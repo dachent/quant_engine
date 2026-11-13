@@ -451,11 +451,13 @@ def build_generation(
         {
             "account_id": internal,
             "as_of_date": item["period_end"],
-            "nav": {"currency": "USD", "value": item["closing"]},
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": item["closing"]},
             "origin": "STATEMENT_CLOSING_BALANCE",
-            "record_id": f"{item['statement_id']}-closing",
+            "record_id": f"{provider}:{item['period_end']}",
             "source_artifact_id": item["source_artifact_id"],
+            "source_record_id": item["statement_id"],
             "statement_id": item["statement_id"],
+            "value_basis": "ACCOUNT_VALUE",
         }
         for item in windows
     ]
