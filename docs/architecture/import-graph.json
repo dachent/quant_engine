@@ -274,8 +274,18 @@
       1
     ],
     [
+      "portfolio_cash_drag_spec",
+      "portfolio_cash_drag",
+      1
+    ],
+    [
       "portfolio_control_panel",
       "account_strategy_manifest",
+      1
+    ],
+    [
+      "portfolio_control_panel",
+      "portfolio_cash_drag",
       1
     ],
     [
@@ -306,7 +316,7 @@
     [
       "portfolio_control_panel",
       "portfolio_report",
-      4
+      5
     ],
     [
       "portfolio_control_panel",

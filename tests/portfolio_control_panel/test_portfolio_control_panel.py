@@ -15892,3 +15892,47 @@ def test_renderer_names_the_p123_layers_and_never_calls_the_copy_provider_live()
     assert "layerLabels[provider.evidence_layer]" in renderer
     assert 'COPY_RECORD: "P123 copy (diagnostic)"' in renderer
     assert "evidence.copy_record" in renderer
+
+
+def test_underwriting_gap_drops_cash_and_fee_causes_when_evidenced() -> None:
+    import portfolio_report as reporter
+    from portfolio_cash_drag import STATUS_EVIDENCED
+
+    policy = json.loads(
+        Path("contracts/portfolio-strategy-underwriting-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )["model_account_gap"]
+    base = {
+        "strategy_name": "TT Portfolio",
+        "provider_comparison_status": "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
+        "provider_cumulative_gap": "-0.05",
+        "provider_reference_cumulative_return": "0.049",
+        "provider_account_cumulative_return": "-0.001",
+        "provider_beta": "0.97",
+        "provider_correlation": "0.98",
+        "provider_tracking_error_annualized": "0.03",
+        "provider_comparison_version_compatibility": "UNRESOLVED",
+    }
+
+    def causes(cash: str, fees: str) -> list[str]:
+        out = panel._model_account_gap_underwriting(
+            {**base, "cash_drag_status": cash, "fees_status": fees}, policy
+        )
+        return out["unresolved_causes"]
+
+    evidenced = causes(STATUS_EVIDENCED, reporter.FEES_STATUS_EVIDENCED)
+    assert "COMPLETE_DAILY_ACCOUNT_CASH_PATH_UNAVAILABLE" not in evidenced
+    assert "ACCOUNT_BOUND_FEE_PATH_INCOMPLETE" not in evidenced
+    for cash, fees in (
+        ("UNAVAILABLE", reporter.FEES_STATUS_EVIDENCED),
+        (STATUS_EVIDENCED, reporter.FEES_STATUS_UPPER_BOUND),
+        (STATUS_EVIDENCED, reporter.FEES_STATUS_DOCUMENTED_RATE),
+    ):
+        got = causes(cash, fees)
+        assert ("COMPLETE_DAILY_ACCOUNT_CASH_PATH_UNAVAILABLE" in got) == (
+            cash != STATUS_EVIDENCED
+        )
+        assert ("ACCOUNT_BOUND_FEE_PATH_INCOMPLETE" in got) == (
+            fees != reporter.FEES_STATUS_EVIDENCED
+        )
