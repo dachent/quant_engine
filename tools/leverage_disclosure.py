@@ -48,6 +48,12 @@ def _until(rows: Sequence[Mapping[str, Any]], cutoff: str) -> list[Mapping[str, 
     return [r for r in rows if day(r) <= cutoff]
 
 
+# One row per account-day on which the provider's own margin-loan / debit / borrowed-balance
+# field read zero (or the account type has no margin feature): the generic input a reader
+# emits for providers without IBKR's base cash rows.
+ZERO_FINANCING_BASIS: Final = "OBSERVED_ZERO_FINANCING_DAY"
+
+
 def _amount(row: Mapping[str, Any]) -> Decimal | None:
     amount = row.get("amount")
     if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
@@ -81,6 +87,22 @@ def _debit_evidence(
         if r.get("classification") == "NET_CASH_DEBIT_BALANCE" and _amount(r) is None
     )
     observed = {r["as_of_date"] for r in base if _amount(r) is not None}
+    # Generic provider-observed zero-financing day (any provider): dated, hash-pinned by
+    # its source artifact, naming the provider field it was read from, amount exactly 0.
+    # A row that fails any of that, or states a non-zero amount, is a data gap.
+    for r in liability:
+        if r.get("measurement_basis") != ZERO_FINANCING_BASIS:
+            continue
+        amount = _amount(r)
+        if (
+            amount == 0
+            and r.get("as_of_date")
+            and r.get("source_artifact_id")
+            and r.get("source_field")
+        ):
+            observed.add(r["as_of_date"])
+        else:
+            unreadable += 1
     currency_days = {
         r["as_of_date"]
         for r in liability

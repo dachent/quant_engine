@@ -173,14 +173,13 @@ def classify(
         if seen.unreadable_debit_rows:
             conflicts.append("DEBIT_ROW_AMOUNT_UNAVAILABLE")
         if state == "NOT_LEVERED":
-            # "Not levered" is a finding, not a default: it needs verified declaration
-            # evidence and observed base cash days showing no debit.
+            # "Not levered" is a finding, not a default: it needs a verified declaration
+            # AND provider-observed, dated zero-financing days (IBKR base cash rows, or a
+            # generic observed zero-financing row).  A declaration alone, whatever the
+            # facility, is never the evidence; an unmeasured count refuses like zero.
             if not row.verified:
                 conflicts.append("NOT_LEVERED_DECLARATION_UNVERIFIED")
-            if seen.observed_base_days == 0 and row.facility != "NO_MARGIN_FACILITY":
-                # A verified declaration that no margin facility exists is itself the
-                # evidence (borrowing is impossible); a facility that exists needs
-                # observed cash days showing no debit.
+            if not seen.observed_base_days:
                 conflicts.append("NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS")
         result[account] = AccountState(account, state, reason, tuple(conflicts))
     return result

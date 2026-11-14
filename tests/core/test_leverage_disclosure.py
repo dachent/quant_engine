@@ -282,8 +282,39 @@ def test_not_levered_needs_observed_cash_days_and_a_verified_declaration() -> No
     empty["financing_liability_observations"] = [
         r for r in empty["financing_liability_observations"] if r["account_id"] != QUIET
     ]
-    # a verified NO_MARGIN_FACILITY declaration is itself the evidence (nothing to borrow)
-    assert _quiet_state(empty)["coverage_status"] == "COMPLETE_DECLARED"
+    # a declaration alone (NO_MARGIN_FACILITY included) is never the evidence
+    refused = _quiet_state(empty)
+    assert refused["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS" in refused["coverage_reason"]
+    # a pinned, provider-observed zero-financing row satisfies it (any provider)
+    zero = {
+        "account_id": QUIET,
+        "provider_id": "ibkr",
+        "measurement_basis": "OBSERVED_ZERO_FINANCING_DAY",
+        "classification": "ZERO_FINANCING_OBSERVED",
+        "as_of_date": DAYS[0],
+        "amount": _amt("0"),
+        "source_artifact_id": "pins/statement-2026-01.txt",
+        "source_field": "Balance Subject to Interest",
+    }
+    pinned = {**empty}
+    pinned["financing_liability_observations"] = [
+        *empty["financing_liability_observations"],
+        zero,
+    ]
+    assert _quiet_state(pinned)["coverage_status"] == "COMPLETE_DECLARED"
+    # without provenance, or with a non-zero amount, it is a gap, not evidence
+    for broken in (
+        {**zero, "source_artifact_id": None},
+        {**zero, "source_field": None},
+        {**zero, "amount": _amt("-5")},
+    ):
+        bad = {**empty}
+        bad["financing_liability_observations"] = [
+            *empty["financing_liability_observations"],
+            broken,
+        ]
+        assert _quiet_state(bad)["coverage_status"] == "OBSERVED_UNRECONCILED"
     # a facility that exists needs observed cash days showing no debit
     available = _declaration()
     available[QUIET] = af.Declared(
