@@ -236,7 +236,10 @@ def p_inception_week_mixed(payload: Payload) -> Result:
             continue
         checked += 1
         first = labels.index("MIXED")
-        if "BACKTEST" not in labels[:first] or "LIVE" not in labels[first + 1 :]:
+        live = {"LIVE", "ACCOUNT_LIVE", "MODEL_LIVE"}
+        if "BACKTEST" not in labels[:first] or not live.intersection(
+            labels[first + 1 :]
+        ):
             misplaced.append(f"{line.get('series_id')}={'/'.join(labels)}")
     if not checked:
         return skip("no LIVE_PLUS_BACKTEST line has a MIXED week")
