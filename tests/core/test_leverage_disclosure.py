@@ -298,6 +298,7 @@ def test_not_levered_needs_observed_cash_days_and_a_verified_declaration() -> No
         "amount": _amt("0"),
         "source_artifact_id": "pins/statement-2026-01.txt",
         "source_field": "Balance Subject to Interest",
+        "source_artifact_sha256": "a" * 64,
     }
     pinned = {**empty}
     pinned["financing_liability_observations"] = [
@@ -310,6 +311,13 @@ def test_not_levered_needs_observed_cash_days_and_a_verified_declaration() -> No
         {**zero, "source_artifact_id": None},
         {**zero, "source_field": None},
         {**zero, "amount": _amt("-5")},
+        {**zero, "source_artifact_sha256": None},
+        {**zero, "source_artifact_sha256": "xyz"},
+        {**zero, "source_artifact_id": True, "source_field": 1},
+        {**zero, "as_of_date": "0000"},
+        {**zero, "as_of_date": "0"},
+        {**zero, "as_of_date": "2025-13-99"},
+        {**zero, "as_of_date": "2025-12-31"},  # before the account's window
     ):
         bad = {**empty}
         bad["financing_liability_observations"] = [
@@ -361,3 +369,26 @@ def test_a_conflicted_not_levered_account_reports_the_missing_field_not_no_row()
     )
     assert exposure["coverage_status"] == "OBSERVED_UNRECONCILED"
     assert "observed_zero_financing_days" in exposure["coverage_reason"]
+
+
+def test_a_positive_borrowed_balance_row_is_a_debit_day_not_an_unreadable_row() -> None:
+    """A provider-observed positive borrowed balance is borrowing: LEVERED, and for a
+    declared NO_MARGIN_FACILITY account a conflict."""
+
+    catalog = _catalog(base_cash=True)
+    catalog["financing_liability_observations"].append(
+        {
+            "account_id": QUIET,
+            "provider_id": "ibkr",
+            "measurement_basis": "OBSERVED_ZERO_FINANCING_DAY",
+            "classification": "ZERO_FINANCING_OBSERVED",
+            "as_of_date": DAYS[1],
+            "amount": _amt("12.5"),
+            "source_artifact_id": "pins/statement-2026-01.txt",
+            "source_field": "Margin Loan Balance",
+            "source_artifact_sha256": "b" * 64,
+        }
+    )
+    state = _quiet_state(catalog)
+    assert state["classification"] == "LEVERED"
+    assert "DECLARED_NO_FACILITY_BUT_NET_BASE_DEBIT" in state["coverage_reason"]

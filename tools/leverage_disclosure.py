@@ -19,7 +19,9 @@ which check failed, never a covered status.  A pure function of its inputs.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import date
 from decimal import Decimal
+import re
 from typing import Any, Final
 
 import account_financing
@@ -29,6 +31,7 @@ COVERED: Final = "COMPLETE_RECONCILED"
 DECLARED: Final = "COMPLETE_DECLARED"
 NOT_COVERED: Final = "OBSERVED_UNRECONCILED"
 _NO_AMOUNT: Final = {"status": "UNAVAILABLE", "value": None}
+_SHA256: Final = re.compile(r"[0-9a-f]{64}")
 
 
 def _evidence_text(closure: leverage_closure.Closure) -> str:
@@ -66,9 +69,23 @@ def _amount(row: Mapping[str, Any]) -> Decimal | None:
         return None
 
 
+def _iso_day(value: object) -> date | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _debit_evidence(
     liability: Sequence[Mapping[str, Any]],
     cost: Sequence[Mapping[str, Any]],
+    window_start: date | None = None,
 ) -> account_financing.DebitEvidence:
     base = [
         r
@@ -89,22 +106,34 @@ def _debit_evidence(
         if r.get("classification") == "NET_CASH_DEBIT_BALANCE" and _amount(r) is None
     )
     observed = {r["as_of_date"] for r in base if _amount(r) is not None}
-    # Generic provider-observed zero-financing day (any provider): dated, hash-pinned by
-    # its source artifact, naming the provider field it was read from, amount exactly 0.
-    # A row that fails any of that, or states a non-zero amount, is a data gap.
+    # Generic provider-observed financing day (any provider): ``amount`` is the provider's
+    # borrowed balance for the day (never negative).  Exactly 0 is an observed zero day; a
+    # positive balance is borrowing (a debit day); anything else is a data gap.  The row
+    # must be pinned (source_artifact_id, a 64-hex source_artifact_sha256), name the
+    # provider field it was read from, and be dated inside the account's window.
     for r in liability:
         if r.get("measurement_basis") != ZERO_FINANCING_BASIS:
             continue
         amount = _amount(r)
+        day = _iso_day(r.get("as_of_date"))
+        pinned = (
+            _text(r.get("source_artifact_id"))
+            and _text(r.get("source_field"))
+            and isinstance(r.get("source_artifact_sha256"), str)
+            and _SHA256.fullmatch(r["source_artifact_sha256"]) is not None
+        )
         if (
-            amount == 0
-            and r.get("as_of_date")
-            and r.get("source_artifact_id")
-            and r.get("source_field")
+            amount is None
+            or amount < 0
+            or not pinned
+            or day is None
+            or (window_start is not None and day < window_start)
         ):
-            observed.add(r["as_of_date"])
-        else:
             unreadable += 1
+        elif amount > 0:
+            base_days.add(day.isoformat())
+        else:
+            observed.add(day.isoformat())
     currency_days = {
         r["as_of_date"]
         for r in liability
@@ -192,7 +221,16 @@ def account_financing_rows(
                 bucket[key].append(item)
     evidence = {
         name: _debit_evidence(
-            _until(parts["liability"], cutoff), _until(parts["cost"], cutoff)
+            _until(parts["liability"], cutoff),
+            _until(parts["cost"], cutoff),
+            min(
+                (
+                    d
+                    for d in (_iso_day(r.get("as_of_date")) for r in parts["nav"])
+                    if d is not None
+                ),
+                default=None,
+            ),
         )
         for name, parts in by_account.items()
     }
@@ -295,7 +333,8 @@ def account_financing_rows(
                     "GROSS_EXPOSURE",
                     NOT_COVERED,
                     "NOT_LEVERED_UNPROVEN: needs observed_zero_financing_days "
-                    "(provider-observed, hash-pinned) and a verified declaration;"
+                    "(provider-observed, source_artifact_sha256-pinned) and a "
+                    "verified declaration;"
                     f"CONFLICT={conflict_text}",
                 )
             )

@@ -5581,7 +5581,8 @@ def _project_account_facts(
                 and (
                     source_fact == "nav_observations"
                     or (
-                        source_fact == "transactions"
+                        provider_id == "schwab"
+                        and source_fact == "transactions"
                         and str(row.get("kind") or "").strip().upper()
                         == "MARGIN INTEREST"
                     )
@@ -5629,8 +5630,12 @@ def _project_account_facts(
                         "status": "UNMAPPED",
                         **(
                             {}
-                            if mapping_reason is None
-                            else {"mapping_reason": mapping_reason}
+                            if record.get("mapping_reason", mapping_reason) is None
+                            else {
+                                "mapping_reason": record.get(
+                                    "mapping_reason", mapping_reason
+                                )
+                            }
                         ),
                     }
                 )

@@ -10545,9 +10545,13 @@ def test_an_unmapped_nav_point_states_why_so_a_reserve_window_can_place_it() -> 
         {"effective_start": "2026-02-01", "effective_end": None, "strategy_id": "s1"},
         {"effective_start": "2026-02-01", "effective_end": None, "strategy_id": "s2"},
     ]
-    projected, _ = ledger._project_account_facts(
+    projected, exceptions = ledger._project_account_facts(
         "ibkr", "d" * 64, catalog, {"account-ibkr"}, {"s1", "s2"}, {"account-ibkr": two}
     )
+    # the exceptions entry states the same reason as the record it describes
+    assert {e["record_id"]: e["mapping_reason"] for e in exceptions} == {
+        r["record_id"]: r["mapping_reason"] for r in projected["nav_observations"]
+    }
     by_day = {r["as_of_date"]: r for r in projected["nav_observations"]}
     assert by_day["2026-01-05"]["mapping_reason"] == "MAPPING_NO_ACTIVE_INTERVAL"
     assert by_day["2026-03-05"]["mapping_reason"] == "MAPPING_AMBIGUOUS_POINT"
