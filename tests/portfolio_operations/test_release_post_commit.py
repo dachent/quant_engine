@@ -436,9 +436,9 @@ def test_the_repository_moving_during_the_steps_is_a_refusal(
     real = tool.repo_identity
     calls = {"n": 0}
 
-    def identity(repo: Path) -> tuple[str, bool]:
+    def identity(repo: Path, scheme: str = "git-commit-v1") -> tuple[str, bool]:
         calls["n"] += 1
-        head, clean = real(repo)
+        head, clean = real(repo, scheme)
         return (head, clean) if calls["n"] == 1 else (head, False)
 
     monkeypatch.setattr(tool, "repo_identity", identity)
@@ -558,3 +558,60 @@ def test_a_failing_gate_step_still_refuses_with_a_non_blocking_rehearsal(
         == 1
     )
     assert not out.exists()
+
+
+def _tree_args(world: dict[str, Any], identity: str, scheme: str) -> list[str]:
+    args = _set(world["args"], "--harness-code-commit", identity)
+    return [
+        *args[: args.index("--repo-root")],
+        "--identity-scheme",
+        scheme,
+        *args[args.index("--repo-root") :],
+    ]
+
+
+def test_a_git_tree_v2_release_verifies_against_the_head_tree(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A git-tree-v2 run binds its code identity to HEAD^{tree}; a commit sha is not it."""
+
+    tree = _git(world["repo"], "rev-parse", "HEAD^{tree}")
+    assert tool.main(_tree_args(world, tree, "git-tree-v2")) == 0, (
+        capsys.readouterr().err
+    )
+
+
+def test_a_git_tree_v2_release_refuses_the_commit_sha_and_a_dirty_tree(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    tree = _git(world["repo"], "rev-parse", "HEAD^{tree}")
+    assert tool.main(_tree_args(world, world["head"], "git-tree-v2")) == 1
+    assert "not clean" in capsys.readouterr().err
+    (world["repo"] / "dirty.txt").write_text("x", encoding="utf-8")
+    assert tool.main(_tree_args(world, tree, "git-tree-v2")) == 1
+    assert "not clean" in capsys.readouterr().err
+
+
+def test_the_legacy_scheme_still_binds_to_the_commit(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    tree = _git(world["repo"], "rev-parse", "HEAD^{tree}")
+    assert tool.main(_tree_args(world, tree, "git-commit-v1")) == 1
+    assert "not clean" in capsys.readouterr().err
+    assert tool.main(_tree_args(world, world["head"], "git-commit-v1")) == 0
+
+
+def test_the_stage_carries_the_render_environment_and_its_own_evidence_dir() -> None:
+    """The render step needs the Playwright environment the QA stages declare, and its
+    create-only output must not land in the commit stage's production evidence."""
+
+    graph = json.loads(
+        (REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json").read_bytes()
+    )
+    stages = {stage["id"]: stage for stage in graph["stages"]}
+    post = stages["post-commit-verify"]
+    assert post["env"] == stages["qa-browser"]["env"]
+    argv = post["argv"]
+    assert argv[argv.index("--identity-scheme") + 1] == "{identity_scheme}"
+    assert graph["paths"]["post_release_evidence"].startswith("{post_commit}/")
+    assert argv[argv.index("--post-evidence-dir") + 1] == "{post_release_evidence}"

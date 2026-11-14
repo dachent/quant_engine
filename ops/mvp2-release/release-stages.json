@@ -42,7 +42,7 @@
     "replica_rehearsal": "{cycle}/replica-rehearsal",
     "clean_room": "{cycle}/clean-room",
     "post_commit": "{cycle}/post-commit",
-    "post_release_evidence": "{cycle}/production/post-release-evidence",
+    "post_release_evidence": "{post_commit}/post-release-evidence",
     "real_rehearsal": "{cycle}/post-commit/rehearsal",
     "real_clean_room": "{cycle}/post-commit/clean-room",
     "crosswalk": "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
@@ -2252,6 +2252,11 @@
     {
       "id": "post-commit-verify",
       "explicit": true,
+      "env": {
+        "PLAYWRIGHT_MODULE": "{playwright_module}",
+        "PLAYWRIGHT_EXECUTABLE_PATH": "{playwright_executable}",
+        "NODE_OPTIONS": "--max-old-space-size=8192"
+      },
       "requires": [
         "commit"
       ],
@@ -2278,6 +2283,8 @@
         "{real_clean_room}",
         "--harness-code-commit",
         "{code_commit}",
+        "--identity-scheme",
+        "{identity_scheme}",
         "--post-pointers",
         "{post_commit}/post-commit-pointers.json",
         "--log-dir",

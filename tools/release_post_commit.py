@@ -260,8 +260,11 @@ def check_post_verify(
     return str(receipt_id)
 
 
-def repo_identity(repo: Path) -> tuple[str, bool]:
-    """(HEAD, clean) of the repository the tools run from."""
+def repo_identity(
+    repo: Path, scheme: str = release_driver.COMMIT_SCHEME
+) -> tuple[str, bool]:
+    """(identity, clean) of the repository the tools run from: HEAD under git-commit-v1,
+    ``HEAD^{tree}`` under git-tree-v2 (the value the run's code identity is bound to)."""
 
     def git(*args: str) -> str:
         done = subprocess.run(
@@ -271,7 +274,8 @@ def repo_identity(repo: Path) -> tuple[str, bool]:
             raise Refusal(f"git {args[0]} failed in the repository")
         return done.stdout
 
-    return git("rev-parse", "HEAD").strip(), not git("status", "--porcelain").strip()
+    revision = "HEAD^{tree}" if scheme == release_driver.TREE_SCHEME else "HEAD"
+    return git("rev-parse", revision).strip(), not git("status", "--porcelain").strip()
 
 
 def _create_only(path: Path, data: bytes) -> None:
@@ -306,7 +310,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
     spec = _read_object(spec_file, "production spec")
     cycle = load_resolved_cycle(Path(args.resolved_cycle))
     commit = _hex(args.harness_code_commit, _HEX40, "harness code commit")
-    head, clean = repo_identity(repo)
+    head, clean = repo_identity(repo, args.identity_scheme)
     if head != commit or not clean:
         raise Refusal("repository is not clean at the harness code commit")
     release_id = check_commit_result(Path(args.commit_result), spec_file)
@@ -456,7 +460,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
                 preflight,
                 str(after["CURRENT_RELEASE"]),
             )
-    head_after, clean_after = repo_identity(repo)
+    head_after, clean_after = repo_identity(repo, args.identity_scheme)
     if head_after != commit or not clean_after:
         raise Refusal("repository changed while post-commit verification ran")
     receipt = {
@@ -553,6 +557,12 @@ def _parser() -> argparse.ArgumentParser:
         "--rehearsal-out",
         default=None,
         help="run the rehearsal after the receipt and record it here; it never refuses the release",
+    )
+    v.add_argument(
+        "--identity-scheme",
+        choices=(release_driver.COMMIT_SCHEME, release_driver.TREE_SCHEME),
+        default=release_driver.COMMIT_SCHEME,
+        help="what --harness-code-commit names: the commit (git-commit-v1) or HEAD^{tree} (git-tree-v2)",
     )
     v.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     v.add_argument("--tools-dir", default=None)
