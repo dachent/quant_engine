@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -196,3 +197,80 @@ def test_a_provider_without_an_accrual_series_is_not_covered_by_its_postings() -
     result = lc.financing_cost_closure([posting, posting], DAYS, DAYS[-1], None)
     assert not result.covered
     assert result.check_id == "FINANCING_COST_ACCRUAL_ROLLFORWARD"
+
+
+# ---- RESERVE_WINDOW row class (control ruling 2026-11-13): attribution only through the
+# declared window, never inferred.
+
+WINDOW = [(date(2026, 1, 5), date(2026, 1, 8), "EXACT_IDENTITY_CLOSURE")]
+
+
+def _reserve_series(reason: str | None = "PERIOD_MAPPING_MISSING_VALIDATED_INTERVAL"):
+    rows = _series(["-1", "-2", "-3", "-4"])
+    for row in rows:
+        row["mapping_status"] = "UNMAPPED"
+        row["mapping_reason"] = reason
+    return rows
+
+
+def test_a_declared_reserve_window_attributes_unmapped_cost_rows() -> None:
+    rows = _reserve_series()
+    assert not lc.financing_cost_closure(rows, DAYS, DAYS[-1], None).covered
+    closed = lc.financing_cost_closure(rows, DAYS, DAYS[-1], None, WINDOW)
+    assert closed.covered
+    assert closed.evidence["reserve_window_rows"] == len(rows)
+    assert closed.evidence["unmapped_rows_in_epoch"] == 0
+
+
+def test_an_undeclared_or_too_short_reserve_window_stays_blocked() -> None:
+    rows = _reserve_series()
+    for windows in (None, [], [(date(2026, 1, 5), date(2026, 1, 7), "X")]):
+        assert not lc.financing_cost_closure(rows, DAYS, DAYS[-1], None, windows).covered
+    gap = [
+        (date(2026, 1, 5), date(2026, 1, 5), "X"),
+        (date(2026, 1, 7), date(2026, 1, 8), "X"),
+    ]
+    period = {**rows[0], "period_start": "2026-01-05", "period_end": "2026-01-07"}
+    assert not lc.in_reserve_window(period, gap)
+
+
+def test_strategy_windows_are_untouched_by_the_reserve_rule() -> None:
+    row = _reserve_series()[0]
+    assert lc.in_reserve_window(row, WINDOW)
+    for change in (
+        {"mapping_reason": "PERIOD_MAPPING_AMBIGUOUS_INTERVAL"},
+        {"mapping_reason": "PERIOD_CROSSES_STRATEGY_EPOCH"},
+        {"mapping_reason": "PERIOD_MAPPING_BOUNDARY_MISSING"},
+        {"strategy_id": "s"},
+    ):
+        assert not lc.in_reserve_window({**row, **change}, WINDOW)
+    mapped = {**row, "mapping_status": "MAPPED", "strategy_id": "s"}
+    assert not lc.in_reserve_window(mapped, WINDOW)
+    assert lc.financing_cost_closure(
+        _series(["-1", "-2", "-3", "-4"]), DAYS, DAYS[-1], None, []
+    ).covered
+
+
+def test_reserve_cutoff_exposure_and_nav_close_only_inside_the_window() -> None:
+    exposure = [
+        {
+            "as_of_date": "2026-01-07",
+            "mapping_status": "UNMAPPED",
+            "mapping_reason": "PERIOD_MAPPING_MISSING_VALIDATED_INTERVAL",
+            "amount": _amt("140"),
+        }
+    ]
+    nav = [{**exposure[0], "nav": _amt("100")}]
+    assert not lc.gross_exposure(exposure, nav, "2026-01-07")[0].covered
+    assert lc.gross_exposure(exposure, nav, "2026-01-07", WINDOW)[0].covered
+    outside = [(date(2026, 1, 8), date(2026, 1, 9), "X")]
+    assert not lc.gross_exposure(exposure, nav, "2026-01-07", outside)[0].covered
+
+
+def test_a_source_scope_ambiguity_is_never_a_reserve_row() -> None:
+    """The IBKR exposure row of a reserve says SOURCE_ACCOUNT_SCOPE_UNMAPPED /
+    AMBIGUOUS_REPORTED_ACCOUNT: the figure's account is unknown, not a missing strategy
+    interval, so the declared window never attributes it."""
+
+    row = {**_reserve_series()[0], "mapping_reason": "SOURCE_ACCOUNT_SCOPE_UNMAPPED"}
+    assert not lc.in_reserve_window(row, WINDOW)

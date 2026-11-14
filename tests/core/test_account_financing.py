@@ -195,3 +195,40 @@ def test_reserve_nav_windows_come_only_from_account_live_reserves_with_closed_wi
     assert [(w[0].isoformat(), w[1].isoformat()) for w in windows[acct]] == [
         ("2026-01-01", "2026-01-02")
     ]
+
+
+def _roles(windows_a: list[dict[str, str]], windows_b: list[dict[str, str]] | None = None) -> bytes:
+    top = json.loads(_declaration(**{A: "MARGIN_USED"}))
+    top["sleeve_roles"] = [
+        {
+            "sleeve_alias": alias,
+            "role": "RESERVE",
+            "ledger_account_id": A,
+            "nav_authority": "ACCOUNT_LIVE",
+            "admit_windows": windows,
+            "evidence_ref": "owner",
+        }
+        for alias, windows in (("r1", windows_a), ("r2", windows_b))
+        if windows is not None
+    ]
+    return json.dumps(top).encode()
+
+
+def _win(start: str, end: str) -> dict[str, str]:
+    return {"start": start, "end": end, "basis": "EXACT_IDENTITY_CLOSURE"}
+
+
+def test_overlapping_declared_reserve_windows_refuse() -> None:
+    ok = af.reserve_nav_windows(
+        af.load_sleeve_roles(
+            _roles([_win("2026-01-01", "2026-01-31"), _win("2026-02-01", "2026-02-28")])
+        )
+    )
+    assert len(ok[A]) == 2
+    for blob in (
+        _roles([_win("2026-01-01", "2026-01-31"), _win("2026-01-31", "2026-02-28")]),
+        _roles([_win("2026-01-01", "2026-01-31")], [_win("2026-01-15", "2026-02-15")]),
+        _roles([_win("2026-02-01", "2026-01-01")]),
+    ):
+        with pytest.raises(af.FinancingDeclarationError):
+            af.reserve_nav_windows(af.load_sleeve_roles(blob))

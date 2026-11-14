@@ -20,13 +20,57 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Final
 
 BASE_LINE: Final = "BASE_SUMMARY"
 _ACCRUAL_BASES: Final = ("ACCRUAL_BALANCE", "PERIOD_ACCRUAL", "ACCRUAL_REVERSAL")
 _ZERO = Decimal(0)
+
+
+# Row class RESERVE_WINDOW: a reserve account has no strategy interval.  Its UNMAPPED rows
+# are attributed to the account's declared RESERVE window (the account financing
+# declaration's sleeve_roles) and only through it: every day the row touches must lie
+# inside a declared window, the row must carry no strategy, and the ledger's reason must
+# be "no validated interval" (an ambiguous or epoch-crossing row means strategy windows
+# exist and stays blocked).  No declared window, or days outside it, stays UNMAPPED.
+RESERVE_WINDOW_REASONS: Final = (None, "PERIOD_MAPPING_MISSING_VALIDATED_INTERVAL")
+_ROW_DAY_FIELDS: Final = (
+    "period_start",
+    "period_end",
+    "value_date",
+    "accounting_date",
+    "event_date",
+    "as_of_date",
+)
+
+
+def in_reserve_window(
+    row: Mapping[str, Any],
+    windows: Sequence[tuple[date, date, str]] | None,
+) -> bool:
+    if (
+        not windows
+        or row.get("mapping_status") != "UNMAPPED"
+        or row.get("strategy_id")
+        or row.get("mapping_reason") not in RESERVE_WINDOW_REASONS
+    ):
+        return False
+    try:
+        days = [date.fromisoformat(str(row[f])) for f in _ROW_DAY_FIELDS if row.get(f)]
+    except ValueError:
+        return False
+    if not days:
+        return False
+
+    def covered(day: date) -> bool:
+        return any(start <= day <= end for start, end, _basis in windows)
+
+    first, last = min(days), max(days)
+    if last - first > timedelta(days=370):
+        return False
+    return all(covered(first + timedelta(days=n)) for n in range((last - first).days + 1))
 
 
 @dataclass(frozen=True)
@@ -52,6 +96,7 @@ def financing_cost_closure(
     statement_days: Sequence[str],
     cutoff: str,
     epoch_start: str | None,
+    reserve_windows: Sequence[tuple[date, date, str]] | None = None,
 ) -> Closure:
     """Interest accrual closure for one account, window = its statement days."""
 
@@ -112,10 +157,16 @@ def financing_cost_closure(
             and previous[1] != _ZERO
         ):
             unexplained.append(f"{currency}:{last_day}:TRAILING_UNOBSERVED")
+    reserve_placed = [
+        r
+        for r in rows
+        if r.get("mapping_status") != "MAPPED" and in_reserve_window(r, reserve_windows)
+    ]
     unmapped = [
         r
         for r in rows
         if r.get("mapping_status") != "MAPPED"
+        and not in_reserve_window(r, reserve_windows)
         and (
             epoch_start is None
             or str(
@@ -148,6 +199,7 @@ def financing_cost_closure(
             "unexplained_steps": sorted(unexplained)[:20],
             "unexplained_step_count": len(unexplained),
             "unmapped_rows_in_epoch": len(unmapped),
+            "reserve_window_rows": len(reserve_placed),
             "unmapped_reasons": dict(
                 sorted(Counter(str(r.get("mapping_reason")) for r in unmapped).items())
             ),
@@ -212,18 +264,25 @@ def gross_exposure(
     exposure_rows: Iterable[Mapping[str, Any]],
     nav_rows: Iterable[Mapping[str, Any]],
     cutoff: str,
+    reserve_windows: Sequence[tuple[date, date, str]] | None = None,
 ) -> tuple[Closure, Decimal | None, Decimal | None]:
-    """Cutoff gross position value (MAPPED, AVAILABLE) and NAV."""
+    """Cutoff gross position value (MAPPED, or placed in a declared RESERVE window,
+    AVAILABLE) and NAV."""
+
+    def placed(r: Mapping[str, Any]) -> bool:
+        return r.get("mapping_status") == "MAPPED" or in_reserve_window(
+            r, reserve_windows
+        )
 
     gross = [
         _value(r, "amount")
         for r in exposure_rows
-        if str(r.get("as_of_date")) == cutoff and r.get("mapping_status") == "MAPPED"
+        if str(r.get("as_of_date")) == cutoff and placed(r)
     ]
     navs = [
         _value(r, "nav")
         for r in nav_rows
-        if str(r.get("as_of_date")) == cutoff and r.get("mapping_status") == "MAPPED"
+        if str(r.get("as_of_date")) == cutoff and placed(r)
     ]
     gross_values = [v for v in gross if v is not None]
     nav_values = [v for v in navs if v is not None]
