@@ -43,6 +43,7 @@ from acceptance.validate.checks import (  # noqa: E402
     Finding,
     owner_view,
     FactsSources,
+    bind_admission_receipt,
     StrategyBasisRefusal,
     expected_exclusions,
     findings_document,
@@ -407,16 +408,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         provider_receipt: dict[str, Any] | None = None
         if args.admission_receipt is not None:
             try:
-                receipt = json.loads(args.admission_receipt.read_bytes())
-            except (OSError, ValueError) as exc:
-                raise ContractError(
-                    f"--admission-receipt is unreadable: {exc}"
-                ) from exc
-            if not isinstance(receipt, dict) or not isinstance(
-                receipt.get("dispositions"), list
-            ):
-                raise ContractError("--admission-receipt carries no dispositions list")
-            provider_receipt = receipt
+                provider_receipt = bind_admission_receipt(
+                    args.admission_receipt, args.provider_ledger
+                )
+            except StrategyBasisRefusal as exc:
+                raise ContractError(f"--admission-receipt is unusable: {exc}") from exc
         strategy_basis: dict[str, str] | None = None
         if args.strategy_basis is not None:
             try:

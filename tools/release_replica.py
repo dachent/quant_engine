@@ -322,6 +322,7 @@ BASIS_ARGS = (
     ("strategy_basis", "--strategy-basis"),
     ("sleeve_facts", "--sleeve-facts"),
     ("provider_ledger", "--provider-ledger"),
+    ("admission_receipt", "--admission-receipt"),
     ("ibkr_root", "--ibkr-root"),
     ("tag_map", "--tag-map"),
 )
