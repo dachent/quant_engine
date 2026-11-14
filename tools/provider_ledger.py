@@ -5575,18 +5575,15 @@ def _project_account_facts(
                 record["capital_disposition"] = (
                     "NON_CAPITAL" if amount == 0 else "EXTERNAL_CAPITAL"
                 )
+            margin_interest_posting = (
+                provider_id == "schwab"
+                and source_fact == "transactions"
+                and str(row.get("kind") or "").strip().upper() == "MARGIN INTEREST"
+            )
             if (
                 mapping_status == "UNMAPPED"
                 and "mapping_reason" not in record
-                and (
-                    source_fact == "nav_observations"
-                    or (
-                        provider_id == "schwab"
-                        and source_fact == "transactions"
-                        and str(row.get("kind") or "").strip().upper()
-                        == "MARGIN INTEREST"
-                    )
-                )
+                and (source_fact == "nav_observations" or margin_interest_posting)
             ):
                 # Why a NAV point or a Schwab margin-interest posting has no strategy:
                 # the reserve-window placement needs an explicit reason, never silence.
@@ -5594,11 +5591,7 @@ def _project_account_facts(
                     mapping_row, accounts, strategies, assignments
                 )
             projections[target_fact].append(record)
-            if (
-                provider_id == "schwab"
-                and source_fact == "transactions"
-                and str(row.get("kind") or "").strip().upper() == "MARGIN INTEREST"
-            ):
+            if margin_interest_posting:
                 # A retained Schwab MARGIN INTEREST transaction is an actual
                 # cash-posting financing observation.  It remains separate
                 # from owner flows and retains its native signed amount,
