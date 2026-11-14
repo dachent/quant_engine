@@ -4562,6 +4562,7 @@ def check_derived_cash_evidence(ctx: Context) -> Iterator[Finding]:
 
 StrategyBasisRefusal = sleeve_basis.Refusal
 FactsSources = facts_bindings.FactsSources
+bind_admission_receipt = facts_bindings.bind_admission_receipt
 
 
 def load_facts_sources(

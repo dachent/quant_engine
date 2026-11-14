@@ -43,6 +43,7 @@ from acceptance.validate.checks import (  # noqa: E402
     Finding,
     owner_view,
     FactsSources,
+    bind_admission_receipt,
     StrategyBasisRefusal,
     expected_exclusions,
     findings_document,
@@ -52,7 +53,6 @@ from acceptance.validate.checks import (  # noqa: E402
     run_checks,
     to_date,
 )
-from acceptance.validate.facts_bindings import bind_admission_receipt  # noqa: E402
 from acceptance.validate.generation import (  # noqa: E402
     GenerationError,
     is_placeholder,
