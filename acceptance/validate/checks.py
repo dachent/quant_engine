@@ -11726,9 +11726,14 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
         metric_id = str(row.get("metric_id"))
         # A retired history-only account's capital is compared by value only: the label
         # of its last observation is not the cutoff by construction.
+        # the row's own tolerance decides the regression compare; the suppression of the
+        # label needs the cent-exact value check besides
+        retired_account = _entity_account(row.get("entity"))
         retired_end = (
-            retired.get(_entity_account(row.get("entity")))
+            retired.get(retired_account)
             if metric_id == _RETIRED_VALUE_METRIC
+            and retired_account in retired
+            and _retired_value_verified(ctx, retired_account)
             else None
         )
         if metric_id == COVERAGE_END_METRIC:

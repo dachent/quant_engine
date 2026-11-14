@@ -226,3 +226,15 @@ def test_the_digest_is_the_producers_computation():
     rows = [_row("fidelity"), _row("alpaca", reason="caf\u00e9"), {"b": 1, "a": [2]}]
     expected = hashlib.sha256(producer._canonical_json_value_bytes(rows)).hexdigest()
     assert _canonical_digest(rows) == expected
+
+
+@pytest.mark.parametrize("artifacts", [None, "x", {"a": 1}])
+def test_a_manifest_without_an_artifact_list_is_a_refusal_not_a_crash(
+    tmp_path, artifacts
+):
+    receipt, ledger = _generation(tmp_path)
+    manifest = receipt.parent / "generation.json"
+    record = json.loads(manifest.read_bytes())
+    record["artifacts"] = artifacts
+    manifest.write_bytes(json.dumps(record).encode())
+    _refused(receipt, ledger)

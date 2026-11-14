@@ -416,3 +416,11 @@ def test_a_receipt_observed_for_another_cutoff_exempts_nothing(tmp_path):
 def test_a_receipt_with_an_unreadable_observation_exempts_nothing(tmp_path):
     receipt = {**_receipt(_disposition()), "run_observation": "x"}
     assert [f.klass for f in _source_clock(tmp_path, receipt)] == ["NOT_READY"]
+
+
+def test_a_loose_row_tolerance_does_not_suppress_the_label_of_a_wrong_value(tmp_path):
+    # expected 0.25 against the tracker's 0.19 with tolerance 1000: the value compare
+    # passes, the label differs, and the cent-exact check fails: the label stays a finding
+    row = {**_expected_capital(RETIRED, "0.25"), "tolerance": "1000"}
+    found = _findings(tmp_path, [row], [])
+    assert set(_classes(found, CAPITAL)) == {checks.BLOCKER_REGRESSION}

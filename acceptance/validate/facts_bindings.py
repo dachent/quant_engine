@@ -409,9 +409,12 @@ def bind_admission_receipt(
         raise Refusal(
             BINDING_RECEIPT, "the receipt's generation is not its verified directory"
         )
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise Refusal(BINDING_RECEIPT, "generation.json records no artifact list")
     recorded = {
         item.get("artifact_id"): item.get("sha256")
-        for item in manifest.get("artifacts", [])
+        for item in artifacts
         if isinstance(item, Mapping)
     }
     if recorded.get(RECEIPT_ARTIFACT) != hashlib.sha256(raw).hexdigest():
