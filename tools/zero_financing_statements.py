@@ -1,4 +1,4 @@
-"""Provider-observed zero-financing days from pinned Schwab monthly statements.
+"""Provider-observed zero-financing days from pinned provider monthly statements.
 
 A pure reader of statement text (extracted by ``pdftotext -layout``): per account-month it
 decides whether the statement proves that the account borrowed nothing on any day of its
@@ -16,7 +16,7 @@ Rules (control ruling 2026-11-14), per statement:
   transaction line;
 * the account number printed on the statement must match the account the mapping names.
 
-The mapping from the file label (h8 = sha256("acct-schwab-<last3>")[:8]) to the ledger
+The mapping from the file label (h8 = sha256("acct-<provider>-<last3>")[:8]) to the ledger
 account id, and the last three digits, live in a local-only, hash-pinned input file; the
 digits never enter the artifact.
 """
@@ -33,7 +33,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from typing import Any, Callable, Final, Mapping, Sequence
+from typing import Any, Callable, Final, Mapping, Sequence, cast
 
 ARTIFACT_ID: Final = "zero-financing-observations"
 SCHEMA_VERSION: Final = 1
@@ -45,7 +45,7 @@ _PERIOD = re.compile(
     r"(?P<m1>[A-Z][a-z]+) (?P<d1>\d{1,2})(?:, (?P<y1>\d{4}))?\s*-\s*"
     r"(?:(?P<m2>[A-Z][a-z]+) )?(?P<d2>\d{1,2}), (?P<y2>\d{4})"
 )
-_ACCOUNT_TOKEN = re.compile(r"\*{4}-\*\d{3}|\d{4}-\d{4}")
+_ACCOUNT_MASK = re.compile(r"\*{4}-\*\d{3}|\d{4}-\d{4}")
 _HEADER_LINES = 80
 _RETIREMENT = re.compile(
     r"(?<![A-Z])(IRA|ROTH IRA|SEP IRA|ROLLOVER IRA)(?![A-Z])|401K|403B|KEOGH|"
@@ -71,8 +71,8 @@ class ZeroFinancingError(ValueError):
     """A statement or input cannot be read as complete evidence."""
 
 
-def statement_label(last3: str) -> str:
-    return hashlib.sha256(f"acct-schwab-{last3}".encode()).hexdigest()[:8]
+def statement_label(provider_id: str, last3: str) -> str:
+    return hashlib.sha256(f"acct-{provider_id}-{last3}".encode()).hexdigest()[:8]
 
 
 def _money(text: str) -> Decimal:
@@ -152,7 +152,7 @@ def parse_statement(text: str, file_period_end: date | None = None) -> dict[str,
     numbers = {
         re.sub(r"\D", "", n)[-3:]
         for chunk in _labelled(lines, "Account Number")
-        for n in _ACCOUNT_TOKEN.findall(chunk)
+        for n in _ACCOUNT_MASK.findall(chunk)
     }
     if len(numbers) != 1:
         raise ZeroFinancingError("statement account number is absent or ambiguous")
@@ -209,7 +209,7 @@ def _pdftotext(path: Path) -> str:
     return result.stdout.decode("utf-8", errors="replace")
 
 
-def load_mapping(raw: bytes) -> dict[str, tuple[str, str]]:
+def load_mapping(raw: bytes, provider_id: str) -> dict[str, tuple[str, str]]:
     """label -> (ledger account id, last3) from the local-only mapping input."""
 
     top = json.loads(raw)
@@ -233,7 +233,7 @@ def load_mapping(raw: bytes) -> dict[str, tuple[str, str]]:
             or not re.fullmatch(r"\d{3}", last3)
         ):
             raise ZeroFinancingError("mapping row is invalid")
-        label = statement_label(last3)
+        label = statement_label(provider_id, last3)
         if label in out:
             raise ZeroFinancingError("mapping names an account twice")
         out[label] = (account, last3)
@@ -258,7 +258,8 @@ def build(
     mapping: Mapping[str, tuple[str, str]],
     *,
     extract: Callable[[Path], str] = _pdftotext,
-    artifact_prefix: str = "schwab-statements",
+    provider_id: str,
+    artifact_prefix: str | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     unobserved: list[dict[str, Any]] = []
@@ -270,9 +271,11 @@ def build(
     names = sorted(sums)
     if not names:
         raise ZeroFinancingError("no statements are pinned")
+    prefix = artifact_prefix or f"{provider_id}-statements"
     for name in names:
         match = re.fullmatch(
-            r"schwab-stmt-([0-9a-f]{8})-(\d{4}-\d{2}-\d{2})\.pdf", name
+            re.escape(provider_id) + r"-stmt-([0-9a-f]{8})-(\d{4}-\d{2}-\d{2})\.pdf",
+            name,
         )
         if match is None:
             raise ZeroFinancingError(f"unexpected statement file name: {name}")
@@ -335,8 +338,8 @@ def build(
                     "amount": {"currency": "USD", "status": "AVAILABLE", "value": "0"},
                     "classification": CLASSIFICATION,
                     "measurement_basis": BASIS,
-                    "provider_id": "schwab",
-                    "source_artifact_id": f"{artifact_prefix}/{name}",
+                    "provider_id": provider_id,
+                    "source_artifact_id": f"{prefix}/{name}",
                     "source_artifact_sha256": digest,
                     "source_field": reason,
                     "source_page": page,
@@ -356,6 +359,7 @@ def build(
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_id": ARTIFACT_ID,
+        "provider_id": provider_id,
         "rows": sorted(rows, key=lambda r: (r["account_id"], r["as_of_date"])),
         "unobserved_periods": sorted(
             unobserved, key=lambda r: (r["account_id"], r["period_start"])
@@ -407,6 +411,8 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
         or artifact.get("artifact_id") != ARTIFACT_ID
         or artifact.get("schema_version") != SCHEMA_VERSION
         or not isinstance(artifact.get("rows"), list)
+        or not isinstance(artifact.get("provider_id"), str)
+        or not artifact["provider_id"].strip()
     ):
         raise ZeroFinancingError("zero-financing artifact shape differs")
     keys = {
@@ -434,7 +440,7 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
             row["account_id"] not in accounts
             or row["measurement_basis"] != BASIS
             or row["classification"] != CLASSIFICATION
-            or row["provider_id"] != "schwab"
+            or row["provider_id"] != artifact.get("provider_id")
             or amount != {"currency": "USD", "status": "AVAILABLE", "value": "0"}
             or not isinstance(row["source_artifact_id"], str)
             or not row["source_artifact_id"].strip()
@@ -451,11 +457,12 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
         if key in seen:
             raise ZeroFinancingError("zero-financing rows repeat an account day")
         seen.add(key)
-    return artifact["rows"]
+    return cast(list[Mapping[str, Any]], artifact["rows"])
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--provider-id", required=True)
     parser.add_argument("--pdf-dir", type=Path, required=True)
     parser.add_argument("--sums", type=Path, required=True)
     parser.add_argument("--mapping", type=Path, required=True)
@@ -468,7 +475,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     artifact = build(
         args.pdf_dir,
         load_sums(args.sums.read_bytes()),
-        load_mapping(mapping_raw),
+        load_mapping(mapping_raw, args.provider_id),
+        provider_id=args.provider_id,
     )
     args.out.write_bytes(canonical(artifact))
     print(

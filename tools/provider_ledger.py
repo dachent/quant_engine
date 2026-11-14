@@ -3989,7 +3989,9 @@ def _contract_fx_segment(financial_contract: Mapping[str, Any]) -> dict[str, Any
     return segments[0]
 
 
-def _zero_financing_rows(value: object, accounts: set[str]) -> list[dict[str, Any]]:
+def _zero_financing_rows(
+    value: object, accounts: set[str], providers: set[str]
+) -> list[dict[str, Any]]:
     """Provider-observed zero-financing days (hash-pinned artifact of
     ``zero_financing_statements``) as financing-liability observations.
 
@@ -4007,9 +4009,14 @@ def _zero_financing_rows(value: object, accounts: set[str]) -> list[dict[str, An
     ):
         raise ProviderLedgerError("zero_financing_observations identity differs")
     try:
-        rows = zero_financing_statements.validate_rows(json.loads(raw), accounts)
+        artifact = json.loads(raw)
+        rows = zero_financing_statements.validate_rows(artifact, accounts)
     except (ValueError, zero_financing_statements.ZeroFinancingError) as exc:
         raise ProviderLedgerError(f"zero_financing_observations: {exc}") from exc
+    if artifact["provider_id"] not in providers:
+        raise ProviderLedgerError(
+            "zero_financing_observations names a provider the spec does not declare"
+        )
     generation = f"zero-financing-{ref['sha256'][:24]}"
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -11001,7 +11008,9 @@ def build_catalog(
         provenance, _object(authority.get("contract"), "financial MVP contract")
     )
     zero_financing_rows = (
-        _zero_financing_rows(spec["zero_financing_observations"], accounts)
+        _zero_financing_rows(
+            spec["zero_financing_observations"], accounts, set(spec["providers"])
+        )
         if "zero_financing_observations" in spec
         else []
     )

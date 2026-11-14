@@ -22,6 +22,7 @@ _SPEC.loader.exec_module(admit)
 ledger = admit.ledger
 
 ACCOUNT = "synthetic-ibkr"
+PROVIDER = "ibkr"
 
 
 def _artifact(path: Path, days: list[str], account: str = ACCOUNT) -> dict[str, Any]:
@@ -32,7 +33,7 @@ def _artifact(path: Path, days: list[str], account: str = ACCOUNT) -> dict[str, 
             "amount": {"currency": "USD", "status": "AVAILABLE", "value": "0"},
             "classification": zf.CLASSIFICATION,
             "measurement_basis": zf.BASIS,
-            "provider_id": "schwab",
+            "provider_id": PROVIDER,
             "source_artifact_id": "schwab-statements/schwab-stmt-aaaaaaaa-2026-01-31.pdf",
             "source_artifact_sha256": "a" * 64,
             "source_field": "LOAN_ZERO_NO_INTEREST_NO_MOVEMENT",
@@ -44,6 +45,7 @@ def _artifact(path: Path, days: list[str], account: str = ACCOUNT) -> dict[str, 
         {
             "schema_version": 1,
             "artifact_id": zf.ARTIFACT_ID,
+            "provider_id": PROVIDER,
             "rows": rows,
             "unobserved_periods": [],
         }
@@ -60,7 +62,7 @@ def test_the_spec_key_projects_validated_rows_and_refuses_the_rest(
     tmp_path: Path,
 ) -> None:
     ref = _artifact(tmp_path / "zero.json", ["2026-01-05", "2026-01-06"])
-    rows = ledger._zero_financing_rows(ref, {ACCOUNT})
+    rows = ledger._zero_financing_rows(ref, {ACCOUNT}, {PROVIDER})
     assert [r["as_of_date"] for r in rows] == ["2026-01-05", "2026-01-06"]
     first = rows[0]
     assert first["measurement_basis"] == "OBSERVED_ZERO_FINANCING_DAY"
@@ -68,14 +70,16 @@ def test_the_spec_key_projects_validated_rows_and_refuses_the_rest(
     assert first["source_artifact_sha256"] == "a" * 64
     assert first["record_id"].endswith(":2026-01-05")
     with pytest.raises(ledger.ProviderLedgerError, match="identity differs"):
-        ledger._zero_financing_rows({**ref, "sha256": "0" * 64}, {ACCOUNT})
+        ledger._zero_financing_rows({**ref, "sha256": "0" * 64}, {ACCOUNT}, {PROVIDER})
     with pytest.raises(ledger.ProviderLedgerError, match="identity differs"):
-        ledger._zero_financing_rows({**ref, "size_bytes": 1}, {ACCOUNT})
+        ledger._zero_financing_rows({**ref, "size_bytes": 1}, {ACCOUNT}, {PROVIDER})
+    with pytest.raises(ledger.ProviderLedgerError, match="does not declare"):
+        ledger._zero_financing_rows(ref, {ACCOUNT}, {"another-provider"})
     with pytest.raises(ledger.ProviderLedgerError, match="keys differ"):
-        ledger._zero_financing_rows({"path": ref["path"]}, {ACCOUNT})
+        ledger._zero_financing_rows({"path": ref["path"]}, {ACCOUNT}, {PROVIDER})
     # an account the provenance does not know is refused, never projected
     with pytest.raises(ledger.ProviderLedgerError, match="zero_financing_observations"):
-        ledger._zero_financing_rows(ref, {"another-account"})
+        ledger._zero_financing_rows(ref, {"another-account"}, {PROVIDER})
     # not an artifact at all
     junk = tmp_path / "junk.json"
     junk.write_bytes(b"{}")
@@ -85,7 +89,7 @@ def test_the_spec_key_projects_validated_rows_and_refuses_the_rest(
         "size_bytes": 2,
     }
     with pytest.raises(ledger.ProviderLedgerError, match="zero_financing_observations"):
-        ledger._zero_financing_rows(bad, {ACCOUNT})
+        ledger._zero_financing_rows(bad, {ACCOUNT}, {PROVIDER})
 
 
 def test_a_staged_candidate_carries_the_zero_rows_and_verifies(

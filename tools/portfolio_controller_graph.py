@@ -190,6 +190,8 @@ _PATH_STAGES = {
     "tools/portfolio_cash_drag_spec.py": ["panel"],
     # Imported by the ledger builder (fill-day restatement) and the baseline (statement points).
     "tools/quantbase_fund_days.py": list(_STAGE_ORDER),
+    # Imported by the ledger builder (provider-observed zero-financing days).
+    "tools/zero_financing_statements.py": list(_STAGE_ORDER),
     "tools/statement_reserve_nav.py": list(_STAGE_ORDER[1:]),
     # The orthogonal risk-share producer: one optional panel block derived from the
     # decomposition lenses and invested capital the panel already holds.

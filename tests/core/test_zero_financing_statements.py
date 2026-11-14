@@ -12,7 +12,8 @@ import zero_financing_statements as zf
 
 LAST3 = "123"
 ACCOUNT = "account-" + "a" * 16
-LABEL = zf.statement_label(LAST3)
+PROVIDER = "schwab"
+LABEL = zf.statement_label(PROVIDER, LAST3)
 
 
 def _text(
@@ -116,7 +117,9 @@ def test_build_emits_one_pinned_row_per_calendar_day_of_a_zero_month(
     name = f"schwab-stmt-{LABEL}-2026-03-31.pdf"
     texts = {name: _text()}
     directory, sums, mapping = _world(tmp_path, texts)
-    artifact = zf.build(directory, sums, mapping, extract=_extract(texts))
+    artifact = zf.build(
+        directory, sums, mapping, provider_id=PROVIDER, extract=_extract(texts)
+    )
     rows = artifact["rows"]
     assert [r["as_of_date"] for r in rows] == [
         f"2026-03-{day:02d}" for day in range(1, 32)
@@ -135,7 +138,9 @@ def test_a_financing_month_emits_no_zero_rows_and_is_listed(tmp_path: Path) -> N
     name = f"schwab-stmt-{LABEL}-2026-03-31.pdf"
     texts = {name: _text(interest=True)}
     directory, sums, mapping = _world(tmp_path, texts)
-    artifact = zf.build(directory, sums, mapping, extract=_extract(texts))
+    artifact = zf.build(
+        directory, sums, mapping, provider_id=PROVIDER, extract=_extract(texts)
+    )
     assert artifact["rows"] == []
     assert artifact["unobserved_periods"] == [
         {
@@ -153,19 +158,33 @@ def test_build_refuses_what_it_cannot_prove(tmp_path: Path) -> None:
     texts = {name: _text()}
     directory, sums, mapping = _world(tmp_path, texts)
     with pytest.raises(zf.ZeroFinancingError, match="identity differs"):
-        zf.build(directory, {name: "0" * 64}, mapping, extract=_extract(texts))
+        zf.build(
+            directory,
+            {name: "0" * 64},
+            mapping,
+            provider_id=PROVIDER,
+            extract=_extract(texts),
+        )
     with pytest.raises(zf.ZeroFinancingError, match="not mapped"):
         zf.build(
-            directory, sums, {"deadbeef": (ACCOUNT, LAST3)}, extract=_extract(texts)
+            directory,
+            sums,
+            {"deadbeef": (ACCOUNT, LAST3)},
+            provider_id=PROVIDER,
+            extract=_extract(texts),
         )
     other = {name: _text(number="****-*999")}
     with pytest.raises(zf.ZeroFinancingError, match="account differs"):
-        zf.build(directory, sums, mapping, extract=_extract(other))
+        zf.build(
+            directory, sums, mapping, provider_id=PROVIDER, extract=_extract(other)
+        )
     with pytest.raises(zf.ZeroFinancingError, match="no statements"):
-        zf.build(directory, {}, mapping, extract=_extract(texts))
+        zf.build(directory, {}, mapping, provider_id=PROVIDER, extract=_extract(texts))
     missing = {f"schwab-stmt-{LABEL}-2026-04-30.pdf": "0" * 64}
     with pytest.raises(zf.ZeroFinancingError, match="missing"):
-        zf.build(directory, missing, mapping, extract=_extract(texts))
+        zf.build(
+            directory, missing, mapping, provider_id=PROVIDER, extract=_extract(texts)
+        )
 
 
 def test_the_same_period_pinned_twice_must_read_identically(tmp_path: Path) -> None:
@@ -173,14 +192,18 @@ def test_the_same_period_pinned_twice_must_read_identically(tmp_path: Path) -> N
     second = f"schwab-stmt-{LABEL}-2026-04-30.pdf"  # a mislabeled copy of March
     same = {first: _text(), second: _text()}
     directory, sums, mapping = _world(tmp_path, same)
-    artifact = zf.build(directory, sums, mapping, extract=_extract(same))
+    artifact = zf.build(
+        directory, sums, mapping, provider_id=PROVIDER, extract=_extract(same)
+    )
     assert len(artifact["rows"]) == 31
     assert artifact["duplicate_period_files"] == [second]
     assert artifact["file_label_mismatches"] == [second]
     differs = {first: _text(), second: _text(interest=True)}
     directory, sums, mapping = _world(tmp_path, differs)
     with pytest.raises(zf.ZeroFinancingError, match="two different statements"):
-        zf.build(directory, sums, mapping, extract=_extract(differs))
+        zf.build(
+            directory, sums, mapping, provider_id=PROVIDER, extract=_extract(differs)
+        )
 
 
 def test_uncovered_days_between_periods_are_listed(tmp_path: Path) -> None:
@@ -188,7 +211,9 @@ def test_uncovered_days_between_periods_are_listed(tmp_path: Path) -> None:
     may = f"schwab-stmt-{LABEL}-2026-05-31.pdf"
     texts = {march: _text(), may: _text(period="May 1-31, 2026")}
     directory, sums, mapping = _world(tmp_path, texts)
-    artifact = zf.build(directory, sums, mapping, extract=_extract(texts))
+    artifact = zf.build(
+        directory, sums, mapping, provider_id=PROVIDER, extract=_extract(texts)
+    )
     assert artifact["coverage_gaps"] == [
         {"account_id": ACCOUNT, "gap_start": "2026-04-01", "gap_end": "2026-04-30"}
     ]
@@ -201,7 +226,7 @@ def test_the_mapping_input_is_validated() -> None:
             "accounts": [{"ledger_account_id": ACCOUNT, "last3": LAST3}],
         }
     ).encode()
-    assert zf.load_mapping(good) == {LABEL: (ACCOUNT, LAST3)}
+    assert zf.load_mapping(good, PROVIDER) == {LABEL: (ACCOUNT, LAST3)}
     other = "account-" + "b" * 16
     for broken in (
         {"schema_version": 2, "accounts": []},
@@ -219,7 +244,7 @@ def test_the_mapping_input_is_validated() -> None:
         },
     ):
         with pytest.raises(zf.ZeroFinancingError):
-            zf.load_mapping(json.dumps(broken).encode())
+            zf.load_mapping(json.dumps(broken).encode(), PROVIDER)
 
 
 def test_validate_rows_refuses_every_malformed_row() -> None:
@@ -235,7 +260,12 @@ def test_validate_rows_refuses_every_malformed_row() -> None:
         "source_field": "LOAN_ZERO_NO_INTEREST_NO_MOVEMENT",
         "source_page": 1,
     }
-    artifact = {"schema_version": 1, "artifact_id": zf.ARTIFACT_ID, "rows": [row]}
+    artifact = {
+        "schema_version": 1,
+        "artifact_id": zf.ARTIFACT_ID,
+        "provider_id": PROVIDER,
+        "rows": [row],
+    }
     assert zf.validate_rows(artifact, {ACCOUNT}) == [row]
     for change in (
         {"account_id": "account-" + "f" * 16},
@@ -271,7 +301,9 @@ def test_days_a_later_interest_posting_charged_are_never_zero_days(
         ),
     }
     directory, sums, mapping = _world(tmp_path, texts)
-    artifact = zf.build(directory, sums, mapping, extract=_extract(texts))
+    artifact = zf.build(
+        directory, sums, mapping, provider_id=PROVIDER, extract=_extract(texts)
+    )
     days = {r["as_of_date"] for r in artifact["rows"]}
     assert "2026-01-28" in days and "2026-01-29" not in days
     assert "2026-01-31" not in days and "2026-02-25" not in days
