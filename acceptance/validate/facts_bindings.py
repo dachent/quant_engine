@@ -412,6 +412,10 @@ def bind_admission_receipt(
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list):
         raise Refusal(BINDING_RECEIPT, "generation.json records no artifact list")
+    ids = [item.get("artifact_id") for item in artifacts if isinstance(item, Mapping)]
+    if len(ids) != len(set(map(str, ids))):
+        # two records for one artifact id: which one the generation vouches for is open
+        raise Refusal(BINDING_RECEIPT, "generation.json records an artifact id twice")
     recorded = {
         item.get("artifact_id"): item.get("sha256")
         for item in artifacts

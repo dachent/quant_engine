@@ -11869,10 +11869,13 @@ def _older_label(label: object, oracle: object, retired_end: date | None) -> boo
     if retired_end is None:
         return False
     shown = to_date(str(label)[:10])
+    wanted = to_date(str(oracle)[:10])
+    # both sides must be real dates: a malformed oracle date is not "later than" anything
     return (
         shown is not None
+        and wanted is not None
         and shown <= retired_end
-        and str(label)[:10] < str(oracle)[:10]
+        and shown < wanted
     )
 
 

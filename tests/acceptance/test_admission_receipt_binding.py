@@ -238,3 +238,15 @@ def test_a_manifest_without_an_artifact_list_is_a_refusal_not_a_crash(
     record["artifacts"] = artifacts
     manifest.write_bytes(json.dumps(record).encode())
     _refused(receipt, ledger)
+
+
+@pytest.mark.parametrize("which", [RECEIPT_ARTIFACT, LEDGER_ARTIFACT])
+def test_a_duplicated_artifact_id_is_refused_even_when_the_last_entry_matches(
+    tmp_path, which
+):
+    receipt, ledger = _generation(tmp_path)
+    manifest = receipt.parent / "generation.json"
+    record = json.loads(manifest.read_bytes())
+    record["artifacts"].insert(0, {"artifact_id": which, "sha256": "0" * 64})
+    manifest.write_bytes(json.dumps(record).encode())
+    _refused(receipt, ledger)
