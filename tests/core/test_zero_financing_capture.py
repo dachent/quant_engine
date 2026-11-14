@@ -281,3 +281,12 @@ def test_a_last_statement_that_is_not_zero_is_not_bridged(tmp_path: Path) -> Non
     )
     assert artifact["rows"] == []
     assert artifact["capture_decisions"][0]["reason"] == "LAST_STATEMENT_NOT_ZERO"
+
+
+def test_descriptive_capture_notes_are_allowed_but_unknown_keys_are_not(
+    tmp_path: Path,
+) -> None:
+    noted = _capture(tmp_path, history_filter="All", rows_in_response=1)
+    assert _days(_build(tmp_path, True, noted))[-1] == "2026-04-06"
+    with pytest.raises(zf.ZeroFinancingError, match="shape differs"):
+        _build(tmp_path, True, _capture(tmp_path, surprise="x"))

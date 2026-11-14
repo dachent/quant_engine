@@ -407,6 +407,17 @@ _CAPTURE_KEYS = frozenset(
 )
 
 
+# descriptive extras a capture may carry (how the page was read); never evidence
+_CAPTURE_NOTES = frozenset(
+    {
+        "balances_note",
+        "history_filter",
+        "rows_in_response",
+        "rows_rendered_in_page_text",
+    }
+)
+
+
 def _zero_amount(value: object) -> bool:
     if not isinstance(value, str) or not value.strip():
         return False
@@ -439,7 +450,8 @@ def evaluate_capture(
         raise ZeroFinancingError("capture is not JSON") from exc
     if (
         not isinstance(top, dict)
-        or set(top) != _CAPTURE_KEYS
+        or not _CAPTURE_KEYS <= set(top)
+        or not set(top) <= _CAPTURE_KEYS | _CAPTURE_NOTES
         or top["schema_version"] != 1
     ):
         raise ZeroFinancingError("capture shape differs")
