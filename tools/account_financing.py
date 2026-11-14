@@ -184,6 +184,9 @@ def classify(
                 conflicts.append("NOT_LEVERED_DECLARATION_UNVERIFIED")
             if not seen.observed_base_days:
                 conflicts.append("NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS")
+            elif seen.unobserved_days is None:
+                # the days that need an observation could not be determined
+                conflicts.append("NOT_LEVERED_COVERAGE_UNMEASURED")
             elif seen.unobserved_days:
                 # coverage is required: every NAV day needs an observation, not just one
                 conflicts.append("NOT_LEVERED_WITH_UNOBSERVED_DAYS")

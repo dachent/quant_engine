@@ -50,7 +50,7 @@ def test_the_three_states_follow_declaration_and_evidence() -> None:
         {
             B: af.DebitEvidence(debit_interest_postings=6),
             C: af.DebitEvidence(currency_debit_days=3),
-            D: af.DebitEvidence(observed_base_days=5),
+            D: af.DebitEvidence(observed_base_days=5, unobserved_days=0),
         },
         [A, B, C, D],
     )
@@ -249,6 +249,8 @@ def test_a_declaration_alone_never_makes_an_account_not_levered() -> None:
             state = af.classify(declared, {account: seen}, [account])[account]
             assert "NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS" in state.conflicts
         ok = af.classify(
-            declared, {account: af.DebitEvidence(observed_base_days=3)}, [account]
+            declared,
+            {account: af.DebitEvidence(observed_base_days=3, unobserved_days=0)},
+            [account],
         )[account]
         assert ok.state == "NOT_LEVERED" and ok.conflicts == ()

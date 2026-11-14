@@ -61,6 +61,8 @@ def _capture(
     raw_rows: list[dict[str, str]] | None = None,
     account_in_raw: str = LAST3,
     raw_kind: str = "history",
+    page_extra: str = "",
+    cash_line: str | None = None,
     **over: Any,
 ) -> bytes:
     """A capture JSON plus raw files that agree with its claims (unless overridden)."""
@@ -97,6 +99,9 @@ def _capture(
         ]
     }
     page = f"Margin Details\nBalance Subject to Interest   ${raw_subject or subject}\n"
+    if cash_line is not None:
+        page += f"Cash & Cash Investments Total\n\t\n${cash_line}\n"
+    page += page_extra
     files = {
         "history.json": (json.dumps(history).encode(), raw_kind),
         "balances.json": (json.dumps(balances).encode(), "balances"),
@@ -202,8 +207,10 @@ NEGATIVE = {
 @pytest.mark.parametrize(
     ("over", "reason"),
     [
-        ({"margin": "12.00"}, "CAPTURE_MARGIN_BALANCE_NOT_ZERO"),
-        ({"subject": "5.00"}, "CAPTURE_MARGIN_BALANCE_NOT_ZERO"),
+        (
+            {"margin": "5.00", "subject": "5.00", "raw_margin": 0.0},
+            "CAPTURE_MARGIN_BALANCE_NOT_ZERO",
+        ),
         ({"transactions_complete": False}, "CAPTURE_TRANSACTIONS_NOT_COMPLETE"),
         ({"transactions_reported_count": 3}, "CAPTURE_TRANSACTION_COUNT_DIFFERS"),
         ({"transactions": [BUY]}, "CAPTURE_TRANSACTION_CAN_CREATE_A_DEBIT"),
@@ -437,3 +444,97 @@ def test_column_anchoring_a_promo_line_and_one_account_per_last3() -> None:
         + "\nOpen a Roth IRA today"
     )
     assert not zf.parse_statement(promo, None)["retirement"]
+
+
+def test_a_cash_credit_in_the_margin_field_is_not_a_loan_only_when_the_page_says_so(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (control): the API marginBalance is accepted as a cash credit only when
+    it equals the page's own cash total to the cent and the page shows no debit."""
+
+    ok = _build(
+        tmp_path,
+        True,
+        _capture(tmp_path, raw_margin=237.07, cash_line="237.07"),
+    )
+    assert ok["capture_decisions"][0]["reason"] == "BRACKET_PROVEN_BY_CAPTURE"
+    for over in (
+        {"raw_margin": 237.07, "cash_line": "237.08"},  # not the page's cash
+        {"raw_margin": 237.07},  # no cash total on the page
+        {"raw_margin": 0.0, "cash_line": "-5.00"},  # negative cash
+        {"page_extra": "Margin Loan Balance   $5.00\n"},  # a loan line
+    ):
+        refused = _build(tmp_path, True, _capture(tmp_path, **over))
+        assert refused["rows"] == []
+        assert (
+            refused["capture_decisions"][0]["reason"]
+            == "CAPTURE_CLAIMS_DIFFER_FROM_RAW"
+        )
+
+
+def test_amounts_are_parsed_and_only_allowlisted_credits_keep_the_bracket(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (Fable A): unparseable or unsigned outgoing entries void the bracket."""
+
+    def entry(action: str, amount: str, description: str = "x") -> dict[str, str]:
+        return {
+            "date": "2026-04-02",
+            "action": action,
+            "description": description,
+            "amount": amount,
+        }
+
+    for bad in (
+        entry("ATM Withdrawal", "500.00"),
+        entry("Withdrawal", "$-500.00"),
+        entry("Check Paid", "900.00"),
+        entry("Margin Int", "12.00"),
+        entry("Transfers", "10.00"),
+        entry("Purchased", "10.00"),
+        entry("Qualified Dividend", ""),
+        entry("Qualified Dividend", "12.00x"),
+    ):
+        artifact = _build(tmp_path, True, _capture(tmp_path, transactions=[bad]))
+        assert artifact["rows"] == [], bad
+    paired = [
+        entry("Reinvest Dividend", "$230.57", "MONEY FUND"),
+        entry("Reinvest Shares", "-$230.57", "MONEY FUND"),
+    ]
+    for item in paired:
+        item["symbol"] = "SWVXX"
+    ok = _build(tmp_path, True, _capture(tmp_path, transactions=paired))
+    assert ok["capture_decisions"][0]["reason"] == "BRACKET_PROVEN_BY_CAPTURE"
+
+
+def test_path_names_second_blocks_and_pdftotext_failures_refuse(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (Fable lows): a raw file name with a path separator, a second margin
+    loan block, and an extractor failure are ledger errors."""
+
+    raw = json.loads(_capture(tmp_path))
+    raw["raw_files"][0]["name"] = "../history.json"
+    with pytest.raises(zf.ZeroFinancingError, match="carries a path"):
+        _build(tmp_path, True, json.dumps(raw).encode())
+    header = (
+        " " * 48
+        + "Opening Margin      Closing Margin      Funds Available     Buying Power"
+    )
+    row = (
+        " " * 48
+        + "$0.00"
+        + " " * 17
+        + "$0.00"
+        + " " * 14
+        + "$1.00"
+        + " " * 14
+        + "$2.00"
+    )
+    one = ["Margin Loan Information", header, row]
+    assert zf._loan_block(one) == (0, 0)
+    with pytest.raises(zf.ZeroFinancingError, match="more than one"):
+        zf._loan_block(one + one)
+    missing = tmp_path / "absent.pdf"
+    with pytest.raises(zf.ZeroFinancingError, match="cannot be extracted"):
+        zf._pdftotext(missing)

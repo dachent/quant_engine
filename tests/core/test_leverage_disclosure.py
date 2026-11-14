@@ -468,3 +468,45 @@ def test_an_incidental_debit_account_needs_a_stated_zero_not_a_silent_nav() -> N
 
     assert cost_status(False) == "OBSERVED_UNRECONCILED"
     assert cost_status(True) == "COMPLETE_RECONCILED"
+
+
+def test_a_sparse_nav_series_never_narrows_the_required_days() -> None:
+    """Kill test (Fable C): required days are the account's calendar span, not its NAV
+    dates; a sparse NAV with a gap, a gap to the cutoff, or no NAV days is a conflict."""
+
+    base = _catalog(base_cash=True)
+    quiet_nav = [r for r in base["nav_observations"] if r["account_id"] == QUIET]
+    assert len(quiet_nav) >= 2
+    zero = {
+        "account_id": QUIET,
+        "provider_id": "ibkr",
+        "measurement_basis": "OBSERVED_ZERO_FINANCING_DAY",
+        "classification": "ZERO_FINANCING_OBSERVED",
+        "amount": _amt("0"),
+        "source_artifact_id": "pins/s.txt",
+        "source_field": "Balance Subject to Interest",
+        "source_artifact_sha256": "a" * 64,
+    }
+    # NAV only on its first and a much later day; zero rows only on those two days
+    sparse = {**base}
+    first, last = {**quiet_nav[0], "as_of_date": "2025-12-01"}, quiet_nav[-1]
+    sparse["nav_observations"] = [
+        r for r in base["nav_observations"] if r["account_id"] != QUIET
+    ] + [first, last]
+    sparse["financing_liability_observations"] = [
+        r for r in base["financing_liability_observations"] if r["account_id"] != QUIET
+    ] + [
+        {**zero, "as_of_date": first["as_of_date"]},
+        {**zero, "as_of_date": last["as_of_date"]},
+    ]
+    refused = _quiet_state(sparse)
+    assert refused["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "NOT_LEVERED_WITH_UNOBSERVED_DAYS" in refused["coverage_reason"]
+    # no NAV days at all: the required days are unknown, never zero
+    nothing = {
+        **sparse,
+        "nav_observations": [
+            r for r in sparse["nav_observations"] if r["account_id"] != QUIET
+        ],
+    }
+    assert "NOT_LEVERED_COVERAGE_UNMEASURED" in _quiet_state(nothing)["coverage_reason"]

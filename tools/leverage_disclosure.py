@@ -19,7 +19,7 @@ which check failed, never a covered status.  A pure function of its inputs.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 import re
 from typing import Any, Final
@@ -82,11 +82,36 @@ def _text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+_SPARSE_GAP_DAYS = 5
+
+
+def _required_days(
+    nav_days: frozenset[str] | None, cutoff: date | None
+) -> set[str] | None:
+    """The days that need a provider observation of the financing balance, or None when
+    they cannot be known (no NAV days, so no window).  Every NAV day is required, and so is
+    every calendar day of a stretch longer than a long weekend between two NAV days or
+    between the last NAV day and the cutoff: a sparse NAV series never narrows the
+    requirement to its own dates."""
+
+    days = sorted(d for d in (_iso_day(x) for x in (nav_days or ())) if d is not None)
+    if not days:
+        return None
+    required = {d.isoformat() for d in days}
+    stops = days + ([cutoff] if cutoff is not None and cutoff > days[-1] else [])
+    for before, after in zip(stops, stops[1:], strict=False):
+        if (after - before).days > _SPARSE_GAP_DAYS:
+            for offset in range(1, (after - before).days + 1):
+                required.add((before + timedelta(days=offset)).isoformat())
+    return required
+
+
 def _debit_evidence(
     liability: Sequence[Mapping[str, Any]],
     cost: Sequence[Mapping[str, Any]],
     window_start: date | None = None,
-    nav_days: frozenset[str] = frozenset(),
+    nav_days: frozenset[str] | None = None,
+    cutoff: date | None = None,
 ) -> account_financing.DebitEvidence:
     base = [
         r
@@ -123,8 +148,15 @@ def _debit_evidence(
             and isinstance(r.get("source_artifact_sha256"), str)
             and _SHA256.fullmatch(r["source_artifact_sha256"]) is not None
         )
-        if day is not None and window_start is not None and day < window_start:
-            continue  # before the account's observed window: clipped, not a gap
+        if (
+            day is not None
+            and window_start is not None
+            and day < window_start
+            and amount is not None
+            and amount == 0
+            and pinned
+        ):
+            continue  # a zero before the account's observed window: clipped, not a gap
         if amount is None or amount < 0 or not pinned or day is None:
             unreadable += 1
         elif amount > 0:
@@ -149,10 +181,11 @@ def _debit_evidence(
             if r.get("classification") == "NET_CASH_DEBIT_BALANCE"
             and _amount(r) is not None
         }
-        | {d for d in base_days if d in nav_days}
+        | base_days
     )
+    required = _required_days(nav_days, cutoff)
     return account_financing.DebitEvidence(
-        unobserved_days=len(nav_days - known_days),
+        unobserved_days=None if required is None else len(required - known_days),
         net_base_debit_days=len(base_days),
         debit_interest_postings=postings,
         currency_debit_days=len(currency_days),
@@ -244,6 +277,7 @@ def account_financing_rows(
                 for r in _until(parts["nav"], cutoff)
                 if r.get("as_of_date")
             ),
+            _iso_day(cutoff) if isinstance(cutoff, str) else cutoff,
         )
         for name, parts in by_account.items()
     }

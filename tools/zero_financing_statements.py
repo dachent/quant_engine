@@ -49,7 +49,7 @@ _ACCOUNT_MASK = re.compile(r"\*{4}-\*\d{3}|\d{4}-\d{4}")
 _HEADER_LINES = 80
 _RETIREMENT = re.compile(
     r"(?<![A-Z])(IRA|ROTH IRA|SEP IRA|ROLLOVER IRA)(?![A-Z])|401K|403B|KEOGH|"
-    r"INDIVIDUAL RETIREMENT",
+    r"RETIREMENT",
 )
 _LOAN_MOVE = re.compile(
     r"^[ \t]*\d{2}/\d{2}[ \t].*?\b(margin[ \t]+loan[ \t]+(advance|payment|repayment)|"
@@ -89,7 +89,7 @@ def _parse_money(amount_text: str) -> Decimal:
     """One printed amount as a signed number: "$1,250.00", "($1,250.00)", "-$5.00"."""
 
     text = amount_text.strip()
-    negative = text.startswith("(") or text.startswith("-") or text.endswith("-")
+    negative = text.startswith("(") or "-" in text
     digits = re.sub(r"[^\d.]", "", text)
     if not re.fullmatch(r"\d+(\.\d\d)", digits) and not re.fullmatch(r"\d+", digits):
         raise ZeroFinancingError("margin loan balance is not a number")
@@ -104,6 +104,13 @@ def _loan_block(lines: list[str]) -> tuple[Decimal, Decimal] | None:
     amounts, each in a recognised form (``$x``, ``($x)``, ``-$x``); any other number in
     the row, or a missing row, refuses."""
 
+    headers = [
+        n
+        for n, x in enumerate(lines)
+        if "Opening Margin" in x and "Closing Margin" in x
+    ]
+    if len(headers) > 1:
+        raise ZeroFinancingError("statement has more than one margin loan block")
     for number, line in enumerate(lines):
         if "Opening Margin" in line and "Closing Margin" in line:
             for follow in lines[number + 1 : number + 7]:
@@ -240,17 +247,16 @@ def _page_of(text: str, needle: str) -> int | None:
 
 
 def _retirement_type(lines: list[str]) -> bool:
-    """The account type, from the line(s) that name the account holder / custodian at the
-    top of the statement: the header text before the first "Account Number" label and the
-    lines right around it, never a promotion further down the first page."""
+    """The account type, from the statement's own title line: the first non-blank line,
+    cut at the "Account Number" label that shares it ("Schwab One Account of",
+    "Schwab Personal Choice Retirement Account (PCRA) of").  Holder names, custodian
+    lines and promotions further down are never the account type."""
 
-    head: list[str] = []
-    for number, line in enumerate(lines[:_HEADER_LINES]):
-        head.append(line)
-        if "Account Number" in line:
-            head.extend(lines[number + 1 : number + 3])
-            break
-    return bool(_RETIREMENT.search("\n".join(head)))
+    for line in lines[:_HEADER_LINES]:
+        if line.strip():
+            title = line.split("Account Number")[0]
+            return bool(_RETIREMENT.search(title.upper()))
+    return False
 
 
 def _block_amounts(header: str, row: str) -> tuple[Decimal, Decimal]:
@@ -377,11 +383,16 @@ def extractor_identity() -> str:
 
 
 def _pdftotext(path: Path) -> str:
-    result = subprocess.run(
-        ["pdftotext", "-layout", str(path), "-"],
-        check=True,
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            ["pdftotext", "-layout", str(path), "-"],
+            check=True,
+            capture_output=True,
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        raise ZeroFinancingError(
+            f"statement text cannot be extracted: {path.name}"
+        ) from exc
     return result.stdout.decode("utf-8", errors="replace")
 
 
@@ -433,9 +444,72 @@ def load_sums(raw: bytes) -> dict[str, str]:
 
 
 _OUTGOING = re.compile(
-    r"(?i)\b(buy|bought|purchase|withdraw|transfer|journal|wire|fee|margin interest|"
-    r"loan|advance|debit|sell short|expense)\b"
+    r"(?i)(buy|bought|purchas|withdraw|transfer|journal|wire|fee|margin int|"
+    r"interest on debit|loan|advance|debit|sell short|expense|check|\batm\b)"
 )
+# the only entries that can never create a debit: a credit with a readable positive
+# amount whose action is one of these stems (anything else voids the bracket)
+_CREDIT_ACTION = re.compile(
+    r"(?i)^\s*(cash dividend|qual[\w.]* dividend|reinvest dividend|bank interest|"
+    r"credit interest|moneylink deposit|deposit|cash in lieu|long term cap gain|"
+    r"short term cap gain|special dividend|pr yr cash div|pr yr div reinvest)\s*$"
+)
+_TX_AMOUNT = re.compile(r"\(?-?\$?\d[\d,]*(\.\d\d)?\)?-?")
+
+
+def _tx_amount(text: object) -> Decimal | None:
+    """A transaction amount as a signed number, or None when it is not readable."""
+
+    raw = str(text).strip() if text is not None else ""
+    if not _TX_AMOUNT.fullmatch(raw):
+        return None
+    negative = raw.startswith(("(", "-")) or raw.endswith("-")
+    value = Decimal(re.sub(r"[^\d.]", "", raw))
+    return -value if negative else value
+
+
+def _transactions_cannot_debit(items: list[dict[str, Any]]) -> tuple[bool, str]:
+    """(ok, reason).  Every amount must parse; a same-day reinvested dividend (credit X
+    and its share purchase -X on the same symbol) nets to zero; every remaining entry
+    must be a positive credit of an allowlisted action that names no outgoing word."""
+
+    entries: list[tuple[str, str, str, Decimal, str]] = []
+    for item in items:
+        amount = _tx_amount(item["amount"])
+        if amount is None:
+            return False, "CAPTURE_TRANSACTION_AMOUNT_UNREADABLE"
+        entries.append(
+            (
+                str(item["date"]),
+                str(item["action"]),
+                str(item.get("symbol", "")),
+                amount,
+                f"{item['action']} {item['description']}",
+            )
+        )
+    remaining = list(entries)
+    for entry in entries:
+        if entry[1].strip().lower() == "reinvest dividend" and entry in remaining:
+            for other in remaining:
+                if (
+                    other[1].strip().lower() == "reinvest shares"
+                    and other[0] == entry[0]
+                    and other[2] == entry[2]
+                    and other[3] == -entry[3]
+                ):
+                    remaining.remove(entry)
+                    remaining.remove(other)
+                    break
+    for _day, action, _symbol, amount, text in remaining:
+        if (
+            amount <= 0
+            or not _CREDIT_ACTION.fullmatch(action)
+            or _OUTGOING.search(text)
+        ):
+            return False, "CAPTURE_TRANSACTION_CAN_CREATE_A_DEBIT"
+    return True, ""
+
+
 _CAPTURE_KEYS = frozenset(
     {
         "schema_version",
@@ -459,8 +533,12 @@ _CAPTURE_KEYS = frozenset(
 
 
 _PAGE_SUBJECT = re.compile(
-    r"Balance Subject to Interest[^\d$(-]*(\(?-?\$?[\d,]+\.\d\d\)?)"
+    r"Balance Subject to Interest[^\d$(-]*(\(?-?\$?-?[\d,]+\.\d\d\)?)"
 )
+_PAGE_CASH_TOTAL = re.compile(
+    r"Cash & Cash Investments Total[^\d$(-]*(\(?-?\$?-?[\d,]+\.\d\d\)?)"
+)
+_PAGE_DEBIT_LINE = re.compile(r"(?i)margin loan|debit balance|margin debit")
 
 
 _ROW_DATE = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})")
@@ -545,42 +623,55 @@ def _recompute_capture(
     if raw_margin is None:
         raise ZeroFinancingError("capture raw balances do not name the account once")
     claimed_balances = top["balances"]
-    if isinstance(claimed_balances, dict) and claimed_balances.get(
-        "margin_loan_balance"
-    ):
-        try:
-            claimed_margin = _parse_money(
-                "$" + str(claimed_balances["margin_loan_balance"]).lstrip("$")
-            )
-        except ZeroFinancingError as exc:
-            raise ZeroFinancingError("capture margin balance is unreadable") from exc
-        if claimed_margin != raw_margin:
-            raise CaptureClaimsDiffer(
-                "capture margin balance differs from its raw balances"
-            )
-    if margin_account:
-        if len(balances_text) != 1:
-            raise ZeroFinancingError("capture needs exactly one raw balances page")
-        text = (raw_dir / balances_text[0]["name"]).read_text(
+    page = None
+    if len(balances_text) == 1:
+        page = (raw_dir / balances_text[0]["name"]).read_text(
             encoding="utf-8", errors="replace"
         )
-        match = _PAGE_SUBJECT.search(text)
-        claimed_subject = (
-            claimed_balances.get("balance_subject_to_interest")
-            if isinstance(claimed_balances, dict)
-            else None
-        )
-        if match is None or not isinstance(claimed_subject, str):
+    elif len(balances_text) > 1 or margin_account:
+        raise ZeroFinancingError("capture needs exactly one raw balances page")
+    subject = _page_amount(page, _PAGE_SUBJECT) if page is not None else None
+    cash_total = _page_amount(page, _PAGE_CASH_TOTAL) if page is not None else None
+    if page is not None and (
+        _PAGE_DEBIT_LINE.search(page) or (cash_total is not None and cash_total < 0)
+    ):
+        raise CaptureClaimsDiffer("capture page shows a debit or negative cash")
+    # the API marginBalance field is the account's cash credit when it is non-zero: it
+    # is only that when the page's own cash total says so, to the cent
+    if raw_margin != 0 and (cash_total is None or raw_margin != cash_total):
+        if margin_account:
+            raise CaptureClaimsDiffer(
+                "capture raw marginBalance is not the page's cash total"
+            )
+        return raw_margin  # a retirement-type account that shows unexplained borrowing
+    if margin_account:
+        if subject is None or subject < 0:
             raise CaptureClaimsDiffer(
                 "capture subject-to-interest is not on its raw page"
             )
-        if _parse_money(match.group(1)) != _parse_money(
-            "$" + claimed_subject.lstrip("$")
-        ):
-            raise CaptureClaimsDiffer(
-                "capture subject-to-interest differs from its page"
-            )
-    return raw_margin
+        if not isinstance(claimed_balances, dict):
+            raise ZeroFinancingError("capture balances are absent")
+        for key in ("margin_loan_balance", "balance_subject_to_interest"):
+            claimed_text = claimed_balances.get(key)
+            if not isinstance(claimed_text, str) or not claimed_text.strip():
+                raise ZeroFinancingError(f"capture {key} is absent")
+            try:
+                value = _parse_money("$" + claimed_text.strip().lstrip("$"))
+            except ZeroFinancingError as exc:
+                raise ZeroFinancingError(f"capture {key} is unreadable") from exc
+            if value != subject:
+                raise CaptureClaimsDiffer(f"capture {key} differs from its page")
+    return Decimal(0)
+
+
+def _page_amount(text: str, pattern: "re.Pattern[str]") -> Decimal | None:
+    match = pattern.search(text)
+    if match is None:
+        return None
+    try:
+        return _parse_money(match.group(1))
+    except ZeroFinancingError:
+        return None
 
 
 def _zero_amount(value: object) -> bool:
@@ -649,6 +740,13 @@ def evaluate_capture(
             or raw_dir is None
         ):
             raise ZeroFinancingError("capture raw file entry is invalid")
+        if (
+            not isinstance(item["name"], str)
+            or item["name"] in ("", ".", "..")
+            or "/" in item["name"]
+            or "\\" in item["name"]
+        ):
+            raise ZeroFinancingError("capture raw file name carries a path")
         path = raw_dir / str(item["name"])
         content = (
             path.read_bytes() if path.is_file() and not path.is_symlink() else None
@@ -702,11 +800,9 @@ def evaluate_capture(
             raise ZeroFinancingError("capture transaction date is invalid") from exc
         if not window_start <= when <= window_end:
             raise ZeroFinancingError("capture transaction is outside its window")
-        text = f"{item['action']} {item['description']}"
-        amount = str(item["amount"]).strip()
-        negative = amount.startswith(("-", "(")) or amount.endswith("-")
-        if negative or _OUTGOING.search(text):
-            return False, "CAPTURE_TRANSACTION_CAN_CREATE_A_DEBIT"
+    effect_ok, effect_reason = _transactions_cannot_debit(transactions)
+    if not effect_ok:
+        return False, effect_reason
     return True, "BRACKET_PROVEN_BY_CAPTURE"
 
 
