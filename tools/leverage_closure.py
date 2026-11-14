@@ -170,15 +170,15 @@ def financing_cost_closure(
             and r.get("nav_interest_accruals_stated") is True
         }
         proven = stated_days if require_explicit_zero else empty_days
-        missing = [d for d in days if d not in proven]
+        days_unproven = [d for d in days if d not in proven]
         placed, unmapped_here = _split_unmapped(rows, epoch_start, reserve_windows)
         return Closure(
             "FINANCING_COST_ACCRUAL_SECTION_EMPTY",
-            bool(days) and not missing and not rows,
+            bool(days) and not days_unproven and not rows,
             {
                 "statement_days": len(days),
                 "empty_section_days": len(empty_days & set(days)),
-                "days_without_section": len(missing),
+                "days_without_section": len(days_unproven),
                 "other_cost_rows": len(rows),
                 "unmapped_rows_in_epoch": len(unmapped_here),
                 "reserve_window_rows": len(placed),
