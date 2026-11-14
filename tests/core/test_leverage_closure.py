@@ -317,3 +317,35 @@ def test_a_real_shaped_reserve_nav_row_is_placed_only_with_its_ledger_reason() -
     assert covered(mapping_reason="MAPPING_NO_ACTIVE_INTERVAL")
     assert not covered()
     assert not covered(mapping_reason="MAPPING_AMBIGUOUS_POINT")
+
+
+def test_a_posting_is_placed_only_if_every_date_it_carries_is_inside_the_window() -> (
+    None
+):
+    """Kill test (round-4 Astra): a Schwab margin-interest posting is mapped by its
+    effective date.  Event 01-14 inside the window but effective 01-15 outside it must
+    stay unmapped and keep counting as a mapping gap; both inside places it."""
+
+    window = [(date(2026, 1, 1), date(2026, 1, 14), "EXACT_IDENTITY_CLOSURE")]
+    days = ["2026-01-12", "2026-01-13", "2026-01-14", "2026-01-15"]
+    posting = {
+        "classification": "BROKER_DEBIT_INTEREST",
+        "measurement_basis": "CASH_POSTING",
+        "source_amount": _amt("-1"),
+        "mapping_status": "UNMAPPED",
+        "mapping_reason": "MAPPING_NO_ACTIVE_INTERVAL",
+        "event_date": "2026-01-14",
+        "effective_date": "2026-01-15",
+    }
+    assert not lc.in_reserve_window(posting, window)
+    result = lc.financing_cost_closure([posting], days, "2026-01-16", None, window)
+    assert result.evidence["reserve_window_rows"] == 0
+    assert result.evidence["unmapped_rows_in_epoch"] == 1
+    inside = {**posting, "effective_date": "2026-01-14"}
+    assert lc.in_reserve_window(inside, window)
+    assert (
+        lc.financing_cost_closure([inside], days, "2026-01-16", None, window).evidence[
+            "reserve_window_rows"
+        ]
+        == 1
+    )

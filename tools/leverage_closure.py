@@ -45,6 +45,7 @@ _ROW_DAY_FIELDS: Final = (
     "value_date",
     "accounting_date",
     "event_date",
+    "effective_date",  # the date the ledger's own point mapping uses (Schwab postings)
     "as_of_date",
 )
 
