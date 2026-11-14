@@ -457,6 +457,9 @@ def _statements_equal(left: FlexDailyStatement, right: FlexDailyStatement) -> bo
         and left.open_position_rows_total == right.open_position_rows_total
         and (left.open_position_rows_suspect == right.open_position_rows_suspect)
         and left.nav_holdings_nonzero == right.nav_holdings_nonzero
+        and left.nav_holdings_complete == right.nav_holdings_complete
+        and left.nav_interest_nonzero == right.nav_interest_nonzero
+        and left.nav_interest_stated == right.nav_interest_stated
         and left.tier_interest == right.tier_interest
         and left.nav_cash == right.nav_cash
         and left.nav_broker_cash_component == right.nav_broker_cash_component
@@ -1009,9 +1012,8 @@ def _normalize(
         if (
             statement.interest_accruals_section_present
             and not statement.interest_accruals
-            # the statement's own NAV accrual components must not say otherwise
-            and statement.nav_interest_accruals in (None, 0)
-            and statement.nav_margin_financing_charge_accruals in (None, 0)
+            # every interest/financing component of the statement's own NAV must be zero
+            and not statement.nav_interest_nonzero
         ):
             empty = source_row(
                 "financing-cost",
@@ -1030,9 +1032,7 @@ def _normalize(
                 Decimal("0"), statement.base_currency, True
             )
             # whether the NAV states the accrual as an explicit zero, or is silent
-            empty["nav_interest_accruals_stated"] = (
-                statement.nav_interest_accruals is not None
-            )
+            empty["nav_interest_accruals_stated"] = statement.nav_interest_stated
             empty["period_start"] = day
             empty["period_end"] = day
             financing_cost_observations.append(empty)
@@ -1265,6 +1265,7 @@ def _normalize(
                 # statement's own NAV reports no holdings
                 or (
                     statement.open_position_rows_total == 0
+                    and statement.nav_holdings_complete
                     and not statement.nav_holdings_nonzero
                 )
             )
@@ -1285,6 +1286,14 @@ def _normalize(
             value=gross_value if gross_available else None,
             currency=statement.base_currency,
         )
+        if not gross_available and all(
+            position.reported_account_matches_statement
+            for position in statement.positions
+        ):
+            # the figure is unverifiable (LOT-only, unknown rows, NAV holdings not stated
+            # or nonzero), not attributable to another account: say so
+            exposure["source_account_scope"] = "STATEMENT_ACCOUNT"
+            exposure["unavailable_reason"] = "OPEN_POSITIONS_UNVERIFIED"
         exposure["as_of_date"] = statement.report_date.isoformat()
         exposure["scope"] = "SUMMARY_HOLDINGS"
         leverage_exposure_observations.append(exposure)

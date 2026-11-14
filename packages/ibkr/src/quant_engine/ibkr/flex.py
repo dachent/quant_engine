@@ -122,16 +122,45 @@ def _optional_decimal(value: str | None, name: str) -> Decimal | None:
     return _decimal(value, name)
 
 
-_NAV_HOLDINGS_ATTRIBUTES = (
+# Holdings components of the NAV element.  The core set must all be stated (silence is not
+# zero); any other attribute that names a holding is held to the same zero standard.
+_NAV_HOLDINGS_CORE = (
     "stock",
     "options",
     "bonds",
     "commodities",
     "funds",
     "notes",
-    "warrants",
+    "crypto",
     "cfdUnrealizedPl",
+    "forexCfdUnrealizedPl",
 )
+_NAV_HOLDINGS_NAME = re.compile(
+    r"(stock|option|bond|commodit|fund|note|warrant|crypto|cfd|forex|ipo|phys|slb"
+    r"|long|short)",
+    re.IGNORECASE,
+)
+_NAV_NOT_HOLDINGS = re.compile(r"(accrual|component|cash|alias|model)", re.IGNORECASE)
+# Interest/financing components of the NAV element: all must be zero when the statement
+# claims "no accruals"; the core ones must be stated.
+_NAV_INTEREST_NAME = re.compile(r"(interest|financing|incentive)", re.IGNORECASE)
+_NAV_INTEREST_CORE = (
+    "interestAccruals",
+    "brokerInterestAccrualsComponent",
+    "marginFinancingChargeAccruals",
+)
+
+
+def _nav_numbers(
+    nav: ET.Element, selector: re.Pattern[str], exclude: re.Pattern[str] | None
+) -> dict[str, Decimal]:
+    out: dict[str, Decimal] = {}
+    for key, value in nav.attrib.items():
+        if selector.search(key) and not (exclude and exclude.search(key)):
+            parsed = _optional_decimal(value, f"nav.{key}")
+            if parsed is not None:
+                out[key] = parsed
+    return out
 
 
 def _account_matches(element: ET.Element, raw_account_id: str) -> bool:
@@ -381,8 +410,13 @@ class FlexDailyStatement:
     # "No positions" is zero exposure only when the section has no child at all.
     open_position_rows_total: int = 0
     open_position_rows_suspect: int = 0
-    # NAV holdings components (stock, options, ...) the statement itself reports nonzero.
+    # NAV holdings components the statement reports: any nonzero, and whether every core
+    # component is stated at all.
     nav_holdings_nonzero: bool = False
+    nav_holdings_complete: bool = False
+    # NAV interest/financing components: any nonzero, and whether the core ones are stated.
+    nav_interest_nonzero: bool = False
+    nav_interest_stated: bool = False
 
 
 @dataclass(frozen=True)
@@ -824,8 +858,17 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
             or _optional(item.attrib.get("accountId")) != raw_account_id
         ),
         nav_holdings_nonzero=any(
-            _optional_decimal(nav.attrib.get(key), f"nav.{key}") not in (None, 0)
-            for key in _NAV_HOLDINGS_ATTRIBUTES
+            v != 0
+            for v in _nav_numbers(nav, _NAV_HOLDINGS_NAME, _NAV_NOT_HOLDINGS).values()
+        ),
+        nav_holdings_complete=all(
+            _optional(nav.attrib.get(key)) is not None for key in _NAV_HOLDINGS_CORE
+        ),
+        nav_interest_nonzero=any(
+            v != 0 for v in _nav_numbers(nav, _NAV_INTEREST_NAME, None).values()
+        ),
+        nav_interest_stated=all(
+            _optional(nav.attrib.get(key)) is not None for key in _NAV_INTEREST_CORE
         ),
         nav_cash=_optional_decimal(nav.attrib.get("cash"), "nav.cash"),
         nav_broker_cash_component=_optional_decimal(

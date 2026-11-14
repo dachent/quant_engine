@@ -392,3 +392,63 @@ def test_a_positive_borrowed_balance_row_is_a_debit_day_not_an_unreadable_row() 
     state = _quiet_state(catalog)
     assert state["classification"] == "LEVERED"
     assert "DECLARED_NO_FACILITY_BUT_NET_BASE_DEBIT" in state["coverage_reason"]
+
+
+def test_an_incidental_debit_account_needs_a_stated_zero_not_a_silent_nav() -> None:
+    """Kill test (round-6): every account that reaches the cost closure (incidental debit
+    included) closes an empty accrual section only on a stated zero."""
+
+    def catalog(stated: bool) -> dict[str, Any]:
+        cat = _catalog(base_cash=True)
+        cat["financing_liability_observations"] += [
+            {
+                "account_id": QUIET,
+                "provider_id": "ibkr",
+                "aggregation_level": "CURRENCY",
+                "measurement_basis": "TRADE_DATE_CASH_BALANCE",
+                "classification": "CASH_DEBIT_BALANCE",
+                "as_of_date": d,
+                "amount": _amt("-500", "EUR"),
+            }
+            for d in DAYS
+        ]
+        cat["financing_cost_observations"] += [
+            {
+                "account_id": QUIET,
+                "provider_id": "ibkr",
+                "classification": "NO_ACCRUALS_REPORTED",
+                "measurement_basis": "ACCRUAL_SECTION_EMPTY",
+                "as_of_date": d,
+                "period_end": d,
+                "amount": _amt("0"),
+                "source_account_scope": "STATEMENT_ACCOUNT",
+                "source_section": "InterestAccruals",
+                "mapping_status": "MAPPED",
+                "nav_interest_accruals_stated": stated,
+            }
+            for d in DAYS
+        ]
+        return cat
+
+    def cost_status(stated: bool) -> str:
+        rows = ld.account_financing_rows(
+            _declaration(),
+            catalog(stated),
+            cutoff=CUTOFF,
+            generation_id=SHA,
+            catalog_sha256=SHA,
+        )
+        state = next(
+            r
+            for r in rows
+            if r["account_id"] == QUIET and r["data_class"] == "ACCOUNT_FINANCING"
+        )
+        assert state["classification"] == "INCIDENTAL_DEBIT"
+        return next(
+            r["coverage_status"]
+            for r in rows
+            if r["account_id"] == QUIET and r["data_class"] == "FINANCING_COST"
+        )
+
+    assert cost_status(False) == "OBSERVED_UNRECONCILED"
+    assert cost_status(True) == "COMPLETE_RECONCILED"

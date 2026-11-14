@@ -3243,6 +3243,17 @@ def test_a_base_only_cash_line_becomes_a_net_loan_row_not_a_dropped_loan(
     assert len({r["record_id"] for r in rows}) == len(rows)
 
 
+FULL_ZERO_NAV = (
+    'stock="0" options="0" bonds="0" commodities="0" funds="0" notes="0" crypto="0" '
+    'cfdUnrealizedPl="0" forexCfdUnrealizedPl="0" interestAccruals="0" '
+    'brokerInterestAccrualsComponent="0" marginFinancingChargeAccruals="0"'
+)
+
+
+def _full_nav(xml: str) -> str:
+    return xml.replace('total="114"', 'total="114" ' + FULL_ZERO_NAV, 1)
+
+
 def _coverage_catalog(tmp_path: Path, xml: str) -> dict[str, Any]:
     path = tmp_path / "coverage.xml"
     path.write_text(xml, encoding="utf-8")
@@ -3285,7 +3296,7 @@ def test_an_empty_open_positions_section_is_zero_exposure_bound_to_the_statement
     reported under another account makes the figure ambiguous."""
 
     day = date(2026, 1, 3)
-    full = _xml("SYNTH-RAW", day, "114")
+    full = _full_nav(_xml("SYNTH-RAW", day, "114"))
     rows = full.split("<OpenPosition ")
     assert len(rows) == 2
     empty_section = (
@@ -3359,7 +3370,7 @@ def test_zero_exposure_refuses_when_the_statement_says_otherwise(
     accountId, and NAV holdings with no positions all leave exposure UNAVAILABLE."""
 
     day = date(2026, 1, 3)
-    full = _xml("SYNTH-RAW", day, "114")
+    full = _full_nav(_xml("SYNTH-RAW", day, "114"))
     clean_empty = _empty_positions(full)
     assert _exposure_status(tmp_path, clean_empty) == "AVAILABLE"
 
@@ -3375,11 +3386,31 @@ def test_zero_exposure_refuses_when_the_statement_says_otherwise(
     assert no_account != full
     assert _exposure_status(tmp_path, no_account) != "AVAILABLE"
 
-    holdings = clean_empty.replace('total="114"', 'total="114" stock="100"')
-    assert holdings != clean_empty
-    assert _exposure_status(tmp_path, holdings) != "AVAILABLE"
-    zero_holdings = clean_empty.replace('total="114"', 'total="114" stock="0"')
-    assert _exposure_status(tmp_path, zero_holdings) == "AVAILABLE"
+    for attribute in (
+        'stock="100"',
+        'crypto="50"',
+        'forexCfdUnrealizedPl="7"',
+        'stockLong="100"',
+        'slbDirectSecuritiesLent="9"',
+    ):
+        name = attribute.split("=")[0]
+        holdings = (
+            clean_empty.replace(f'{name}="0"', attribute)
+            if f'{name}="0"' in clean_empty
+            else clean_empty.replace('total="114"', 'total="114" ' + attribute)
+        )
+        assert holdings != clean_empty
+        assert _exposure_status(tmp_path, holdings) != "AVAILABLE", attribute
+    # silence is not zero: a core holdings attribute missing, or none stated at all
+    silent = clean_empty.replace(' crypto="0"', "")
+    assert silent != clean_empty
+    assert _exposure_status(tmp_path, silent) != "AVAILABLE"
+    unstated = _empty_positions(_xml("SYNTH-RAW", day, "114"))
+    assert _exposure_status(tmp_path, unstated) != "AVAILABLE"
+    # an unverifiable figure is not an account ambiguity
+    exposure = _exposure(_coverage_catalog(tmp_path, unstated))
+    assert exposure["source_account_scope"] == "STATEMENT_ACCOUNT"
+    assert exposure["unavailable_reason"] == "OPEN_POSITIONS_UNVERIFIED"
 
 
 def test_an_empty_accrual_section_contradicted_by_the_statement_is_not_recorded(
@@ -3397,14 +3428,24 @@ def test_an_empty_accrual_section_contradicted_by_the_statement_is_not_recorded(
             if row["measurement_basis"] == "ACCRUAL_SECTION_EMPTY"
         ]
 
-    base = _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
-    assert len(empty_rows(base)) == 1
-    contradicted = base.replace('total="114"', 'total="114" interestAccruals="-12.34"')
-    assert contradicted != base
-    assert empty_rows(contradicted) == []
-    stated_zero = base.replace('total="114"', 'total="114" interestAccruals="0"')
-    assert empty_rows(stated_zero)[0]["nav_interest_accruals_stated"] is True
-    assert empty_rows(base)[0]["nav_interest_accruals_stated"] is False
+    silent_base = _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    assert len(empty_rows(silent_base)) == 1
+    assert empty_rows(silent_base)[0]["nav_interest_accruals_stated"] is False
+    base = _full_nav(silent_base)
+    assert empty_rows(base)[0]["nav_interest_accruals_stated"] is True
+    for name, value in (
+        ("interestAccruals", "-12.34"),
+        ("brokerInterestAccrualsComponent", "-5"),
+        ("marginFinancingChargeAccruals", "-1"),
+    ):
+        contradicted = base.replace(f'{name}="0"', f'{name}="{value}"')
+        assert contradicted != base
+        assert empty_rows(contradicted) == [], name
+    # another interest component not on the core list is held to the same standard
+    other = silent_base.replace(
+        'total="114"', 'total="114" bondInterestAccrualsComponent="-3"'
+    )
+    assert empty_rows(other) == []
     renamed = _xml(
         "SYNTH-RAW",
         day,
@@ -3439,7 +3480,7 @@ def test_open_positions_variants_never_read_as_zero_exposure(tmp_path: Path) -> 
     of the statement's own account (the real shape) stay AVAILABLE."""
 
     day = date(2026, 1, 3)
-    full = _xml("SYNTH-RAW", day, "114")
+    full = _full_nav(_xml("SYNTH-RAW", day, "114"))
     summary_row = full.split("<OpenPositions>", 1)[1].split("</OpenPositions>", 1)[0]
     lot_row = summary_row.replace('levelOfDetail="SUMMARY"', 'levelOfDetail="LOT"')
     assert lot_row != summary_row

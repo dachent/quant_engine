@@ -38,6 +38,7 @@ ACTIVITY_SECTIONS = (
     "ConversionRates",
     "CorporateActions",
     "EquitySummaryByReportDateInBase",
+    "InterestAccruals",
     "OpenPositions",
     "Trades",
     "Transfers",
