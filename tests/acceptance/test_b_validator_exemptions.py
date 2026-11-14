@@ -443,3 +443,10 @@ def test_a_malformed_oracle_date_does_not_suppress_the_label(tmp_path):
     row = {**_expected_capital(RETIRED), "as_of": "2026-9"}
     found = _findings(tmp_path, [row], [])
     assert set(_classes(found, CAPITAL)) == {checks.BLOCKER_REGRESSION}
+
+
+def test_a_zero_row_tolerance_binds_the_value_check_below_the_cent_cap(tmp_path):
+    # 0.195 vs the tracker's 0.19 is inside the cent cap but not inside tolerance 0
+    row = {**_expected_capital(RETIRED, "0.195"), "tolerance": "0"}
+    found = _findings(tmp_path, [row], [_last_observation()])
+    assert _classes(found, LAST_OBS) == [checks.NOT_READY]
