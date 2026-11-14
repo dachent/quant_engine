@@ -3039,3 +3039,57 @@ def test_the_run_observation_locator_refuses_two_distinct_matching_files(
         materialize._locate_run_observation(None, top / "gen" / "inner", name, identity)
         == top / name
     )
+
+
+def test_the_run_observation_identity_survives_the_real_two_prefix_layout() -> None:
+    """Kill test (round-2 R4): the real observation keeps one root under the world
+    directory and the other roots under the owner's data folders, so no textual common
+    prefix exists.  World name, drive, profile and case must not enter the identity;
+    each root's own leaf still does."""
+
+    from quant_engine.portfolio_ledger.provider_admission import (
+        run_observation_identity,
+    )
+
+    def world(name: str, data: str, drive: str = "C:") -> dict[str, Any]:
+        return _identity_observation(
+            {
+                "matrixport": f"{drive}/Dev/scratch/qe-r3/{name}/matrixport",
+                "ibkr": f"{data}/dataIBKR",
+                "schwab": f"{data}/dataSchwab",
+            }
+        )
+
+    profile = "C:/Users/Someone/V Capital/investing - Documents/_quant_engine"
+    base = run_observation_identity(world("world-F", profile))
+    assert base == run_observation_identity(world("world-G", profile))
+    assert base == run_observation_identity(world("world-A2", profile.upper(), "D:"))
+    assert base == run_observation_identity(
+        world("w-x", "E:/other-owner/_quant_engine".replace("/", chr(92)))
+    )
+    renamed_leaf = _identity_observation(
+        {
+            "matrixport": "C:/Dev/scratch/qe-r3/world-F/matrixport",
+            "ibkr": f"{profile}/dataIBKR-other",
+            "schwab": f"{profile}/dataSchwab",
+        }
+    )
+    assert base != run_observation_identity(renamed_leaf)
+
+
+def test_a_point_row_states_why_it_is_unmapped() -> None:
+    accounts, strategies = {"a"}, {"s1", "s2"}
+    both = {
+        "a": [
+            {"strategy_id": "s1", "effective_start": "2026-01-01", "effective_end": None},
+            {"strategy_id": "s2", "effective_start": "2026-01-01", "effective_end": None},
+        ]
+    }
+    row = {"account_id": "a", "as_of_date": "2026-02-01"}
+    reason = ledger._point_unmapped_reason
+    assert reason(row, accounts, strategies, both) == "MAPPING_AMBIGUOUS_POINT"
+    assert reason(row, accounts, strategies, {"a": []}) == "MAPPING_NO_ACTIVE_INTERVAL"
+    assert (
+        reason({"account_id": "z", "as_of_date": "2026-02-01"}, accounts, strategies, both)
+        == "MAPPING_ACCOUNT_OR_DAY_UNKNOWN"
+    )

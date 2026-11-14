@@ -33,9 +33,12 @@ _ZERO = Decimal(0)
 # are attributed to the account's declared RESERVE window (the account financing
 # declaration's sleeve_roles) and only through it: every day the row touches must lie
 # inside a declared window, the row must carry no strategy, and the ledger's reason must
-# be "no validated interval" (an ambiguous or epoch-crossing row means strategy windows
-# exist and stays blocked).  No declared window, or days outside it, stays UNMAPPED.
-RESERVE_WINDOW_REASONS: Final = (None, "PERIOD_MAPPING_MISSING_VALIDATED_INTERVAL")
+# be an explicit "no validated/active interval" (a row with no stated reason, an ambiguous
+# point day or an epoch-crossing period means strategy windows exist and stays blocked).  No declared window, or days outside it, stays UNMAPPED.
+RESERVE_WINDOW_REASONS: Final = (
+    "PERIOD_MAPPING_MISSING_VALIDATED_INTERVAL",
+    "MAPPING_NO_ACTIVE_INTERVAL",
+)
 _ROW_DAY_FIELDS: Final = (
     "period_start",
     "period_end",

@@ -232,7 +232,7 @@ def account_financing_rows(
                 f"{state.reason}{';CONFLICT=' + conflict_text if conflict_text else ''}{unverified}",
             )
         )
-        if state.state == "NOT_LEVERED":
+        if state.state == "NOT_LEVERED" and not state.conflicts:
             continue
         mapped_days = sorted(
             {
