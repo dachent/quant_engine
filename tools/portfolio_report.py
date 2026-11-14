@@ -9163,12 +9163,18 @@ def _leverage_disclosures(
                     account_financing_path, "account financing declaration"
                 )
             )
+            declaration_bytes = _regular_file_bytes(
+                account_financing_path, "account financing declaration"
+            )
             summary = leverage_disclosure.account_financing_rows(
                 declaration,
                 provider_catalog,
                 cutoff=cutoff,
                 generation_id=catalog_generation_id,
                 catalog_sha256=catalog_sha256,
+                reserve_windows=account_financing.reserve_nav_windows(
+                    account_financing.load_sleeve_roles(declaration_bytes)
+                ),
             )
         except account_financing.FinancingDeclarationError as exc:
             raise ReportValidationError(str(exc)) from exc

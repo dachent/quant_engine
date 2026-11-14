@@ -143,8 +143,12 @@ def account_financing_rows(
     generation_id: str,
     catalog_sha256: str,
     account_ids: Iterable[str] | None = None,
+    reserve_windows: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """The summary rows of every named account (default: every declared account)."""
+    """The summary rows of every named account (default: every declared account).
+
+    ``reserve_windows`` (account id -> declared RESERVE windows) is the only way an
+    unmapped reserve row is attributed; absent, nothing is."""
 
     names = sorted(set(declaration if account_ids is None else account_ids))
     by_account: dict[str, dict[str, list[Mapping[str, Any]]]] = {
@@ -242,7 +246,11 @@ def account_financing_rows(
         )
         epoch_start = mapped_days[0] if mapped_days else None
         cost_closure = leverage_closure.financing_cost_closure(
-            parts["cost"], statement_days, cutoff, epoch_start
+            parts["cost"],
+            statement_days,
+            cutoff,
+            epoch_start,
+            (reserve_windows or {}).get(name),
         )
         rows.append(
             make(
@@ -281,7 +289,7 @@ def account_financing_rows(
             )
         )
         exposure_closure, gross, nav = leverage_closure.gross_exposure(
-            parts["exposure"], parts["nav"], cutoff
+            parts["exposure"], parts["nav"], cutoff, (reserve_windows or {}).get(name)
         )
         rows.append(
             make(

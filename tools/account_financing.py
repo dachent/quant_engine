@@ -274,4 +274,16 @@ def reserve_nav_windows(
             out.setdefault(role.ledger_account_id, []).append(
                 (date.fromisoformat(start), date.fromisoformat(end), basis)
             )
+    for account, windows in out.items():
+        ordered = sorted(windows)
+        for (_s1, e1, _b1), (s2, _e2, _b2) in zip(ordered, ordered[1:], strict=False):
+            if s2 <= e1:
+                raise FinancingDeclarationError(
+                    f"overlapping RESERVE windows declared for {account}"
+                )
+        for start, end, _basis in ordered:
+            if end < start:
+                raise FinancingDeclarationError(
+                    f"RESERVE window ends before it starts for {account}"
+                )
     return out
