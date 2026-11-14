@@ -6395,7 +6395,9 @@ def _statement_reserve_facts(
         try:
             raw = Path(_text(pin.get("path"), "statement reserve path")).read_bytes()
             facts = statement_reserve_nav.statement_reserve_facts(
-                statement_reserve_nav.verified_catalog(raw, pin),
+                statement_reserve_nav.verified_catalog(
+                    raw, {k: pin.get(k) for k in ("path", "sha256", "size_bytes")}
+                ),
                 as_of,
                 role=str(pin.get("role", "RESERVE")),
             )

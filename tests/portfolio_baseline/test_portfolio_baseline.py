@@ -5840,3 +5840,32 @@ def test_an_owner_excluded_statement_account_joins_retained_excluded_and_total_l
         ]
         == "1517.5"
     )
+
+
+def test_statement_reserve_pin_carrying_a_role_is_read(tmp_path: Path) -> None:
+    """Kill test: the spec schema allows `role` on a statement pin; the pin check must not refuse it."""
+
+    account = "account-" + "b" * 16
+    catalog = {
+        "catalog_schema_version": 1,
+        "accounts": [{"account_id": account, "provider": "COMPOSER"}],
+        "nav_observations": [
+            {
+                "account_id": account,
+                "as_of_date": "2026-08-31",
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
+                "record_id": "composer:2026-08-31",
+            }
+        ],
+    }
+    raw = json.dumps(catalog).encode()
+    path = tmp_path / "catalog.json"
+    path.write_bytes(raw)
+    pin = {
+        "path": str(path),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+        "role": "EXCLUDED_IMMATERIAL",
+    }
+    facts = baseline._statement_reserve_facts([pin], date(2026, 9, 17))
+    assert facts["excluded"], facts
