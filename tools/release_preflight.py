@@ -181,11 +181,27 @@ def non_terminal_releases(coordination_root: Path) -> list[str]:
     return found
 
 
+def _own_prepared_release_id(run: driver.Run) -> str | None:
+    """The release this run's own real lane prepared, once it exists (none at lane entry)."""
+
+    try:
+        return str(run.derive("release_id"))
+    except (driver.Refusal, KeyError, ValueError):
+        return None
+
+
 def row_no_stale_prepared(run: driver.Run, env: Env) -> None:
     """No release left in a non-terminal state (16 PREPARED were found next to 12 COMMITTED). Retire them with
-    ``retire`` (archive evidence first); nothing is declared away."""
+    ``retire`` (archive evidence first); nothing is declared away. The one exception is the release this run's
+    own lane prepared (its derived release id, PREPARED): after the lanes it is the release about to be committed,
+    so a pre-commit G0 must not fail on it. Any other non-terminal release, or a second one, still fails."""
 
-    left = non_terminal_releases(_path(run, "coordination_root"))
+    own = _own_prepared_release_id(run)
+    left = [
+        entry
+        for entry in non_terminal_releases(_path(run, "coordination_root"))
+        if entry != f"{own}:PREPARED"
+    ]
     if left:
         raise driver.Refusal(
             f"{len(left)} release(s) not in a terminal state: {left[:3]} (archive and retire them)"

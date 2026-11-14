@@ -255,6 +255,24 @@ def test_the_pointer_graph_needs_declared_roots(gworld: dict[str, Any]) -> None:
     _only_fails(gworld, "authority:pointer-graph")
 
 
+def test_the_release_being_committed_is_not_a_stale_prepared_release(
+    gworld: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Between the lanes and the commit the run's own release is PREPARED: G0 passes 9/9
+    with it, and still fails when a second, foreign PREPARED release is left behind."""
+
+    own = _prepare(gworld["coordination"], gworld["root"], "own")
+    original = driver.Run.derive
+
+    def derive(self: Any, name: str) -> str:
+        return own.release_id if name == "release_id" else original(self, name)
+
+    monkeypatch.setattr(driver.Run, "derive", derive)
+    assert set(_g0(gworld).values()) == {"PASS"}
+    _prepare(gworld["coordination"], gworld["root"], "foreign")
+    _only_fails(gworld, "authority:no-stale-prepared")
+
+
 def test_a_prepared_release_left_behind_fails_until_it_is_retired(
     gworld: dict[str, Any], tmp_path: Path
 ) -> None:
