@@ -615,3 +615,40 @@ def test_the_stage_carries_the_render_environment_and_its_own_evidence_dir() -> 
     assert argv[argv.index("--identity-scheme") + 1] == "{identity_scheme}"
     assert graph["paths"]["post_release_evidence"].startswith("{post_commit}/")
     assert argv[argv.index("--post-evidence-dir") + 1] == "{post_release_evidence}"
+
+
+def test_a_failed_attempt_never_blocks_the_retry() -> None:
+    """Every create-only path the stage writes lies under its one declared output
+    ``{post_commit}``. The driver refuses a rerun that would collide, naming the earlier
+    attempt, and ``--replace`` moves that whole directory aside (kept as evidence); no
+    path outside it (such as the commit stage's production evidence) can hold a failed
+    attempt's receipt and block the retry."""
+
+    graph = json.loads(
+        (REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json").read_bytes()
+    )
+    stage = next(s for s in graph["stages"] if s["id"] == "post-commit-verify")
+    assert stage["outputs"] == ["{post_commit}"]
+
+    def expand(text: str) -> str:
+        for _ in range(5):
+            for name, value in graph["paths"].items():
+                text = text.replace("{" + name + "}", value)
+        return text
+
+    root = expand("{post_commit}")
+    argv = [item for item in stage["argv"] if isinstance(item, str)]
+    argv = argv[: argv.index("--")]
+    written = (
+        "--post-evidence-dir",
+        "--rehearsal-root",
+        "--clean-room",
+        "--post-pointers",
+        "--log-dir",
+        "--out",
+        "--rehearsal-out",
+        "--post-findings",
+    )
+    for flag in written:
+        value = expand(argv[argv.index(flag) + 1])
+        assert value.startswith(root + "/"), f"{flag} {value} is outside {root}"
