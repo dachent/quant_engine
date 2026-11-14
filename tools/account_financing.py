@@ -180,7 +180,7 @@ def classify(
             if not row.verified:
                 conflicts.append("NOT_LEVERED_DECLARATION_UNVERIFIED")
             if not seen.observed_base_days:
-                conflicts.append("NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS")
+                conflicts.append("NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS")
         result[account] = AccountState(account, state, reason, tuple(conflicts))
     return result
 

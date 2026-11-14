@@ -290,3 +290,30 @@ def test_a_row_with_no_stated_reason_or_an_ambiguous_point_is_never_a_reserve_ro
     )
     for reason in (None, "MAPPING_AMBIGUOUS_POINT", "MAPPING_ACCOUNT_OR_DAY_UNKNOWN"):
         assert not lc.in_reserve_window({**row, "mapping_reason": reason}, WINDOW)
+
+
+def test_a_real_shaped_reserve_nav_row_is_placed_only_with_its_ledger_reason() -> None:
+    """Kill test (round-3): the NAV row is shaped like a real ledger row (its own reason,
+    never the exposure row's).  No reason fails closed; an ambiguous point never places."""
+
+    exposure = [
+        {
+            "as_of_date": "2026-01-07",
+            "mapping_status": "MAPPED",
+            "amount": _amt("140"),
+        }
+    ]
+    nav_row = {
+        "as_of_date": "2026-01-07",
+        "mapping_status": "UNMAPPED",
+        "nav": _amt("100"),
+    }
+
+    def covered(**extra: str) -> bool:
+        return lc.gross_exposure(
+            exposure, [{**nav_row, **extra}], "2026-01-07", WINDOW
+        )[0].covered
+
+    assert covered(mapping_reason="MAPPING_NO_ACTIVE_INTERVAL")
+    assert not covered()
+    assert not covered(mapping_reason="MAPPING_AMBIGUOUS_POINT")

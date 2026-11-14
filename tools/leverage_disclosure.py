@@ -5,7 +5,9 @@ the provider observations the report already carries:
 
 * ``ACCOUNT_FINANCING``: the state (``LEVERED`` / ``INCIDENTAL_DEBIT`` / ``NOT_LEVERED``)
   with the reason, so a non-levered account is an explicit row, never an absent one;
-* ``FINANCING_COST / RECONCILED_FINANCING_COST``: levered and incidental-debit accounts;
+* ``FINANCING_COST / RECONCILED_FINANCING_COST``: levered and incidental-debit accounts,
+  and a NOT_LEVERED account whose state carries a conflict (no observed zero-financing
+  days, unverified declaration), so the open evidence has a row to close;
 * ``FINANCING_LIABILITY / BORROWED_PRINCIPAL`` and ``LEVERAGE_EXPOSURE / GROSS_EXPOSURE``:
   levered accounts.
 
@@ -283,6 +285,21 @@ def account_financing_rows(
                 _evidence_text(cost_closure),
             )
         )
+        if state.state == "NOT_LEVERED":
+            # A conflicted NOT_LEVERED account: an uncovered exposure row that names what
+            # is missing, so E8 reports NOT_READY with the evidence reason, never NO_ROW.
+            rows.append(
+                make(
+                    "LEVERAGE_EXPOSURE",
+                    "GROSS_EXPOSURE",
+                    "GROSS_EXPOSURE",
+                    NOT_COVERED,
+                    "NOT_LEVERED_UNPROVEN: needs observed_zero_financing_days "
+                    "(provider-observed, hash-pinned) and a verified declaration;"
+                    f"CONFLICT={conflict_text}",
+                )
+            )
+            continue
         if state.state != "LEVERED":
             continue
         currencies = {

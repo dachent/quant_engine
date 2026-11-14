@@ -5575,6 +5575,23 @@ def _project_account_facts(
                 record["capital_disposition"] = (
                     "NON_CAPITAL" if amount == 0 else "EXTERNAL_CAPITAL"
                 )
+            if (
+                mapping_status == "UNMAPPED"
+                and "mapping_reason" not in record
+                and (
+                    source_fact == "nav_observations"
+                    or (
+                        source_fact == "transactions"
+                        and str(row.get("kind") or "").strip().upper()
+                        == "MARGIN INTEREST"
+                    )
+                )
+            ):
+                # Why a NAV point or a Schwab margin-interest posting has no strategy:
+                # the reserve-window placement needs an explicit reason, never silence.
+                record["mapping_reason"] = _point_unmapped_reason(
+                    mapping_row, accounts, strategies, assignments
+                )
             projections[target_fact].append(record)
             if (
                 provider_id == "schwab"
