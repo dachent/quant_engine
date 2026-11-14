@@ -5869,3 +5869,16 @@ def test_statement_reserve_pin_carrying_a_role_is_read(tmp_path: Path) -> None:
     }
     facts = baseline._statement_reserve_facts([pin], date(2026, 9, 17))
     assert facts["excluded"], facts
+
+
+def test_statement_reserve_pin_with_a_misspelled_key_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "catalog.json"
+    path.write_bytes(b"{}")
+    pin = {
+        "path": str(path),
+        "sha256": hashlib.sha256(b"{}").hexdigest(),
+        "size_bytes": 2,
+        "roel": "EXCLUDED_IMMATERIAL",
+    }
+    with pytest.raises(baseline.BaselineValidationError, match="unknown key"):
+        baseline._statement_reserve_facts([pin], date(2026, 9, 17))

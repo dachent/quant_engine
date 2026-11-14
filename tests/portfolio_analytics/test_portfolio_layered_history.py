@@ -6685,3 +6685,22 @@ def test_layered_history_accepts_the_executing_tree_as_repository_identity(
         contract_path=fixture["contract_path"],
     )
     assert result["verification"] == "VALID"
+
+
+def test_qsi_revision_reconstruction_never_counts_model_live_rows_as_backtest() -> None:
+    """The reconstruction of the backtest segment skips the bundle's MODEL_LIVE rows."""
+
+    rows = [
+        {"series_id": "EU [P123]", "date": "2024-01-02", "evidence_layer": "BACKTEST"},
+        {
+            "series_id": "EU [P123]",
+            "date": "2024-02-19",
+            "evidence_layer": "MODEL_LIVE",
+        },
+        {"series_id": "QSI", "date": "2024-01-02", "evidence_layer": "BACKTEST"},
+    ]
+    selected = target_series._bundle_backtest_rows(rows, "EU [P123]")
+    assert [row["date"] for row in selected] == ["2024-01-02"]
+    assert {row["evidence_layer"] for row in selected} == {"BACKTEST"}
+    # a series that is entirely model-live has no backtest to reconstruct
+    assert target_series._bundle_backtest_rows(rows[1:2], "EU [P123]") == []

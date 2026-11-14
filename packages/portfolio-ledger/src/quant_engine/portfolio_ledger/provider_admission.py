@@ -803,31 +803,25 @@ def run_observation_identity(observation: Mapping[str, Any]) -> tuple[str, int]:
     The observation names each provider's absolute ``root`` and the absolute path of
     its finality evidence, so its raw bytes depend on the directory the world was built
     in.  The admit-or-declare receipt is a ledger artifact: it records this identity
-    (roots dropped, finality paths reduced to the file name, hashes kept), so the ledger
+    (roots reduced to their leaf directory name, finality paths to the file name,
+    hashes kept), so the ledger
     generation id is a function of the data and never of the world's directory name.
     """
 
     normalized: dict[str, Any] = json.loads(json.dumps(observation))
     providers = normalized.get("providers")
     if isinstance(providers, dict):
-        # Roots stay bound, as their layout below the providers' common ancestor: a
-        # set property, so independent of provider order, and of the world's own name.
-        split = {
-            key: [p for p in re.split(r"[\\/]", row["root"]) if p]
-            for key, row in providers.items()
-            if isinstance(row, dict) and isinstance(row.get("root"), str)
-        }
-        common = 0
-        if split:
-            for column in zip(*split.values(), strict=False):
-                if len(set(column)) != 1:
-                    break
-                common += 1
-        for key, row in providers.items():
+        # Each root stays bound by its leaf directory name, case-folded: the leaf is the
+        # root's own name (dataIBKR, matrixport ...), never the world, drive or profile
+        # it was built under, and unlike a common-prefix layout it does not depend on
+        # where the other providers' roots sit.  The data itself is bound by each row's
+        # generation_id and evidence hashes.
+        for row in providers.values():
             if not isinstance(row, dict):
                 continue
-            if key in split:
-                row["root"] = "/".join(split[key][common:])
+            if isinstance(row.get("root"), str):
+                parts = [p for p in re.split(r"[\\/]", row["root"]) if p]
+                row["root"] = parts[-1].casefold() if parts else ""
             evidence = row.get("finality_evidence")
             if isinstance(evidence, dict) and isinstance(evidence.get("path"), str):
                 evidence["path"] = re.split(r"[\\/]", evidence["path"])[-1]

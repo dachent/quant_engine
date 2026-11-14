@@ -5,7 +5,9 @@ the provider observations the report already carries:
 
 * ``ACCOUNT_FINANCING``: the state (``LEVERED`` / ``INCIDENTAL_DEBIT`` / ``NOT_LEVERED``)
   with the reason, so a non-levered account is an explicit row, never an absent one;
-* ``FINANCING_COST / RECONCILED_FINANCING_COST``: levered and incidental-debit accounts;
+* ``FINANCING_COST / RECONCILED_FINANCING_COST``: levered and incidental-debit accounts,
+  and a NOT_LEVERED account whose state carries a conflict (no observed zero-financing
+  days, unverified declaration), so the open evidence has a row to close;
 * ``FINANCING_LIABILITY / BORROWED_PRINCIPAL`` and ``LEVERAGE_EXPOSURE / GROSS_EXPOSURE``:
   levered accounts.
 
@@ -17,7 +19,9 @@ which check failed, never a covered status.  A pure function of its inputs.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import date
 from decimal import Decimal
+import re
 from typing import Any, Final
 
 import account_financing
@@ -27,6 +31,7 @@ COVERED: Final = "COMPLETE_RECONCILED"
 DECLARED: Final = "COMPLETE_DECLARED"
 NOT_COVERED: Final = "OBSERVED_UNRECONCILED"
 _NO_AMOUNT: Final = {"status": "UNAVAILABLE", "value": None}
+_SHA256: Final = re.compile(r"[0-9a-f]{64}")
 
 
 def _evidence_text(closure: leverage_closure.Closure) -> str:
@@ -48,6 +53,12 @@ def _until(rows: Sequence[Mapping[str, Any]], cutoff: str) -> list[Mapping[str, 
     return [r for r in rows if day(r) <= cutoff]
 
 
+# One row per account-day on which the provider's own margin-loan / debit / borrowed-balance
+# field read zero (or the account type has no margin feature): the generic input a reader
+# emits for providers without IBKR's base cash rows.
+ZERO_FINANCING_BASIS: Final = "OBSERVED_ZERO_FINANCING_DAY"
+
+
 def _amount(row: Mapping[str, Any]) -> Decimal | None:
     amount = row.get("amount")
     if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
@@ -58,9 +69,23 @@ def _amount(row: Mapping[str, Any]) -> Decimal | None:
         return None
 
 
+def _iso_day(value: object) -> date | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _debit_evidence(
     liability: Sequence[Mapping[str, Any]],
     cost: Sequence[Mapping[str, Any]],
+    window_start: date | None = None,
 ) -> account_financing.DebitEvidence:
     base = [
         r
@@ -81,6 +106,34 @@ def _debit_evidence(
         if r.get("classification") == "NET_CASH_DEBIT_BALANCE" and _amount(r) is None
     )
     observed = {r["as_of_date"] for r in base if _amount(r) is not None}
+    # Generic provider-observed financing day (any provider): ``amount`` is the provider's
+    # borrowed balance for the day (never negative).  Exactly 0 is an observed zero day; a
+    # positive balance is borrowing (a debit day); anything else is a data gap.  The row
+    # must be pinned (source_artifact_id, a 64-hex source_artifact_sha256), name the
+    # provider field it was read from, and be dated inside the account's window.
+    for r in liability:
+        if r.get("measurement_basis") != ZERO_FINANCING_BASIS:
+            continue
+        amount = _amount(r)
+        day = _iso_day(r.get("as_of_date"))
+        pinned = (
+            _text(r.get("source_artifact_id"))
+            and _text(r.get("source_field"))
+            and isinstance(r.get("source_artifact_sha256"), str)
+            and _SHA256.fullmatch(r["source_artifact_sha256"]) is not None
+        )
+        if (
+            amount is None
+            or amount < 0
+            or not pinned
+            or day is None
+            or (window_start is not None and day < window_start)
+        ):
+            unreadable += 1
+        elif amount > 0:
+            base_days.add(day.isoformat())
+        else:
+            observed.add(day.isoformat())
     currency_days = {
         r["as_of_date"]
         for r in liability
@@ -168,7 +221,16 @@ def account_financing_rows(
                 bucket[key].append(item)
     evidence = {
         name: _debit_evidence(
-            _until(parts["liability"], cutoff), _until(parts["cost"], cutoff)
+            _until(parts["liability"], cutoff),
+            _until(parts["cost"], cutoff),
+            min(
+                (
+                    d
+                    for d in (_iso_day(r.get("as_of_date")) for r in parts["nav"])
+                    if d is not None
+                ),
+                default=None,
+            ),
         )
         for name, parts in by_account.items()
     }
@@ -232,7 +294,7 @@ def account_financing_rows(
                 f"{state.reason}{';CONFLICT=' + conflict_text if conflict_text else ''}{unverified}",
             )
         )
-        if state.state == "NOT_LEVERED":
+        if state.state == "NOT_LEVERED" and not state.conflicts:
             continue
         mapped_days = sorted(
             {
@@ -261,6 +323,22 @@ def account_financing_rows(
                 _evidence_text(cost_closure),
             )
         )
+        if state.state == "NOT_LEVERED":
+            # A conflicted NOT_LEVERED account: an uncovered exposure row that names what
+            # is missing, so E8 reports NOT_READY with the evidence reason, never NO_ROW.
+            rows.append(
+                make(
+                    "LEVERAGE_EXPOSURE",
+                    "GROSS_EXPOSURE",
+                    "GROSS_EXPOSURE",
+                    NOT_COVERED,
+                    "NOT_LEVERED_UNPROVEN: needs observed_zero_financing_days "
+                    "(provider-observed, source_artifact_sha256-pinned) and a "
+                    "verified declaration;"
+                    f"CONFLICT={conflict_text}",
+                )
+            )
+            continue
         if state.state != "LEVERED":
             continue
         currencies = {

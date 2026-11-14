@@ -225,7 +225,9 @@ def test_a_declared_reserve_window_attributes_unmapped_cost_rows() -> None:
 def test_an_undeclared_or_too_short_reserve_window_stays_blocked() -> None:
     rows = _reserve_series()
     for windows in (None, [], [(date(2026, 1, 5), date(2026, 1, 7), "X")]):
-        assert not lc.financing_cost_closure(rows, DAYS, DAYS[-1], None, windows).covered
+        assert not lc.financing_cost_closure(
+            rows, DAYS, DAYS[-1], None, windows
+        ).covered
     gap = [
         (date(2026, 1, 5), date(2026, 1, 5), "X"),
         (date(2026, 1, 7), date(2026, 1, 8), "X"),
@@ -274,6 +276,79 @@ def test_a_source_scope_ambiguity_is_never_a_reserve_row() -> None:
 
     row = {**_reserve_series()[0], "mapping_reason": "SOURCE_ACCOUNT_SCOPE_UNMAPPED"}
     assert not lc.in_reserve_window(row, WINDOW)
+
+
+def test_a_row_with_no_stated_reason_or_an_ambiguous_point_is_never_a_reserve_row() -> (
+    None
+):
+    """Kill test (round-2 R6 item 3): the ledger now states why a point row is unmapped;
+    no reason, or two active strategies, never places the row in a reserve window."""
+
+    row = _reserve_series()[0]
+    assert lc.in_reserve_window(
+        {**row, "mapping_reason": "MAPPING_NO_ACTIVE_INTERVAL"}, WINDOW
+    )
+    for reason in (None, "MAPPING_AMBIGUOUS_POINT", "MAPPING_ACCOUNT_OR_DAY_UNKNOWN"):
+        assert not lc.in_reserve_window({**row, "mapping_reason": reason}, WINDOW)
+
+
+def test_a_real_shaped_reserve_nav_row_is_placed_only_with_its_ledger_reason() -> None:
+    """Kill test (round-3): the NAV row is shaped like a real ledger row (its own reason,
+    never the exposure row's).  No reason fails closed; an ambiguous point never places."""
+
+    exposure = [
+        {
+            "as_of_date": "2026-01-07",
+            "mapping_status": "MAPPED",
+            "amount": _amt("140"),
+        }
+    ]
+    nav_row = {
+        "as_of_date": "2026-01-07",
+        "mapping_status": "UNMAPPED",
+        "nav": _amt("100"),
+    }
+
+    def covered(**extra: str) -> bool:
+        return lc.gross_exposure(
+            exposure, [{**nav_row, **extra}], "2026-01-07", WINDOW
+        )[0].covered
+
+    assert covered(mapping_reason="MAPPING_NO_ACTIVE_INTERVAL")
+    assert not covered()
+    assert not covered(mapping_reason="MAPPING_AMBIGUOUS_POINT")
+
+
+def test_a_posting_is_placed_only_if_every_date_it_carries_is_inside_the_window() -> (
+    None
+):
+    """Kill test (round-4 Astra): a Schwab margin-interest posting is mapped by its
+    effective date.  Event 01-14 inside the window but effective 01-15 outside it must
+    stay unmapped and keep counting as a mapping gap; both inside places it."""
+
+    window = [(date(2026, 1, 1), date(2026, 1, 14), "EXACT_IDENTITY_CLOSURE")]
+    days = ["2026-01-12", "2026-01-13", "2026-01-14", "2026-01-15"]
+    posting = {
+        "classification": "BROKER_DEBIT_INTEREST",
+        "measurement_basis": "CASH_POSTING",
+        "source_amount": _amt("-1"),
+        "mapping_status": "UNMAPPED",
+        "mapping_reason": "MAPPING_NO_ACTIVE_INTERVAL",
+        "event_date": "2026-01-14",
+        "effective_date": "2026-01-15",
+    }
+    assert not lc.in_reserve_window(posting, window)
+    result = lc.financing_cost_closure([posting], days, "2026-01-16", None, window)
+    assert result.evidence["reserve_window_rows"] == 0
+    assert result.evidence["unmapped_rows_in_epoch"] == 1
+    inside = {**posting, "effective_date": "2026-01-14"}
+    assert lc.in_reserve_window(inside, window)
+    assert (
+        lc.financing_cost_closure([inside], days, "2026-01-16", None, window).evidence[
+            "reserve_window_rows"
+        ]
+        == 1
+    )
 
 
 def _empty_day(day: str) -> dict[str, Any]:

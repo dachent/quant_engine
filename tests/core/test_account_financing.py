@@ -50,6 +50,7 @@ def test_the_three_states_follow_declaration_and_evidence() -> None:
         {
             B: af.DebitEvidence(debit_interest_postings=6),
             C: af.DebitEvidence(currency_debit_days=3),
+            D: af.DebitEvidence(observed_base_days=5),
         },
         [A, B, C, D],
     )
@@ -197,7 +198,9 @@ def test_reserve_nav_windows_come_only_from_account_live_reserves_with_closed_wi
     ]
 
 
-def _roles(windows_a: list[dict[str, str]], windows_b: list[dict[str, str]] | None = None) -> bytes:
+def _roles(
+    windows_a: list[dict[str, str]], windows_b: list[dict[str, str]] | None = None
+) -> bytes:
     top = json.loads(_declaration(**{A: "MARGIN_USED"}))
     top["sleeve_roles"] = [
         {
@@ -232,3 +235,20 @@ def test_overlapping_declared_reserve_windows_refuse() -> None:
     ):
         with pytest.raises(af.FinancingDeclarationError):
             af.reserve_nav_windows(af.load_sleeve_roles(blob))
+
+
+def test_a_declaration_alone_never_makes_an_account_not_levered() -> None:
+    """Kill test (control ruling): NOT_LEVERED needs provider-observed zero-financing
+    days whatever the declared facility; an unmeasured count refuses like zero."""
+
+    declared = (
+        _load()
+    )  # B is NO_MARGIN_FACILITY, verified; C is MARGIN_AVAILABLE_UNUSED
+    for account in (B, C):
+        for seen in (af.DebitEvidence(), af.DebitEvidence(observed_base_days=0)):
+            state = af.classify(declared, {account: seen}, [account])[account]
+            assert "NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS" in state.conflicts
+        ok = af.classify(
+            declared, {account: af.DebitEvidence(observed_base_days=3)}, [account]
+        )[account]
+        assert ok.state == "NOT_LEVERED" and ok.conflicts == ()

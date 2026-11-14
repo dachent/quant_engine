@@ -831,7 +831,7 @@ def verify(
         results.append(res)
         if not res.ok:
             codes.append(f"{name}:{res.code}")
-    token = uuid.uuid4().hex
+    issue_key = uuid.uuid4().hex
     verdict = Verdict(
         source.source_id,
         "PASS" if not codes else "FAIL",
@@ -840,9 +840,9 @@ def verify(
         manifest_digest(manifest),
         as_of,
         cutoff,
-        token,
+        issue_key,
     )
-    _ISSUED[token] = verdict.issued_fields()
+    _ISSUED[issue_key] = verdict.issued_fields()
     return verdict
 
 

@@ -3246,7 +3246,9 @@ def test_a_base_only_cash_line_becomes_a_net_loan_row_not_a_dropped_loan(
 def _coverage_catalog(tmp_path: Path, xml: str) -> dict[str, Any]:
     path = tmp_path / "coverage.xml"
     path.write_text(xml, encoding="utf-8")
-    statement = parse_flex_file(path, artifact_id="synthetic/coverage.xml").statements[0]
+    statement = parse_flex_file(path, artifact_id="synthetic/coverage.xml").statements[
+        0
+    ]
     return ibkr_generation._normalize(
         [statement],
         {
@@ -3286,7 +3288,9 @@ def test_an_empty_open_positions_section_is_zero_exposure_bound_to_the_statement
     full = _xml("SYNTH-RAW", day, "114")
     rows = full.split("<OpenPosition ")
     assert len(rows) == 2
-    empty_section = rows[0] + "</OpenPositions>" + rows[1].split("</OpenPositions>", 1)[1]
+    empty_section = (
+        rows[0] + "</OpenPositions>" + rows[1].split("</OpenPositions>", 1)[1]
+    )
     zero = _exposure(_coverage_catalog(tmp_path, empty_section))
     assert zero["amount"] == {"currency": "USD", "status": "AVAILABLE", "value": "0"}
     assert zero["source_account_scope"] == "STATEMENT_ACCOUNT"
@@ -3296,7 +3300,9 @@ def test_an_empty_open_positions_section_is_zero_exposure_bound_to_the_statement
             tmp_path, _xml("SYNTH-RAW", day, "114", omit_section="OpenPositions")
         )
 
-    other = full.replace('<OpenPosition accountId="SYNTH-RAW"', '<OpenPosition accountId="OTHER-RAW"')
+    other = full.replace(
+        '<OpenPosition accountId="SYNTH-RAW"', '<OpenPosition accountId="OTHER-RAW"'
+    )
     ambiguous = _exposure(_coverage_catalog(tmp_path, other))
     assert ambiguous["amount"]["status"] != "AVAILABLE"
     assert ambiguous["source_account_scope"] == "AMBIGUOUS_REPORTED_ACCOUNT"

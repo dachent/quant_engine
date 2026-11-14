@@ -177,6 +177,20 @@ _PATH_STAGES = {
     # returns, account manifest and governed HWM proof the panel already holds.
     "tools/portfolio_performance_tab.py": ["panel"],
     "tools/portfolio_model_vs_actual.py": ["panel"],
+    # The audit-input schema is the contract of the file that producer reads into the panel block.
+    "schemas/portfolio/model-vs-actual-audit-input.schema.json": ["panel"],
+    "schemas/portfolio/model-vs-actual-derive-spec.schema.json": ["panel"],
+    # Offline producers and generators: none is imported by a stage handler.
+    "tools/capture_governed_price.py": [],
+    "tools/statement_nav_generation.py": [],
+    "tools/release_note.py": [],
+    "tools/portfolio_model_vs_actual_derive.py": ["panel"],
+    # Cash drag is derived and rendered by the panel producer only.
+    "tools/portfolio_cash_drag.py": ["panel"],
+    "tools/portfolio_cash_drag_spec.py": ["panel"],
+    # Imported by the ledger builder (fill-day restatement) and the baseline (statement points).
+    "tools/quantbase_fund_days.py": list(_STAGE_ORDER),
+    "tools/statement_reserve_nav.py": list(_STAGE_ORDER[1:]),
     # The orthogonal risk-share producer: one optional panel block derived from the
     # decomposition lenses and invested capital the panel already holds.
     "tools/portfolio_orthogonal_risk.py": ["panel"],

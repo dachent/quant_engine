@@ -35,15 +35,19 @@ _ZERO = Decimal(0)
 # are attributed to the account's declared RESERVE window (the account financing
 # declaration's sleeve_roles) and only through it: every day the row touches must lie
 # inside a declared window, the row must carry no strategy, and the ledger's reason must
-# be "no validated interval" (an ambiguous or epoch-crossing row means strategy windows
-# exist and stays blocked).  No declared window, or days outside it, stays UNMAPPED.
-RESERVE_WINDOW_REASONS: Final = (None, "PERIOD_MAPPING_MISSING_VALIDATED_INTERVAL")
+# be an explicit "no validated/active interval" (a row with no stated reason, an ambiguous
+# point day or an epoch-crossing period means strategy windows exist and stays blocked).  No declared window, or days outside it, stays UNMAPPED.
+RESERVE_WINDOW_REASONS: Final = (
+    "PERIOD_MAPPING_MISSING_VALIDATED_INTERVAL",
+    "MAPPING_NO_ACTIVE_INTERVAL",
+)
 _ROW_DAY_FIELDS: Final = (
     "period_start",
     "period_end",
     "value_date",
     "accounting_date",
     "event_date",
+    "effective_date",  # the date the ledger's own point mapping uses (Schwab postings)
     "as_of_date",
 )
 
@@ -72,7 +76,9 @@ def in_reserve_window(
     first, last = min(days), max(days)
     if last - first > timedelta(days=370):
         return False
-    return all(covered(first + timedelta(days=n)) for n in range((last - first).days + 1))
+    return all(
+        covered(first + timedelta(days=n)) for n in range((last - first).days + 1)
+    )
 
 
 @dataclass(frozen=True)
@@ -91,6 +97,38 @@ def _value(row: Mapping[str, Any], field: str = "source_amount") -> Decimal | No
 
 def _day(text: object) -> date:
     return date.fromisoformat(str(text))
+
+
+def _split_unmapped(
+    rows: Sequence[Mapping[str, Any]],
+    epoch_start: str | None,
+    reserve_windows: Sequence[tuple[date, date, str]] | None,
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    """(rows placed in a declared RESERVE window, mapping gaps in the epoch)."""
+
+    placed = [
+        r
+        for r in rows
+        if r.get("mapping_status") != "MAPPED" and in_reserve_window(r, reserve_windows)
+    ]
+    gaps = [
+        r
+        for r in rows
+        if r.get("mapping_status") != "MAPPED"
+        and not in_reserve_window(r, reserve_windows)
+        and (
+            epoch_start is None
+            or str(
+                r.get("value_date")
+                or r.get("accounting_date")
+                or r.get("period_end")
+                or r.get("event_date")
+                or ""
+            )
+            >= epoch_start
+        )
+    ]
+    return placed, gaps
 
 
 def financing_cost_closure(
@@ -120,6 +158,7 @@ def financing_cost_closure(
         # row at all (a posting or detail row with no accrual behind it is not explained
         # by an empty section): covered.  A day without the section is not captured.
         missing = [d for d in days if d not in empty_days]
+        placed, unmapped_here = _split_unmapped(rows, epoch_start, reserve_windows)
         return Closure(
             "FINANCING_COST_ACCRUAL_SECTION_EMPTY",
             bool(days) and not missing and not rows,
@@ -128,6 +167,8 @@ def financing_cost_closure(
                 "empty_section_days": len(empty_days & set(days)),
                 "days_without_section": len(missing),
                 "other_cost_rows": len(rows),
+                "unmapped_rows_in_epoch": len(unmapped_here),
+                "reserve_window_rows": len(placed),
             },
         )
     by_currency: dict[str, dict[str, dict[str, Decimal]]] = defaultdict(
@@ -180,28 +221,7 @@ def financing_cost_closure(
             and previous[1] != _ZERO
         ):
             unexplained.append(f"{currency}:{last_day}:TRAILING_UNOBSERVED")
-    reserve_placed = [
-        r
-        for r in rows
-        if r.get("mapping_status") != "MAPPED" and in_reserve_window(r, reserve_windows)
-    ]
-    unmapped = [
-        r
-        for r in rows
-        if r.get("mapping_status") != "MAPPED"
-        and not in_reserve_window(r, reserve_windows)
-        and (
-            epoch_start is None
-            or str(
-                r.get("value_date")
-                or r.get("accounting_date")
-                or r.get("period_end")
-                or r.get("event_date")
-                or ""
-            )
-            >= epoch_start
-        )
-    ]
+    reserve_placed, unmapped = _split_unmapped(rows, epoch_start, reserve_windows)
     # A row the strategy mapping cannot place is a mapping gap, and an account whose cost
     # has one is not covered; the reasons stay in the evidence so the gap is explainable.
     covered = (

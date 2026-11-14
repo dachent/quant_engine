@@ -173,12 +173,14 @@ def classify(
         if seen.unreadable_debit_rows:
             conflicts.append("DEBIT_ROW_AMOUNT_UNAVAILABLE")
         if state == "NOT_LEVERED":
-            # "Not levered" is a finding, not a default: it needs verified declaration
-            # evidence and observed base cash days showing no debit.
+            # "Not levered" is a finding, not a default: it needs a verified declaration
+            # AND provider-observed, dated zero-financing days (IBKR base cash rows, or a
+            # generic observed zero-financing row).  A declaration alone, whatever the
+            # facility, is never the evidence; an unmeasured count refuses like zero.
             if not row.verified:
                 conflicts.append("NOT_LEVERED_DECLARATION_UNVERIFIED")
-            if seen.observed_base_days == 0:
-                conflicts.append("NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS")
+            if not seen.observed_base_days:
+                conflicts.append("NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS")
         result[account] = AccountState(account, state, reason, tuple(conflicts))
     return result
 
@@ -281,8 +283,8 @@ def reserve_nav_windows(
                 raise FinancingDeclarationError(
                     f"overlapping RESERVE windows declared for {account}"
                 )
-        for start, end, _basis in ordered:
-            if end < start:
+        for first, last, _basis in ordered:
+            if last < first:
                 raise FinancingDeclarationError(
                     f"RESERVE window ends before it starts for {account}"
                 )

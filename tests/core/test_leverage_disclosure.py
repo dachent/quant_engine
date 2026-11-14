@@ -282,11 +282,113 @@ def test_not_levered_needs_observed_cash_days_and_a_verified_declaration() -> No
     empty["financing_liability_observations"] = [
         r for r in empty["financing_liability_observations"] if r["account_id"] != QUIET
     ]
-    silent = _quiet_state(empty)
+    # a declaration alone (NO_MARGIN_FACILITY included) is never the evidence
+    refused = _quiet_state(empty)
+    assert refused["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert (
+        "NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS" in refused["coverage_reason"]
+    )
+    # a pinned, provider-observed zero-financing row satisfies it (any provider)
+    zero = {
+        "account_id": QUIET,
+        "provider_id": "ibkr",
+        "measurement_basis": "OBSERVED_ZERO_FINANCING_DAY",
+        "classification": "ZERO_FINANCING_OBSERVED",
+        "as_of_date": DAYS[0],
+        "amount": _amt("0"),
+        "source_artifact_id": "pins/statement-2026-01.txt",
+        "source_field": "Balance Subject to Interest",
+        "source_artifact_sha256": "a" * 64,
+    }
+    pinned = {**empty}
+    pinned["financing_liability_observations"] = [
+        *empty["financing_liability_observations"],
+        zero,
+    ]
+    assert _quiet_state(pinned)["coverage_status"] == "COMPLETE_DECLARED"
+    # without provenance, or with a non-zero amount, it is a gap, not evidence
+    for broken in (
+        {**zero, "source_artifact_id": None},
+        {**zero, "source_field": None},
+        {**zero, "amount": _amt("-5")},
+        {**zero, "source_artifact_sha256": None},
+        {**zero, "source_artifact_sha256": "xyz"},
+        {**zero, "source_artifact_id": True, "source_field": 1},
+        {**zero, "as_of_date": "0000"},
+        {**zero, "as_of_date": "0"},
+        {**zero, "as_of_date": "2025-13-99"},
+        {**zero, "as_of_date": "2025-12-31"},  # before the account's window
+    ):
+        bad = {**empty}
+        bad["financing_liability_observations"] = [
+            *empty["financing_liability_observations"],
+            broken,
+        ]
+        assert _quiet_state(bad)["coverage_status"] == "OBSERVED_UNRECONCILED"
+    # a facility that exists needs observed cash days showing no debit
+    available = _declaration()
+    available[QUIET] = af.Declared(
+        QUIET, "ACTIVE", "MARGIN_AVAILABLE_UNUSED", True, "x"
+    )
+    silent = _quiet_state(empty, available)
     assert silent["coverage_status"] == "OBSERVED_UNRECONCILED"
-    assert "NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS" in silent["coverage_reason"]
+    assert (
+        "NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS" in silent["coverage_reason"]
+    )
+    # and the conflicted account still gets closure rows, so a route to closure exists
+    rows = ld.account_financing_rows(
+        available, empty, cutoff=CUTOFF, generation_id=SHA, catalog_sha256=SHA
+    )
+    assert any(
+        r["account_id"] == QUIET and r["data_class"] == "FINANCING_COST" for r in rows
+    )
     declaration = _declaration()
     declaration[QUIET] = af.Declared(QUIET, "ACTIVE", "NO_MARGIN_FACILITY", False, "x")
     unverified = _quiet_state(_catalog(base_cash=True), declaration)
     assert unverified["coverage_status"] == "OBSERVED_UNRECONCILED"
     assert "NOT_LEVERED_DECLARATION_UNVERIFIED" in unverified["coverage_reason"]
+
+
+def test_a_conflicted_not_levered_account_reports_the_missing_field_not_no_row() -> (
+    None
+):
+    """Kill test (round-3 F3): E8 gets an uncovered exposure row naming the missing
+    observed_zero_financing_days, never NO_ROW."""
+
+    empty = _catalog(base_cash=True)
+    empty["financing_liability_observations"] = [
+        r for r in empty["financing_liability_observations"] if r["account_id"] != QUIET
+    ]
+    rows = ld.account_financing_rows(
+        _declaration(), empty, cutoff=CUTOFF, generation_id=SHA, catalog_sha256=SHA
+    )
+    exposure = next(
+        r
+        for r in rows
+        if r["account_id"] == QUIET and r["data_class"] == "LEVERAGE_EXPOSURE"
+    )
+    assert exposure["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "observed_zero_financing_days" in exposure["coverage_reason"]
+
+
+def test_a_positive_borrowed_balance_row_is_a_debit_day_not_an_unreadable_row() -> None:
+    """A provider-observed positive borrowed balance is borrowing: LEVERED, and for a
+    declared NO_MARGIN_FACILITY account a conflict."""
+
+    catalog = _catalog(base_cash=True)
+    catalog["financing_liability_observations"].append(
+        {
+            "account_id": QUIET,
+            "provider_id": "ibkr",
+            "measurement_basis": "OBSERVED_ZERO_FINANCING_DAY",
+            "classification": "ZERO_FINANCING_OBSERVED",
+            "as_of_date": DAYS[1],
+            "amount": _amt("12.5"),
+            "source_artifact_id": "pins/statement-2026-01.txt",
+            "source_field": "Margin Loan Balance",
+            "source_artifact_sha256": "b" * 64,
+        }
+    )
+    state = _quiet_state(catalog)
+    assert state["classification"] == "LEVERED"
+    assert "DECLARED_NO_FACILITY_BUT_NET_BASE_DEBIT" in state["coverage_reason"]

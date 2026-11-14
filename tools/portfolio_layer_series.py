@@ -22,7 +22,14 @@ from decimal import Decimal, InvalidOperation
 import io
 from typing import Any, Final, Mapping, Sequence
 
-from series_label import BACKTEST, LAYERS, MODEL_LIVE, SeriesLabel, label_from_dict
+from series_label import (
+    BACKTEST,
+    LAYERS,
+    MODEL_LIVE,
+    SeriesLabel,
+    SeriesLabelError,
+    label_from_dict,
+)
 
 # Matrixport product NAV (the Robuxio model-live layer) starts here; the backtest
 # layer ends strictly before it.
@@ -83,14 +90,26 @@ def partition_bundle_rows(
             )
         parts.setdefault(row["series_id"], {}).setdefault(layer, []).append(row)
     for series_id in set(definitions) | set(parts):
-        declared = [
-            label
-            for label in (
-                label_from_dict(raw)
-                for raw in (definitions.get(series_id) or {}).get("segment_labels", [])
-            )
-            if label.layer == MODEL_LIVE
-        ]
+        try:
+            declared = [
+                label
+                for label in (
+                    label_from_dict(raw)
+                    for raw in (definitions.get(series_id) or {}).get(
+                        "segment_labels", []
+                    )
+                )
+                if label.layer == MODEL_LIVE
+            ]
+        except (
+            SeriesLabelError,
+            KeyError,
+            TypeError,
+            ValueError,
+            AttributeError,
+        ) as exc:
+            # a malformed label is a layer refusal, never a traceback
+            raise LayerSeriesError(f"{series_id} segment label is invalid") from exc
         live = parts.get(series_id, {}).get(MODEL_LIVE, [])
         if len(declared) > 1:
             raise LayerSeriesError(f"{series_id} declares two model-live segments")
