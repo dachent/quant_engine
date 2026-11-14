@@ -3989,35 +3989,152 @@ def _contract_fx_segment(financial_contract: Mapping[str, Any]) -> dict[str, Any
     return segments[0]
 
 
-def _zero_financing_rows(
-    value: object, accounts: set[str], providers: set[str]
-) -> list[dict[str, Any]]:
-    """Provider-observed zero-financing days (hash-pinned artifact of
-    ``zero_financing_statements``) as financing-liability observations.
+_ZERO_FINANCING_KEYS: Final = frozenset(
+    {
+        "mapping_path",
+        "mapping_sha256",
+        "provider_id",
+        "statements_dir",
+        "sums_path",
+        "sums_sha256",
+    }
+)
 
-    Only the artifact's own validated rows are used; each is an account-level observation
-    (no strategy), dated, pinned to its statement PDF (sha256, page) and typed."""
+
+def _pinned_file(path_value: object, sha256: object, name: str) -> bytes:
+    path = _absolute_regular_path(path_value, name)
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != sha256:
+        raise ProviderLedgerError(f"{name} identity differs")
+    return raw
+
+
+def _zero_financing_rows(
+    value: object, accounts: set[str], providers: set[str], as_of: date
+) -> tuple[str, list[dict[str, Any]], list[SourceArtifact]]:
+    """Provider-observed zero-financing days, derived HERE from the retained statements.
+
+    The spec pins the statement directory's SHA256SUMS, the local-only account mapping and
+    names the provider; the ledger re-hashes every statement from disk and runs the reader
+    itself (``zero_financing_statements.build``), so no hand-written artifact can enter and
+    each row's statement hash and page come from bytes the ledger verified.  Returns the
+    provider, the rows (account-level observations: no strategy, dated, pinned) and the
+    source artifacts to record in the generation manifest."""
 
     ref = _object(value, "zero_financing_observations")
-    if set(ref) != {"path", "sha256", "size_bytes"}:
-        raise ProviderLedgerError("zero_financing_observations reference keys differ")
-    path = _absolute_regular_path(ref["path"], "zero_financing_observations.path")
-    raw = path.read_bytes()
-    if (
-        hashlib.sha256(raw).hexdigest() != ref["sha256"]
-        or len(raw) != ref["size_bytes"]
-    ):
-        raise ProviderLedgerError("zero_financing_observations identity differs")
-    try:
-        artifact = json.loads(raw)
-        rows = zero_financing_statements.validate_rows(artifact, accounts)
-    except (ValueError, zero_financing_statements.ZeroFinancingError) as exc:
-        raise ProviderLedgerError(f"zero_financing_observations: {exc}") from exc
-    if artifact["provider_id"] not in providers:
+    capture_keys = {"captures_dir", "captures_sums_path", "captures_sums_sha256"}
+    if set(ref) not in (_ZERO_FINANCING_KEYS, _ZERO_FINANCING_KEYS | capture_keys):
+        raise ProviderLedgerError("zero_financing_observations keys differ")
+    provider_id = _text(ref["provider_id"], "zero_financing_observations.provider_id")
+    if provider_id not in providers:
         raise ProviderLedgerError(
             "zero_financing_observations names a provider the spec does not declare"
         )
-    generation = f"zero-financing-{ref['sha256'][:24]}"
+    sums_raw = _pinned_file(ref["sums_path"], ref["sums_sha256"], "statement sums")
+    mapping_raw = _pinned_file(
+        ref["mapping_path"], ref["mapping_sha256"], "statement account mapping"
+    )
+    directory = _absolute_path(ref["statements_dir"], "statements_dir")
+    if not directory.is_dir() or directory.is_symlink():
+        raise ProviderLedgerError("zero_financing_observations statements_dir differs")
+    captures: dict[str, bytes] = {}
+    capture_artifacts: list[SourceArtifact] = []
+    capture_dir: Path | None = None
+    mapping = None
+    if "captures_dir" in ref:
+        # the post-statement bracket: dated account captures, pinned by their own sums
+        capture_dir = _absolute_path(ref["captures_dir"], "captures_dir")
+        capture_sums_raw = _pinned_file(
+            ref["captures_sums_path"], ref["captures_sums_sha256"], "capture sums"
+        )
+        try:
+            mapping = zero_financing_statements.load_mapping(mapping_raw, provider_id)
+            capture_sums = zero_financing_statements.load_sums(capture_sums_raw)
+        except (ValueError, zero_financing_statements.ZeroFinancingError) as exc:
+            raise ProviderLedgerError(f"zero_financing_observations: {exc}") from exc
+        for name, digest in sorted(capture_sums.items()):
+            path = capture_dir / name
+            if not path.is_file() or path.is_symlink():
+                raise ProviderLedgerError("a pinned capture file is missing")
+            content = path.read_bytes()
+            if hashlib.sha256(content).hexdigest() != digest:
+                raise ProviderLedgerError("a pinned capture file identity differs")
+            capture_artifacts.append(
+                SourceArtifact(
+                    artifact_id=f"zero-financing/{provider_id}/captures/{name}",
+                    sha256=digest,
+                    size_bytes=len(content),
+                    as_of_date=as_of,
+                    schema_name=f"{provider_id}-account-capture",
+                    schema_version="1",
+                )
+            )
+            prefix = f"{provider_id}-capture-"
+            if name.startswith(prefix) and name.endswith(".json"):
+                label = name[len(prefix) : -len(".json")]
+                if label not in mapping:
+                    raise ProviderLedgerError("a capture label is not mapped")
+                captures[mapping[label][0]] = content
+        capture_artifacts.append(
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/captures/SHA256SUMS",
+                sha256=hashlib.sha256(capture_sums_raw).hexdigest(),
+                size_bytes=len(capture_sums_raw),
+                as_of_date=as_of,
+                schema_name="capture-sums",
+                schema_version="1",
+            )
+        )
+    try:
+        artifact = zero_financing_statements.build(
+            directory,
+            zero_financing_statements.load_sums(sums_raw),
+            mapping or zero_financing_statements.load_mapping(mapping_raw, provider_id),
+            provider_id=provider_id,
+            captures=captures or None,
+            capture_dir=capture_dir,
+            cutoff=as_of,
+        )
+        rows = zero_financing_statements.validate_rows(artifact, accounts)
+    except (
+        OSError,
+        ValueError,
+        zero_financing_statements.ZeroFinancingError,
+    ) as exc:
+        raise ProviderLedgerError(f"zero_financing_observations: {exc}") from exc
+    artifacts = (
+        [
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/{item['name']}",
+                sha256=item["sha256"],
+                size_bytes=item["size_bytes"],
+                as_of_date=as_of,
+                schema_name=f"{provider_id}-statement-pdf",
+                schema_version="1",
+            )
+            for item in artifact["statement_manifest"]
+        ]
+        + capture_artifacts
+        + [
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/SHA256SUMS",
+                sha256=hashlib.sha256(sums_raw).hexdigest(),
+                size_bytes=len(sums_raw),
+                as_of_date=as_of,
+                schema_name="statement-sums",
+                schema_version="1",
+            ),
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/account-mapping",
+                sha256=hashlib.sha256(mapping_raw).hexdigest(),
+                size_bytes=len(mapping_raw),
+                as_of_date=as_of,
+                schema_name="statement-account-mapping",
+                schema_version="1",
+            ),
+        ]
+    )
+    generation = f"zero-financing-{hashlib.sha256(sums_raw).hexdigest()[:24]}"
     out: list[dict[str, Any]] = []
     for row in rows:
         source_id = f"zero-financing:{row['account_id']}:{row['as_of_date']}"
@@ -4033,7 +4150,7 @@ def _zero_financing_rows(
                 "strategy_id": None,
             }
         )
-    return out
+    return provider_id, out, artifacts
 
 
 def _quantbase_fill_closes(value: object) -> dict[str, dict[date, Decimal]]:
@@ -11007,12 +11124,12 @@ def build_catalog(
     accounts, strategies, assignments = _assignment_index(
         provenance, _object(authority.get("contract"), "financial MVP contract")
     )
-    zero_financing_rows = (
+    zero_financing = (
         _zero_financing_rows(
-            spec["zero_financing_observations"], accounts, set(spec["providers"])
+            spec["zero_financing_observations"], accounts, set(spec["providers"]), as_of
         )
         if "zero_financing_observations" in spec
-        else []
+        else None
     )
     identities: list[ProviderGenerationIdentity] = []
     provider_coverage: list[dict[str, Any]] = []
@@ -11084,7 +11201,52 @@ def build_catalog(
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
-    combined["financing_liability_observations"].extend(zero_financing_rows)
+    if zero_financing is not None:
+        zero_provider, zero_rows, zero_artifacts = zero_financing
+        # each row must belong to an account this provider's own generation observes, and
+        # rows past the provider's financial cutoff are not projected
+        observed_accounts = {
+            row["account_id"]
+            for row in provider_facts.get(zero_provider, {}).get("nav_observations", [])
+        }
+        if any(row["account_id"] not in observed_accounts for row in zero_rows):
+            raise ProviderLedgerError(
+                "zero_financing_observations name an account the provider does not observe"
+            )
+        zero_cutoff = (
+            min(
+                as_of,
+                _day(
+                    _object(
+                        _object(run_observation, "run observation")["providers"],
+                        "run observation providers",
+                    )[zero_provider]["finalized_through"],
+                    f"{zero_provider} observation finality",
+                ),
+            )
+            if run_observation is not None
+            else as_of
+        )
+        projected = [
+            row
+            for row in zero_rows
+            if date.fromisoformat(row["as_of_date"]) <= zero_cutoff
+        ]
+        if projected:  # never create an empty fact collection (ids must not move)
+            combined["financing_liability_observations"].extend(projected)
+            exceptions.extend(
+                {
+                    "account_in_provenance": row["account_id"] in accounts,
+                    "effective_date": row["as_of_date"],
+                    "fact_type": "financing_liability_observations",
+                    "mapping_reason": row["mapping_reason"],
+                    "provider_id": zero_provider,
+                    "record_id": row["record_id"],
+                    "status": "UNMAPPED",
+                }
+                for row in projected
+            )
+        provider_artifacts.extend(zero_artifacts)
 
     authoritative_strategy_ids = {
         str(row.get("strategy_id"))

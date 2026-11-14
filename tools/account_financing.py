@@ -78,6 +78,9 @@ class DebitEvidence:
     # cash days actually observed.  ``None`` means the caller did not measure it.
     unreadable_debit_rows: int = 0
     observed_base_days: int | None = None
+    # NAV days (up to the cutoff) with no provider observation of the financing balance;
+    # ``None`` means the caller did not measure coverage.
+    unobserved_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +184,9 @@ def classify(
                 conflicts.append("NOT_LEVERED_DECLARATION_UNVERIFIED")
             if not seen.observed_base_days:
                 conflicts.append("NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS")
+            elif seen.unobserved_days:
+                # coverage is required: every NAV day needs an observation, not just one
+                conflicts.append("NOT_LEVERED_WITH_UNOBSERVED_DAYS")
         result[account] = AccountState(account, state, reason, tuple(conflicts))
     return result
 

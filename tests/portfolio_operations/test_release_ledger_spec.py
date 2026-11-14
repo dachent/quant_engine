@@ -510,7 +510,15 @@ def test_the_zero_financing_artifact_is_pinned_carried_and_passed_through(
 
     assert "zero_financing_observations" not in _build(world)["spec"]
     artifact = tmp_path / "zero.json"
-    artifact.write_bytes(b'{"rows": []}')
+    keys = (
+        "mapping_path",
+        "mapping_sha256",
+        "provider_id",
+        "statements_dir",
+        "sums_path",
+        "sums_sha256",
+    )
+    artifact.write_text(json.dumps({k: f"v-{k}" for k in keys}), encoding="utf-8")
     spec = tool.build(
         world["resolved"],
         world["predecessor"],
@@ -519,8 +527,17 @@ def test_the_zero_financing_artifact_is_pinned_carried_and_passed_through(
         zero_financing_observations=artifact,
     )["spec"]
     pin = spec["zero_financing_observations"]
-    assert pin["sha256"] == hashlib.sha256(b'{"rows": []}').hexdigest()
-    assert pin["size_bytes"] == 12 and pin["path"].endswith("zero.json")
+    assert pin == {k: f"v-{k}" for k in keys}
+    broken = tmp_path / "broken.json"
+    broken.write_text(json.dumps({"provider_id": "x"}), encoding="utf-8")
+    with pytest.raises(tool.LedgerSpecError):
+        tool.build(
+            world["resolved"],
+            world["predecessor"],
+            world["out"],
+            world["provenance"],
+            zero_financing_observations=broken,
+        )
     carried = tool.build(
         world["resolved"],
         {**world["predecessor"], "zero_financing_observations": pin},
