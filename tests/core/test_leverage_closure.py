@@ -225,7 +225,9 @@ def test_a_declared_reserve_window_attributes_unmapped_cost_rows() -> None:
 def test_an_undeclared_or_too_short_reserve_window_stays_blocked() -> None:
     rows = _reserve_series()
     for windows in (None, [], [(date(2026, 1, 5), date(2026, 1, 7), "X")]):
-        assert not lc.financing_cost_closure(rows, DAYS, DAYS[-1], None, windows).covered
+        assert not lc.financing_cost_closure(
+            rows, DAYS, DAYS[-1], None, windows
+        ).covered
     gap = [
         (date(2026, 1, 5), date(2026, 1, 5), "X"),
         (date(2026, 1, 7), date(2026, 1, 8), "X"),

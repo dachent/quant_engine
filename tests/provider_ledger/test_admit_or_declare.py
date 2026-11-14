@@ -3029,9 +3029,10 @@ def test_the_run_observation_locator_refuses_two_distinct_matching_files(
     (top / name).write_text(json.dumps(second), encoding="utf-8")
     identity = materialize.run_observation_identity(first)[0]
     assert identity == materialize.run_observation_identity(second)[0]
-    assert hashlib.sha256((top / name).read_bytes()).hexdigest() != hashlib.sha256(
-        (tmp_path / name).read_bytes()
-    ).hexdigest()
+    assert (
+        hashlib.sha256((top / name).read_bytes()).hexdigest()
+        != hashlib.sha256((tmp_path / name).read_bytes()).hexdigest()
+    )
     with pytest.raises(materialize.MaterializationError, match="ambiguous"):
         materialize._locate_run_observation(None, top / "gen" / "inner", name, identity)
     (tmp_path / name).unlink()

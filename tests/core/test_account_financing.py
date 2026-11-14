@@ -197,7 +197,9 @@ def test_reserve_nav_windows_come_only_from_account_live_reserves_with_closed_wi
     ]
 
 
-def _roles(windows_a: list[dict[str, str]], windows_b: list[dict[str, str]] | None = None) -> bytes:
+def _roles(
+    windows_a: list[dict[str, str]], windows_b: list[dict[str, str]] | None = None
+) -> bytes:
     top = json.loads(_declaration(**{A: "MARGIN_USED"}))
     top["sleeve_roles"] = [
         {

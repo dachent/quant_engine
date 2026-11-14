@@ -70,7 +70,9 @@ def in_reserve_window(
     first, last = min(days), max(days)
     if last - first > timedelta(days=370):
         return False
-    return all(covered(first + timedelta(days=n)) for n in range((last - first).days + 1))
+    return all(
+        covered(first + timedelta(days=n)) for n in range((last - first).days + 1)
+    )
 
 
 @dataclass(frozen=True)

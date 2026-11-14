@@ -281,8 +281,8 @@ def reserve_nav_windows(
                 raise FinancingDeclarationError(
                     f"overlapping RESERVE windows declared for {account}"
                 )
-        for start, end, _basis in ordered:
-            if end < start:
+        for first, last, _basis in ordered:
+            if last < first:
                 raise FinancingDeclarationError(
                     f"RESERVE window ends before it starts for {account}"
                 )
