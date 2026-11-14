@@ -344,9 +344,10 @@ def build(
     mapping: Mapping[str, tuple[str, str]],
     *,
     provider_id: str,
-    extract: Callable[[Path], str] = _pdftotext,
+    extract: Callable[[Path], str] | None = None,
     artifact_prefix: str | None = None,
 ) -> dict[str, Any]:
+    extract = extract or _pdftotext  # resolved at call time
     names = sorted(sums)
     if not names:
         raise ZeroFinancingError("no statements are pinned")
@@ -358,6 +359,7 @@ def build(
     # (account, start, end) -> record of the first statement that carries the period
     periods: dict[tuple[str, date, date], dict[str, Any]] = {}
     seen_accounts: set[str] = set()
+    sizes: dict[str, int] = {}
     for name in names:
         match = re.fullmatch(
             re.escape(provider_id) + r"-stmt-([0-9a-f]{8})-(\d{4}-\d{2}-\d{2})\.pdf",
@@ -369,7 +371,9 @@ def build(
         path = pdf_dir / name
         if not path.is_file() or path.is_symlink():
             raise ZeroFinancingError(f"pinned statement is missing: {name}")
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        content = path.read_bytes()
+        sizes[name] = len(content)
+        digest = hashlib.sha256(content).hexdigest()
         if digest != sums[name]:
             raise ZeroFinancingError(f"statement identity differs: {name}")
         if label not in mapping:
@@ -491,6 +495,10 @@ def build(
             unobserved, key=lambda r: (r["account_id"], r["period_start"])
         ),
         "statements": len(names),
+        "statement_manifest": [
+            {"name": name, "sha256": sums[name], "size_bytes": sizes[name]}
+            for name in names
+        ],
         "accounts": sorted(seen_accounts),
         "file_label_mismatches": sorted(label_mismatches),
         "duplicate_period_files": sorted(duplicate_periods),
