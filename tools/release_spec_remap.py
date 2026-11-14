@@ -57,7 +57,13 @@ import release_cycle_manifest
 
 MAPPING_VERSION = "qe-release-spec-remap/1"
 # Mirrors release_ledger_spec.CARRIED / REGENERATED; a test keeps the two in step.
-CARRIED_KEYS = ("strategy_inputs", "strategy_provider_map", "portfolio_fx_rates")
+CARRIED_KEYS = (
+    "strategy_inputs",
+    "strategy_provider_map",
+    "portfolio_fx_rates",
+    "account_roles",
+    "quantbase_fill_closes",
+)
 REGENERATED_KEYS = (
     "as_of_date",
     "financial_mvp",
