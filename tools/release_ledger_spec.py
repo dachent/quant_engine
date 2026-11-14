@@ -55,6 +55,7 @@ CARRIED = (
     "portfolio_fx_rates",
     "account_roles",
     "quantbase_fill_closes",
+    "zero_financing_observations",
 )
 REGENERATED = (
     "as_of_date",
@@ -229,12 +230,15 @@ def build(
     repo_root: Path = REPO_ROOT,
     account_roles: Path | None = None,
     quantbase_fill_closes: Path | None = None,
+    zero_financing_observations: Path | None = None,
 ) -> dict[str, Any]:
     """Return ``{"observation": bytes, "spec": bytes-builder inputs}``; writes nothing.
 
     ``account_roles`` (the governed declaration file, #900) and ``quantbase_fill_closes``
     (a JSON list of {symbol, path, sha256, size_bytes}, #909) are optional per-cycle pins
-    written into the spec; absent, the spec is what it was.
+    written into the spec; absent, the spec is what it was.  ``zero_financing_observations``
+    is the hash-pinned artifact of provider-observed zero-financing days (see
+    ``zero_financing_statements``); it is pinned by path, sha256 and size.
     """
 
     if resolved.get("schema_version") != release_cycle_manifest.RESOLVED_VERSION:
@@ -319,6 +323,17 @@ def build(
             "sha256": _sha256(raw),
             "size_bytes": len(raw),
         }
+    if "zero_financing_observations" in predecessor_spec:
+        spec["zero_financing_observations"] = predecessor_spec[
+            "zero_financing_observations"
+        ]
+    if zero_financing_observations is not None:
+        zero_raw = zero_financing_observations.resolve().read_bytes()
+        spec["zero_financing_observations"] = {
+            "path": str(zero_financing_observations.resolve()),
+            "sha256": _sha256(zero_raw),
+            "size_bytes": len(zero_raw),
+        }
     if quantbase_fill_closes is not None:
         pins = json.loads(quantbase_fill_closes.read_bytes())
         if not isinstance(pins, list) or not pins:
@@ -397,6 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     command.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     command.add_argument("--account-roles", type=Path)
     command.add_argument("--quantbase-fill-closes", type=Path)
+    command.add_argument("--zero-financing-observations", type=Path)
     command.add_argument(
         "--plan", action="store_true", help="build and print, write nothing"
     )
@@ -418,6 +434,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.repo_root,
             args.account_roles,
             args.quantbase_fill_closes,
+            args.zero_financing_observations,
         )
         if args.plan:
             print(

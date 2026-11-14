@@ -499,3 +499,32 @@ def test_account_roles_and_fill_closes_reach_the_spec_only_when_given(
             world["provenance"],
             quantbase_fill_closes=empty,
         )
+
+
+def test_the_zero_financing_artifact_is_pinned_carried_and_passed_through(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """The artifact of provider-observed zero-financing days rides the ledger spec like the
+    other per-cycle pins: pinned by path/sha256/size, carried from the predecessor spec
+    when not given again."""
+
+    assert "zero_financing_observations" not in _build(world)["spec"]
+    artifact = tmp_path / "zero.json"
+    artifact.write_bytes(b'{"rows": []}')
+    spec = tool.build(
+        world["resolved"],
+        world["predecessor"],
+        world["out"],
+        world["provenance"],
+        zero_financing_observations=artifact,
+    )["spec"]
+    pin = spec["zero_financing_observations"]
+    assert pin["sha256"] == hashlib.sha256(b'{"rows": []}').hexdigest()
+    assert pin["size_bytes"] == 12 and pin["path"].endswith("zero.json")
+    carried = tool.build(
+        world["resolved"],
+        {**world["predecessor"], "zero_financing_observations": pin},
+        world["out"],
+        world["provenance"],
+    )["spec"]
+    assert carried["zero_financing_observations"] == pin
