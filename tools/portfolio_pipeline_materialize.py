@@ -1287,15 +1287,22 @@ def _locate_run_observation(
         return Path(reader._absolute_regular_path(text, "provider run observation"))
     if Path(text).name != text:
         raise MaterializationError("provider run observation name is not a bare name")
+    # Every candidate is examined (no first match): the identity binds the provider
+    # roots, so more than one distinct file matching it is an ambiguous world.
+    found: dict[str, Path] = {}
     for ancestor in list(generation.resolve().parents)[:6]:
         for candidate in (ancestor / text, *sorted(ancestor.glob(f"*/{text}"))):
-            if (
-                candidate.is_file()
-                and not candidate.is_symlink()
-                and _observation_identity_matches(candidate.read_bytes(), sha256)
-            ):
-                return candidate
-    raise MaterializationError("provider run observation file is not beside the world")
+            if candidate.is_file() and not candidate.is_symlink():
+                content = candidate.read_bytes()
+                if _observation_identity_matches(content, sha256):
+                    found.setdefault(hashlib.sha256(content).hexdigest(), candidate)
+    if len(found) > 1:
+        raise MaterializationError("provider run observation file is ambiguous")
+    if not found:
+        raise MaterializationError(
+            "provider run observation file is not beside the world"
+        )
+    return next(iter(found.values()))
 
 
 def _provider_admission_authority(

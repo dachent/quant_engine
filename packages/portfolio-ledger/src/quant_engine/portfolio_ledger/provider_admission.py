@@ -810,10 +810,24 @@ def run_observation_identity(observation: Mapping[str, Any]) -> tuple[str, int]:
     normalized: dict[str, Any] = json.loads(json.dumps(observation))
     providers = normalized.get("providers")
     if isinstance(providers, dict):
-        for row in providers.values():
+        # Roots stay bound, as their layout below the providers' common ancestor: a
+        # set property, so independent of provider order, and of the world's own name.
+        split = {
+            key: [p for p in re.split(r"[\\/]", row["root"]) if p]
+            for key, row in providers.items()
+            if isinstance(row, dict) and isinstance(row.get("root"), str)
+        }
+        common = 0
+        if split:
+            for column in zip(*split.values(), strict=False):
+                if len(set(column)) != 1:
+                    break
+                common += 1
+        for key, row in providers.items():
             if not isinstance(row, dict):
                 continue
-            row.pop("root", None)
+            if key in split:
+                row["root"] = "/".join(split[key][common:])
             evidence = row.get("finality_evidence")
             if isinstance(evidence, dict) and isinstance(evidence.get("path"), str):
                 evidence["path"] = re.split(r"[\\/]", evidence["path"])[-1]
