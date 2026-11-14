@@ -2911,6 +2911,13 @@ def _validated_retained_bundle(
             or definitions[series_id].get("live_inception") != raw_boundary
         ):
             raise StrategyHistoryError("QSI refresh retained boundary differs")
+    try:
+        # BACKTEST and declared MODEL_LIVE rows only; any other layer is refused
+        layer_parts = layer_series.partition_bundle_rows(rows, definitions)
+    except (layer_series.LayerSeriesError, KeyError, ValueError) as exc:
+        raise StrategyHistoryError(
+            f"QSI refresh retained layers differ: {exc}"
+        ) from exc
     seen: set[tuple[str, str]] = set()
     for row in rows:
         series_id = row["series_id"]
@@ -2921,9 +2928,14 @@ def _validated_retained_bundle(
             definition is None
             or key in seen
             or observed > cutoff
-            or row["evidence_layer"] != "BACKTEST"
             or row["strategy_version"] != definition.get("strategy_version")
-            or (series_id in boundaries and row["date"] >= boundaries[series_id])
+            # the account boundary caps the hypothetical rows only; the model-live
+            # layer is not part of the account and is not capped by it
+            or (
+                row["evidence_layer"] == "BACKTEST"
+                and series_id in boundaries
+                and row["date"] >= boundaries[series_id]
+            )
             or _decimal(row["return"], "retained return") <= -1
             or set(row) != set(RETURN_FIELDS)
         ):
@@ -2932,7 +2944,9 @@ def _validated_retained_bundle(
     if rows != sorted(rows, key=lambda row: (row["series_id"], row["date"])):
         raise StrategyHistoryError("QSI refresh retained ordering differs")
     for series_id, definition in definitions.items():
-        selected = [row for row in rows if row["series_id"] == series_id]
+        # the definition describes the BACKTEST rows; MODEL_LIVE rows are checked
+        # against their own segment label above
+        selected = layer_parts.get(series_id, {}).get("BACKTEST", [])
         if not selected or (
             len(selected),
             selected[0]["date"],

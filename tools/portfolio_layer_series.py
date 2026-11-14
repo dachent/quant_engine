@@ -56,6 +56,67 @@ class LayerSeriesError(ValueError):
     """A labelled-series input breaks the layer rule."""
 
 
+BUNDLE_ROW_LAYERS: Final = frozenset({BACKTEST, MODEL_LIVE})
+
+
+def partition_bundle_rows(
+    rows: Sequence[Mapping[str, str]],
+    definitions: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, list[Mapping[str, str]]]]:
+    """Split strategy-history rows by layer: ``{series_id: {layer: rows}}``.
+
+    A strategy-history bundle carries the BACKTEST rows its series definition
+    describes and, beside them, MODEL_LIVE rows that its MODEL_LIVE segment label
+    declares. Every other layer (the account, a COPY_RECORD, a provider record)
+    is refused, and so is a MODEL_LIVE row no label declares, a label whose rows
+    are absent or differ in window or count, and a model-live row that is not
+    strictly after the series' backtest rows.
+    """
+
+    parts: dict[str, dict[str, list[Mapping[str, str]]]] = {}
+    for row in rows:
+        layer = row.get("evidence_layer")
+        if layer not in BUNDLE_ROW_LAYERS:
+            raise LayerSeriesError(
+                f"bundle row layer {layer!r} is not admitted; only "
+                f"{', '.join(sorted(BUNDLE_ROW_LAYERS))} may travel in the bundle"
+            )
+        parts.setdefault(row["series_id"], {}).setdefault(layer, []).append(row)
+    for series_id in set(definitions) | set(parts):
+        declared = [
+            label
+            for label in (
+                label_from_dict(raw)
+                for raw in (definitions.get(series_id) or {}).get("segment_labels", [])
+            )
+            if label.layer == MODEL_LIVE
+        ]
+        live = parts.get(series_id, {}).get(MODEL_LIVE, [])
+        if len(declared) > 1:
+            raise LayerSeriesError(f"{series_id} declares two model-live segments")
+        if not declared and live:
+            raise LayerSeriesError(
+                f"{series_id} carries MODEL_LIVE rows no segment label declares"
+            )
+        if declared:
+            label = declared[0]
+            dates = [row["date"] for row in live]
+            if (len(dates), min(dates, default=""), max(dates, default="")) != (
+                label.observations,
+                label.first,
+                label.last,
+            ):
+                raise LayerSeriesError(
+                    f"{series_id} MODEL_LIVE rows differ from their segment label"
+                )
+            backtest = parts.get(series_id, {}).get(BACKTEST, [])
+            if backtest and max(row["date"] for row in backtest) >= label.first:
+                raise LayerSeriesError(
+                    f"{series_id} BACKTEST rows reach the model-live layer"
+                )
+    return parts
+
+
 def parse_nav_csv(content: bytes) -> list[tuple[date, Decimal, Decimal]]:
     """(date, daily_change_percent, balance) rows of a site NAV file, validated."""
 

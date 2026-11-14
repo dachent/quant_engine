@@ -1488,3 +1488,92 @@ def test_a_junction_into_scratch_is_refused_even_though_its_path_looks_durable(
             pytest.skip("cannot create a junction here")
     with pytest.raises(history.StrategyHistoryError, match="not scratch"):
         history._refuse_scratch_locator(link / "archive.zip")
+
+
+# --- three-layer rows in a retained bundle (train 2, R2) -----------------------
+
+
+def _layered_seed(
+    tmp_path: Path, layer: str, *, declare: bool
+) -> tuple[bytes, bytes, str]:
+    """A rehashed copy of the seed with one extra row of ``layer`` on a non-QSI series."""
+
+    inputs = _bundle_inputs(tmp_path)
+    seed = Path(
+        history.write_bundle(
+            tmp_path / "seed",
+            **inputs,
+            as_of_date="2026-09-17",
+            live_inceptions={"QSI": "2026-01-05"},
+        )["destination"]
+    )
+    manifest = json.loads((seed / "manifest.json").read_bytes())
+    rows = list(history.csv.DictReader((seed / "returns.csv").read_text().splitlines()))
+    definition = next(item for item in manifest["series"] if item["series_id"] != "QSI")
+    series_id = definition["series_id"]
+    extra = {
+        "series_id": series_id,
+        "date": "2026-09-17",
+        "return": "0.01",
+        "evidence_layer": layer,
+        "strategy_version": definition["strategy_version"],
+    }
+    rows.append(extra)
+    rows.sort(key=lambda row: (row["series_id"], row["date"]))
+    if declare:
+        from series_label import SeriesLabel
+
+        definition["segment_labels"] = [
+            SeriesLabel(
+                layer="MODEL_LIVE",
+                entity_id="designer model",
+                entity_role="DESIGNER_MODEL",
+                first="2026-09-17",
+                last="2026-09-17",
+                observations=1,
+                currency="USD",
+                return_basis="PROVIDER_PUBLISHED_MODEL_EQUITY_CURVE_LEVEL_RATIO",
+                cost_basis="NET",
+            ).to_dict()
+        ]
+    output = io.StringIO(newline="")
+    writer = history.csv.DictWriter(
+        output, fieldnames=history.RETURN_FIELDS, lineterminator="\n"
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+    content = output.getvalue().encode()
+    manifest["returns_artifact"].update(
+        sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content)
+    )
+    manifest.pop("bundle_id")
+    manifest["bundle_id"] = hashlib.sha256(
+        history.canonical_json_bytes(manifest)
+    ).hexdigest()
+    return history.canonical_json_bytes(manifest), content, series_id
+
+
+def test_a_retained_bundle_admits_a_declared_model_live_layer(tmp_path: Path) -> None:
+    manifest, content, series_id = _layered_seed(tmp_path, "MODEL_LIVE", declare=True)
+    _, rows = history._validated_retained_bundle(manifest, content)
+    assert any(
+        row["series_id"] == series_id and row["evidence_layer"] == "MODEL_LIVE"
+        for row in rows
+    )
+
+
+@pytest.mark.parametrize(
+    ("layer", "declare"),
+    [
+        ("ACCOUNT_LIVE", False),
+        ("COPY_RECORD", False),
+        ("PROVIDER_LIVE", False),
+        ("MODEL_LIVE", False),  # a model-live row nothing declares
+    ],
+)
+def test_a_retained_bundle_refuses_every_other_layer(
+    tmp_path: Path, layer: str, declare: bool
+) -> None:
+    manifest, content, _ = _layered_seed(tmp_path, layer, declare=declare)
+    with pytest.raises(history.StrategyHistoryError, match="retained layers differ"):
+        history._validated_retained_bundle(manifest, content)

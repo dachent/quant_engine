@@ -689,6 +689,11 @@
       1
     ],
     [
+      "portfolio_strategy_backtests",
+      "portfolio_layer_series",
+      1
+    ],
+    [
       "portfolio_strategy_history",
       "portfolio_layer_series",
       1

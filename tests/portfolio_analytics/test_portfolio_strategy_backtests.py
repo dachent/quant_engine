@@ -158,7 +158,7 @@ def test_a_non_backtest_row_is_refused(tmp_path) -> None:
         returns=RETURNS.replace("BACKTEST,beta", "ACCOUNT_LIVE,beta"),
     )
 
-    with pytest.raises(StrategyBacktestsError, match="non-backtest evidence layer"):
+    with pytest.raises(StrategyBacktestsError, match="inadmissible layer"):
         backtests.stage_candidate(bundle, tmp_path / "backtests")
 
 
@@ -209,3 +209,92 @@ def test_a_conflicting_existing_generation_is_refused(tmp_path) -> None:
 
     with pytest.raises(StrategyBacktestsError, match="candidate generation differs"):
         backtests.stage_candidate(bundle, output)
+
+
+# --- three-layer rows in the strategy-history bundle (train 2, R2) -------------
+
+
+def _layered(returns: str, *, label: dict[str, object] | None = None):
+    """Alpha with an optional MODEL_LIVE segment label, as bytes for the builder."""
+
+    manifest = _manifest(returns)
+    if label is not None:
+        manifest["series"][0]["segment_labels"] = [label]  # type: ignore[index]
+    return json.dumps(manifest, sort_keys=True).encode("utf-8"), returns.encode("utf-8")
+
+
+def _live_label(first: str, last: str, observations: int) -> dict[str, object]:
+    from series_label import SeriesLabel
+
+    return SeriesLabel(
+        layer="MODEL_LIVE",
+        entity_id="designer model",
+        entity_role="DESIGNER_MODEL",
+        first=first,
+        last=last,
+        observations=observations,
+        currency="USD",
+        return_basis="PROVIDER_PUBLISHED_MODEL_EQUITY_CURVE_LEVEL_RATIO",
+        cost_basis="NET",
+    ).to_dict()
+
+
+LIVE_ROWS = (
+    "Alpha,2025-01-06,0.01,MODEL_LIVE,alpha-current:v1\n"
+    "Alpha,2025-01-07,0.02,MODEL_LIVE,alpha-current:v1\n"
+)
+
+
+def _build_layered(returns: str, label: dict[str, object] | None):
+    manifest_bytes, returns_bytes = _layered(returns, label=label)
+    # the manifest digest must describe the exact returns bytes
+    manifest = json.loads(manifest_bytes)
+    manifest["returns_artifact"]["sha256"] = hashlib.sha256(returns_bytes).hexdigest()
+    manifest["returns_artifact"]["size_bytes"] = len(returns_bytes)
+    return backtests._build_from_contents(
+        json.dumps(manifest, sort_keys=True).encode("utf-8"), returns_bytes
+    )
+
+
+def test_a_declared_model_live_layer_is_admitted_beside_the_backtest() -> None:
+    returns = RETURNS + LIVE_ROWS
+    _, catalog_bytes, _, extra = _build_layered(
+        returns, _live_label("2025-01-06", "2025-01-07", 2)
+    )
+    catalog = json.loads(catalog_bytes)
+    alpha = next(item for item in catalog["series"] if item["series_id"] == "Alpha")
+    # backtest coverage is the backtest rows only
+    assert (alpha["observed_end"], alpha["return_observations"]) == ("2025-01-03", 2)
+    assert alpha["model_live"]["return_observations"] == 2
+    assert catalog["evidence_layers"] == ["BACKTEST", "MODEL_LIVE"]
+    assert catalog["coverage"]["return_observations"] == 3
+
+
+@pytest.mark.parametrize(
+    "layer", ["ACCOUNT_LIVE", "COPY_RECORD", "PROVIDER_LIVE", "SOMETHING_ELSE"]
+)
+def test_every_other_layer_is_refused_in_the_bundle(layer: str) -> None:
+    returns = RETURNS + f"Alpha,2025-01-06,0.01,{layer},alpha-current:v1\n"
+    with pytest.raises(StrategyBacktestsError, match="inadmissible layer"):
+        _build_layered(returns, None)
+
+
+def test_a_model_live_row_no_label_declares_is_refused() -> None:
+    with pytest.raises(StrategyBacktestsError, match="no segment label declares"):
+        _build_layered(RETURNS + LIVE_ROWS, None)
+
+
+def test_model_live_rows_must_match_their_label() -> None:
+    with pytest.raises(StrategyBacktestsError, match="differ from their segment"):
+        _build_layered(RETURNS + LIVE_ROWS, _live_label("2025-01-06", "2025-01-07", 3))
+
+
+def test_model_live_must_start_after_the_backtest() -> None:
+    overlapping = (
+        "Alpha,2025-01-03,0.01,MODEL_LIVE,alpha-current:v1\n"
+        "Alpha,2025-01-07,0.02,MODEL_LIVE,alpha-current:v1\n"
+    )
+    with pytest.raises(StrategyBacktestsError, match="reach the model-live layer"):
+        _build_layered(
+            RETURNS + overlapping, _live_label("2025-01-03", "2025-01-07", 2)
+        )
