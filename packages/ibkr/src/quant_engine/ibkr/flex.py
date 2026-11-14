@@ -122,6 +122,18 @@ def _optional_decimal(value: str | None, name: str) -> Decimal | None:
     return _decimal(value, name)
 
 
+_NAV_HOLDINGS_ATTRIBUTES = (
+    "stock",
+    "options",
+    "bonds",
+    "commodities",
+    "funds",
+    "notes",
+    "warrants",
+    "cfdUnrealizedPl",
+)
+
+
 def _account_matches(element: ET.Element, raw_account_id: str) -> bool:
     observed = _optional(element.attrib.get("accountId"))
     return observed is None or observed == raw_account_id
@@ -359,6 +371,13 @@ class FlexDailyStatement:
     # InterestAccruals is the broker's "no accruals", a missing one is "not captured".
     interest_accruals_section_present: bool = False
     open_positions_section_present: bool = False
+    # Every OpenPosition element of the statement at any levelOfDetail, and the SUMMARY
+    # rows that state no accountId: "no positions" is zero exposure only when the section
+    # holds no row of any kind; a row without an account never binds to the statement.
+    open_position_rows_total: int = 0
+    open_position_summary_rows_without_account: int = 0
+    # NAV holdings components (stock, options, ...) the statement itself reports nonzero.
+    nav_holdings_nonzero: bool = False
 
 
 @dataclass(frozen=True)
@@ -724,6 +743,10 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         _cash_report(item, raw_account_id)
         for item in _elements(element, "CashReportCurrency")
     )
+    for section in _elements(element, "InterestAccruals"):
+        # a renamed or unknown child inside a present section must not read as "empty"
+        if any(_local(child.tag) != "InterestAccrualsCurrency" for child in section):
+            raise FlexValidationError("InterestAccruals holds an unknown element")
     interest_accruals = tuple(
         _interest_accrual(item, raw_account_id)
         for item in _elements(element, "InterestAccrualsCurrency")
@@ -775,6 +798,17 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         tier_interest=tier_interest,
         interest_accruals_section_present=bool(_elements(element, "InterestAccruals")),
         open_positions_section_present=bool(_elements(element, "OpenPositions")),
+        open_position_rows_total=len(_elements(element, "OpenPosition")),
+        open_position_summary_rows_without_account=sum(
+            1
+            for item in _elements(element, "OpenPosition")
+            if item.attrib.get("levelOfDetail") == "SUMMARY"
+            and _optional(item.attrib.get("accountId")) is None
+        ),
+        nav_holdings_nonzero=any(
+            _optional_decimal(nav.attrib.get(key), f"nav.{key}") not in (None, 0)
+            for key in _NAV_HOLDINGS_ATTRIBUTES
+        ),
         nav_cash=_optional_decimal(nav.attrib.get("cash"), "nav.cash"),
         nav_broker_cash_component=_optional_decimal(
             nav.attrib.get("brokerCashComponent"), "nav.brokerCashComponent"

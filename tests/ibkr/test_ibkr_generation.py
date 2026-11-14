@@ -3341,3 +3341,93 @@ def test_an_empty_interest_accruals_section_is_recorded_distinct_from_a_missing_
         ),
     )
     assert empty_rows(withrows) == []
+
+
+def _empty_positions(xml: str) -> str:
+    head, rest = xml.split("<OpenPosition ", 1)
+    return head + "</OpenPositions>" + rest.split("</OpenPositions>", 1)[1]
+
+
+def _exposure_status(tmp_path: Path, xml: str) -> str:
+    return str(_exposure(_coverage_catalog(tmp_path, xml))["amount"]["status"])
+
+
+def test_zero_exposure_refuses_when_the_statement_says_otherwise(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (round-5 item 1): LOT-only or level-less rows, a SUMMARY row without
+    accountId, and NAV holdings with no positions all leave exposure UNAVAILABLE."""
+
+    day = date(2026, 1, 3)
+    full = _xml("SYNTH-RAW", day, "114")
+    clean_empty = _empty_positions(full)
+    assert _exposure_status(tmp_path, clean_empty) == "AVAILABLE"
+
+    lot_only = full.replace(
+        'levelOfDetail="SUMMARY" conid="100"', 'levelOfDetail="LOT" conid="100"'
+    )
+    assert lot_only != full
+    assert _exposure_status(tmp_path, lot_only) != "AVAILABLE"
+    no_level = full.replace('levelOfDetail="SUMMARY" conid="100"', 'conid="100"')
+    assert _exposure_status(tmp_path, no_level) != "AVAILABLE"
+
+    no_account = full.replace('<OpenPosition accountId="SYNTH-RAW"', "<OpenPosition")
+    assert no_account != full
+    assert _exposure_status(tmp_path, no_account) != "AVAILABLE"
+
+    holdings = clean_empty.replace('total="114"', 'total="114" stock="100"')
+    assert holdings != clean_empty
+    assert _exposure_status(tmp_path, holdings) != "AVAILABLE"
+    zero_holdings = clean_empty.replace('total="114"', 'total="114" stock="0"')
+    assert _exposure_status(tmp_path, zero_holdings) == "AVAILABLE"
+
+
+def test_an_empty_accrual_section_contradicted_by_the_statement_is_not_recorded(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (round-5 item 2): a nonzero NAV accrual, or a renamed child inside the
+    section, never reads as 'no accruals'."""
+
+    day = date(2026, 1, 3)
+
+    def empty_rows(xml: str) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in _coverage_catalog(tmp_path, xml)["financing_cost_observations"]
+            if row["measurement_basis"] == "ACCRUAL_SECTION_EMPTY"
+        ]
+
+    base = _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    assert len(empty_rows(base)) == 1
+    contradicted = base.replace('total="114"', 'total="114" interestAccruals="-12.34"')
+    assert contradicted != base
+    assert empty_rows(contradicted) == []
+    stated_zero = base.replace('total="114"', 'total="114" interestAccruals="0"')
+    assert empty_rows(stated_zero)[0]["nav_interest_accruals_stated"] is True
+    assert empty_rows(base)[0]["nav_interest_accruals_stated"] is False
+    renamed = _xml(
+        "SYNTH-RAW",
+        day,
+        "114",
+        native_sections="<InterestAccruals><InterestAccrualsByCurrency/></InterestAccruals>",
+    )
+    with pytest.raises(Exception, match="InterestAccruals"):
+        _coverage_catalog(tmp_path, renamed)
+
+
+def test_a_refresh_differing_only_in_section_presence_is_not_equal(
+    tmp_path: Path,
+) -> None:
+    day = date(2026, 1, 3)
+    path = tmp_path / "eq.xml"
+
+    def parse(xml: str) -> Any:
+        path.write_text(xml, encoding="utf-8")
+        return parse_flex_file(path, artifact_id="synthetic/eq.xml").statements[0]
+
+    absent = parse(_xml("SYNTH-RAW", day, "114"))
+    present = parse(
+        _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    )
+    assert not ibkr_generation._statements_equal(absent, present)
+    assert ibkr_generation._statements_equal(absent, absent)

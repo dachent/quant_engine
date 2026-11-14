@@ -196,7 +196,7 @@ def test_a_provider_without_an_accrual_series_is_not_covered_by_its_postings() -
     }
     result = lc.financing_cost_closure([posting, posting], DAYS, DAYS[-1], None)
     assert not result.covered
-    assert result.check_id == "FINANCING_COST_ACCRUAL_SECTION_EMPTY"
+    assert result.check_id == "FINANCING_COST_ACCRUAL_ROLLFORWARD"
 
 
 # ---- RESERVE_WINDOW row class (control ruling 2026-11-13): attribution only through the
@@ -384,3 +384,21 @@ def test_a_day_with_no_section_or_any_other_cost_row_is_not_covered() -> None:
         [_empty_day(d) for d in DAYS] + [posting], DAYS, DAYS[-1], None
     ).covered
     assert not lc.financing_cost_closure([], DAYS, DAYS[-1], None).covered
+
+
+def test_a_levered_account_needs_an_explicitly_stated_zero_accrual_per_day() -> None:
+    """Kill test (round-5): for a borrowing account an empty accrual section closes a day
+    only when the statement's NAV states the accrual as an explicit zero."""
+
+    def day_row(day: str, stated: bool) -> dict[str, Any]:
+        return {**_empty_day(day), "nav_interest_accruals_stated": stated}
+
+    silent = [day_row(d, False) for d in DAYS]
+    stated = [day_row(d, True) for d in DAYS]
+    assert lc.financing_cost_closure(silent, DAYS, DAYS[-1], None).covered
+    assert not lc.financing_cost_closure(
+        silent, DAYS, DAYS[-1], None, require_explicit_zero=True
+    ).covered
+    assert lc.financing_cost_closure(
+        stated, DAYS, DAYS[-1], None, require_explicit_zero=True
+    ).covered

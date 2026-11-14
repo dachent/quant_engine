@@ -313,6 +313,7 @@ def account_financing_rows(
             cutoff,
             epoch_start,
             (reserve_windows or {}).get(name),
+            require_explicit_zero=state.state == "LEVERED",
         )
         rows.append(
             make(

@@ -137,8 +137,13 @@ def financing_cost_closure(
     cutoff: str,
     epoch_start: str | None,
     reserve_windows: Sequence[tuple[date, date, str]] | None = None,
+    require_explicit_zero: bool = False,
 ) -> Closure:
-    """Interest accrual closure for one account, window = its statement days."""
+    """Interest accrual closure for one account, window = its statement days.
+
+    ``require_explicit_zero`` (a levered account, which really borrowed): an empty accrual
+    section closes a day only when the statement's own NAV also states the accrual as an
+    explicit zero, never by silence."""
 
     days = sorted(day for day in set(statement_days) if day <= cutoff)
     rows = [
@@ -147,17 +152,25 @@ def financing_cost_closure(
         if str(r.get("as_of_date") or r.get("period_end") or "") <= cutoff
     ]
     accruals = [r for r in rows if r.get("measurement_basis") in _ACCRUAL_BASES]
+    cost_rows_all = rows
     empty_days = {
         str(r.get("as_of_date") or r.get("period_end"))
         for r in rows
         if r.get("measurement_basis") == EMPTY_ACCRUAL_BASIS
     }
     rows = [r for r in rows if r.get("measurement_basis") != EMPTY_ACCRUAL_BASIS]
-    if not accruals:
+    if not accruals and empty_days:
         # The broker's explicit "no accruals" on every statement day, and no other cost
         # row at all (a posting or detail row with no accrual behind it is not explained
         # by an empty section): covered.  A day without the section is not captured.
-        missing = [d for d in days if d not in empty_days]
+        stated_days = {
+            str(r.get("as_of_date") or r.get("period_end"))
+            for r in cost_rows_all
+            if r.get("measurement_basis") == EMPTY_ACCRUAL_BASIS
+            and r.get("nav_interest_accruals_stated") is True
+        }
+        proven = stated_days if require_explicit_zero else empty_days
+        missing = [d for d in days if d not in proven]
         placed, unmapped_here = _split_unmapped(rows, epoch_start, reserve_windows)
         return Closure(
             "FINANCING_COST_ACCRUAL_SECTION_EMPTY",
