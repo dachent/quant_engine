@@ -4022,7 +4022,8 @@ def _zero_financing_rows(
     source artifacts to record in the generation manifest."""
 
     ref = _object(value, "zero_financing_observations")
-    if set(ref) != _ZERO_FINANCING_KEYS:
+    capture_keys = {"captures_dir", "captures_sums_path", "captures_sums_sha256"}
+    if set(ref) not in (_ZERO_FINANCING_KEYS, _ZERO_FINANCING_KEYS | capture_keys):
         raise ProviderLedgerError("zero_financing_observations keys differ")
     provider_id = _text(ref["provider_id"], "zero_financing_observations.provider_id")
     if provider_id not in providers:
@@ -4036,12 +4037,63 @@ def _zero_financing_rows(
     directory = _absolute_path(ref["statements_dir"], "statements_dir")
     if not directory.is_dir() or directory.is_symlink():
         raise ProviderLedgerError("zero_financing_observations statements_dir differs")
+    captures: dict[str, bytes] = {}
+    capture_artifacts: list[SourceArtifact] = []
+    capture_dir: Path | None = None
+    mapping = None
+    if "captures_dir" in ref:
+        # the post-statement bracket: dated account captures, pinned by their own sums
+        capture_dir = _absolute_path(ref["captures_dir"], "captures_dir")
+        capture_sums_raw = _pinned_file(
+            ref["captures_sums_path"], ref["captures_sums_sha256"], "capture sums"
+        )
+        try:
+            mapping = zero_financing_statements.load_mapping(mapping_raw, provider_id)
+            capture_sums = zero_financing_statements.load_sums(capture_sums_raw)
+        except (ValueError, zero_financing_statements.ZeroFinancingError) as exc:
+            raise ProviderLedgerError(f"zero_financing_observations: {exc}") from exc
+        for name, digest in sorted(capture_sums.items()):
+            path = capture_dir / name
+            if not path.is_file() or path.is_symlink():
+                raise ProviderLedgerError("a pinned capture file is missing")
+            content = path.read_bytes()
+            if hashlib.sha256(content).hexdigest() != digest:
+                raise ProviderLedgerError("a pinned capture file identity differs")
+            capture_artifacts.append(
+                SourceArtifact(
+                    artifact_id=f"zero-financing/{provider_id}/captures/{name}",
+                    sha256=digest,
+                    size_bytes=len(content),
+                    as_of_date=as_of,
+                    schema_name=f"{provider_id}-account-capture",
+                    schema_version="1",
+                )
+            )
+            prefix = f"{provider_id}-capture-"
+            if name.startswith(prefix) and name.endswith(".json"):
+                label = name[len(prefix) : -len(".json")]
+                if label not in mapping:
+                    raise ProviderLedgerError("a capture label is not mapped")
+                captures[mapping[label][0]] = content
+        capture_artifacts.append(
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/captures/SHA256SUMS",
+                sha256=hashlib.sha256(capture_sums_raw).hexdigest(),
+                size_bytes=len(capture_sums_raw),
+                as_of_date=as_of,
+                schema_name="capture-sums",
+                schema_version="1",
+            )
+        )
     try:
         artifact = zero_financing_statements.build(
             directory,
             zero_financing_statements.load_sums(sums_raw),
-            zero_financing_statements.load_mapping(mapping_raw, provider_id),
+            mapping or zero_financing_statements.load_mapping(mapping_raw, provider_id),
             provider_id=provider_id,
+            captures=captures or None,
+            capture_dir=capture_dir,
+            cutoff=as_of,
         )
         rows = zero_financing_statements.validate_rows(artifact, accounts)
     except (
@@ -4050,34 +4102,38 @@ def _zero_financing_rows(
         zero_financing_statements.ZeroFinancingError,
     ) as exc:
         raise ProviderLedgerError(f"zero_financing_observations: {exc}") from exc
-    artifacts = [
-        SourceArtifact(
-            artifact_id=f"zero-financing/{provider_id}/{item['name']}",
-            sha256=item["sha256"],
-            size_bytes=item["size_bytes"],
-            as_of_date=as_of,
-            schema_name=f"{provider_id}-statement-pdf",
-            schema_version="1",
-        )
-        for item in artifact["statement_manifest"]
-    ] + [
-        SourceArtifact(
-            artifact_id=f"zero-financing/{provider_id}/SHA256SUMS",
-            sha256=hashlib.sha256(sums_raw).hexdigest(),
-            size_bytes=len(sums_raw),
-            as_of_date=as_of,
-            schema_name="statement-sums",
-            schema_version="1",
-        ),
-        SourceArtifact(
-            artifact_id=f"zero-financing/{provider_id}/account-mapping",
-            sha256=hashlib.sha256(mapping_raw).hexdigest(),
-            size_bytes=len(mapping_raw),
-            as_of_date=as_of,
-            schema_name="statement-account-mapping",
-            schema_version="1",
-        ),
-    ]
+    artifacts = (
+        [
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/{item['name']}",
+                sha256=item["sha256"],
+                size_bytes=item["size_bytes"],
+                as_of_date=as_of,
+                schema_name=f"{provider_id}-statement-pdf",
+                schema_version="1",
+            )
+            for item in artifact["statement_manifest"]
+        ]
+        + capture_artifacts
+        + [
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/SHA256SUMS",
+                sha256=hashlib.sha256(sums_raw).hexdigest(),
+                size_bytes=len(sums_raw),
+                as_of_date=as_of,
+                schema_name="statement-sums",
+                schema_version="1",
+            ),
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/account-mapping",
+                sha256=hashlib.sha256(mapping_raw).hexdigest(),
+                size_bytes=len(mapping_raw),
+                as_of_date=as_of,
+                schema_name="statement-account-mapping",
+                schema_version="1",
+            ),
+        ]
+    )
     generation = f"zero-financing-{hashlib.sha256(sums_raw).hexdigest()[:24]}"
     out: list[dict[str, Any]] = []
     for row in rows:

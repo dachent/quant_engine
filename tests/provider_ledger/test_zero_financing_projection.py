@@ -224,3 +224,76 @@ def test_a_staged_candidate_carries_rows_of_an_observed_account_and_verifies(
     # the row past the provider's financial cutoff is not projected
     assert [r["as_of_date"] for r in zero] == ["2026-01-05"]
     ledger.verify_candidate(spec_path, str(staged["generation_id"]))
+
+
+def _with_captures(pins: "_Pins", tmp_path: Path, **over: Any) -> dict[str, Any]:
+    directory = tmp_path / "captures"
+    directory.mkdir()
+    label = zf.statement_label(PROVIDER, LAST3)
+    (directory / "history.csv").write_bytes(b"raw capture bytes")
+    body = {
+        "schema_version": 1,
+        "provider_id": PROVIDER,
+        "account_last3": LAST3,
+        "captured_at_utc": "2026-02-03T12:00:00Z",
+        "capture_date": "2026-02-03",
+        "window_start": "2026-01-20",
+        "window_end": "2026-02-03",
+        "balances": {},
+        "transactions_reported_count": 0,
+        "transactions": [],
+        "transactions_complete": True,
+        "raw_files": [
+            {
+                "name": "history.csv",
+                "sha256": hashlib.sha256(b"raw capture bytes").hexdigest(),
+                "size_bytes": len(b"raw capture bytes"),
+                "kind": "history",
+            }
+        ],
+    }
+    body.update(over)
+    name = f"{PROVIDER}-capture-{label}.json"
+    (directory / name).write_text(json.dumps(body), encoding="utf-8")
+    sums = tmp_path / "CAPTURE-SUMS.txt"
+    lines = [
+        f"{hashlib.sha256((directory / n).read_bytes()).hexdigest()} *{n}"
+        for n in (name, "history.csv")
+    ]
+    sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return pins.spec(
+        captures_dir=str(directory),
+        captures_sums_path=str(sums),
+        captures_sums_sha256=hashlib.sha256(sums.read_bytes()).hexdigest(),
+    )
+
+
+def test_pinned_captures_enter_the_manifest_and_are_hash_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pins = _Pins(tmp_path, monkeypatch)
+    account = "account-" + "a" * 16
+    spec = _with_captures(pins, tmp_path)
+    _provider, rows, artifacts = ledger._zero_financing_rows(
+        spec, {account}, {PROVIDER}, AS_OF
+    )
+    ids = {a.artifact_id for a in artifacts}
+    assert f"zero-financing/{PROVIDER}/captures/SHA256SUMS" in ids
+    assert any(i.endswith("history.csv") for i in ids)
+    assert len(rows) == 31  # as_of is the statement end: the capture adds no later day
+    with pytest.raises(ledger.ProviderLedgerError, match="capture sums identity"):
+        ledger._zero_financing_rows(
+            {**spec, "captures_sums_sha256": "0" * 64}, {account}, {PROVIDER}, AS_OF
+        )
+    (tmp_path / "captures" / "history.csv").write_bytes(b"altered")
+    with pytest.raises(ledger.ProviderLedgerError, match="identity differs"):
+        ledger._zero_financing_rows(spec, {account}, {PROVIDER}, AS_OF)
+
+
+def test_a_capture_of_another_account_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pins = _Pins(tmp_path, monkeypatch)
+    spec = _with_captures(pins, tmp_path, account_last3="999")
+    with pytest.raises(ledger.ProviderLedgerError, match="capture account differs"):
+        ledger._zero_financing_rows(spec, {"account-" + "a" * 16}, {PROVIDER}, AS_OF)

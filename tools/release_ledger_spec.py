@@ -341,7 +341,11 @@ def build(
         # a pin file of the six keys the ledger needs to recompute the rows from the
         # retained statements (provider, statements dir, sums and mapping with hashes)
         pin = json.loads(zero_financing_observations.read_bytes())
-        if not isinstance(pin, dict) or set(pin) != ZERO_FINANCING_PIN_KEYS:
+        capture_keys = {"captures_dir", "captures_sums_path", "captures_sums_sha256"}
+        if not isinstance(pin, dict) or set(pin) not in (
+            ZERO_FINANCING_PIN_KEYS,
+            ZERO_FINANCING_PIN_KEYS | capture_keys,
+        ):
             raise LedgerSpecError(
                 "INPUT",
                 "zero financing pin file must carry exactly "
