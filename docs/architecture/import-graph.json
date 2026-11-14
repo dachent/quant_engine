@@ -734,6 +734,11 @@
       1
     ],
     [
+      "provider_ledger",
+      "zero_financing_statements",
+      1
+    ],
+    [
       "quantbase_cdp_har_recorder",
       "capture_dry_run",
       1

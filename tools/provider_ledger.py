@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo
 
 import account_financing
 import quantbase_fund_days
+import zero_financing_statements
 
 from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
@@ -2555,6 +2556,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "run_observation",
             "account_roles",
             "quantbase_fill_closes",
+            "zero_financing_observations",
         )
         allowed.update(
             frozenset({*expected, *subset})
@@ -3985,6 +3987,53 @@ def _contract_fx_segment(financial_contract: Mapping[str, Any]) -> dict[str, Any
     if len(segments) != 1:
         raise ProviderLedgerError("portfolio FX contract segment is absent")
     return segments[0]
+
+
+def _zero_financing_rows(
+    value: object, accounts: set[str], providers: set[str]
+) -> list[dict[str, Any]]:
+    """Provider-observed zero-financing days (hash-pinned artifact of
+    ``zero_financing_statements``) as financing-liability observations.
+
+    Only the artifact's own validated rows are used; each is an account-level observation
+    (no strategy), dated, pinned to its statement PDF (sha256, page) and typed."""
+
+    ref = _object(value, "zero_financing_observations")
+    if set(ref) != {"path", "sha256", "size_bytes"}:
+        raise ProviderLedgerError("zero_financing_observations reference keys differ")
+    path = _absolute_regular_path(ref["path"], "zero_financing_observations.path")
+    raw = path.read_bytes()
+    if (
+        hashlib.sha256(raw).hexdigest() != ref["sha256"]
+        or len(raw) != ref["size_bytes"]
+    ):
+        raise ProviderLedgerError("zero_financing_observations identity differs")
+    try:
+        artifact = json.loads(raw)
+        rows = zero_financing_statements.validate_rows(artifact, accounts)
+    except (ValueError, zero_financing_statements.ZeroFinancingError) as exc:
+        raise ProviderLedgerError(f"zero_financing_observations: {exc}") from exc
+    if artifact["provider_id"] not in providers:
+        raise ProviderLedgerError(
+            "zero_financing_observations names a provider the spec does not declare"
+        )
+    generation = f"zero-financing-{ref['sha256'][:24]}"
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        source_id = f"zero-financing:{row['account_id']}:{row['as_of_date']}"
+        out.append(
+            {
+                **row,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": generation,
+                "mapping_status": "UNMAPPED",
+                "mapping_reason": "ACCOUNT_LEVEL_OBSERVATION",
+                "record_id": f"{row['provider_id']}:{source_id}",
+                "source_record_id": source_id,
+                "strategy_id": None,
+            }
+        )
+    return out
 
 
 def _quantbase_fill_closes(value: object) -> dict[str, dict[date, Decimal]]:
@@ -10958,6 +11007,13 @@ def build_catalog(
     accounts, strategies, assignments = _assignment_index(
         provenance, _object(authority.get("contract"), "financial MVP contract")
     )
+    zero_financing_rows = (
+        _zero_financing_rows(
+            spec["zero_financing_observations"], accounts, set(spec["providers"])
+        )
+        if "zero_financing_observations" in spec
+        else []
+    )
     identities: list[ProviderGenerationIdentity] = []
     provider_coverage: list[dict[str, Any]] = []
     provider_artifacts: list[SourceArtifact] = []
@@ -11028,6 +11084,7 @@ def build_catalog(
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
+    combined["financing_liability_observations"].extend(zero_financing_rows)
 
     authoritative_strategy_ids = {
         str(row.get("strategy_id"))

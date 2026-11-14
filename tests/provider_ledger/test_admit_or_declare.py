@@ -1429,7 +1429,9 @@ def test_finality_requires_selected_native_sources_and_account_scope(
 
 
 def _stage_world(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_spec: dict[str, object] | None = None,
 ) -> tuple[Any, bytes, dict[str, Any], Path, dict[str, object]]:
     """Exercise the real stage/verify producer seam with existing synthetic inputs.
 
@@ -1480,6 +1482,7 @@ def _stage_world(
         "schema_version": 2,
         "strategy_inputs": {},
         "strategy_provider_map": {"synthetic-required": "ibkr"},
+        **(extra_spec or {}),
     }
     spec_path = tmp_path / "spec.json"
     spec_path.write_bytes(canonical_json_bytes(spec))

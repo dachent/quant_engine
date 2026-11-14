@@ -807,6 +807,7 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "statement_reserves",
         "account_roles",
         "quantbase_fill_closes",
+        "zero_financing_observations",
         "implementation_model_book_perf",
         "prep_pins",
         "prep_pin_root_key",

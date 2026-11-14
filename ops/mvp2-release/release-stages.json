@@ -387,6 +387,13 @@
             "--quantbase-fill-closes",
             "{quantbase_fill_closes}"
           ]
+        },
+        {
+          "if": "zero_financing_observations",
+          "args": [
+            "--zero-financing-observations",
+            "{zero_financing_observations}"
+          ]
         }
       ],
       "checks": [
