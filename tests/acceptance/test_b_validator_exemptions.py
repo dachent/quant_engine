@@ -424,3 +424,29 @@ def test_a_loose_row_tolerance_does_not_suppress_the_label_of_a_wrong_value(tmp_
     row = {**_expected_capital(RETIRED, "0.25"), "tolerance": "1000"}
     found = _findings(tmp_path, [row], [])
     assert set(_classes(found, CAPITAL)) == {checks.BLOCKER_REGRESSION}
+
+
+def test_the_one_cent_boundary_is_inclusive_and_nothing_beyond_it(tmp_path):
+    # tracker 0.19: 0.20 differs by exactly one cent (verifies); 0.2001 by more (refuses)
+    on = _findings(
+        tmp_path / "on", [_expected_capital(RETIRED, "0.20")], [_last_observation()]
+    )
+    assert _classes(on, LAST_OBS) == []
+    over = _findings(
+        tmp_path / "over", [_expected_capital(RETIRED, "0.2001")], [_last_observation()]
+    )
+    assert _classes(over, LAST_OBS) == [checks.NOT_READY]
+
+
+def test_a_malformed_oracle_date_does_not_suppress_the_label(tmp_path):
+    # "2026-9" sorts after "2025-11-24" as text; it is not a date, so nothing is suppressed
+    row = {**_expected_capital(RETIRED), "as_of": "2026-9"}
+    found = _findings(tmp_path, [row], [])
+    assert set(_classes(found, CAPITAL)) == {checks.BLOCKER_REGRESSION}
+
+
+def test_a_zero_row_tolerance_binds_the_value_check_below_the_cent_cap(tmp_path):
+    # 0.195 vs the tracker's 0.19 is inside the cent cap but not inside tolerance 0
+    row = {**_expected_capital(RETIRED, "0.195"), "tolerance": "0"}
+    found = _findings(tmp_path, [row], [_last_observation()])
+    assert _classes(found, LAST_OBS) == [checks.NOT_READY]

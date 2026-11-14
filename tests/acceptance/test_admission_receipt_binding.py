@@ -238,3 +238,32 @@ def test_a_manifest_without_an_artifact_list_is_a_refusal_not_a_crash(
     record["artifacts"] = artifacts
     manifest.write_bytes(json.dumps(record).encode())
     _refused(receipt, ledger)
+
+
+@pytest.mark.parametrize("which", [RECEIPT_ARTIFACT, LEDGER_ARTIFACT])
+def test_a_duplicated_artifact_id_is_refused_even_when_the_last_entry_matches(
+    tmp_path, which
+):
+    receipt, ledger = _generation(tmp_path)
+    manifest = receipt.parent / "generation.json"
+    record = json.loads(manifest.read_bytes())
+    record["artifacts"].insert(0, {"artifact_id": which, "sha256": "0" * 64})
+    manifest.write_bytes(json.dumps(record).encode())
+    _refused(receipt, ledger)
+
+
+def test_a_boolean_schema_version_does_not_bind_as_one(tmp_path):
+    receipt, ledger = _generation(
+        tmp_path, receipt={**_receipt(), "schema_version": True}
+    )
+    _refused(receipt, ledger)
+
+
+@pytest.mark.parametrize("bad_id", [None, 5, ["x"], {"a": 1}])
+def test_a_non_string_artifact_id_is_a_refusal_not_a_crash(tmp_path, bad_id):
+    receipt, ledger = _generation(tmp_path)
+    manifest = receipt.parent / "generation.json"
+    record = json.loads(manifest.read_bytes())
+    record["artifacts"].append({"artifact_id": bad_id, "sha256": "0" * 64})
+    manifest.write_bytes(json.dumps(record).encode())
+    _refused(receipt, ledger)
