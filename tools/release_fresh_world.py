@@ -300,19 +300,13 @@ def config(
 def _gate_defaults(cfg: dict[str, Any], data_roots: Sequence[str]) -> None:
     """Keys the G0 gate reads, so a generated configuration needs no hand patch.
 
-    Only what is derivable is filled: the floor, the cutoff of the run's own label (release B's stays the
-    owner's to state), the authority roots from the real data-root directories the operator passes
+    Only what is derivable is filled: the floor, the authority roots from the real data-root directories the operator passes
     (``--data-root ID=DIR``, a known provider root of the stage graph), and an ``evidence_dest`` that is a
     sibling of the cycle (one inside the cycle goes aside with it, and the config:paths row refuses it).
     """
 
     cfg.setdefault("free_space_floor_gb", DEFAULT_FREE_SPACE_FLOOR_GB)
     cfg.setdefault("retire_ticket", DEFAULT_RETIRE_TICKET)
-    label, as_of = cfg.get("release_label"), cfg.get("requested_as_of")
-    if isinstance(label, str) and isinstance(as_of, str):
-        cutoffs = cfg.setdefault("release_cutoffs", {})
-        if isinstance(cutoffs, dict):
-            cutoffs.setdefault(label, as_of)
     if data_roots:
         known = set(
             json.loads(STAGE_GRAPH.read_text(encoding="utf-8"))["provider_roots"]

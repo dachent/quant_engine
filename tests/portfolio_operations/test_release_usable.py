@@ -73,7 +73,9 @@ def test_a_generated_config_passes_g0_with_no_manual_patch(
     gworld: dict[str, Any],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    out = _generate(gworld, monkeypatch)
+    out = _generate(
+        gworld, monkeypatch, json_sets=['release_cutoffs={"A": "2026-08-02"}']
+    )
     generated = json.loads(out.read_text(encoding="utf-8"))
     for key in ("free_space_floor_gb", "release_cutoffs", "authority_roots"):
         assert key in generated, key
@@ -89,6 +91,21 @@ def test_a_generated_config_passes_g0_with_no_manual_patch(
         "replica_relative_ok",
         "pinned_files",
     } <= set(generated) | {"release_inputs_root"}
+
+
+def test_the_generator_never_states_the_cutoff_so_g0_fails_an_unstated_one(
+    gworld: dict[str, Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R7: a cutoff the generator filled from requested_as_of would satisfy the row that
+    checks requested_as_of against it. Unstated, the row fails; stated, it passes."""
+
+    out = _generate(gworld, monkeypatch)
+    generated = json.loads(out.read_text(encoding="utf-8"))
+    assert "release_cutoffs" not in generated
+    gworld["config"] = out
+    out.write_text(json.dumps(dict(generated, free_space_floor_gb=0)), encoding="utf-8")
+    assert _g0(gworld)["inputs:cutoff-stated"] == "FAIL"
 
 
 def test_the_generated_evidence_dest_is_outside_the_cycle_and_the_unsafe_one_still_fails(
