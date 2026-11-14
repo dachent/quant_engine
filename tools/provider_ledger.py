@@ -4332,6 +4332,38 @@ def _mapped_strategy(
     return (unique[0], "MAPPED") if len(unique) == 1 else (None, "UNMAPPED")
 
 
+def _point_unmapped_reason(
+    row: Mapping[str, Any],
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> str:
+    """Why a point-in-time row has no strategy: two active strategies are ambiguous, an
+    unknown account or day is its own reason, and none active is a missing interval."""
+
+    account_id = str(row.get("account_id") or "")
+    day = _row_day(row)
+    if account_id not in accounts or day is None:
+        return "MAPPING_ACCOUNT_OR_DAY_UNKNOWN"
+    active = {
+        str(item["strategy_id"])
+        for item in assignments.get(account_id, ())
+        if isinstance(item.get("strategy_id"), str)
+        and item["strategy_id"] in strategies
+        and item.get("effective_start") not in {None, ""}
+        and _day(item["effective_start"], "assignment.effective_start")
+        <= day
+        <= (
+            date.max
+            if item.get("effective_end") in {None, ""}
+            else _day(item["effective_end"], "assignment.effective_end")
+        )
+    }
+    return (
+        "MAPPING_AMBIGUOUS_POINT" if len(active) > 1 else "MAPPING_NO_ACTIVE_INTERVAL"
+    )
+
+
 def _mapped_strategy_for_period(
     row: Mapping[str, Any],
     accounts: set[str],
@@ -5450,6 +5482,10 @@ def _project_account_facts(
                 strategy_id, mapping_status = _mapped_strategy(
                     mapping_row, accounts, strategies, assignments
                 )
+                if native_leverage_observation and mapping_status == "UNMAPPED":
+                    mapping_reason = _point_unmapped_reason(
+                        mapping_row, accounts, strategies, assignments
+                    )
             source_id = _text(
                 row.get("record_id"), f"{provider_id}.{source_fact}.record_id"
             )

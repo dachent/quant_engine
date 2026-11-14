@@ -177,7 +177,10 @@ def classify(
             # evidence and observed base cash days showing no debit.
             if not row.verified:
                 conflicts.append("NOT_LEVERED_DECLARATION_UNVERIFIED")
-            if seen.observed_base_days == 0:
+            if seen.observed_base_days == 0 and row.facility != "NO_MARGIN_FACILITY":
+                # A verified declaration that no margin facility exists is itself the
+                # evidence (borrowing is impossible); a facility that exists needs
+                # observed cash days showing no debit.
                 conflicts.append("NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS")
         result[account] = AccountState(account, state, reason, tuple(conflicts))
     return result

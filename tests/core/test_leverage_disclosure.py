@@ -282,9 +282,21 @@ def test_not_levered_needs_observed_cash_days_and_a_verified_declaration() -> No
     empty["financing_liability_observations"] = [
         r for r in empty["financing_liability_observations"] if r["account_id"] != QUIET
     ]
-    silent = _quiet_state(empty)
+    # a verified NO_MARGIN_FACILITY declaration is itself the evidence (nothing to borrow)
+    assert _quiet_state(empty)["coverage_status"] == "COMPLETE_DECLARED"
+    # a facility that exists needs observed cash days showing no debit
+    available = _declaration()
+    available[QUIET] = af.Declared(QUIET, "ACTIVE", "MARGIN_AVAILABLE_UNUSED", True, "x")
+    silent = _quiet_state(empty, available)
     assert silent["coverage_status"] == "OBSERVED_UNRECONCILED"
     assert "NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS" in silent["coverage_reason"]
+    # and the conflicted account still gets closure rows, so a route to closure exists
+    rows = ld.account_financing_rows(
+        available, empty, cutoff=CUTOFF, generation_id=SHA, catalog_sha256=SHA
+    )
+    assert any(
+        r["account_id"] == QUIET and r["data_class"] == "FINANCING_COST" for r in rows
+    )
     declaration = _declaration()
     declaration[QUIET] = af.Declared(QUIET, "ACTIVE", "NO_MARGIN_FACILITY", False, "x")
     unverified = _quiet_state(_catalog(base_cash=True), declaration)

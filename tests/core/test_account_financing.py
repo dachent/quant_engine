@@ -234,3 +234,11 @@ def test_overlapping_declared_reserve_windows_refuse() -> None:
     ):
         with pytest.raises(af.FinancingDeclarationError):
             af.reserve_nav_windows(af.load_sleeve_roles(blob))
+
+
+def test_a_verified_no_margin_declaration_is_the_not_levered_evidence() -> None:
+    declared = _load()  # B is NO_MARGIN_FACILITY, verified
+    quiet = af.classify(declared, {B: af.DebitEvidence(observed_base_days=0)}, [B])[B]
+    assert quiet.state == "NOT_LEVERED" and not quiet.conflicts
+    available = af.classify(declared, {C: af.DebitEvidence(observed_base_days=0)}, [C])[C]
+    assert "NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS" in available.conflicts
