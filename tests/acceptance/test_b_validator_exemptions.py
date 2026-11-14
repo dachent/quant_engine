@@ -398,3 +398,21 @@ def test_agreement_within_a_cent_verifies(tmp_path):
         tmp_path, [_expected_capital(RETIRED, "0.195")], [_last_observation()]
     )
     assert _classes(found, LAST_OBS) == []
+
+
+def _observed(cutoff: str) -> dict[str, Any]:
+    return {**_receipt(_disposition()), "run_observation": {"financial_cutoff": cutoff}}
+
+
+def test_a_receipt_observed_for_this_cutoff_exempts(tmp_path):
+    assert _source_clock(tmp_path, _observed(CUTOFF)) == []
+
+
+def test_a_receipt_observed_for_another_cutoff_exempts_nothing(tmp_path):
+    found = _source_clock(tmp_path, _observed("2026-09-03"))
+    assert [f.klass for f in found] == ["NOT_READY"]
+
+
+def test_a_receipt_with_an_unreadable_observation_exempts_nothing(tmp_path):
+    receipt = {**_receipt(_disposition()), "run_observation": "x"}
+    assert [f.klass for f in _source_clock(tmp_path, receipt)] == ["NOT_READY"]

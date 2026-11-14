@@ -21,6 +21,7 @@ from acceptance.validate.facts_bindings import (
     LEDGER_ARTIFACT,
     RECEIPT_ARTIFACT,
     RECEIPT_TYPE,
+    _canonical_digest,
     bind_admission_receipt,
 )
 from acceptance.validate.sleeve_basis import Refusal
@@ -37,12 +38,27 @@ def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _receipt() -> dict[str, Any]:
+def _receipt(dispositions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    rows = dispositions if dispositions is not None else [_row("fidelity")]
+    inventory = [{"item_id": "i1"}]
     return {
         "receipt_type": RECEIPT_TYPE,
         "schema_version": 1,
         "admission_gate_status": "PASS",
-        "dispositions": [],
+        "dispositions": rows,
+        "disposition_sha256": _canonical_digest(rows),
+        "inventory": inventory,
+        "inventory_sha256": _canonical_digest(inventory),
+    }
+
+
+def _row(provider: str, **over: Any) -> dict[str, Any]:
+    return {
+        "provider_id": provider,
+        "action": "EXCLUDE",
+        "reason": "NO_CURRENT_PRODUCT_CONSUMER",
+        "readiness_impact": "NO_CURRENT_PRODUCT_EFFECT",
+        **over,
     }
 
 
@@ -170,3 +186,43 @@ def test_a_missing_receipt_file_is_refused(tmp_path):
     receipt, ledger = _generation(tmp_path)
     receipt.unlink()
     _refused(receipt, ledger)
+
+
+def test_a_changed_disposition_is_refused(tmp_path):
+    # the stored digest is left as written: one disposition now says ADMIT
+    receipt, ledger = _generation(tmp_path)
+    document = json.loads(receipt.read_bytes())
+    document["dispositions"][0]["action"] = "ADMIT"
+    raw = json.dumps(document, sort_keys=True).encode()
+    receipt.write_bytes(raw)
+    # keep the generation's record consistent so only the digest can catch it
+    manifest = receipt.parent / "generation.json"
+    record = json.loads(manifest.read_bytes())
+    for item in record["artifacts"]:
+        if item["artifact_id"] == RECEIPT_ARTIFACT:
+            item["sha256"] = _sha(raw)
+    manifest.write_bytes(json.dumps(record).encode())
+    _refused(receipt, ledger)
+
+
+def test_a_changed_inventory_is_refused(tmp_path):
+    receipt, ledger = _generation(tmp_path)
+    document = json.loads(receipt.read_bytes())
+    document["inventory"].append({"item_id": "extra"})
+    raw = json.dumps(document, sort_keys=True).encode()
+    receipt.write_bytes(raw)
+    manifest = receipt.parent / "generation.json"
+    record = json.loads(manifest.read_bytes())
+    for item in record["artifacts"]:
+        if item["artifact_id"] == RECEIPT_ARTIFACT:
+            item["sha256"] = _sha(raw)
+    manifest.write_bytes(json.dumps(record).encode())
+    _refused(receipt, ledger)
+
+
+def test_the_digest_is_the_producers_computation():
+    from quant_engine.portfolio_ledger import provider_admission as producer
+
+    rows = [_row("fidelity"), _row("alpaca", reason="caf\u00e9"), {"b": 1, "a": [2]}]
+    expected = hashlib.sha256(producer._canonical_json_value_bytes(rows)).hexdigest()
+    assert _canonical_digest(rows) == expected

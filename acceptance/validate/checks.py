@@ -8458,6 +8458,13 @@ def _receipt_excluded_providers(ctx: Context) -> frozenset[str]:
     listed = receipt.get("dispositions")
     if not isinstance(listed, list):
         return frozenset()
+    observation = receipt.get("run_observation")
+    if observation is not None and (
+        not isinstance(observation, Mapping)
+        or to_date(observation.get("financial_cutoff")) != ctx.cutoff
+    ):
+        # a receipt observed for another cutoff says nothing about this run
+        return frozenset()
     clean: dict[str, bool] = {}
     for item in listed:
         provider = item.get("provider_id") if isinstance(item, Mapping) else None

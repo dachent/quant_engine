@@ -340,6 +340,18 @@ LEDGER_ARTIFACT = "normalized/provider-ledger.json"
 RECEIPT_TYPE = "PROVIDER_ADMIT_OR_DECLARE_V1"
 
 
+def _canonical_digest(value: object) -> str:
+    """SHA-256 of the producer's canonical JSON (provider_admission._canonical_json_value_bytes:
+    sorted keys, compact separators, ASCII, one trailing newline); a test pins the two equal."""
+
+    return hashlib.sha256(
+        (
+            json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            + "\n"
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _json_object(raw: bytes, what: str) -> dict[str, Any]:
     try:
         value = json.loads(raw)
@@ -380,6 +392,15 @@ def bind_admission_receipt(
         raise Refusal(
             BINDING_RECEIPT, "the file is not a provider admit-or-declare receipt"
         )
+    for rows_key, digest_key in (
+        ("dispositions", "disposition_sha256"),
+        ("inventory", "inventory_sha256"),
+    ):
+        if _canonical_digest(receipt.get(rows_key)) != receipt.get(digest_key):
+            raise Refusal(
+                BINDING_RECEIPT,
+                f"the receipt's {rows_key} do not hash to its {digest_key}",
+            )
     manifest = _json_object(manifest_raw, "generation.json")
     if (
         manifest.get("generation_id") != directory.name
