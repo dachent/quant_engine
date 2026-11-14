@@ -6230,6 +6230,44 @@ def check_benchmark_account_return(ctx: Context) -> Iterator[Finding]:
         pointer = f"$.strategy_attribution.benchmark_comparisons[{position}].metrics"
         if shown is None:
             continue
+        if strategy in epoch_receipts(ctx):
+            # A receipt-carrying strategy's comparison publishes the epoch headline
+            # (daily rows times the verified HPR spans), not the daily-only compound:
+            # compare it with the same splice the comparison is built from.
+            spliced = splice_window(ctx, strategy, start, end)
+            if spliced.value is None and spliced.rows:
+                # The splice declined (a window edge strictly inside a span, an
+                # unverified or ragged-skipped span in the window). Only a BLOCKER-class
+                # receipt finding that already names the span lets this check stay
+                # silent (``check_strategy_return_views`` does the same); otherwise a
+                # forged value would pass unseen.
+                if spliced.reported:
+                    continue
+                field = (
+                    "account_cumulative_return"
+                    if spliced.edge is None
+                    else f"observed_{spliced.edge}"
+                )
+                yield _finding(
+                    "returns.benchmark_account_return",
+                    BLOCKER_INVARIANT,
+                    strategy,
+                    {
+                        "benchmark_account_cumulative_return": shown,
+                        "window": [start, end],
+                        "declined": spliced.declined,
+                    },
+                    "an epoch splice of the live series over the benchmark window",
+                    REPORT,
+                    f"{pointer}.{field}",
+                    ("B3",),
+                    f"benchmark account return cannot be anchored to the rows: "
+                    f"{spliced.declined}",
+                )
+                continue
+            # no live row in the window (value None, rows 0) falls through to the
+            # no-live-series NOT_READY path below
+            computed, count = spliced.value, spliced.rows
         if (
             count == 0
             and row.get("account_series_source") == RETAINED_ACCOUNT_SOURCE

@@ -2070,8 +2070,6 @@
         "{laneout}",
         "--real-panel-dir",
         "{panel_root}/generations/{panel_gid}",
-        "--replica-panel-dir",
-        "{replica_workspace}/dataPortfolio/control-panel/generations/{panel_gid}",
         "--expected",
         "{expected_baseline_arg}",
         "--cutoff",

@@ -3585,8 +3585,9 @@ def _span_payload(report: dict[str, Any]) -> None:
 
     Spliced (epoch basis): the summary headline, the provider-evidence account
     value (both labelled), the account's TWR and own return path. Daily-only by
-    design: strategy_returns (capital chain included), the dependence
-    performance and the benchmark comparison.
+    design: strategy_returns (capital chain included) and the dependence
+    performance. The benchmark comparison publishes the epoch headline too (the
+    attribution stage splices a receipt-carrying strategy's comparison).
     """
 
     capital = Decimal("1000")
@@ -3610,7 +3611,7 @@ def _span_payload(report: dict[str, Any]) -> None:
     summary = report["strategy_summary"][0]
     summary["account_live_cumulative_return"] = "0.1"
     summary["account_live_cumulative_return_label"] = EPOCH_LABEL
-    summary["benchmark_account_cumulative_return"] = "0.25"
+    summary["benchmark_account_cumulative_return"] = "0.1"
     account = report["strategy_provider_evidence"][0]["account"]
     account["cumulative_return"] = "0.1"
     account["cumulative_return_label"] = EPOCH_LABEL
@@ -3618,7 +3619,7 @@ def _span_payload(report: dict[str, Any]) -> None:
         performance = report["dependence_analysis"]["mode_summaries"][mode]
         performance["performance"]["Alpha"]["cumulative_return"] = "0.25"
     metrics = report["strategy_attribution"]["benchmark_comparisons"][0]["metrics"]
-    metrics["account_cumulative_return"] = "0.25"
+    metrics["account_cumulative_return"] = "0.1"
     report["strategy_history_contract"] = {
         "as_of_date": CUTOFF,
         "schema": "portfolio-current-dependence-source/1",
@@ -3640,6 +3641,111 @@ def _span_field(**changes: Any) -> Mutator:
         receipt["receipt"]["span_return_receipts"][0].update(changes)
 
     return mutate
+
+
+def test_a_receipt_carrying_benchmark_account_return_is_the_epoch_splice(
+    tmp_path: Path,
+) -> None:
+    """B3: the comparison shows the splice (0.1), not the daily-only 0.25 compound."""
+
+    findings = run(build(tmp_path, Spec(report=[_span_payload])))
+    assert "returns.benchmark_account_return" not in [f.check_id for f in findings]
+
+    def daily(report: dict[str, Any]) -> None:
+        _span_payload(report)
+        report["strategy_attribution"]["benchmark_comparisons"][0]["metrics"][
+            "account_cumulative_return"
+        ] = "0.25"
+        report["strategy_summary"][0]["benchmark_account_cumulative_return"] = "0.25"
+
+    stale = run(build(tmp_path / "daily", Spec(report=[daily])))
+    assert [
+        f.check_id for f in stale if f.check_id == "returns.benchmark_account_return"
+    ] == ["returns.benchmark_account_return"]
+
+
+def _benchmark_findings(tmp_path: Path, *mutators: Mutator) -> list[Any]:
+    findings = run(build(tmp_path, Spec(report=[_span_payload, *mutators])))
+    return [f for f in findings if f.check_id == "returns.benchmark_account_return"]
+
+
+def _benchmark_metrics(**changes: str) -> Mutator:
+    def mutate(report: dict[str, Any]) -> None:
+        metrics = report["strategy_attribution"]["benchmark_comparisons"][0]["metrics"]
+        metrics.update(changes)
+
+    return mutate
+
+
+def test_a_receipt_carrying_benchmark_window_cut_inside_a_span_is_a_blocker(
+    tmp_path: Path,
+) -> None:
+    """An edge inside a span declines the splice; sibling B2 reports it BLOCKER_INVARIANT."""
+
+    got = _benchmark_findings(
+        tmp_path,
+        _benchmark_metrics(observed_end=SPAN_MISSING, account_cumulative_return="0.9"),
+    )
+    assert [f.klass for f in got] == [checks.BLOCKER_INVARIANT]
+    assert got[0].pointer.endswith("metrics.observed_end")
+
+
+def test_a_forged_benchmark_account_return_in_an_empty_window_is_not_silent(
+    tmp_path: Path,
+) -> None:
+    """No live row in the window: the value has nothing to be compared with, so it
+    takes the no-live-series NOT_READY path instead of being skipped."""
+
+    got = _benchmark_findings(
+        tmp_path,
+        _benchmark_metrics(
+            observed_start="2027-01-01",
+            observed_end="2027-01-05",
+            account_cumulative_return="0.9",
+        ),
+    )
+    assert [f.klass for f in got] == [checks.NOT_READY]
+    assert got[0].observed["live_series_rows"] == 0
+
+
+def test_a_forged_benchmark_account_return_over_a_ragged_span_is_a_blocker(
+    tmp_path: Path,
+) -> None:
+    """A ragged receipt span (starts at the last published row) is skipped, not
+    verified: the window holding it cannot be anchored, and a forged value is a finding."""
+
+    def ragged(report: dict[str, Any]) -> None:
+        receipt = report["strategy_history_contract"]["epoch_hpr_receipts"][0][
+            "receipt"
+        ]
+        receipt["observed_end"] = "2026-09-18"
+        receipt["span_return_receipts"].append(
+            {
+                "end_endpoint_sha256": "1" * 64,
+                "missing_source_date": "2026-09-18",
+                "return": "0",
+                "span_days": 2,
+                "span_end_date": "2026-09-19",
+                "span_start_date": CUTOFF,
+                "start_endpoint_sha256": "2" * 64,
+                "subscription_events_in_span": 0,
+            }
+        )
+
+    got = _benchmark_findings(
+        tmp_path,
+        ragged,
+        _benchmark_metrics(observed_end="2026-09-20", account_cumulative_return="0.9"),
+    )
+    assert [f.klass for f in got] == [checks.BLOCKER_INVARIANT]
+
+
+def _benchmark_daily(report: dict[str, Any]) -> None:
+    """The benchmark comparison of a strategy whose receipt is not admitted: daily."""
+
+    metrics = report["strategy_attribution"]["benchmark_comparisons"][0]["metrics"]
+    metrics["account_cumulative_return"] = "0.25"
+    report["strategy_summary"][0]["benchmark_account_cumulative_return"] = "0.25"
 
 
 def _alpha_row(day: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -3828,10 +3934,13 @@ def test_forged_span_is_never_spliced(tmp_path: Path) -> None:
     ]
 
 
-def test_benchmark_and_dependence_views_stay_daily_only(tmp_path: Path) -> None:
-    """The benchmark account return and the dependence performance are daily-only
-    by design; splicing them (a global compound_window splice) is a false blocker,
-    while a benchmark that shows the spliced return is still caught."""
+def test_dependence_stays_daily_only_and_the_benchmark_is_the_epoch_splice(
+    tmp_path: Path,
+) -> None:
+    """The dependence performance is daily-only by design (splicing it is a false
+    blocker). The benchmark account return of a receipt-carrying strategy is the
+    epoch splice since attribution splices it (453e514e): a daily-only benchmark is
+    the stale shape and is caught."""
 
     clean = run(build(tmp_path / "good", Spec(report=[_span_payload])))
     assert not [
@@ -3840,7 +3949,7 @@ def test_benchmark_and_dependence_views_stay_daily_only(tmp_path: Path) -> None:
         if f.check_id
         in ("returns.benchmark_account_return", "returns.strategy_return_views_agree")
     ]
-    spliced_benchmark = [
+    daily_benchmark = [
         _set(
             (
                 "strategy_attribution",
@@ -3849,11 +3958,11 @@ def test_benchmark_and_dependence_views_stay_daily_only(tmp_path: Path) -> None:
                 "metrics",
                 "account_cumulative_return",
             ),
-            "0.1",
+            "0.25",
         ),
-        _set(("strategy_summary", 0, "benchmark_account_cumulative_return"), "0.1"),
+        _set(("strategy_summary", 0, "benchmark_account_cumulative_return"), "0.25"),
     ]
-    bad = run(build(tmp_path / "bad", Spec(report=[_span_payload, *spliced_benchmark])))
+    bad = run(build(tmp_path / "bad", Spec(report=[_span_payload, *daily_benchmark])))
     assert ("returns.benchmark_account_return", checks.BLOCKER_INVARIANT) in [
         (f.check_id, f.klass) for f in bad
     ]
@@ -4382,7 +4491,7 @@ def test_receipt_filed_on_a_non_live_layer_is_ignored(tmp_path: Path) -> None:
     """
 
     assert _only(run(build(tmp_path / "good", Spec(report=[_span_payload])))) == []
-    filed = [_span_payload, _receipt_on_layer("PROVIDER_LIVE")]
+    filed = [_span_payload, _benchmark_daily, _receipt_on_layer("PROVIDER_LIVE")]
     assert _only(run(build(tmp_path / "bad", Spec(report=filed)))) == [
         ("returns.strategy_return_views_agree", checks.BLOCKER_INVARIANT, "alpha")
     ]
@@ -5081,6 +5190,7 @@ def _alpha_evidence(**changes: str) -> Mutator:
         pytest.param(
             [
                 _drop_span_receipts,
+                _benchmark_daily,
                 _alpha_summary(**NO_ROW_WINDOW, account_live_cumulative_return="0.5"),
                 _alpha_performance(**NO_ROW_VIEW),
             ],
