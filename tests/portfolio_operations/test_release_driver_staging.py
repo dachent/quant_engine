@@ -663,7 +663,7 @@ def test_the_real_cycle_resolve_ledger_spec_and_ledger_stages_run_in_order(
     for stage_id in ("provenance", "ledger-spec", "ledger"):
         record = state["stages"][stage_id]
         assert Path(record["timing_log"]).parent == cycle / "stage-timing"
-        assert record["receipts_mode"] == "persist"
+        assert record["receipts_mode"] == driver.DEFAULT_RECEIPT_MODE == "off"
         assert set(record["timing_summary"]["verifier_calls"]) == {
             "financial_outcomes",
             "product_authority",

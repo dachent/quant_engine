@@ -71,6 +71,7 @@ GRAPH_DEFAULT = (
     Path(__file__).resolve().parents[1] / "ops" / "mvp2-release" / "release-stages.json"
 )
 SCHEMA_DEFAULT = GRAPH_DEFAULT.with_name("release-stages.schema.json")
+DEFAULT_RECEIPT_MODE = "off"  # live verifiers, nothing retained; see run_stage
 STATE_NAME = "release-driver-state.json"
 TIMING_NAME = "release-driver-timing.log"
 BASELINE_INPUT = "acceptance/expected-baseline.json"
@@ -1783,10 +1784,11 @@ def _execute_stage(
         timing_log = timing_dir / f"{stage['id']}.{attempt}.jsonl"
         env.setdefault(STAGE_TIMING_LOG_ENV, str(timing_log))
         record["timing_log"] = env[STAGE_TIMING_LOG_ENV]
-        # Cross-process verification receipts (#885): a verifier that already passed on
-        # byte-identical inputs and code is not re-run by a later stage; every input in
-        # its recorded read-set is re-hashed first. An operator value (off/refresh) wins.
-        env.setdefault(RECEIPT_MODE_ENV, "persist")
+        # Cross-process verification receipts (#885) reuse a stored pass across stages. A
+        # release stage must not retain or trust a stored pass by default: the default is
+        # "off" (every verifier runs live, nothing is written beside the state root). An
+        # operator's own value (persist/refresh) wins.
+        env.setdefault(RECEIPT_MODE_ENV, DEFAULT_RECEIPT_MODE)
         record["receipts_mode"] = env[RECEIPT_MODE_ENV]
         if stdout_to is not None:
             stdout_to.parent.mkdir(parents=True, exist_ok=True)
