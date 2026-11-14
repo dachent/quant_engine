@@ -11205,11 +11205,11 @@ def build_catalog(
         zero_provider, zero_rows, zero_artifacts = zero_financing
         # each row must belong to an account this provider's own generation observes, and
         # rows past the provider's financial cutoff are not projected
-        known = {
+        observed_accounts = {
             row["account_id"]
             for row in provider_facts.get(zero_provider, {}).get("nav_observations", [])
         }
-        if any(row["account_id"] not in known for row in zero_rows):
+        if any(row["account_id"] not in observed_accounts for row in zero_rows):
             raise ProviderLedgerError(
                 "zero_financing_observations name an account the provider does not observe"
             )
