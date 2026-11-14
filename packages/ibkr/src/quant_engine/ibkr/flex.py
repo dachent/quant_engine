@@ -355,6 +355,10 @@ class FlexDailyStatement:
     nav_interest_accruals: Decimal | None = None
     nav_broker_interest_accruals_component: Decimal | None = None
     nav_margin_financing_charge_accruals: Decimal | None = None
+    # The statement carried the section (possibly with no rows): an explicit empty
+    # InterestAccruals is the broker's "no accruals", a missing one is "not captured".
+    interest_accruals_section_present: bool = False
+    open_positions_section_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -769,6 +773,8 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         cash_reports=cash_reports,
         interest_accruals=interest_accruals,
         tier_interest=tier_interest,
+        interest_accruals_section_present=bool(_elements(element, "InterestAccruals")),
+        open_positions_section_present=bool(_elements(element, "OpenPositions")),
         nav_cash=_optional_decimal(nav.attrib.get("cash"), "nav.cash"),
         nav_broker_cash_component=_optional_decimal(
             nav.attrib.get("brokerCashComponent"), "nav.brokerCashComponent"

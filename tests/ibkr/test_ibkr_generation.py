@@ -3241,3 +3241,97 @@ def test_a_base_only_cash_line_becomes_a_net_loan_row_not_a_dropped_loan(
     assert {r["classification"] for r in currency} == {"CASH_BALANCE"}
     # the two levels never share a record id, so a consumer can sum one level
     assert len({r["record_id"] for r in rows}) == len(rows)
+
+
+def _coverage_catalog(tmp_path: Path, xml: str) -> dict[str, Any]:
+    path = tmp_path / "coverage.xml"
+    path.write_text(xml, encoding="utf-8")
+    statement = parse_flex_file(path, artifact_id="synthetic/coverage.xml").statements[0]
+    return ibkr_generation._normalize(
+        [statement],
+        {
+            "accounts": [
+                {
+                    "account_id": "account-ibkr-synthetic",
+                    "base_currency": "USD",
+                    "role": "INVESTMENT",
+                }
+            ],
+            "assignments": [],
+        },
+        {"SYNTH-RAW": "account-ibkr-synthetic"},
+        [],
+        frozenset(),
+        0,
+        None,
+    )
+
+
+def _exposure(catalog: dict[str, Any]) -> dict[str, Any]:
+    return next(
+        row
+        for row in catalog["leverage_exposure_observations"]
+        if row["measurement_basis"] == "GROSS_POSITION_MARKET_VALUE"
+    )
+
+
+def test_an_empty_open_positions_section_is_zero_exposure_bound_to_the_statement(
+    tmp_path: Path,
+) -> None:
+    """Kill test (control 2026-11-13): zero positions are zero exposure when the
+    statement carries the section; a missing section is not captured; a position
+    reported under another account makes the figure ambiguous."""
+
+    day = date(2026, 1, 3)
+    full = _xml("SYNTH-RAW", day, "114")
+    rows = full.split("<OpenPosition ")
+    assert len(rows) == 2
+    empty_section = rows[0] + "</OpenPositions>" + rows[1].split("</OpenPositions>", 1)[1]
+    zero = _exposure(_coverage_catalog(tmp_path, empty_section))
+    assert zero["amount"] == {"currency": "USD", "status": "AVAILABLE", "value": "0"}
+    assert zero["source_account_scope"] == "STATEMENT_ACCOUNT"
+
+    with pytest.raises(Exception, match="OpenPositions"):  # a missing section refuses
+        _coverage_catalog(
+            tmp_path, _xml("SYNTH-RAW", day, "114", omit_section="OpenPositions")
+        )
+
+    other = full.replace('<OpenPosition accountId="SYNTH-RAW"', '<OpenPosition accountId="OTHER-RAW"')
+    ambiguous = _exposure(_coverage_catalog(tmp_path, other))
+    assert ambiguous["amount"]["status"] != "AVAILABLE"
+    assert ambiguous["source_account_scope"] == "AMBIGUOUS_REPORTED_ACCOUNT"
+
+    assert _exposure(_coverage_catalog(tmp_path, full))["amount"]["value"] == "20"
+
+
+def test_an_empty_interest_accruals_section_is_recorded_distinct_from_a_missing_one(
+    tmp_path: Path,
+) -> None:
+    day = date(2026, 1, 3)
+
+    def empty_rows(xml: str) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in _coverage_catalog(tmp_path, xml)["financing_cost_observations"]
+            if row["measurement_basis"] == "ACCRUAL_SECTION_EMPTY"
+        ]
+
+    absent = _xml("SYNTH-RAW", day, "114")
+    assert empty_rows(absent) == []
+    present = _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    rows = empty_rows(present)
+    assert len(rows) == 1
+    assert rows[0]["period_end"] == "2026-01-03"
+    assert rows[0]["classification"] == "NO_ACCRUALS_REPORTED"
+    withrows = _xml(
+        "SYNTH-RAW",
+        day,
+        "114",
+        native_sections=(
+            '<InterestAccruals><InterestAccrualsCurrency accountId="SYNTH-RAW" '
+            'currency="USD" fromDate="20260102" toDate="20260103" '
+            'startingAccrualBalance="0" interestAccrued="-1" accrualReversal="1" '
+            'endingAccrualBalance="0" fxTranslation="0" /></InterestAccruals>'
+        ),
+    )
+    assert empty_rows(withrows) == []

@@ -26,6 +26,8 @@ from typing import Any, Final
 
 BASE_LINE: Final = "BASE_SUMMARY"
 _ACCRUAL_BASES: Final = ("ACCRUAL_BALANCE", "PERIOD_ACCRUAL", "ACCRUAL_REVERSAL")
+# One row per statement day whose InterestAccruals section was present with no rows.
+EMPTY_ACCRUAL_BASIS: Final = "ACCRUAL_SECTION_EMPTY"
 _ZERO = Decimal(0)
 
 
@@ -107,6 +109,27 @@ def financing_cost_closure(
         if str(r.get("as_of_date") or r.get("period_end") or "") <= cutoff
     ]
     accruals = [r for r in rows if r.get("measurement_basis") in _ACCRUAL_BASES]
+    empty_days = {
+        str(r.get("as_of_date") or r.get("period_end"))
+        for r in rows
+        if r.get("measurement_basis") == EMPTY_ACCRUAL_BASIS
+    }
+    rows = [r for r in rows if r.get("measurement_basis") != EMPTY_ACCRUAL_BASIS]
+    if not accruals:
+        # The broker's explicit "no accruals" on every statement day, and no other cost
+        # row at all (a posting or detail row with no accrual behind it is not explained
+        # by an empty section): covered.  A day without the section is not captured.
+        missing = [d for d in days if d not in empty_days]
+        return Closure(
+            "FINANCING_COST_ACCRUAL_SECTION_EMPTY",
+            bool(days) and not missing and not rows,
+            {
+                "statement_days": len(days),
+                "empty_section_days": len(empty_days & set(days)),
+                "days_without_section": len(missing),
+                "other_cost_rows": len(rows),
+            },
+        )
     by_currency: dict[str, dict[str, dict[str, Decimal]]] = defaultdict(
         lambda: defaultdict(dict)
     )

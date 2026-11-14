@@ -998,6 +998,28 @@ def _normalize(
                 row["period_end"] = report.to_date.isoformat()
                 financing_liability_observations.append(row)
 
+        if statement.interest_accruals_section_present and not statement.interest_accruals:
+            empty = source_row(
+                "financing-cost",
+                {
+                    "classification": "NO_ACCRUALS_REPORTED",
+                    "measurement_basis": "ACCRUAL_SECTION_EMPTY",
+                    "source_record_id": (
+                        f"interest-accruals-empty:{account_id}:{day}"
+                    ),
+                    "source_section": "InterestAccruals",
+                    "source_field": "section",
+                },
+                available=True,
+                value=Decimal("0"),
+                currency=statement.base_currency,
+            )
+            empty["source_amount"] = observed_amount(
+                Decimal("0"), statement.base_currency, True
+            )
+            empty["period_start"] = day
+            empty["period_end"] = day
+            financing_cost_observations.append(empty)
         for accrual in statement.interest_accruals:
             accrual_available = accrual.reported_account_matches_statement
             for basis, field, value in (
@@ -1211,7 +1233,10 @@ def _normalize(
             ),
             Decimal("0"),
         )
-        gross_available = bool(statement.positions) and all(
+        # Each statement's own accountId binds its positions.  An OpenPositions section
+        # with no rows is zero exposure; a missing section is not captured; a position
+        # reported under another account makes the figure ambiguous (unavailable).
+        gross_available = statement.open_positions_section_present and all(
             position.reported_account_matches_statement
             for position in statement.positions
         )
@@ -1228,7 +1253,7 @@ def _normalize(
             "leverage-exposure",
             exposure_payload,
             available=gross_available,
-            value=gross_value if statement.positions else None,
+            value=gross_value if gross_available else None,
             currency=statement.base_currency,
         )
         exposure["as_of_date"] = statement.report_date.isoformat()
