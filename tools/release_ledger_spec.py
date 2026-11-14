@@ -49,7 +49,24 @@ OBSERVATION_NAME = "run-observation.json"
 SPEC_NAME = "ledger-spec.json"
 LEDGER_OUTPUT = "ledger"
 PROVENANCE_CATALOG = "portfolio-provenance.json"
-CARRIED = ("strategy_inputs", "strategy_provider_map", "portfolio_fx_rates")
+ZERO_FINANCING_PIN_KEYS = frozenset(
+    {
+        "mapping_path",
+        "mapping_sha256",
+        "provider_id",
+        "statements_dir",
+        "sums_path",
+        "sums_sha256",
+    }
+)
+CARRIED = (
+    "strategy_inputs",
+    "strategy_provider_map",
+    "portfolio_fx_rates",
+    "account_roles",
+    "quantbase_fill_closes",
+    "zero_financing_observations",
+)
 REGENERATED = (
     "as_of_date",
     "financial_mvp",
@@ -221,8 +238,19 @@ def build(
     out_root: Path,
     provenance_dir: Path,
     repo_root: Path = REPO_ROOT,
+    account_roles: Path | None = None,
+    quantbase_fill_closes: Path | None = None,
+    zero_financing_observations: Path | None = None,
 ) -> dict[str, Any]:
-    """Return ``{"observation": bytes, "spec": bytes-builder inputs}``; writes nothing."""
+    """Return ``{"observation": bytes, "spec": bytes-builder inputs}``; writes nothing.
+
+    ``account_roles`` (the governed declaration file, #900) and ``quantbase_fill_closes``
+    (a JSON list of {symbol, path, sha256, size_bytes}, #909) are optional per-cycle pins
+    written into the spec; absent, the spec is what it was.  ``zero_financing_observations``
+    is a pin file (``ZERO_FINANCING_PIN_KEYS``, plus an optional capture trio) naming the
+    retained statements directory, statement sums, account mapping and capture sums, each
+    by path and sha256; the ledger recomputes the zero-financing rows from those bytes.
+    """
 
     if resolved.get("schema_version") != release_cycle_manifest.RESOLVED_VERSION:
         raise LedgerSpecError("RESOLVED_VERSION", "not a resolved release cycle")
@@ -295,6 +323,43 @@ def build(
     }
     if "portfolio_fx_rates" in predecessor_spec:
         spec["portfolio_fx_rates"] = predecessor_spec["portfolio_fx_rates"]
+    if "account_roles" in predecessor_spec:
+        spec["account_roles"] = predecessor_spec["account_roles"]
+    if "quantbase_fill_closes" in predecessor_spec:
+        spec["quantbase_fill_closes"] = predecessor_spec["quantbase_fill_closes"]
+    if account_roles is not None:
+        raw = account_roles.resolve().read_bytes()
+        spec["account_roles"] = {
+            "path": str(account_roles.resolve()),
+            "sha256": _sha256(raw),
+            "size_bytes": len(raw),
+        }
+    if "zero_financing_observations" in predecessor_spec:
+        spec["zero_financing_observations"] = predecessor_spec[
+            "zero_financing_observations"
+        ]
+    if zero_financing_observations is not None:
+        # a pin file of the six keys the ledger needs to recompute the rows from the
+        # retained statements (provider, statements dir, sums and mapping with hashes)
+        pin = json.loads(zero_financing_observations.read_bytes())
+        capture_keys = {"captures_dir", "captures_sums_path", "captures_sums_sha256"}
+        if not isinstance(pin, dict) or set(pin) not in (
+            ZERO_FINANCING_PIN_KEYS,
+            ZERO_FINANCING_PIN_KEYS | capture_keys,
+        ):
+            raise LedgerSpecError(
+                "INPUT",
+                "zero financing pin file must carry exactly "
+                + ", ".join(sorted(ZERO_FINANCING_PIN_KEYS)),
+            )
+        spec["zero_financing_observations"] = pin
+    if quantbase_fill_closes is not None:
+        pins = json.loads(quantbase_fill_closes.read_bytes())
+        if not isinstance(pins, list) or not pins:
+            raise LedgerSpecError(
+                "INPUT", "quantbase fill closes must be a non-empty list"
+            )
+        spec["quantbase_fill_closes"] = pins
     return {"observation": observation, "spec": spec, "out": out}
 
 
@@ -364,6 +429,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     command.add_argument("--out-root", type=Path, required=True)
     command.add_argument("--provenance-generation-dir", type=Path, required=True)
     command.add_argument("--repo-root", type=Path, default=REPO_ROOT)
+    command.add_argument("--account-roles", type=Path)
+    command.add_argument("--quantbase-fill-closes", type=Path)
+    command.add_argument("--zero-financing-observations", type=Path)
     command.add_argument(
         "--plan", action="store_true", help="build and print, write nothing"
     )
@@ -383,6 +451,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.out_root,
             args.provenance_generation_dir,
             args.repo_root,
+            args.account_roles,
+            args.quantbase_fill_closes,
+            args.zero_financing_observations,
         )
         if args.plan:
             print(

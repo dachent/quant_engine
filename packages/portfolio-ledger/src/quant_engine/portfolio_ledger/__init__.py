@@ -96,6 +96,7 @@ from quant_engine.portfolio_ledger.provider_admission import (
     validate_admit_or_declare_receipt,
     validate_dataset_dispositions,
     validate_provider_authority,
+    run_observation_identity,
 )
 from quant_engine.portfolio_ledger.returns import (
     DATE_ONLY,
@@ -137,6 +138,7 @@ from quant_engine.portfolio_ledger.strategy_versions import (
 __version__ = "0.2.0"
 
 __all__ = [
+    "run_observation_identity",
     "assess_gap_bounds_document",
     "numerical_from_governed_proof",
     "proof_covers_spans",

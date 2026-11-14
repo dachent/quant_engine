@@ -177,6 +177,22 @@ _PATH_STAGES = {
     # returns, account manifest and governed HWM proof the panel already holds.
     "tools/portfolio_performance_tab.py": ["panel"],
     "tools/portfolio_model_vs_actual.py": ["panel"],
+    # The audit-input schema is the contract of the file that producer reads into the panel block.
+    "schemas/portfolio/model-vs-actual-audit-input.schema.json": ["panel"],
+    "schemas/portfolio/model-vs-actual-derive-spec.schema.json": ["panel"],
+    # Offline producers and generators: none is imported by a stage handler.
+    "tools/capture_governed_price.py": [],
+    "tools/statement_nav_generation.py": [],
+    "tools/release_note.py": [],
+    "tools/portfolio_model_vs_actual_derive.py": ["panel"],
+    # Cash drag is derived and rendered by the panel producer only.
+    "tools/portfolio_cash_drag.py": ["panel"],
+    "tools/portfolio_cash_drag_spec.py": ["panel"],
+    # Imported by the ledger builder (fill-day restatement) and the baseline (statement points).
+    "tools/quantbase_fund_days.py": list(_STAGE_ORDER),
+    # Imported by the ledger builder (provider-observed zero-financing days).
+    "tools/zero_financing_statements.py": list(_STAGE_ORDER),
+    "tools/statement_reserve_nav.py": list(_STAGE_ORDER[1:]),
     # The orthogonal risk-share producer: one optional panel block derived from the
     # decomposition lenses and invested capital the panel already holds.
     "tools/portfolio_orthogonal_risk.py": ["panel"],
@@ -202,6 +218,9 @@ _PATH_STAGES = {
     "tools/release_driver.py": [],
     # #884 G0 upfront-QC gate: reads a run config and release roots, writes only its own receipt
     "tools/release_preflight.py": [],
+    "tools/release_preflight_g1a.py": [],
+    "tools/release_preflight_g1b.py": [],
+    "tools/release_preflight_g2.py": [],
     "tools/release_fresh_world.py": [],
     "tools/release_cycle_manifest.py": [],
     "tools/release_cycle_seeds.py": [],
@@ -248,6 +267,17 @@ _PATH_STAGES = {
     "tools/capture_action_guard.py": [],
     # Rehearsal (DRY-) root rules shared by the live capture recorders.
     "tools/capture_dry_run.py": [],
+    # #913 capture pipeline: declared sources, S0-S5, weekly refresh table and stage libraries. Read only by the
+    # attended preparation when a spec carries a captured_inputs block; no stage reads a captured file otherwise.
+    "contracts/capture-sources-v1.json": [],
+    "tools/capture_pipeline.py": [],
+    "tools/capture_refresh.py": [],
+    "tools/capture_stages/ibkr_equity_history.py": [],
+    "tools/capture_stages/schwab_cash.py": [],
+    "tools/capture_stages/statement_browser.py": [],
+    "tools/capture_stages/recorders.py": [],
+    "tools/capture_stages/adapters.py": [],
+    "tools/capture_stages/chain.py": [],
     # Attaches to the owner's signed-in Portfolio123 tab and saves a fixed,
     # hash-pinned allowlist of read-only exports into a create-only directory; the
     # staging CLI and the generation read only the files and manifest they are handed.
@@ -469,6 +499,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             _RELEASE,
             "tools/portfolio_designer_model_curve.py",
             "tools/portfolio_strategy_history.py",
+            "tools/portfolio_layer_series.py",
             "tools/portfolio_strategy_backtests.py",
             "tools/portfolio_provider_track_record.py",
             "tools/account_strategy_manifest.py",
@@ -506,6 +537,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "id": "qsi-source-revision",
         "source_paths": (
             "tools/portfolio_strategy_history.py",
+            "tools/portfolio_layer_series.py",
             "tools/portfolio_strategy_backtests.py",
             _TARGET_SERIES,
         ),

@@ -8,7 +8,7 @@ grows by well under 0.2 MB:
     Per evidence mode (``LIVE_ONLY`` and ``LIVE_PLUS_BACKTEST``) a weekly grid over
     the common window and the lines drawn on it: one total-return index per
     strategy (1.0 immediately before that line's own first week), the equal-weight
-    portfolio, and per point origin runs (``LIVE`` / ``BACKTEST`` / ``MIXED``)
+    portfolio, and per point origin runs (``ACCOUNT_LIVE`` / ``MODEL_LIVE`` / ``BACKTEST`` / ``MIXED``)
     derived from the admitted mode coverage.  The window start is stated with the
     series that sets it.
 
@@ -309,9 +309,34 @@ def _mode_inputs(
     return None
 
 
-def _week_origin(meta_entry: Any, live_start: date | None, source: str) -> str:
+ORIGIN_ACCOUNT_LIVE: Final = "ACCOUNT_LIVE"
+ORIGIN_MODEL_LIVE: Final = "MODEL_LIVE"
+
+
+def _research_boundary(row: Mapping[str, Any]) -> tuple[date | None, str]:
+    """First day of the live layer of the research series and which layer it is.
+
+    The research series of a strategy with a model-live layer is backtest then
+    MODEL_LIVE and never the account, so its boundary is the model-live inception
+    its own coverage states, not the account's first day.
+    """
+
+    coverage = _mapping(_mapping(row.get("mode_coverage")).get("LIVE_PLUS_BACKTEST"))
+    inception = coverage.get("research_live_inception")
+    layer = coverage.get("research_live_layer")
+    if isinstance(inception, str) and layer in {ORIGIN_MODEL_LIVE, ORIGIN_ACCOUNT_LIVE}:
+        return _day(inception, "research live inception"), str(layer)
+    return _live_start(row), ORIGIN_ACCOUNT_LIVE
+
+
+def _week_origin(
+    meta_entry: Any,
+    live_start: date | None,
+    source: str,
+    live_layer: str = ORIGIN_ACCOUNT_LIVE,
+) -> str:
     if source in ("LIVE_ONLY", "LIVE_ONLY_FALLBACK"):
-        return "LIVE"
+        return ORIGIN_ACCOUNT_LIVE
     declared = _flag_origin(meta_entry)
     if declared is not None:
         return declared
@@ -320,12 +345,10 @@ def _week_origin(meta_entry: Any, live_start: date | None, source: str) -> str:
     if not isinstance(meta_entry, list) or len(meta_entry) < 3:
         raise PerformanceTabError("observation meta is missing for an origin week")
     start = _day(meta_entry[1], "observation start")
-    end = _day(meta_entry[2], "observation end")
-    if end < live_start:
-        return "BACKTEST"
     if start >= live_start:
-        return "LIVE"
-    return "MIXED"
+        return live_layer
+    # a week holding any hypothetical day is BACKTEST, never MIXED across layers
+    return "BACKTEST"
 
 
 def _mondays(first: date, last: date) -> list[date]:
@@ -338,7 +361,13 @@ def _mondays(first: date, last: date) -> list[date]:
 
 
 ORIGIN_DERIVED_FLAG: Final = "ORIGIN_DERIVED"
+# One vocabulary across ledger, weekly series and panel: BACKTEST, MODEL_LIVE,
+# ACCOUNT_LIVE (the owner's own account), DERIVED, and MIXED where a week spans
+# two.  The weekly flag keeps its historical spelling as an accepted alias.
+ORIGIN_MODEL_LIVE_FLAG: Final = "ORIGIN_MODEL_LIVE"
 ORIGIN_PROVIDER_MODEL_LIVE_FLAG: Final = "ORIGIN_PROVIDER_MODEL_LIVE"
+ORIGIN_BACKTEST_FLAG: Final = "ORIGIN_BACKTEST"
+ORIGIN_ACCOUNT_LIVE_FLAG: Final = "ORIGIN_ACCOUNT_LIVE"
 EW_AVAILABLE_SERIES_ID: Final = "portfolio:equal_weight_available"
 EW_AVAILABLE_DEFINITION: Final = (
     "Equal-weight portfolio of the strategy lines that have a value in each week "
@@ -362,8 +391,12 @@ def _flag_origin(meta_entry: Any) -> str | None:
     )
     if ORIGIN_DERIVED_FLAG in flags:
         return "DERIVED"
-    if ORIGIN_PROVIDER_MODEL_LIVE_FLAG in flags:
-        return "PROVIDER_MODEL_LIVE"
+    if ORIGIN_BACKTEST_FLAG in flags:
+        return "BACKTEST"
+    if ORIGIN_MODEL_LIVE_FLAG in flags or ORIGIN_PROVIDER_MODEL_LIVE_FLAG in flags:
+        return ORIGIN_MODEL_LIVE
+    if ORIGIN_ACCOUNT_LIVE_FLAG in flags:
+        return ORIGIN_ACCOUNT_LIVE
     return None
 
 
@@ -462,13 +495,15 @@ def _build_mode(weekly: Mapping[str, Any], mode: str) -> dict[str, Any]:
     with localcontext() as context:
         context.prec = _PRECISION
         for row, values, meta, source in per:
-            live_start = _live_start(row)
+            live_start, live_layer = _research_boundary(row)
             returns: list[Decimal | None] = []
             flags: list[str | None] = []
             for key in week_keys:
                 if key in values:
                     returns.append(_dec(values[key], f"{row.get('series_id')} {key}"))
-                    flags.append(_week_origin(meta.get(key), live_start, source))
+                    flags.append(
+                        _week_origin(meta.get(key), live_start, source, live_layer)
+                    )
                 else:
                     returns.append(None)
                     flags.append(None)
@@ -1369,7 +1404,7 @@ def _qualified_label(label: str, line: Mapping[str, Any], dates: object) -> str:
             else f"{grid[start]} to {grid[end]} ({flag})"
         )
         for start, end, flag in _sequence(line.get("origin"))
-        if flag != "LIVE" and 0 <= start <= end < len(grid)
+        if flag != ORIGIN_ACCOUNT_LIVE and 0 <= start <= end < len(grid)
     ]
     if not parts:
         return label
@@ -1684,22 +1719,30 @@ def _fail(message: str) -> PerformanceTabError:
     return PerformanceTabError(f"performance_tab: {message}")
 
 
-def _origin_of(entry: Any, live_start: date | None, source: str) -> str:
+def _origin_of(
+    entry: Any,
+    live_start: date | None,
+    source: str,
+    live_layer: str = "ACCOUNT_LIVE",
+) -> str:
     """Pointwise origin rule, written separately from the builder's."""
 
     if source != "LIVE_PLUS_BACKTEST":
-        return "LIVE"
+        return "ACCOUNT_LIVE"
     if isinstance(entry, list) and len(entry) > 4 and isinstance(entry[4], list):
         if "ORIGIN_DERIVED" in entry[4]:
             return "DERIVED"
-        if "ORIGIN_PROVIDER_MODEL_LIVE" in entry[4]:
-            return "PROVIDER_MODEL_LIVE"
+        if "ORIGIN_BACKTEST" in entry[4]:
+            return "BACKTEST"
+        if "ORIGIN_MODEL_LIVE" in entry[4] or "ORIGIN_PROVIDER_MODEL_LIVE" in entry[4]:
+            return "MODEL_LIVE"
+        if "ORIGIN_ACCOUNT_LIVE" in entry[4]:
+            return "ACCOUNT_LIVE"
     if live_start is None or not isinstance(entry, list):
         raise _fail("hybrid origin inputs are missing")
-    boundary = live_start.isoformat()
-    if str(entry[2]) < boundary:
-        return "BACKTEST"
-    return "LIVE" if str(entry[1]) >= boundary else "MIXED"
+    # unflagged: a week from the live layer's first day on is that layer, any week
+    # holding an earlier day is hypothetical; the layers are never collapsed
+    return live_layer if str(entry[1]) >= live_start.isoformat() else "BACKTEST"
 
 
 def _expect_path(
@@ -1828,12 +1871,14 @@ def _verify_mode(
         line = by_id.get(series_id)
         if line is None or line["source_mode"] != source or line["kind"] != "STRATEGY":
             raise _fail(f"{mode} {series_id} source or kind differs")
-        live_start = _live_start(row)
+        live_start, live_layer = _research_boundary(row)
         returns = [
             Fraction(str(values[key])) if key in values else None for key in dates
         ]
         flags = [
-            _origin_of(meta.get(key), live_start, source) if key in values else None
+            _origin_of(meta.get(key), live_start, source, live_layer)
+            if key in values
+            else None
             for key in dates
         ]
         _check_line(line, returns, dates, f"{mode} {series_id}")

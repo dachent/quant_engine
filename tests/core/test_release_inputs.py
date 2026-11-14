@@ -461,6 +461,8 @@ def test_default_expansion_is_byte_identical_to_the_legacy_graph(
         - set(new_graph["paths"])
         - set(new_graph["derive"])
         - {"release_inputs_root", "release_inputs_manifest_sha256"}
+        # a defaulted run value (git-commit-v1), validated against two schemes: not a free name
+        - {"identity_scheme"}
     )
     config = {name: f"<{name}>" for name in names}
     config.update(_run_config(tmp_path, tmp_path / "repo"))

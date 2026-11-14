@@ -1160,7 +1160,11 @@ def _designer_generation(root: Path, rows: list[tuple[str, str, str]]) -> Path:
     return generation
 
 
-def test_designer_curve_admits_only_the_pre_launch_segment(tmp_path: Path) -> None:
+def test_designer_curve_admits_the_post_launch_rows_as_model_live(
+    tmp_path: Path,
+) -> None:
+    """Kill test: the EU designer curve is MODEL_LIVE after launch, never backtest."""
+
     generation = _designer_generation(
         tmp_path,
         [
@@ -1173,14 +1177,146 @@ def test_designer_curve_admits_only_the_pre_launch_segment(tmp_path: Path) -> No
 
     rows, definition = history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
 
-    assert [row["date"] for row in rows] == ["2024-02-15", "2024-02-16"]
-    assert {row["evidence_layer"] for row in rows} == {"BACKTEST"}
+    assert [(row["date"], row["evidence_layer"]) for row in rows] == [
+        ("2024-02-15", "BACKTEST"),
+        ("2024-02-16", "BACKTEST"),
+        ("2024-02-19", "MODEL_LIVE"),
+        ("2024-02-20", "MODEL_LIVE"),
+    ]
     assert {row["series_id"] for row in rows} == {"EU [P123]"}
+    # The definition still describes the BACKTEST rows, so prehistory consumers
+    # read what they always did; the live layer is counted beside it.
     assert definition["return_observations"] == 2
-    assert definition["provider_model_live_observations_not_admitted"] == 2
     assert definition["observed_end"] == "2024-02-16"
+    assert definition["model_live_observations"] == 2
+    assert (definition["model_live_start"], definition["model_live_end"]) == (
+        "2024-02-19",
+        "2024-02-20",
+    )
     assert definition["provider_launch"] == "2024-02-18"
     assert definition["strategy_version"] == DESIGNER_VERSION
+
+
+def test_bundle_keeps_eu_model_live_past_the_account_live_boundary(
+    tmp_path: Path,
+) -> None:
+    """The account-live boundary cuts backtest rows only; model live runs on."""
+
+    inputs = _bundle_inputs(tmp_path)
+    generation = _designer_generation(
+        tmp_path / "designer",
+        [
+            ("2024-02-15", "0.01", "BACKTEST"),
+            ("2024-02-16", "0.02", "BACKTEST"),
+            ("2024-02-19", "0.03", "PROVIDER_MODEL_LIVE"),
+            ("2025-12-01", "0.04", "PROVIDER_MODEL_LIVE"),
+        ],
+    )
+    result = history.write_bundle(
+        tmp_path / "bundle",
+        **inputs,
+        p123_eu_designer_model_generation=generation,
+        p123_eu_strategy_version=DESIGNER_VERSION,
+        as_of_date="2026-09-17",
+        live_inceptions={"EU [P123]": "2025-11-21"},
+    )
+    returns = (Path(str(result["destination"])) / "returns.csv").read_text(
+        encoding="utf-8"
+    )
+    eu = [
+        line.split(",")
+        for line in returns.splitlines()[1:]
+        if line.startswith("EU [P123],")
+    ]
+    assert [(row[1], row[3]) for row in eu] == [
+        ("2024-02-15", "BACKTEST"),
+        ("2024-02-16", "BACKTEST"),
+        ("2024-02-19", "MODEL_LIVE"),
+        ("2025-12-01", "MODEL_LIVE"),
+    ]
+
+
+def test_designer_curve_refuses_model_live_that_overlaps_the_backtest(
+    tmp_path: Path,
+) -> None:
+    generation = _designer_generation(
+        tmp_path,
+        [
+            ("2024-02-15", "0.01", "BACKTEST"),
+            ("2024-02-16", "0.02", "BACKTEST"),
+            ("2024-02-16", "0.03", "PROVIDER_MODEL_LIVE"),
+        ],
+    )
+
+    with pytest.raises(history.StrategyHistoryError, match="overlaps the backtest"):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+
+def test_designer_curve_refuses_model_live_before_the_provider_launch(
+    tmp_path: Path,
+) -> None:
+    """A row between the backtest's end and the launch belongs to neither layer."""
+
+    generation = _designer_generation(
+        tmp_path,
+        [
+            ("2024-02-15", "0.01", "BACKTEST"),
+            ("2024-02-16", "0.02", "BACKTEST"),
+            ("2024-02-17", "0.03", "PROVIDER_MODEL_LIVE"),
+        ],
+    )
+
+    with pytest.raises(history.StrategyHistoryError, match="precedes the provider"):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+
+def test_designer_curve_labels_each_layer_and_the_bundle_keeps_the_live_label(
+    tmp_path: Path,
+) -> None:
+    """The series label is the backtest's; the model-live rows carry their own label."""
+
+    rows = [
+        ("2024-02-15", "0.01", "BACKTEST"),
+        ("2024-02-16", "0.02", "BACKTEST"),
+        ("2024-02-19", "0.03", "PROVIDER_MODEL_LIVE"),
+        ("2025-12-01", "0.04", "PROVIDER_MODEL_LIVE"),
+    ]
+    _rows, definition = history._p123_eu_designer_curve(
+        _designer_generation(tmp_path / "curve", rows), DESIGNER_VERSION
+    )
+    [series_label] = definition["series_labels"]
+    assert series_label["layer"] == "BACKTEST"
+    assert series_label["window"] == {
+        "first": "2024-02-15",
+        "last": "2024-02-16",
+        "observations": 2,
+    }
+    [live_label] = definition["segment_labels"]
+    assert live_label["layer"] == "MODEL_LIVE"
+    assert live_label["window"] == {
+        "first": "2024-02-19",
+        "last": "2025-12-01",
+        "observations": 2,
+    }
+
+    # After the account-live cap the backtest label is refit and the live one stays.
+    inputs = _bundle_inputs(tmp_path)
+    result = history.write_bundle(
+        tmp_path / "bundle",
+        **inputs,
+        p123_eu_designer_model_generation=_designer_generation(
+            tmp_path / "designer", rows
+        ),
+        p123_eu_strategy_version=DESIGNER_VERSION,
+        as_of_date="2026-09-17",
+        live_inceptions={"EU [P123]": "2025-11-21"},
+    )
+    manifest = json.loads(
+        (Path(str(result["destination"])) / "manifest.json").read_text(encoding="utf-8")
+    )
+    eu = next(item for item in manifest["series"] if item["series_id"] == "EU [P123]")
+    assert eu["series_labels"][0]["layer"] == "BACKTEST"
+    assert [item["layer"] for item in eu["segment_labels"]] == ["MODEL_LIVE"]
 
 
 def test_designer_curve_carries_the_currency_and_revision_dates(
@@ -1352,3 +1488,92 @@ def test_a_junction_into_scratch_is_refused_even_though_its_path_looks_durable(
             pytest.skip("cannot create a junction here")
     with pytest.raises(history.StrategyHistoryError, match="not scratch"):
         history._refuse_scratch_locator(link / "archive.zip")
+
+
+# --- three-layer rows in a retained bundle (train 2, R2) -----------------------
+
+
+def _layered_seed(
+    tmp_path: Path, layer: str, *, declare: bool
+) -> tuple[bytes, bytes, str]:
+    """A rehashed copy of the seed with one extra row of ``layer`` on a non-QSI series."""
+
+    inputs = _bundle_inputs(tmp_path)
+    seed = Path(
+        history.write_bundle(
+            tmp_path / "seed",
+            **inputs,
+            as_of_date="2026-09-17",
+            live_inceptions={"QSI": "2026-01-05"},
+        )["destination"]
+    )
+    manifest = json.loads((seed / "manifest.json").read_bytes())
+    rows = list(history.csv.DictReader((seed / "returns.csv").read_text().splitlines()))
+    definition = next(item for item in manifest["series"] if item["series_id"] != "QSI")
+    series_id = definition["series_id"]
+    extra = {
+        "series_id": series_id,
+        "date": "2026-09-17",
+        "return": "0.01",
+        "evidence_layer": layer,
+        "strategy_version": definition["strategy_version"],
+    }
+    rows.append(extra)
+    rows.sort(key=lambda row: (row["series_id"], row["date"]))
+    if declare:
+        from series_label import SeriesLabel
+
+        definition["segment_labels"] = [
+            SeriesLabel(
+                layer="MODEL_LIVE",
+                entity_id="designer model",
+                entity_role="DESIGNER_MODEL",
+                first="2026-09-17",
+                last="2026-09-17",
+                observations=1,
+                currency="USD",
+                return_basis="PROVIDER_PUBLISHED_MODEL_EQUITY_CURVE_LEVEL_RATIO",
+                cost_basis="NET",
+            ).to_dict()
+        ]
+    output = io.StringIO(newline="")
+    writer = history.csv.DictWriter(
+        output, fieldnames=history.RETURN_FIELDS, lineterminator="\n"
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+    content = output.getvalue().encode()
+    manifest["returns_artifact"].update(
+        sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content)
+    )
+    manifest.pop("bundle_id")
+    manifest["bundle_id"] = hashlib.sha256(
+        history.canonical_json_bytes(manifest)
+    ).hexdigest()
+    return history.canonical_json_bytes(manifest), content, series_id
+
+
+def test_a_retained_bundle_admits_a_declared_model_live_layer(tmp_path: Path) -> None:
+    manifest, content, series_id = _layered_seed(tmp_path, "MODEL_LIVE", declare=True)
+    _, rows = history._validated_retained_bundle(manifest, content)
+    assert any(
+        row["series_id"] == series_id and row["evidence_layer"] == "MODEL_LIVE"
+        for row in rows
+    )
+
+
+@pytest.mark.parametrize(
+    ("layer", "declare"),
+    [
+        ("ACCOUNT_LIVE", False),
+        ("COPY_RECORD", False),
+        ("PROVIDER_LIVE", False),
+        ("MODEL_LIVE", False),  # a model-live row nothing declares
+    ],
+)
+def test_a_retained_bundle_refuses_every_other_layer(
+    tmp_path: Path, layer: str, declare: bool
+) -> None:
+    manifest, content, _ = _layered_seed(tmp_path, layer, declare=declare)
+    with pytest.raises(history.StrategyHistoryError, match="retained layers differ"):
+        history._validated_retained_bundle(manifest, content)

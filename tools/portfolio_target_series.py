@@ -82,7 +82,10 @@ LAYERED_HISTORY_ASSURANCE_PROFILES: Final = frozenset(
 )
 LAYERED_HISTORY_MODE_POLICY: Final = {
     "LIVE_ONLY": "SELECTED_ACCOUNT_LIVE_ONLY",
-    "LIVE_PLUS_BACKTEST": "EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE_THEN_ACCOUNT_LIVE",
+    # The research series: exact-version backtest strictly before model-live
+    # inception, then the model's own live record -- never the account.  A
+    # strategy with no model-live layer keeps backtest-then-account.
+    "LIVE_PLUS_BACKTEST": "EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_MODEL_LIVE_THEN_MODEL_LIVE_ELSE_ACCOUNT_LIVE",
     "comparison_layers_in_modes": False,
     "post_inception_backtest_fill": False,
 }
@@ -90,7 +93,7 @@ LAYERED_HISTORY_CORRECTION_RESOLUTION_IDS: Final = frozenset(
     {
         "echotrade-event-only-account-live-rejected",
         "p123-ai-backtest",
-        "p123-eu-provider-live",
+        "p123-eu-copy-record",
         "robuxio-account-live-after-funding",
         "volatis-account-live",
     }
@@ -2491,7 +2494,7 @@ def _history_contract(
         not isinstance(product, dict)
         or product.get("product_id") != "FINANCIAL_MVP"
         or not isinstance(history, dict)
-        or history.get("policy_id") != "PORT-HISTORY-TRUTH-1"
+        or history.get("policy_id") != "PORT-HISTORY-TRUTH-2"
         or not isinstance(raw_strategies, list)
         or not isinstance(raw_sources, list)
     ):
@@ -2534,8 +2537,10 @@ def _history_contract(
         "robuxio-account-live-after-funding",
         "p123-ai-backtest-candidate",
         "p123-eu-backtest",
-        "p123-eu-provider-live",
+        "p123-eu-copy-record",
         "p123-eu-account-live",
+        "p123-ai-model-live",
+        "p123-eu-model-live",
         "volatis-backtest-does-not-exist",
         "volatis-provider-live",
         "volatis-account-live",
@@ -2543,6 +2548,39 @@ def _history_contract(
     if not required_corrections <= set(corrections):
         raise TargetSeriesError("financial MVP history correction set is incomplete")
     return contract, strategies, sources, corrections
+
+
+def _model_live_layers(
+    corrections: Mapping[str, Mapping[str, Any]],
+) -> dict[str, tuple[date, bool]]:
+    """Strategies with a model-live layer: inception, and whether it is admitted.
+
+    The inception date ends the strategy's backtest (strictly before it) and the
+    account is never part of the research series of such a strategy, admitted or
+    not.  Admission is the contract's: READY with the research-series admission.
+    """
+
+    layers: dict[str, tuple[date, bool]] = {}
+    for row in corrections.values():
+        if not isinstance(row, Mapping) or row.get("evidence_layer") != "MODEL_LIVE":
+            continue
+        interval = row.get("interval")
+        modes = row.get("mode_admission")
+        if not isinstance(interval, Mapping) or not isinstance(modes, Mapping):
+            raise TargetSeriesError("model-live correction is invalid")
+        try:
+            start = date.fromisoformat(str(interval.get("observed_start")))
+        except ValueError as exc:
+            raise TargetSeriesError("model-live inception is invalid") from exc
+        strategy_id = str(row.get("strategy_id"))
+        if strategy_id in layers:
+            raise TargetSeriesError("model-live layer is declared twice")
+        layers[strategy_id] = (
+            start,
+            row.get("readiness") == "READY"
+            and modes.get("LIVE_PLUS_BACKTEST") == "INCLUDE_MODEL_LIVE_RESEARCH",
+        )
+    return layers
 
 
 def _excluded_strategy_mode_reason(strategy: Mapping[str, Any]) -> str | None:
@@ -4402,6 +4440,22 @@ def _matrixport_account_is_unadmitted(
     return True
 
 
+def _bundle_backtest_rows(
+    raw_rows: Sequence[dict[str, str]], series_id: object
+) -> list[dict[str, str]]:
+    """A series' BACKTEST rows of a strategy-history bundle.
+
+    The bundle also carries MODEL_LIVE rows (a layer of its own, admitted under its
+    own segment); they are never part of the backtest reconstruction.
+    """
+
+    return [
+        row
+        for row in raw_rows
+        if row["series_id"] == series_id and row["evidence_layer"] == "BACKTEST"
+    ]
+
+
 def _strategies_without_a_backtest_layer(
     corrections: Mapping[str, Mapping[str, object]],
 ) -> set[str]:
@@ -5274,7 +5328,7 @@ def build_layered_history_generation(
     p123_comparison_selected = all(path is not None for path in p123_comparison_paths)
     p123_history_receipts = (
         _portfolio123_provider_history_receipts(
-            corrections["p123-eu-provider-live"], p123_generation
+            corrections["p123-eu-copy-record"], p123_generation
         )
         if p123_comparison_selected
         else None
@@ -5400,11 +5454,11 @@ def build_layered_history_generation(
         p123_eu_candidate = []
         p123_eu_proof = cast(
             dict[str, object],
-            corrections["p123-eu-provider-live"].get("derived_evidence_identity"),
+            corrections["p123-eu-copy-record"].get("derived_evidence_identity"),
         )
         if not isinstance(p123_eu_proof, dict):
             raise TargetSeriesError("Portfolio123 EU provider evidence is absent")
-    p123_eu_interval = corrections["p123-eu-provider-live"].get("interval")
+    p123_eu_interval = corrections["p123-eu-copy-record"].get("interval")
     if not isinstance(p123_eu_interval, dict) or (
         p123_comparison_selected
         and (
@@ -5471,6 +5525,7 @@ def build_layered_history_generation(
     history_definitions: dict[str, dict[str, object]] = {}
     history_dispositions: dict[str, dict[str, object]] = {}
     history_proof: dict[str, object] | None = None
+    history_model_live_rows: dict[str, list[dict[str, str]]] = {}
     if (strategy_history_manifest_path is None) != (
         strategy_history_returns_path is None
     ):
@@ -5485,7 +5540,9 @@ def build_layered_history_generation(
             history_dispositions,
             history_proof,
         ) = _strategy_history_returns(
-            strategy_history_manifest_path, strategy_history_returns_path
+            strategy_history_manifest_path,
+            strategy_history_returns_path,
+            model_live_out=history_model_live_rows,
         )
     # The bundle is hash-bound evidence but it is not a governed generation,
     # so the contract's `strategy-backtests` segment names the generation
@@ -5573,7 +5630,10 @@ def build_layered_history_generation(
     # running beside the live book, never prehistory, and they are retained as
     # the not-admitted overlap; the rows before it are the version-matched
     # prehistory LIVE_PLUS_BACKTEST exists to admit.
-    p123_ai_live_start = first_live["p123-ai-factor"]
+    model_live_layers = _model_live_layers(corrections)
+    # The twin hands over to the model book's own live record, so it is split at
+    # MODEL-LIVE inception, not at the account's.
+    p123_ai_live_start = model_live_layers["p123-ai-factor"][0]
     p123_ai_prehistory = [
         row
         for row in p123_ai_backtest
@@ -5613,14 +5673,71 @@ def build_layered_history_generation(
             )
         ):
             continue
-        if (
-            rows
-            and date.fromisoformat(rows[-1]["date"]) >= first_live[mapped_strategy_id]
-        ):
+        history_boundary = (
+            model_live_layers[mapped_strategy_id][0]
+            if mapped_strategy_id in model_live_layers
+            else first_live[mapped_strategy_id]
+        )
+        if rows and date.fromisoformat(rows[-1]["date"]) >= history_boundary:
             raise TargetSeriesError(
-                f"strategy history overlaps account-live: {mapped_strategy_id}"
+                f"strategy history overlaps live inception: {mapped_strategy_id}"
             )
         admitted_backtests[mapped_strategy_id] = rows
+
+    # The model-live layer: the model's own live record, admitted only where the
+    # contract admits it.  It is never the account and never the copy.
+    model_live_rows: dict[str, list[dict[str, str]]] = {}
+    for strategy_id, (model_start, model_admitted) in model_live_layers.items():
+        if not model_admitted:
+            continue
+        model_series_id = series_by_strategy[strategy_id]
+        if strategy_id == "p123-ai-factor":
+            candidates = [
+                {
+                    "series_id": model_series_id,
+                    "date": str(item["date"]),
+                    "return": str(item["return"]),
+                    "evidence_layer": "MODEL_LIVE",
+                }
+                for item in ledger_catalog.get("provider_strategy_returns") or []
+                if isinstance(item, dict)
+                and item.get("strategy_id") == strategy_id
+                and item.get("evidence_layer") == "MODEL_LIVE"
+            ]
+        else:
+            candidates = [
+                {**item, "series_id": model_series_id}
+                for item in history_model_live_rows.get(model_series_id, [])
+            ]
+        candidates.sort(key=lambda item: item["date"])
+        if not candidates:
+            raise TargetSeriesError(
+                f"admitted model-live layer has no rows: {strategy_id}"
+            )
+        if len({item["date"] for item in candidates}) != len(candidates):
+            raise TargetSeriesError(f"duplicate model-live return: {strategy_id}")
+        if (
+            date.fromisoformat(candidates[0]["date"]) < model_start
+            or date.fromisoformat(candidates[-1]["date"]) > accepted_as_of
+            or any(
+                _decimal(item["return"], "model-live return") <= -1
+                for item in candidates
+            )
+        ):
+            raise TargetSeriesError(
+                f"model-live rows leave their window: {strategy_id}"
+            )
+        model_live_rows[strategy_id] = [
+            {
+                "series_id": item["series_id"],
+                "date": item["date"],
+                "return": format(_decimal(item["return"], "model-live return"), "f"),
+                "evidence_layer": "MODEL_LIVE",
+                "return_basis": "MODEL",
+                "return_type": "TOTAL",
+            }
+            for item in candidates
+        ]
 
     account_source = sources["owner-account-live-history"]
     account_calendar, account_frequency = _source_temporal(account_source)
@@ -5721,6 +5838,30 @@ def build_layered_history_generation(
                 frequency=frequency,
             )
         )
+    for strategy_id, rows in model_live_rows.items():
+        is_ledger_model = strategy_id == "p123-ai-factor"
+        segment_rows.extend(
+            _segment_rows(
+                rows,
+                strategy_id=strategy_id,
+                strategy_version=version_by_strategy[strategy_id],
+                segment_id=f"{strategy_id}:model-live",
+                source_id=(
+                    "owner-account-live-history"
+                    if is_ledger_model
+                    else "strategy-backtests"
+                ),
+                source_generation_id=(
+                    ledger_generation
+                    if is_ledger_model
+                    else strategy_backtests_generation
+                    or str((history_proof or {}).get("bundle_id") or "NOT_CAPTURED")
+                ),
+                mode_admission="INCLUDE_MODEL_LIVE_RESEARCH",
+                calendar=account_calendar if is_ledger_model else backtest_calendar,
+                frequency=account_frequency if is_ledger_model else backtest_frequency,
+            )
+        )
     for strategy_id, rows in unadmitted_backtests.items():
         normalized = [
             {
@@ -5774,7 +5915,13 @@ def build_layered_history_generation(
             row
             for row in segment_rows
             if row["mode_admission"]
-            in {"INCLUDE_SELECTED_LIVE", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+            in {"INCLUDE_MODEL_LIVE_RESEARCH", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+            or (
+                # The account is in the research series only where the strategy
+                # has no model-live layer to continue on.
+                row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+                and row["strategy_id"] not in model_live_layers
+            )
         ],
         key=lambda row: (
             row["series_id"],
@@ -5871,6 +6018,17 @@ def build_layered_history_generation(
             )
         hybrid_state = live_state
         hybrid_reason = live_reason
+        if exclusion_reason is None and strategy_id in model_live_layers:
+            # The research series stands on backtest + model live; the account
+            # does not decide it.  A model-live layer the contract has not
+            # admitted decides it first: the series is never AVAILABLE, even for
+            # an instant, without that layer.
+            if model_live_layers[strategy_id][1]:
+                hybrid_state = "AVAILABLE"
+                hybrid_reason = None
+            else:
+                hybrid_state = "REQUIRED_NOT_READY"
+                hybrid_reason = "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED"
         if (
             exclusion_reason is None
             and hybrid_state == "AVAILABLE"
@@ -5985,7 +6143,7 @@ def build_layered_history_generation(
             ),
             "status": p123_ai_disposition,
         },
-        "p123-eu-provider-live": {
+        "p123-eu-copy-record": {
             **p123_eu_proof,
             "status": "DERIVED_NOT_ADMITTED_PENDING_303",
         },
@@ -6729,6 +6887,7 @@ def validate_layered_history_generation(
     contract, strategies, sources, corrections = _history_contract(
         contract_path, repository_sha
     )
+    model_live_layers = _model_live_layers(corrections)
     if current_admission is not None:
         admitted_generations = cast(
             Mapping[str, Mapping[str, str]], current_admission["source_generations"]
@@ -6782,7 +6941,7 @@ def validate_layered_history_generation(
         raise TargetSeriesError("Portfolio123 comparison input set differs")
     p123_history_receipts = (
         _portfolio123_provider_history_receipts(
-            corrections["p123-eu-provider-live"],
+            corrections["p123-eu-copy-record"],
             str(
                 sources["portfolio123-model-generation"]["current_generation"][
                     "generation_id"
@@ -7444,11 +7603,9 @@ def validate_layered_history_generation(
         for strategy_id, strategy in strategies.items():
             if raw_rows is None:
                 continue
-            selected = [
-                row
-                for row in raw_rows
-                if row["series_id"] == strategy.get("history_series_id")
-            ]
+            selected = _bundle_backtest_rows(
+                raw_rows, strategy.get("history_series_id")
+            )
             version_status, version = _contract_version(strategy)
             if (
                 not selected
@@ -7724,7 +7881,11 @@ def validate_layered_history_generation(
         {field: row[field] for field in CORRELATION_FIELDS_V2}
         for row in segments
         if row["mode_admission"]
-        in {"INCLUDE_SELECTED_LIVE", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+        in {"INCLUDE_MODEL_LIVE_RESEARCH", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+        or (
+            row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+            and row["strategy_id"] not in model_live_layers
+        )
     ]
     expected_hybrid.sort(
         key=lambda row: (
@@ -7760,6 +7921,7 @@ def validate_layered_history_generation(
         if _decimal(segment_row["return"], "layered history return") <= -1:
             raise TargetSeriesError("layered history return is invalid")
         if segment_row["evidence_layer"] in {
+            "COPY_RECORD",
             "PROVIDER_LIVE",
             "PROVIDER_TRACK_RECORD",
         } and segment_row["mode_admission"] not in {
@@ -7767,6 +7929,14 @@ def validate_layered_history_generation(
             "REQUIRED_NOT_READY_OVERLAP",
         }:
             raise TargetSeriesError("comparison history entered a selected mode")
+        # Each owner layer has exactly one admission: the account is the selected
+        # live path, the model's own record is the research series' live leg.
+        if (segment_row["evidence_layer"] == "MODEL_LIVE") != (
+            segment_row["mode_admission"] == "INCLUDE_MODEL_LIVE_RESEARCH"
+        ) or (segment_row["evidence_layer"] == "ACCOUNT_LIVE") != (
+            segment_row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+        ):
+            raise TargetSeriesError("layered history layer admission differs")
         rows_by_strategy[strategy_id].append(segment_row)
 
     for strategy_id, rows in rows_by_strategy.items():
@@ -7784,7 +7954,37 @@ def validate_layered_history_generation(
             ],
             key=lambda row: row["date"],
         )
-        if backtest:
+        model_live = sorted(
+            [
+                row
+                for row in rows
+                if row["mode_admission"] == "INCLUDE_MODEL_LIVE_RESEARCH"
+            ],
+            key=lambda row: row["date"],
+        )
+        if model_live:
+            declared = model_live_layers.get(strategy_id)
+            if declared is None or not declared[1]:
+                raise TargetSeriesError("model-live rows lack an admitted layer")
+            if date.fromisoformat(model_live[0]["date"]) < declared[0]:
+                raise TargetSeriesError("model-live rows precede model-live inception")
+            if (
+                backtest
+                and backtest[0]["strategy_version"]
+                != (model_live[0]["strategy_version"])
+            ):
+                raise TargetSeriesError(
+                    "admitted backtest version differs from model live"
+                )
+        if backtest and strategy_id in model_live_layers:
+            # The backtest hands over to the model's live record: it must end
+            # strictly before MODEL-LIVE inception, whatever the account does.
+            if (
+                date.fromisoformat(backtest[-1]["date"])
+                >= model_live_layers[strategy_id][0]
+            ):
+                raise TargetSeriesError("admitted backtest overlaps model-live")
+        elif backtest:
             if not live:
                 raise TargetSeriesError("admitted backtest lacks selected live path")
             if backtest[0]["strategy_version"] != live[0]["strategy_version"]:
@@ -8066,6 +8266,18 @@ def validate_layered_history_generation(
                 expected_layer = "PROVIDER_LIVE"
                 expected_admission = "EXCLUDE_COMPARISON_ONLY"
                 expected_basis = "NET"
+            elif (
+                segment_id == f"{strategy_id}:model-live"
+                and model_live_layers.get(strategy_id, (None, False))[1]
+            ):
+                source_id = (
+                    "owner-account-live-history"
+                    if strategy_id == "p123-ai-factor"
+                    else "strategy-backtests"
+                )
+                expected_layer = "MODEL_LIVE"
+                expected_admission = "INCLUDE_MODEL_LIVE_RESEARCH"
+                expected_basis = "MODEL"
             elif segment_id in {
                 f"{strategy_id}:backtest",
                 f"{strategy_id}:backtest-not-admitted",
@@ -8216,6 +8428,13 @@ def validate_layered_history_generation(
         )
         if admitted_backtest and expected_version_status != "EVIDENCED":
             raise TargetSeriesError("unapproved backtest entered a selected mode")
+        if exclusion_reason is None and strategy_id in model_live_layers:
+            if model_live_layers[strategy_id][1]:
+                hybrid_status = "AVAILABLE"
+                hybrid_reason = None
+            else:
+                hybrid_status = "REQUIRED_NOT_READY"
+                hybrid_reason = "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED"
         if (
             exclusion_reason is None
             and hybrid_status == "AVAILABLE"
@@ -8460,6 +8679,10 @@ def validate_layered_history_generation(
         if row["mode_admission"] == "REQUIRED_NOT_READY_OVERLAP"
     ]
     live_inception = str(p123_ai_resolution.get("live_inception") or "")
+    if live_inception != model_live_layers["p123-ai-factor"][0].isoformat():
+        raise TargetSeriesError(
+            "Portfolio123 AI backtest split is not at model-live inception"
+        )
     if not isinstance(p123_ai_identity, dict) or p123_ai_resolution != {
         **p123_ai_identity,
         "admitted_prehistory_observations": len(admitted_rows),
@@ -8497,7 +8720,7 @@ def validate_layered_history_generation(
     )
     if robuxio_resolution.get("source_gap_policy") != expected_matrixport_gap_policy:
         raise TargetSeriesError("Matrixport source gap resolution differs")
-    p123_resolution = resolutions.get("p123-eu-provider-live")
+    p123_resolution = resolutions.get("p123-eu-copy-record")
     if not isinstance(p123_resolution, dict):
         raise TargetSeriesError("Portfolio123 EU return transform disposition differs")
     _require_exact_keys(
@@ -8517,7 +8740,7 @@ def validate_layered_history_generation(
         ),
         "Portfolio123 EU return transform disposition",
     )
-    p123_correction = corrections.get("p123-eu-provider-live")
+    p123_correction = corrections.get("p123-eu-copy-record")
     p123_evidence_identity = (
         p123_correction.get("derived_evidence_identity")
         if isinstance(p123_correction, dict)
@@ -8997,6 +9220,8 @@ def _strategy_backtests_generation(
 def _strategy_history_returns(
     manifest_path: Path,
     returns_path: Path,
+    *,
+    model_live_out: dict[str, list[dict[str, str]]] | None = None,
 ) -> tuple[
     dict[str, list[dict[str, str]]],
     dict[str, dict[str, object]],
@@ -9163,7 +9388,10 @@ def _strategy_history_returns(
             raise TargetSeriesError(
                 f"strategy history returns contain undeclared series: {series_id}"
             )
-        if row["evidence_layer"] != "BACKTEST":
+        is_model_live = row["evidence_layer"] == "MODEL_LIVE"
+        if row["evidence_layer"] != "BACKTEST" and not (
+            is_model_live and model_live_out is not None
+        ):
             raise TargetSeriesError("strategy history may contain only BACKTEST rows")
         if row["strategy_version"] != definition["strategy_version"]:
             raise TargetSeriesError(f"strategy history version differs: {series_id}")
@@ -9186,6 +9414,10 @@ def _strategy_history_returns(
                 f"strategy history contains duplicate dates: {series_id}"
             )
         seen.add(key)
+        if is_model_live:
+            assert model_live_out is not None
+            model_live_out.setdefault(series_id, []).append(dict(row))
+            continue
         grouped[series_id].append(dict(row))
 
     for series_id, definition in definitions.items():
@@ -9203,6 +9435,32 @@ def _strategy_history_returns(
                 f"strategy history observation bounds differ: {series_id}"
             )
         grouped[series_id] = accepted
+        declared_live = definition.get("model_live_observations")
+        if declared_live is not None:
+            # The model-live layer is checked against its own declared window, as
+            # the backtest is against observed_start/observed_end: its first row
+            # is on or after the provider launch and strictly after the backtest.
+            live_rows = sorted(
+                (model_live_out or {}).get(series_id, []),
+                key=lambda item: item["date"],
+            )
+            launch = definition.get("provider_launch")
+            if (
+                len(live_rows) != declared_live
+                or (
+                    live_rows
+                    and live_rows[0]["date"] != definition.get("model_live_start")
+                )
+                or (
+                    live_rows
+                    and live_rows[-1]["date"] != definition.get("model_live_end")
+                )
+                or (live_rows and live_rows[0]["date"] <= definition["observed_end"])
+                or (live_rows and launch and live_rows[0]["date"] < str(launch))
+            ):
+                raise TargetSeriesError(
+                    f"strategy history model-live bounds differ: {series_id}"
+                )
 
     proof = {
         "as_of_date": history_as_of.isoformat(),
@@ -9327,7 +9585,10 @@ def build_layered_correlation_inputs(
             history_dispositions,
             history_proof,
         ) = _strategy_history_returns(
-            strategy_history_manifest_path, strategy_history_returns_path
+            strategy_history_manifest_path,
+            strategy_history_returns_path,
+            # The legacy correlation view is prehistory only.
+            model_live_out={},
         )
 
     target_rows = _target_rows(target_content)

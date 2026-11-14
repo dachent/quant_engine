@@ -24,6 +24,8 @@ TOOLS = REPOSITORY_ROOT / "tools"
 # A directory target was tried and rejected: mypy fails on module-path mapping for this
 # layout without --explicit-package-bases, so the list stays explicit and this test guards it.
 UNCHECKED_TOOLS: dict[str, str] = {
+    "capture_refresh.py": "imports capture_pipeline, which has the module-path conflict",
+    "capture_pipeline.py": "module path found twice under different names",
     # passes strict mypy on its own (``mypy tools/release_canary.py``); kept out of the shared invocation
     # line, which every release-tool PR edits and conflicts on
     "release_canary.py": "checked standalone; see the comment above",

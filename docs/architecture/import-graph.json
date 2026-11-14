@@ -124,6 +124,11 @@
       1
     ],
     [
+      "capture_refresh",
+      "capture_pipeline",
+      1
+    ],
+    [
       "gate_profile",
       "verify_release_restore",
       1
@@ -141,6 +146,11 @@
     [
       "portfolio_attended_preparation",
       "build_sleeve_facts_release",
+      1
+    ],
+    [
+      "portfolio_attended_preparation",
+      "capture_pipeline",
       1
     ],
     [
@@ -274,8 +284,23 @@
       1
     ],
     [
+      "portfolio_baseline",
+      "statement_reserve_nav",
+      1
+    ],
+    [
+      "portfolio_cash_drag_spec",
+      "portfolio_cash_drag",
+      1
+    ],
+    [
       "portfolio_control_panel",
       "account_strategy_manifest",
+      1
+    ],
+    [
+      "portfolio_control_panel",
+      "portfolio_cash_drag",
       1
     ],
     [
@@ -306,11 +331,16 @@
     [
       "portfolio_control_panel",
       "portfolio_report",
-      4
+      5
     ],
     [
       "portfolio_control_panel",
       "portfolio_vendor_nav_gap_fill",
+      1
+    ],
+    [
+      "portfolio_control_panel",
+      "series_label",
       1
     ],
     [
@@ -390,6 +420,11 @@
     ],
     [
       "portfolio_grizzly_signal_replay",
+      "portfolio_layer_series",
+      1
+    ],
+    [
+      "portfolio_grizzly_signal_replay",
       "portfolio_strategy_history",
       1
     ],
@@ -425,6 +460,11 @@
     ],
     [
       "portfolio_implementation_sleeve_basis",
+      "series_label",
+      1
+    ],
+    [
+      "portfolio_implementation_sleeve_basis",
       "strategy_basis",
       1
     ],
@@ -447,6 +487,16 @@
       "portfolio_invested_capital",
       "provider_ledger",
       3
+    ],
+    [
+      "portfolio_layer_series",
+      "series_label",
+      1
+    ],
+    [
+      "portfolio_model_vs_actual_derive",
+      "portfolio_model_vs_actual",
+      1
     ],
     [
       "portfolio_pipeline_materialize",
@@ -639,8 +689,23 @@
       1
     ],
     [
+      "portfolio_strategy_backtests",
+      "portfolio_layer_series",
+      1
+    ],
+    [
+      "portfolio_strategy_history",
+      "portfolio_layer_series",
+      1
+    ],
+    [
       "portfolio_strategy_history",
       "portfolio_strategy_backtests",
+      1
+    ],
+    [
+      "portfolio_strategy_history",
+      "series_label",
       1
     ],
     [
@@ -649,8 +714,28 @@
       1
     ],
     [
+      "portfolio_weekly_returns",
+      "series_label",
+      1
+    ],
+    [
+      "provider_ledger",
+      "account_financing",
+      1
+    ],
+    [
+      "provider_ledger",
+      "quantbase_fund_days",
+      1
+    ],
+    [
       "provider_ledger",
       "schwab_rollback",
+      1
+    ],
+    [
+      "provider_ledger",
+      "zero_financing_statements",
       1
     ],
     [
@@ -701,6 +786,11 @@
     [
       "release_driver",
       "release_preflight",
+      1
+    ],
+    [
+      "release_driver",
+      "release_preflight_g2",
       1
     ],
     [
@@ -755,7 +845,82 @@
     ],
     [
       "release_preflight",
+      "portfolio_attended_preparation",
+      1
+    ],
+    [
+      "release_preflight",
+      "release_canary",
+      1
+    ],
+    [
+      "release_preflight",
       "release_driver",
+      1
+    ],
+    [
+      "release_preflight",
+      "release_preflight_g1a",
+      1
+    ],
+    [
+      "release_preflight",
+      "release_preflight_g1b",
+      1
+    ],
+    [
+      "release_preflight_g1a",
+      "portfolio_attended_preparation",
+      1
+    ],
+    [
+      "release_preflight_g1a",
+      "portfolio_pipeline_materialize",
+      1
+    ],
+    [
+      "release_preflight_g1a",
+      "portfolio_report",
+      1
+    ],
+    [
+      "release_preflight_g1a",
+      "provider_ledger",
+      1
+    ],
+    [
+      "release_preflight_g1a",
+      "release_driver",
+      1
+    ],
+    [
+      "release_preflight_g1b",
+      "portfolio_decomposition",
+      1
+    ],
+    [
+      "release_preflight_g1b",
+      "portfolio_report",
+      1
+    ],
+    [
+      "release_preflight_g1b",
+      "release_driver",
+      1
+    ],
+    [
+      "release_preflight_g2",
+      "panel_payload_size",
+      1
+    ],
+    [
+      "release_preflight_g2",
+      "release_driver",
+      1
+    ],
+    [
+      "release_preflight_g2",
+      "release_preflight",
       1
     ],
     [
@@ -771,6 +936,11 @@
     [
       "release_public_bundles",
       "portfolio_public_style_sources",
+      1
+    ],
+    [
+      "release_replica",
+      "release_preflight",
       1
     ],
     [

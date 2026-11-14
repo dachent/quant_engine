@@ -29,7 +29,7 @@ ROOTS = {
 }
 # a refusal about the VALUE of a dummy argument is not an argv mismatch; these are about the SHAPE of the command
 STRUCTURAL = re.compile(
-    r"unrecognized arguments|the following arguments are required|expected (one|at least one|\d+) arguments?"
+    r"unrecognized arguments|the following arguments are required|expected (one|at least one|at most one|\d+) arguments?"
     r"|ambiguous option|invalid choice: 'x'|not allowed with argument|one of the arguments .* is required"
 )
 # a typed option takes the first of these its `type=` accepts (so int/float/date options are not value refusals)
@@ -76,15 +76,35 @@ def _typed(parser: argparse.ArgumentParser, args: list[str]) -> list[str]:
                     continue
                 out[i + 1] = probe
                 break
+            else:
+                raise _Mismatch(
+                    f"{token}: its type accepts none of the probe values {PROBES}"
+                )
     return out
 
 
+def _module_file(module: str) -> Path:
+    """The source file of ``python -m <module>`` in one of the repo's packages."""
+    relative = Path(*module.split(".")).with_suffix(".py")
+    found = [
+        p / relative
+        for p in REPO_ROOT.glob("packages/*/src")
+        if (p / relative).is_file()
+    ]
+    assert found, f"no source file for module {module}"
+    return found[0]
+
+
 def _command(argv: list[str]) -> tuple[Path, list[str]] | None:
+    if len(argv) < 3 and argv[:2] == ["{python}", "-m"]:
+        return None
+    if len(argv) >= 3 and argv[:2] == ["{python}", "-m"]:
+        return _module_file(argv[2]), [_dummy(x) for x in argv[3:]]
     if len(argv) < 2 or argv[0] != "{python}":
         return None
     root = next((r for r in ROOTS if argv[1].startswith(r + "/")), None)
     if root is None:
-        return None  # -m modules and node scripts are not argparse scripts of this repo
+        return None  # a script outside this repo's tool roots
     return ROOTS[root] / argv[1][len(root) + 1 :], [_dummy(x) for x in argv[2:]]
 
 
@@ -217,3 +237,48 @@ def test_a_typed_option_gets_a_value_its_type_accepts(
 ) -> None:
     body = "p.add_argument('--m', choices=['q'])\np.parse_args()"
     _check("typed", _toy(tmp_path, body), ["--a", "x", "--m", "x"], monkeypatch)
+
+
+def _node_stages() -> list[tuple[str, Path, list[str]]]:
+    found = []
+    for stage in GRAPH["stages"]:
+        argv = _flatten(stage.get("argv", []))
+        if argv and argv[0] == "{node}":
+            script = REPO_ROOT / argv[1].replace("{repo_root}/", "")
+            found.append((stage["id"], script, [_dummy(x) for x in argv[2:]]))
+    return found
+
+
+@pytest.mark.parametrize(("stage_id", "script", "args"), _node_stages())
+def test_node_stage_argv_is_name_value_pairs_the_script_reads(
+    stage_id: str, script: Path, args: list[str]
+) -> None:
+    """The node QA scripts take ``--name value`` pairs and read ``options.name``."""
+    assert script.is_file(), f"stage {stage_id}: {script} does not exist"
+    source = script.read_text(encoding="utf-8")
+    assert len(args) % 2 == 0, f"stage {stage_id}: {args} are not name/value pairs"
+    for name, value in zip(args[::2], args[1::2], strict=True):
+        assert name.startswith("--") and value, (
+            f"stage {stage_id}: bad pair {name} {value}"
+        )
+        assert re.search(rf"[.'\"\[]{re.escape(name[2:])}(?![A-Za-z0-9_])", source), (
+            f"stage {stage_id}: {script.name} never reads {name}"
+        )
+
+
+def test_module_and_node_stages_are_covered() -> None:
+    ids = {stage_id for stage_id, _, _ in _stages()}
+    assert {"attest", "replica-attest"} <= ids
+    assert {i for i, _, _ in _node_stages()} == {"qa-browser", "qa-interaction"}
+
+
+def test_the_argv_test_rejects_an_option_whose_type_accepts_no_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = "p.add_argument('--k', type=lambda v: 1 / 0)\np.parse_args()"
+    with pytest.raises(pytest.fail.Exception):
+        _check("untypable", _toy(tmp_path, body), ["--a", "x", "--k", "x"], monkeypatch)
+
+
+def test_at_most_one_argument_is_a_structural_error() -> None:
+    assert STRUCTURAL.search("argument --o: expected at most one argument")

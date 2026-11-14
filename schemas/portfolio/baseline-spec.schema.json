@@ -74,6 +74,21 @@
         "strategy-live-metrics": {"$ref": "#/$defs/source_ref"}
       }
     },
+    "statement_reserves": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "size_bytes"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "size_bytes": {"type": "integer", "minimum": 1},
+          "role": {"enum": ["RESERVE", "EXCLUDED_IMMATERIAL"]}
+        }
+      }
+    },
     "provider_generations": {
       "type": "object",
       "additionalProperties": false,

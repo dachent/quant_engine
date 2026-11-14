@@ -1,0 +1,1231 @@
+"""Provider-observed zero-financing days from pinned provider monthly statements.
+
+A pure reader of statement text (extracted by ``pdftotext -layout``): per account-month it
+decides whether the statement proves that the account borrowed nothing on any day of its
+period, and emits one ``OBSERVED_ZERO_FINANCING_DAY`` row per calendar day of a qualifying
+period, pinned to the statement PDF (sha256 and page).  A period that does not qualify
+yields no zero rows and is listed as unobserved with its reason; an absent field refuses.
+
+Rules (control ruling 2026-11-14), per statement:
+
+* retirement-type statement (IRA / Roth / 401K ...) with no margin loan block: no margin
+  feature, every day of the period is a zero day;
+* otherwise the statement needs the Margin Loan block and ALL of: opening and closing
+  margin loan balance exactly $0.00, no margin-interest expense posting in the period
+  (interest accrues daily, so a debit day would post), no margin-loan borrow/repay
+  transaction line;
+* the account number printed on the statement must match the account the mapping names.
+
+The mapping from the file label (h8 = sha256("acct-<provider>-<last3>")[:8]) to the ledger
+account id, and the last three digits, live in a local-only, hash-pinned input file; the
+digits never enter the artifact.
+"""
+
+from __future__ import annotations
+
+import argparse
+import calendar
+import hashlib
+import json
+from datetime import date, timedelta
+from decimal import Decimal
+from pathlib import Path
+import re
+import subprocess
+import sys
+from typing import Any, Callable, Final, Mapping, Sequence, cast
+
+ARTIFACT_ID: Final = "zero-financing-observations"
+SCHEMA_VERSION: Final = 1
+BASIS: Final = "OBSERVED_ZERO_FINANCING_DAY"
+CLASSIFICATION: Final = "ZERO_FINANCING_OBSERVED"
+
+_MONTHS: Final = {name: i for i, name in enumerate(calendar.month_name) if name}
+_PERIOD = re.compile(
+    r"(?P<m1>[A-Z][a-z]+) (?P<d1>\d{1,2})(?:, (?P<y1>\d{4}))?\s*-\s*"
+    r"(?:(?P<m2>[A-Z][a-z]+) )?(?P<d2>\d{1,2}), (?P<y2>\d{4})"
+)
+_ACCOUNT_MASK = re.compile(r"\*{4}-\*\d{3}|\d{4}-\d{4}")
+_HEADER_LINES = 80
+_RETIREMENT = re.compile(
+    r"(?<![A-Z])(IRA|ROTH IRA|SEP IRA|ROLLOVER IRA)(?![A-Z])|401K|403B|KEOGH|"
+    r"RETIREMENT",
+)
+_LOAN_MOVE = re.compile(
+    r"^[ \t]*\d{2}/\d{2}[ \t].*?\b(margin[ \t]+loan[ \t]+(advance|payment|repayment)|"
+    r"loan[ \t]+(advance|repayment)|margin[ \t]+borrow)",
+    re.M | re.I,
+)
+# A margin-interest posting names the days it charged: "INTEREST 03/30THRU 04/28".  Those
+# days were financing days whichever statement month they fall in (a debit on the 30th
+# posts in the NEXT statement), so they are never zero days.
+_INTEREST_PERIOD = re.compile(
+    r"INTEREST[ \t]+(\d{2})/(\d{2})[ \t]*THRU[ \t]+(\d{2})/(\d{2})"
+)
+_SHA = re.compile(r"[0-9a-f]{64}")
+
+
+class ZeroFinancingError(ValueError):
+    """A statement or input cannot be read as complete evidence."""
+
+
+class CaptureClaimsDiffer(ZeroFinancingError):
+    """A capture's own claims disagree with the raw bytes it pins: that capture is not
+    evidence (its account stays unobserved), the other accounts are unaffected."""
+
+
+def statement_label(provider_id: str, last3: str) -> str:
+    return hashlib.sha256(f"acct-{provider_id}-{last3}".encode()).hexdigest()[:8]
+
+
+_MONEY_AMOUNT = re.compile(r"\(?-?\$[\d,]+\.\d\d\)?")
+_MARGIN_INTEREST_WORDS = re.compile(r"margin\s+interest", re.I)
+_DATED_LINE = re.compile(r"^[ \t]*\d{1,2}/\d{1,2}(/\d{2,4})?[ \t]")
+_AMOUNT_AT_END = re.compile(r"\(?-?[\d,]+\.\d\d\)?[ \t]*$")
+_TRANSACTIONS_SUMMARY = "Transactions - Summary"
+
+
+def _parse_money(amount_text: str) -> Decimal:
+    """One printed amount as a signed number: "$1,250.00", "($1,250.00)", "-$5.00"."""
+
+    text = amount_text.strip()
+    negative = text.startswith("(") or "-" in text
+    digits = re.sub(r"[^\d.]", "", text)
+    if not re.fullmatch(r"\d+(\.\d\d)", digits) and not re.fullmatch(r"\d+", digits):
+        raise ZeroFinancingError("margin loan balance is not a number")
+    value = Decimal(digits)
+    return -value if negative else value
+
+
+def _loan_block(lines: list[str]) -> tuple[Decimal, Decimal] | None:
+    """(opening, closing) margin loan balance of the Margin Loan block, if printed.
+
+    The first balance row under the column headings must hold at least two printed
+    amounts, each in a recognised form (``$x``, ``($x)``, ``-$x``); any other number in
+    the row, or a missing row, refuses."""
+
+    headers = [
+        n
+        for n, x in enumerate(lines)
+        if "Opening Margin" in x and "Closing Margin" in x
+    ]
+    if len(headers) > 1:
+        raise ZeroFinancingError("statement has more than one margin loan block")
+    for number, line in enumerate(lines):
+        if "Opening Margin" in line and "Closing Margin" in line:
+            for follow in lines[number + 1 : number + 7]:
+                amounts = _MONEY_AMOUNT.findall(follow)
+                if len(amounts) >= 2:
+                    if len(amounts) < 4:
+                        # opening, closing, funds available, buying power: a row with
+                        # fewer cannot be anchored to its labels (a blank closing balance
+                        # would pair the opening balance with "Funds Available")
+                        raise ZeroFinancingError(
+                            "margin loan block row is not four amounts"
+                        )
+                    if follow.count("$") != len(amounts):
+                        raise ZeroFinancingError(
+                            "margin loan block has an unparsed amount"
+                        )
+                    return _block_amounts(line, follow)
+            raise ZeroFinancingError("margin loan block has no balances")
+    return None
+
+
+def _margin_interest_postings(lines: list[str]) -> tuple[int, bool]:
+    """(dated margin-interest posting lines, ambiguous).
+
+    A posting is a dated line (plus its next two lines, for wrapped descriptions) that
+    names margin interest, in any case.  A line that names margin interest and ends in an
+    amount without being a recognised posting is ambiguous: the caller refuses."""
+
+    postings = 0
+    ambiguous = False
+    consumed: set[int] = set()
+    for number, line in enumerate(lines):
+        if _DATED_LINE.match(line):
+            window = range(number, min(number + 3, len(lines)))
+            if _MARGIN_INTEREST_WORDS.search(" ".join(lines[i] for i in window)):
+                postings += 1
+                consumed.update(window)
+    for number, line in enumerate(lines):
+        if (
+            number not in consumed
+            and _MARGIN_INTEREST_WORDS.search(line)
+            and _AMOUNT_AT_END.search(line)
+        ):
+            ambiguous = True
+    return postings, ambiguous
+
+
+def _incomplete(lines: list[str]) -> str | None:
+    """Why a statement cannot be read as complete, or None.
+
+    Every statement prints a "Transactions - Summary".  When transaction details are
+    printed they must end in exactly one "Total Transactions" line (a dropped page breaks
+    that); when none are printed, the summary may state only $0.00 amounts."""
+
+    text = "\n".join(lines)
+    if _TRANSACTIONS_SUMMARY not in text:
+        return "TRANSACTIONS_SUMMARY_ABSENT"
+    details = sum(1 for line in lines if "Transaction Details" in line)
+    totals = sum(1 for line in lines if "Total Transactions" in line)
+    if details:
+        return None if totals == 1 else "TRANSACTION_DETAILS_WITHOUT_ONE_TOTAL"
+    for number, line in enumerate(lines):
+        if _TRANSACTIONS_SUMMARY in line:
+            for follow in lines[number + 1 : number + 9]:
+                amounts = _MONEY_AMOUNT.findall(follow)
+                if len(amounts) >= 6:
+                    # beginning cash, the activity columns, ending cash: activity is zero
+                    if any(_parse_money(t) != 0 for t in amounts[1:-1]):
+                        return "ACTIVITY_SUMMARY_WITHOUT_TRANSACTION_DETAILS"
+                    return None
+            return "TRANSACTIONS_SUMMARY_UNREADABLE"
+    return None
+
+
+def _interest_periods(text: str, period_end: date) -> list[tuple[date, date]]:
+    out: list[tuple[date, date]] = []
+    for match in _INTEREST_PERIOD.finditer(text):
+        m1, d1, m2, d2 = (int(g) for g in match.groups())
+        year2 = period_end.year if m2 <= period_end.month else period_end.year - 1
+        year1 = year2 if m1 <= m2 else year2 - 1
+        try:
+            out.append((date(year1, m1, d1), date(year2, m2, d2)))
+        except ValueError:
+            raise ZeroFinancingError("margin interest period is not a date") from None
+    return out
+
+
+_TABLE_RANGE = re.compile(r"(\d{2})/(\d{2})-(\d{2})/(\d{2})")
+
+
+def _interest_table_ranges(
+    lines: list[str], period_end: date
+) -> list[tuple[date, date]]:
+    """The day ranges of the statement's "Margin Interest" table (average daily balance,
+    rate and interest per range): each range is a stretch of days with a margin debit."""
+
+    out: list[tuple[date, date]] = []
+    for number, line in enumerate(lines):
+        if not re.match(r"[ \t]*Margin Interest([ \t]{2,}\S.*)?$", line) or (
+            _MONEY_AMOUNT.search(line)
+        ):
+            continue
+        for follow in lines[number + 1 : number + 14]:
+            for match in _TABLE_RANGE.finditer(follow):
+                m1, d1, m2, d2 = (int(g) for g in match.groups())
+                year2 = (
+                    period_end.year if m2 <= period_end.month else period_end.year - 1
+                )
+                year1 = year2 if m1 <= m2 else year2 - 1
+                try:
+                    out.append((date(year1, m1, d1), date(year2, m2, d2)))
+                except ValueError:
+                    raise ZeroFinancingError(
+                        "margin interest range is not a date"
+                    ) from None
+    return out
+
+
+def _labelled(lines: list[str], label: str, window: int = 3) -> list[str]:
+    """The lines that carry or directly follow every line containing ``label``."""
+
+    out: list[str] = []
+    for number, line in enumerate(lines):
+        if label in line:
+            out.extend(lines[number : number + window])
+    return out
+
+
+def _page_of(text: str, needle: str) -> int | None:
+    for number, page in enumerate(text.split("\f"), start=1):
+        if needle in page:
+            return number
+    return None
+
+
+def _retirement_type(lines: list[str]) -> bool:
+    """The account type, from the statement's own title line: the first non-blank line,
+    cut at the "Account Number" label that shares it ("Schwab One Account of",
+    "Schwab Personal Choice Retirement Account (PCRA) of").  Holder names, custodian
+    lines and promotions further down are never the account type."""
+
+    for line in lines[:_HEADER_LINES]:
+        if line.strip():
+            title = line.split("Account Number")[0]
+            return bool(_RETIREMENT.search(title.upper()))
+    return False
+
+
+def _block_amounts(header: str, row: str) -> tuple[Decimal, Decimal]:
+    """Opening and closing amounts of the row, anchored to the header's own labels (the
+    columns of other blocks may share the line): the amount that starts nearest each
+    label's column, within the label's width; an unmatched label refuses."""
+
+    out = []
+    for label in ("Opening Margin", "Closing Margin"):
+        position = header.index(label)
+        candidates = [
+            (abs(m.start() - position), m)
+            for m in _MONEY_AMOUNT.finditer(row)
+            if abs(m.start() - position) <= 14
+        ]
+        if not candidates:
+            raise ZeroFinancingError("margin loan block amount is not under its label")
+        out.append(_parse_money(min(candidates, key=lambda c: c[0])[1].group(0)))
+    return out[0], out[1]
+
+
+def parse_statement(text: str, file_period_end: date | None = None) -> dict[str, Any]:
+    """Facts of one statement.  The period comes from the statement's own labelled
+    "Statement Period" and the account from its labelled "Account Number" (every
+    occurrence must agree); ``file_period_end`` only records whether the file label
+    matches (a mismatch is reported, never trusted)."""
+
+    lines = text.splitlines()
+    periods = set()
+    for chunk in _labelled(lines, "Statement Period"):
+        for match in _PERIOD.finditer(chunk):
+            m1 = _MONTHS.get(match["m1"])
+            m2 = _MONTHS.get(match["m2"] or match["m1"])
+            if m1 is None or m2 is None:
+                continue
+            try:
+                y2 = int(match["y2"])
+                end = date(y2, m2, int(match["d2"]))
+                y1 = int(match["y1"]) if match["y1"] else (y2 if m1 <= m2 else y2 - 1)
+                start = date(y1, m1, int(match["d1"]))
+            except ValueError:
+                continue
+            if start <= end:
+                if (end - start).days > 31:
+                    raise ZeroFinancingError("statement period is longer than a month")
+                periods.add((start, end))
+    if len(periods) != 1:
+        raise ZeroFinancingError(
+            "statement period is absent"
+            if not periods
+            else "statement period is ambiguous"
+        )
+    ((start, end),) = periods
+    numbers = {
+        re.sub(r"\D", "", n)[-3:]
+        for chunk in _labelled(lines, "Account Number")
+        for n in _ACCOUNT_MASK.findall(chunk)
+    }
+    if len(numbers) != 1:
+        raise ZeroFinancingError("statement account number is absent or ambiguous")
+    postings, ambiguous = _margin_interest_postings(lines)
+    return {
+        "last3": next(iter(numbers)),
+        "period_start": start,
+        "period_end": end,
+        "file_label_matches": file_period_end is None or file_period_end == end,
+        # the account type is read from the statement header only, never from disclosures
+        "retirement": _retirement_type(lines),
+        "loan_block": _loan_block(lines),
+        "incomplete": _incomplete(lines),
+        "margin_interest_postings": postings,
+        "margin_interest_ambiguous": ambiguous,
+        "loan_movements": len(_LOAN_MOVE.findall(text)),
+        "interest_periods": _interest_periods(text, end)
+        + _interest_table_ranges(lines, end),
+        "interest_table_ranges": len(_interest_table_ranges(lines, end)),
+        "block_page": _page_of(text, "Margin Loan Information"),
+        "header_page": _page_of(text, "Statement Period"),
+    }
+
+
+def verdict(facts: Mapping[str, Any]) -> tuple[str, str]:
+    """('ZERO' | 'FINANCING' | 'UNVERIFIED', reason) for one statement period.
+
+    A margin account's ZERO is provisional: its days are zero only once the NEXT statement
+    is pinned and shows no interest for them (``build`` decides)."""
+
+    if facts["incomplete"]:
+        return "UNVERIFIED", str(facts["incomplete"])
+    if facts["margin_interest_ambiguous"]:
+        return "UNVERIFIED", "AMBIGUOUS_MARGIN_INTEREST_LINE"
+    block = facts["loan_block"]
+    if block is None:
+        if facts["retirement"]:
+            return "ZERO", "RETIREMENT_ACCOUNT_NO_MARGIN_FEATURE"
+        return "UNVERIFIED", "NO_MARGIN_LOAN_BLOCK_AND_NOT_A_RETIREMENT_STATEMENT"
+    if facts["retirement"]:
+        return "UNVERIFIED", "RETIREMENT_STATEMENT_WITH_A_MARGIN_LOAN_BLOCK"
+    opening, closing = block
+    if opening != 0 or closing != 0:
+        return "FINANCING", "MARGIN_LOAN_BALANCE_NONZERO"
+    if facts["margin_interest_postings"]:
+        return "FINANCING", "MARGIN_INTEREST_POSTED_IN_PERIOD"
+    if facts["interest_table_ranges"]:
+        return "FINANCING", "MARGIN_DEBIT_DAYS_IN_PERIOD"
+    if facts["loan_movements"]:
+        return "FINANCING", "MARGIN_LOAN_MOVEMENT_IN_PERIOD"
+    return "ZERO", "LOAN_ZERO_NO_INTEREST_NO_MOVEMENT"
+
+
+def _days(start: date, end: date) -> list[date]:
+    return [start + timedelta(days=n) for n in range((end - start).days + 1)]
+
+
+def extractor_identity() -> str:
+    """The text extractor's own version line: a different extractor can read the same bytes
+    differently, so it is part of the generation identity."""
+
+    try:
+        result = subprocess.run(["pdftotext", "-v"], capture_output=True, check=False)
+    except OSError:
+        return "pdftotext-unavailable"
+    return (result.stderr + result.stdout).decode("utf-8", errors="replace").strip()
+
+
+def _pdftotext(path: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["pdftotext", "-layout", str(path), "-"],
+            check=True,
+            capture_output=True,
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        raise ZeroFinancingError(
+            f"statement text cannot be extracted: {path.name}"
+        ) from exc
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def load_mapping(raw: bytes, provider_id: str) -> dict[str, tuple[str, str]]:
+    """label -> (ledger account id, last3) from the local-only mapping input."""
+
+    top = json.loads(raw)
+    if (
+        not isinstance(top, dict)
+        or set(top) != {"schema_version", "accounts"}
+        or top["schema_version"] != 1
+        or not isinstance(top["accounts"], list)
+        or not top["accounts"]
+    ):
+        raise ZeroFinancingError("mapping shape differs")
+    out: dict[str, tuple[str, str]] = {}
+    seen_last3: set[str] = set()
+    seen_accounts: set[str] = set()
+    for item in top["accounts"]:
+        if not isinstance(item, dict) or set(item) != {"ledger_account_id", "last3"}:
+            raise ZeroFinancingError("mapping row keys differ")
+        account, last3 = item["ledger_account_id"], item["last3"]
+        if (
+            not isinstance(account, str)
+            or not re.fullmatch(r"account-[0-9a-f]{16}", account)
+            or not isinstance(last3, str)
+            or not re.fullmatch(r"\d{3}", last3)
+        ):
+            raise ZeroFinancingError("mapping row is invalid")
+        label = statement_label(provider_id, last3)
+        if label in out or last3 in seen_last3 or account in seen_accounts:
+            raise ZeroFinancingError("mapping names an account or last-3 twice")
+        seen_last3.add(last3)
+        seen_accounts.add(account)
+        out[label] = (account, last3)
+    return out
+
+
+def load_sums(raw: bytes) -> dict[str, str]:
+    sums: dict[str, str] = {}
+    for line in raw.decode("utf-8").splitlines():
+        if not line.strip():
+            continue
+        match = re.fullmatch(r"([0-9a-f]{64}) [ *](\S.*)", line.strip())
+        if match is None or match[2] in sums:
+            raise ZeroFinancingError("SHA256SUMS line is invalid or repeated")
+        sums[match[2]] = match[1]
+    return sums
+
+
+_OUTGOING = re.compile(
+    r"(?i)(buy|bought|purchas|withdraw|transfer|journal|wire|fee|margin int|"
+    r"interest on debit|loan|advance|debit|sell short|expense|check|\batm\b)"
+)
+# the only entries that can never create a debit: a credit with a readable positive
+# amount whose action is one of these stems (anything else voids the bracket)
+_CREDIT_ACTION = re.compile(
+    r"(?i)^\s*(cash dividend|qual[\w.]* dividend|reinvest dividend|bank interest|"
+    r"credit interest|moneylink deposit|deposit|cash in lieu|long term cap gain|"
+    r"short term cap gain|special dividend|pr yr cash div|pr yr div reinvest)\s*$"
+)
+_TX_AMOUNT = re.compile(r"\(?-?\$?\d[\d,]*(\.\d\d)?\)?-?")
+
+
+def _tx_amount(text: object) -> Decimal | None:
+    """A transaction amount as a signed number, or None when it is not readable."""
+
+    raw = str(text).strip() if text is not None else ""
+    if not _TX_AMOUNT.fullmatch(raw):
+        return None
+    negative = raw.startswith(("(", "-")) or raw.endswith("-")
+    value = Decimal(re.sub(r"[^\d.]", "", raw))
+    return -value if negative else value
+
+
+def _transactions_cannot_debit(items: list[dict[str, Any]]) -> tuple[bool, str]:
+    """(ok, reason).  Every amount must parse; a same-day reinvested dividend (credit X
+    and its share purchase -X on the same symbol) nets to zero; every remaining entry
+    must be a positive credit of an allowlisted action that names no outgoing word."""
+
+    entries: list[tuple[str, str, str, Decimal, str]] = []
+    for item in items:
+        amount = _tx_amount(item["amount"])
+        if amount is None:
+            return False, "CAPTURE_TRANSACTION_AMOUNT_UNREADABLE"
+        entries.append(
+            (
+                str(item["date"]),
+                str(item["action"]),
+                str(item.get("symbol", "")),
+                amount,
+                f"{item['action']} {item['description']}",
+            )
+        )
+    remaining = list(entries)
+    for entry in entries:
+        if entry[1].strip().lower() == "reinvest dividend" and entry in remaining:
+            for other in remaining:
+                if (
+                    other[1].strip().lower() == "reinvest shares"
+                    and other[0] == entry[0]
+                    and other[2] == entry[2]
+                    and other[3] == -entry[3]
+                ):
+                    remaining.remove(entry)
+                    remaining.remove(other)
+                    break
+    for _day, action, _symbol, amount, text in remaining:
+        if (
+            amount <= 0
+            or not _CREDIT_ACTION.fullmatch(action)
+            or _OUTGOING.search(text)
+        ):
+            return False, "CAPTURE_TRANSACTION_CAN_CREATE_A_DEBIT"
+    return True, ""
+
+
+_CAPTURE_KEYS = frozenset(
+    {
+        "schema_version",
+        "provider_id",
+        "account_last3",
+        "captured_at_utc",
+        "capture_date",
+        "window_start",
+        "window_end",
+        "balances",
+        "transactions_reported_count",
+        "transactions",
+        "transactions_complete",
+        "raw_files",
+    }
+)
+
+
+# Extra keys (how the page was read, row labels ...) are descriptive and ignored: only
+# the required keys below can influence the verdict.
+
+
+_PAGE_SUBJECT = re.compile(
+    r"Balance Subject to Interest[^\d$(-]*(\(?-?\$?-?[\d,]+\.\d\d\)?)"
+)
+_PAGE_CASH_TOTAL = re.compile(
+    r"Cash & Cash Investments Total[^\d$(-]*(\(?-?\$?-?[\d,]+\.\d\d\)?)"
+)
+_PAGE_DEBIT_LINE = re.compile(r"(?i)margin loan|debit balance|margin debit")
+
+
+_ROW_DATE = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})")
+
+
+def _row_date(text: object) -> date:
+    """A history row's own date: the first date printed ("MM/DD/YYYY"); a trailing
+    "as of MM/DD/YYYY" is ignored (the row date decides the window)."""
+
+    match = _ROW_DATE.match(str(text).strip())
+    if match is None:
+        raise ValueError("history row date is unreadable")
+    return date(int(match[3]), int(match[1]), int(match[2]))
+
+
+def _recompute_capture(
+    top: Mapping[str, Any],
+    files: list[Any],
+    raw_dir: Path | None,
+    last3: str,
+    margin_account: bool,
+) -> Decimal | None:
+    """Re-derive the capture's transactions and balances from its pinned raw files and
+    refuse any difference with the JSON's own claims.  Returns the raw margin balance."""
+
+    assert raw_dir is not None
+    histories = [
+        f for f in files if f["kind"] == "history" and f["name"].endswith(".json")
+    ]
+    balances_json = [
+        f for f in files if f["kind"] == "balances" and f["name"].endswith(".json")
+    ]
+    balances_text = [
+        f for f in files if f["kind"] == "balances" and f["name"].endswith(".txt")
+    ]
+    if len(histories) != 1:
+        raise ZeroFinancingError("capture needs exactly one raw history response")
+    window_start = date.fromisoformat(top["window_start"])
+    window_end = date.fromisoformat(top["window_end"])
+    try:
+        history = json.loads((raw_dir / histories[0]["name"]).read_bytes())
+        raw_rows = history["brokerageTransactions"]
+        derived = []
+        for row in raw_rows:
+            when = _row_date(row["transactionDate"])
+            if window_start <= when <= window_end:
+                derived.append(
+                    (when.isoformat(), str(row["action"]), str(row["amount"]))
+                )
+        claimed = [
+            (str(t["date"]), str(t["action"]), str(t["amount"]))
+            for t in top["transactions"]
+        ]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ZeroFinancingError("capture raw history is unreadable") from exc
+    if history.get("bookmark"):
+        # more pages exist: the rows held must reach back past the window's start
+        # (newest first), or the window is not fully covered
+        earliest = min(_row_date(r["transactionDate"]) for r in raw_rows)
+        if raw_rows == [] or earliest >= window_start:
+            raise ZeroFinancingError(
+                "capture raw history does not reach its window start"
+            )
+    if sorted(derived) != sorted(claimed):
+        raise CaptureClaimsDiffer("capture transactions differ from the raw history")
+    if len(balances_json) != 1:
+        raise ZeroFinancingError("capture needs exactly one raw balances response")
+    try:
+        balances = json.loads((raw_dir / balances_json[0]["name"]).read_bytes())
+        entries = [
+            e
+            for e in balances["brokerageAccountList"]
+            if str(e.get("accountId", ""))[-3:] == last3
+        ]
+        raw_margin = (
+            Decimal(str(entries[0]["cashInvestments"]["marginBalance"]))
+            if len(entries) == 1
+            else None
+        )
+    except (KeyError, TypeError, ArithmeticError, ValueError) as exc:
+        raise ZeroFinancingError("capture raw balances are unreadable") from exc
+    if raw_margin is None:
+        raise ZeroFinancingError("capture raw balances do not name the account once")
+    claimed_balances = top["balances"]
+    page = None
+    if len(balances_text) == 1:
+        page = (raw_dir / balances_text[0]["name"]).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    elif len(balances_text) > 1 or margin_account:
+        raise ZeroFinancingError("capture needs exactly one raw balances page")
+    subject = _page_amount(page, _PAGE_SUBJECT) if page is not None else None
+    cash_total = _page_amount(page, _PAGE_CASH_TOTAL) if page is not None else None
+    if page is not None and (
+        _PAGE_DEBIT_LINE.search(page) or (cash_total is not None and cash_total < 0)
+    ):
+        raise CaptureClaimsDiffer("capture page shows a debit or negative cash")
+    # the API marginBalance field is the account's cash credit when it is non-zero: it
+    # is only that when the page's own cash total says so, to the cent
+    if raw_margin != 0 and (cash_total is None or raw_margin != cash_total):
+        if margin_account:
+            raise CaptureClaimsDiffer(
+                "capture raw marginBalance is not the page's cash total"
+            )
+        return raw_margin  # a retirement-type account that shows unexplained borrowing
+    if margin_account:
+        if subject is None or subject < 0:
+            raise CaptureClaimsDiffer(
+                "capture subject-to-interest is not on its raw page"
+            )
+        if not isinstance(claimed_balances, dict):
+            raise ZeroFinancingError("capture balances are absent")
+        for key in ("margin_loan_balance", "balance_subject_to_interest"):
+            claimed_text = claimed_balances.get(key)
+            if not isinstance(claimed_text, str) or not claimed_text.strip():
+                raise ZeroFinancingError(f"capture {key} is absent")
+            try:
+                value = _parse_money("$" + claimed_text.strip().lstrip("$"))
+            except ZeroFinancingError as exc:
+                raise ZeroFinancingError(f"capture {key} is unreadable") from exc
+            if value != subject:
+                raise CaptureClaimsDiffer(f"capture {key} differs from its page")
+    return Decimal(0)
+
+
+def _page_amount(text: str, pattern: "re.Pattern[str]") -> Decimal | None:
+    match = pattern.search(text)
+    if match is None:
+        return None
+    try:
+        return _parse_money(match.group(1))
+    except ZeroFinancingError:
+        return None
+
+
+def _zero_amount(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        return _parse_money(value if "$" in value else "$" + value.strip()) == 0
+    except ZeroFinancingError:
+        return False
+
+
+def evaluate_capture(
+    raw: bytes,
+    *,
+    provider_id: str,
+    last3: str,
+    last_end: date,
+    cutoff: date,
+    raw_dir: Path | None,
+    margin_account: bool = True,
+) -> tuple[bool, str]:
+    """(bracket holds, reason) for a dated account capture after the last statement.
+
+    Structure, account, window and raw-file hashes are refused (an exception); a capture
+    that is sound but shows borrowing evidence (nonzero balance, a transaction that can
+    create a debit, incomplete list) only fails the bracket, leaving those days
+    unobserved."""
+
+    try:
+        top = json.loads(raw)
+    except ValueError as exc:
+        raise ZeroFinancingError("capture is not JSON") from exc
+    if (
+        not isinstance(top, dict)
+        or not _CAPTURE_KEYS <= set(top)
+        or top["schema_version"] != 1
+    ):
+        raise ZeroFinancingError("capture shape differs")
+    if top["provider_id"] != provider_id:
+        raise ZeroFinancingError("capture is for another provider")
+    if top["account_last3"] != last3:
+        raise ZeroFinancingError("capture account differs from the mapped account")
+    try:
+        capture_date = date.fromisoformat(top["capture_date"])
+        window_start = date.fromisoformat(top["window_start"])
+        window_end = date.fromisoformat(top["window_end"])
+    except (TypeError, ValueError) as exc:
+        raise ZeroFinancingError("capture dates are invalid") from exc
+    if (
+        capture_date < cutoff
+        or capture_date <= last_end
+        or window_end != capture_date
+        or window_start > window_end
+        or window_start > last_end + timedelta(days=1)
+    ):
+        raise ZeroFinancingError(
+            "capture does not cover the days after the last statement"
+        )
+    files = top["raw_files"]
+    if not isinstance(files, list) or not files:
+        raise ZeroFinancingError("capture names no raw files")
+    for item in files:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"name", "sha256", "size_bytes", "kind"}
+            or raw_dir is None
+        ):
+            raise ZeroFinancingError("capture raw file entry is invalid")
+        if (
+            not isinstance(item["name"], str)
+            or item["name"] in ("", ".", "..")
+            or "/" in item["name"]
+            or "\\" in item["name"]
+        ):
+            raise ZeroFinancingError("capture raw file name carries a path")
+        path = raw_dir / str(item["name"])
+        content = (
+            path.read_bytes() if path.is_file() and not path.is_symlink() else None
+        )
+        if (
+            content is None
+            or hashlib.sha256(content).hexdigest() != item["sha256"]
+            or len(content) != item["size_bytes"]
+        ):
+            raise ZeroFinancingError("capture raw file identity differs")
+        if item["kind"] not in ("history", "balances"):
+            raise ZeroFinancingError("capture raw file kind is unknown")
+    try:
+        raw_margin = _recompute_capture(top, files, raw_dir, last3, margin_account)
+    except CaptureClaimsDiffer:
+        return False, "CAPTURE_CLAIMS_DIFFER_FROM_RAW"
+    if not margin_account:
+        # a no-margin account type: the capture shows the account at its date; borrowing
+        # evidence on such an account is an anomaly, never extended over
+        if raw_margin is not None and raw_margin != 0:
+            return False, "RETIREMENT_ACCOUNT_SHOWS_BORROWING"
+        return True, "ACCOUNT_EXISTS_AT_CAPTURE"
+    balances = top["balances"]
+    if not isinstance(balances, dict):
+        raise ZeroFinancingError("capture balances are absent")
+    # absent fields refuse; a nonzero balance only fails the bracket
+    for key in ("margin_loan_balance", "balance_subject_to_interest"):
+        if not isinstance(balances.get(key), str) or not balances[key].strip():
+            raise ZeroFinancingError(f"capture {key} is absent")
+    if not (
+        _zero_amount(balances["margin_loan_balance"])
+        and _zero_amount(balances["balance_subject_to_interest"])
+    ):
+        return False, "CAPTURE_MARGIN_BALANCE_NOT_ZERO"
+    transactions = top["transactions"]
+    if not isinstance(transactions, list) or top["transactions_complete"] is not True:
+        return False, "CAPTURE_TRANSACTIONS_NOT_COMPLETE"
+    if top["transactions_reported_count"] != len(transactions):
+        return False, "CAPTURE_TRANSACTION_COUNT_DIFFERS"
+    for item in transactions:
+        if not isinstance(item, dict) or not {
+            "date",
+            "action",
+            "description",
+            "amount",
+        } <= set(item):
+            raise ZeroFinancingError("capture transaction row is invalid")
+        try:
+            when = date.fromisoformat(item["date"])
+        except (TypeError, ValueError) as exc:
+            raise ZeroFinancingError("capture transaction date is invalid") from exc
+        if not window_start <= when <= window_end:
+            raise ZeroFinancingError("capture transaction is outside its window")
+    effect_ok, effect_reason = _transactions_cannot_debit(transactions)
+    if not effect_ok:
+        return False, effect_reason
+    return True, "BRACKET_PROVEN_BY_CAPTURE"
+
+
+def build(
+    pdf_dir: Path,
+    sums: Mapping[str, str],
+    mapping: Mapping[str, tuple[str, str]],
+    *,
+    provider_id: str,
+    extract: Callable[[Path], str] | None = None,
+    artifact_prefix: str | None = None,
+    captures: Mapping[str, bytes] | None = None,
+    capture_dir: Path | None = None,
+    cutoff: date | None = None,
+    history_start: Mapping[str, date] | None = None,
+) -> dict[str, Any]:
+    extract = extract or _pdftotext  # resolved at call time
+    names = sorted(sums)
+    if not names:
+        raise ZeroFinancingError("no statements are pinned")
+    prefix = artifact_prefix or f"{provider_id}-statements"
+    duplicate_periods: list[str] = []
+    interest_days: dict[str, set[date]] = {}
+    unobserved: list[dict[str, Any]] = []
+    # (account, start, end) -> record of the first statement that carries the period
+    periods: dict[tuple[str, date, date], dict[str, Any]] = {}
+    seen_accounts: set[str] = set()
+    sizes: dict[str, int] = {}
+    for name in names:
+        match = re.fullmatch(
+            re.escape(provider_id) + r"-stmt-([0-9a-f]{8})-(\d{4}-\d{2}-\d{2})\.pdf",
+            name,
+        )
+        if match is None:
+            raise ZeroFinancingError(f"unexpected statement file name: {name}")
+        label, day = match.groups()
+        path = pdf_dir / name
+        if not path.is_file() or path.is_symlink():
+            raise ZeroFinancingError(f"pinned statement is missing: {name}")
+        content = path.read_bytes()
+        sizes[name] = len(content)
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != sums[name]:
+            raise ZeroFinancingError(f"statement identity differs: {name}")
+        if label not in mapping:
+            raise ZeroFinancingError(f"statement label is not mapped: {label}")
+        account, last3 = mapping[label]
+        text = extract(path)
+        facts = parse_statement(text, date.fromisoformat(day))
+        if facts["last3"] != last3:
+            raise ZeroFinancingError(
+                f"statement account differs from the mapped account: {label}"
+            )
+        if not facts["file_label_matches"]:
+            raise ZeroFinancingError(
+                f"file name differs from the printed period: {name}"
+            )
+        seen_accounts.add(account)
+        key = (account, facts["period_start"], facts["period_end"])
+        if facts["margin_interest_postings"] > len(facts["interest_periods"]):
+            raise ZeroFinancingError(
+                f"a margin-interest posting names no charged period: {name}"
+            )
+        state, reason = verdict(facts)
+        fingerprint = (
+            facts["last3"],
+            facts["retirement"],
+            facts["loan_block"],
+            facts["margin_interest_postings"],
+            facts["loan_movements"],
+            tuple(facts["interest_periods"]),
+            state,
+        )
+        if key in periods:
+            # the same statement period pinned twice must read identically, or refuse
+            if periods[key]["fingerprint"] != fingerprint:
+                raise ZeroFinancingError(
+                    f"two different statements cover one period: {label}"
+                )
+            duplicate_periods.append(name)
+            continue
+        # the page the evidence sits on: the loan block, else the header (never invented)
+        page = facts["block_page"] if facts["loan_block"] else facts["header_page"]
+        if state == "ZERO" and page is None:
+            raise ZeroFinancingError(f"evidence page is absent: {name}")
+        retirement_type = state == "ZERO" and facts["loan_block"] is None
+        periods[key] = {
+            "fingerprint": fingerprint,
+            "state": state,
+            "reason": reason,
+            "name": name,
+            "digest": digest,
+            "page": page,
+            "type_only": retirement_type,
+            "loan_closing": facts["loan_block"][1] if facts["loan_block"] else None,
+        }
+        for first, last in facts["interest_periods"]:
+            interest_days.setdefault(account, set()).update(_days(first, last))
+    rows: list[dict[str, Any]] = []
+    by_account: dict[str, list[tuple[date, date]]] = {}
+    for account, start, end in periods:
+        by_account.setdefault(account, []).append((start, end))
+    for account, spans in by_account.items():
+        spans.sort()
+        for (_s1, e1), (s2, _e2) in zip(spans, spans[1:], strict=False):
+            if s2 <= e1:
+                raise ZeroFinancingError("two statement periods of one account overlap")
+        for index, (start, end) in enumerate(spans):
+            record = periods[(account, start, end)]
+            state, reason = record["state"], record["reason"]
+            if state == "ZERO" and not record["type_only"]:
+                # a margin account's days are zero only once the NEXT statement is pinned
+                # (a debit's interest posts after the period closes)
+                following = spans[index + 1] if index + 1 < len(spans) else None
+                if following is None or following[0] != end + timedelta(days=1):
+                    state, reason = "UNVERIFIED", "NEXT_STATEMENT_NOT_PINNED"
+                elif periods[(account, *following)]["state"] not in (
+                    "ZERO",
+                    "FINANCING",
+                ):
+                    # the proving statement must itself be fully readable
+                    state, reason = "UNVERIFIED", "NEXT_STATEMENT_NOT_VERIFIED"
+            if state != "ZERO":
+                unobserved.append(
+                    {
+                        "account_id": account,
+                        "period_start": start.isoformat(),
+                        "period_end": end.isoformat(),
+                        "state": state,
+                        "reason": reason,
+                    }
+                )
+                continue
+            for current in _days(start, end):
+                if current in interest_days.get(account, ()):
+                    continue  # charged by a later posting: a financing day
+                rows.append(
+                    {
+                        "account_id": account,
+                        "as_of_date": current.isoformat(),
+                        "amount": {
+                            "currency": "USD",
+                            "status": "AVAILABLE",
+                            "value": "0",
+                        },
+                        "classification": CLASSIFICATION,
+                        "measurement_basis": BASIS,
+                        "provider_id": provider_id,
+                        "source_artifact_id": f"{prefix}/{record['name']}",
+                        "source_artifact_sha256": record["digest"],
+                        "source_field": (
+                            "Statement account type"
+                            if record["type_only"]
+                            else "Margin Loan Information"
+                        ),
+                        "source_page": record["page"],
+                        "verdict_reason": reason,
+                    }
+                )
+    # Days after an account's latest statement, up to the cutoff, from its dated capture:
+    # a retirement type still stands (the account exists at the capture date); a margin
+    # account's final period and the days after it count only when the bracket holds.
+    capture_notes: list[dict[str, Any]] = []
+    if captures and cutoff is not None:
+        last3_of = {account: last3 for account, last3 in mapping.values()}
+        for account, spans in by_account.items():
+            if account not in captures:
+                continue
+            start, end = spans[-1]
+            record = periods[(account, start, end)]
+            raw = captures[account]
+            holds, why = evaluate_capture(
+                raw,
+                provider_id=provider_id,
+                last3=last3_of[account],
+                last_end=end,
+                cutoff=cutoff,
+                raw_dir=capture_dir,
+                margin_account=not record["type_only"],
+            )
+            if record["type_only"] and holds:
+                holds = record["state"] == "ZERO"
+                why = "RETIREMENT_TYPE_THROUGH_CUTOFF" if holds else "TYPE_NOT_PROVEN"
+            elif not record["type_only"] and (
+                record["state"] != "ZERO" or record["loan_closing"] != 0
+            ):
+                holds, why = False, "LAST_STATEMENT_NOT_ZERO"
+            note: dict[str, Any] = {
+                "account_id": account,
+                "bracket": holds,
+                "reason": why,
+            }
+            capture_notes.append(note)
+            if not holds:
+                continue
+            if record["type_only"] and history_start and account in history_start:
+                # An account type is a property of the account, not of a date: days of the
+                # account's ledger history before its first pinned statement rest on the
+                # type rule (printed on a pinned statement) and not on statements.  Refused
+                # when any pinned period of the account is not a clean type-only period.
+                first_start = spans[0][0]
+                earlier = history_start[account]
+                if all(periods[(account, a, b)]["type_only"] for a, b in spans) and (
+                    earlier < first_start
+                ):
+                    anchor = periods[(account, first_start, spans[0][1])]
+                    for current in _days(earlier, first_start - timedelta(days=1)):
+                        rows.append(
+                            {
+                                "account_id": account,
+                                "as_of_date": current.isoformat(),
+                                "amount": {
+                                    "currency": "USD",
+                                    "status": "AVAILABLE",
+                                    "value": "0",
+                                },
+                                "classification": CLASSIFICATION,
+                                "measurement_basis": BASIS,
+                                "provider_id": provider_id,
+                                "source_artifact_id": f"{prefix}/{anchor['name']}",
+                                "source_artifact_sha256": anchor["digest"],
+                                "source_field": "Statement account type (type rule)",
+                                "source_page": anchor["page"],
+                                "verdict_reason": "RETIREMENT_TYPE_WHOLE_HISTORY",
+                            }
+                        )
+                    note["whole_history_days"] = (first_start - earlier).days
+                    note["whole_history_reason"] = "RETIREMENT_TYPE_WHOLE_HISTORY"
+            digest = hashlib.sha256(raw).hexdigest()
+            first_new = end + timedelta(days=1)
+            if not record["type_only"]:
+                # the final statement period is proven by the bracket, not by a next
+                # statement: re-admit its days (minus the days an interest range charged)
+                first_new = start
+                rows[:] = [
+                    r
+                    for r in rows
+                    if not (
+                        r["account_id"] == account
+                        and date.fromisoformat(r["as_of_date"]) >= start
+                    )
+                ]
+                unobserved[:] = [
+                    u
+                    for u in unobserved
+                    if not (
+                        u["account_id"] == account
+                        and u["period_start"] == start.isoformat()
+                    )
+                ]
+            for current in _days(first_new, cutoff):
+                if current in interest_days.get(account, ()):
+                    continue
+                rows.append(
+                    {
+                        "account_id": account,
+                        "as_of_date": current.isoformat(),
+                        "amount": {
+                            "currency": "USD",
+                            "status": "AVAILABLE",
+                            "value": "0",
+                        },
+                        "classification": CLASSIFICATION,
+                        "measurement_basis": BASIS,
+                        "provider_id": provider_id,
+                        "source_artifact_id": f"{prefix}/capture/{account}",
+                        "source_artifact_sha256": digest,
+                        "source_field": "Account capture: margin loan balance and activity",
+                        "source_page": 1,
+                        "verdict_reason": why,
+                    }
+                )
+    removed = sorted(
+        (
+            {"account_id": a, "as_of_date": d.isoformat()}
+            for a, days in interest_days.items()
+            for d in days
+        ),
+        key=lambda r: (r["account_id"], r["as_of_date"]),
+    )
+    keys = [(r["account_id"], r["as_of_date"]) for r in rows]
+    if len(keys) != len(set(keys)):
+        raise ZeroFinancingError("two statements cover the same account day")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_id": ARTIFACT_ID,
+        "provider_id": provider_id,
+        "rows": sorted(rows, key=lambda r: (r["account_id"], r["as_of_date"])),
+        "unobserved_periods": sorted(
+            unobserved, key=lambda r: (r["account_id"], r["period_start"])
+        ),
+        "statements": len(names),
+        "statement_manifest": [
+            {"name": name, "sha256": sums[name], "size_bytes": sizes[name]}
+            for name in names
+        ],
+        "accounts": sorted(seen_accounts),
+        "duplicate_period_files": sorted(duplicate_periods),
+        "interest_charged_days": removed,
+        "coverage_gaps": _gaps(periods),
+        "capture_decisions": sorted(capture_notes, key=lambda n: n["account_id"]),
+    }
+
+
+def _gaps(
+    periods: Mapping[tuple[str, date, date], Any],
+) -> list[dict[str, str]]:
+    """Days between an account's statement periods: never observed by any statement."""
+
+    by_account: dict[str, list[tuple[date, date]]] = {}
+    for account, start, end in periods:
+        by_account.setdefault(account, []).append((start, end))
+    out: list[dict[str, str]] = []
+    for account, spans in sorted(by_account.items()):
+        spans.sort()
+        for (_s1, e1), (s2, _e2) in zip(spans, spans[1:], strict=False):
+            if s2 > e1 + timedelta(days=1):
+                out.append(
+                    {
+                        "account_id": account,
+                        "gap_start": (e1 + timedelta(days=1)).isoformat(),
+                        "gap_end": (s2 - timedelta(days=1)).isoformat(),
+                    }
+                )
+    return out
+
+
+def canonical(artifact: Mapping[str, Any]) -> bytes:
+    return (json.dumps(artifact, indent=1, sort_keys=True) + "\n").encode("utf-8")
+
+
+def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any]]:
+    """The rows of an artifact the ledger may use, or a refusal."""
+
+    if (
+        not isinstance(artifact, dict)
+        or artifact.get("artifact_id") != ARTIFACT_ID
+        or artifact.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(artifact.get("rows"), list)
+        or not isinstance(artifact.get("provider_id"), str)
+        or not artifact["provider_id"].strip()
+    ):
+        raise ZeroFinancingError("zero-financing artifact shape differs")
+    keys = {
+        "account_id",
+        "as_of_date",
+        "amount",
+        "classification",
+        "measurement_basis",
+        "provider_id",
+        "source_artifact_id",
+        "source_artifact_sha256",
+        "source_field",
+        "source_page",
+        "verdict_reason",
+    }
+    seen: set[tuple[str, str]] = set()
+    for row in artifact["rows"]:
+        if not isinstance(row, dict) or set(row) != keys:
+            raise ZeroFinancingError("zero-financing row keys differ")
+        try:
+            date.fromisoformat(row["as_of_date"])
+        except (TypeError, ValueError) as exc:
+            raise ZeroFinancingError("zero-financing row date is invalid") from exc
+        amount = row["amount"]
+        if (
+            row["account_id"] not in accounts
+            or row["measurement_basis"] != BASIS
+            or row["classification"] != CLASSIFICATION
+            or row["provider_id"] != artifact.get("provider_id")
+            or amount != {"currency": "USD", "status": "AVAILABLE", "value": "0"}
+            or not isinstance(row["source_artifact_id"], str)
+            or not row["source_artifact_id"].strip()
+            or not isinstance(row["source_field"], str)
+            or not row["source_field"].strip()
+            or not isinstance(row["source_artifact_sha256"], str)
+            or _SHA.fullmatch(row["source_artifact_sha256"]) is None
+            or not isinstance(row["source_page"], int)
+            or isinstance(row["source_page"], bool)
+            or row["source_page"] < 1
+        ):
+            raise ZeroFinancingError("zero-financing row is invalid")
+        key = (row["account_id"], row["as_of_date"])
+        if key in seen:
+            raise ZeroFinancingError("zero-financing rows repeat an account day")
+        seen.add(key)
+    return cast(list[Mapping[str, Any]], artifact["rows"])
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--provider-id", required=True)
+    parser.add_argument("--pdf-dir", type=Path, required=True)
+    parser.add_argument("--sums", type=Path, required=True)
+    parser.add_argument("--mapping", type=Path, required=True)
+    parser.add_argument("--mapping-sha256", required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args(argv)
+    mapping_raw = args.mapping.read_bytes()
+    if hashlib.sha256(mapping_raw).hexdigest() != args.mapping_sha256:
+        raise ZeroFinancingError("mapping identity differs")
+    artifact = build(
+        args.pdf_dir,
+        load_sums(args.sums.read_bytes()),
+        load_mapping(mapping_raw, args.provider_id),
+        provider_id=args.provider_id,
+    )
+    args.out.write_bytes(canonical(artifact))
+    print(
+        json.dumps(
+            {
+                "rows": len(artifact["rows"]),
+                "unobserved_periods": len(artifact["unobserved_periods"]),
+                "accounts": len(artifact["accounts"]),
+            }
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except ZeroFinancingError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        sys.exit(2)

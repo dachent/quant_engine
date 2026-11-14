@@ -286,12 +286,26 @@ def test_the_planner_refuses_selected_rows_that_are_not_the_sealed_path(
         )
 
 
-def test_the_hybrid_lane_keeps_the_backtest_prehistory_before_the_parent_start(
+def test_the_hybrid_plan_of_an_unadmitted_model_live_strategy_is_its_live_series(
     world: dict[str, Any],
     admitted: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Kill test: an unadmitted model-live layer does not stop the hybrid plan.
+
+    The research series of a strategy with a model-live layer is backtest then model
+    live, never the account.  While the layer is not admitted there is no research
+    series, and the plan carries the strategy's own labelled live-only series (the
+    declared sleeve path) instead of refusing, and without a backtest prehistory.
+    """
+
     artifacts, manifest = _restated(world)
+    coverage = json.loads(artifacts["coverage.json"])
+    ai = next(row for row in coverage["strategies"] if row["strategy_id"] == AI)
+    assert ai["modes"]["LIVE_PLUS_BACKTEST"] == {
+        "reason": "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED",
+        "status": "REQUIRED_NOT_READY",
+    }
     result = _plan(
         world,
         monkeypatch,
@@ -300,24 +314,23 @@ def test_the_hybrid_lane_keeps_the_backtest_prehistory_before_the_parent_start(
         mode="LIVE_PLUS_BACKTEST",
         admission=admitted,
     )
-    lane = result["composition"][SERIES].get("account_basis")
-    parent = _ledger_rows(world)
+    assert (
+        result["composition"][SERIES]["status"]
+        == "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+    )
     primary = [row for row in result["rows"] if row["series_id"] == SERIES]
-    # primary (sleeve): backtest strictly before the sleeve's first live date;
-    # lane (account): backtest strictly before the parent's first live date
+    expected = strategy_basis.rows_from_sleeve_facts(_bytes(_facts()), AI)
+    assert {row["evidence_layer"] for row in primary} == {"ACCOUNT_LIVE"}
+    assert [(row["date"], row["return"]) for row in primary] == [
+        (row["date"], row["return"]) for row in expected
+    ]
+    lane = result["composition"][SERIES].get("account_basis")
     if lane is None:
         pytest.fail("hybrid plan lost the account lane")
-    lane_backtest = [r for r in lane["rows"] if r["evidence_layer"] == "BACKTEST"]
-    primary_backtest = [r for r in primary if r["evidence_layer"] == "BACKTEST"]
-    sleeve_start = min(
-        r["date"] for r in primary if r["evidence_layer"] == "ACCOUNT_LIVE"
-    )
-    assert all(r["date"] < parent[0]["date"] for r in lane_backtest)
-    assert all(r["date"] < sleeve_start for r in primary_backtest)
-    assert {r["date"] for r in lane_backtest} <= {r["date"] for r in primary_backtest}
-    assert [
-        r["date"] for r in lane["rows"] if r["evidence_layer"] == "ACCOUNT_LIVE"
-    ] == [r["date"] for r in parent]
+    assert {row["evidence_layer"] for row in lane["rows"]} == {"ACCOUNT_LIVE"}
+    assert [row["date"] for row in lane["rows"]] == [
+        row["date"] for row in _ledger_rows(world)
+    ]
 
 
 def _rows_csv(path: Path, rows: list[tuple[str, str]]) -> None:

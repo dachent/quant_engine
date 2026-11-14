@@ -40,6 +40,8 @@ from quant_engine.core import (
 )
 from quant_engine.core.contracts import canonical_json_bytes
 
+from portfolio_layer_series import LayerSeriesError, partition_bundle_rows
+
 
 CATALOG_SCHEMA_VERSION: Final = 1
 ADAPTER_VERSION: Final = "1"
@@ -106,18 +108,29 @@ def _build_from_contents(
     rows = list(csv.DictReader(io.StringIO(returns_bytes.decode("utf-8"))))
     if not rows or tuple(rows[0]) != RETURN_FIELDS:
         raise StrategyBacktestsError("bundle return header differs")
-    if {row["evidence_layer"] for row in rows} != {"BACKTEST"}:
-        raise StrategyBacktestsError("bundle carries a non-backtest evidence layer")
-
-    observed: dict[str, list[str]] = {}
-    versions: dict[str, set[str]] = {}
-    for row in rows:
-        observed.setdefault(row["series_id"], []).append(row["date"])
-        versions.setdefault(row["series_id"], set()).add(row["strategy_version"])
-
     declared = source.get("series")
     if not isinstance(declared, list) or not declared:
         raise StrategyBacktestsError("bundle manifest lacks series")
+    # BACKTEST rows, plus MODEL_LIVE rows a series' own segment label declares;
+    # the account, a copy record or any other layer is refused (and so is a
+    # model-live row nothing declares).
+    try:
+        partition_bundle_rows(
+            rows, {str(item.get("series_id")): item for item in declared}
+        )
+    except LayerSeriesError as exc:
+        raise StrategyBacktestsError(
+            f"bundle carries an inadmissible layer: {exc}"
+        ) from exc
+    backtest_rows = [row for row in rows if row["evidence_layer"] == "BACKTEST"]
+    model_live_rows = [row for row in rows if row["evidence_layer"] == "MODEL_LIVE"]
+
+    observed: dict[str, list[str]] = {}
+    versions: dict[str, set[str]] = {}
+    for row in backtest_rows:
+        observed.setdefault(row["series_id"], []).append(row["date"])
+    for row in rows:
+        versions.setdefault(row["series_id"], set()).add(row["strategy_version"])
     series: list[dict[str, Any]] = []
     for entry in sorted(declared, key=lambda item: str(item.get("series_id"))):
         series_id = str(entry.get("series_id"))
@@ -136,19 +149,29 @@ def _build_from_contents(
             raise StrategyBacktestsError(
                 f"bundle series coverage differs from its rows: {series_id}"
             )
-        series.append(
-            {
-                "compatibility_basis": str(entry.get("compatibility_basis")),
-                "coverage_disposition": str(entry.get("coverage_disposition")),
-                "frequency": str(entry.get("frequency")),
-                "history_status": str(entry.get("history_status")),
-                "observed_end": max(dates),
-                "observed_start": min(dates),
-                "return_observations": len(dates),
-                "series_id": series_id,
-                "strategy_version": str(entry.get("strategy_version")),
+        item: dict[str, Any] = {
+            "compatibility_basis": str(entry.get("compatibility_basis")),
+            "coverage_disposition": str(entry.get("coverage_disposition")),
+            "frequency": str(entry.get("frequency")),
+            "history_status": str(entry.get("history_status")),
+            "observed_end": max(dates),
+            "observed_start": min(dates),
+            "return_observations": len(dates),
+            "series_id": series_id,
+            "strategy_version": str(entry.get("strategy_version")),
+        }
+        live_dates = [
+            row["date"] for row in model_live_rows if row["series_id"] == series_id
+        ]
+        if live_dates:
+            # a layer of its own, beside the backtest coverage above
+            item["model_live"] = {
+                "evidence_layer": "MODEL_LIVE",
+                "observed_end": max(live_dates),
+                "observed_start": min(live_dates),
+                "return_observations": len(live_dates),
             }
-        )
+        series.append(item)
 
     as_of = _day(source.get("as_of_date"), "bundle as_of_date")
     starts = [item["observed_start"] for item in series]
@@ -167,7 +190,7 @@ def _build_from_contents(
         "coverage": {
             "observed_end": max(ends),
             "observed_start": min(starts),
-            "return_observations": len(rows),
+            "return_observations": len(backtest_rows),
             "series_count": len(series),
             "status": "COMPLETE_WITHIN_RETAINED_SOURCE_BOUNDARY",
         },
@@ -181,6 +204,11 @@ def _build_from_contents(
             "ONLY_VERSION_COMPATIBLE_PREHISTORY_STRICTLY_BEFORE_LIVE_INCEPTION"
         ),
     }
+    if model_live_rows:
+        # `evidence_layer` above names the layer the coverage describes; the
+        # model-live rows ride beside it and are counted separately.
+        catalog["evidence_layers"] = ["BACKTEST", "MODEL_LIVE"]
+        catalog["model_live_observations"] = len(model_live_rows)
     catalog_bytes = canonical_json_bytes(catalog)
 
     manifest = GenerationManifest.build(
@@ -192,7 +220,7 @@ def _build_from_contents(
                 "Retained vendor strategy histories normalized by "
                 f"{source.get('builder')} {source.get('builder_version')} into "
                 f"bundle {source.get('bundle_id')}; {len(series)} series, "
-                f"{len(rows)} daily backtest returns from {min(starts)} through "
+                f"{len(backtest_rows)} daily backtest returns from {min(starts)} through "
                 f"{max(ends)}, each admitted strictly before its own "
                 "account-live inception"
             ),

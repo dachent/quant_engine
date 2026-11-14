@@ -76,9 +76,9 @@
       "check_id": "preservation.report_to_panel",
       "issue": 895,
       "owner": "sprint-qc-validator",
-      "class": "BUILDER_BUG",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
       "close_by": "2026-12-15",
-      "reason": "portfolio-hwm-policy provenance row appended by both builders (F9)"
+      "reason": "F9 fixed in the panel builder (test_report_dependence_identity_does_not_replace_report_artifact_identity); the validator-side pass awaits a full-chain fixture"
     },
     {
       "check_id": "lint.payload_size",
@@ -92,9 +92,9 @@
       "check_id": "lint.internal_tokens_displayed",
       "issue": 895,
       "owner": "sprint-qc-validator",
-      "class": "BUILDER_NOT_WIRED",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
       "close_by": "2026-12-15",
-      "reason": "known_gap tokens are not humanised (F9)"
+      "reason": "F3 fixed: the panel humanises gate-note tokens (test_operator_readable_gate_notes); validator pass awaits a full-chain fixture"
     },
     {
       "check_id": "lint.invested_capital_vs_contributions",
@@ -990,9 +990,9 @@
       "check_id": "preservation.report_to_panel",
       "issue": 895,
       "owner": "sprint-qc-validator",
-      "class": "BUILDER_BUG",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
       "close_by": "2026-12-15",
-      "reason": "portfolio-hwm-policy provenance row appended by both builders (F9)",
+      "reason": "F9 fixed in the panel builder (test_report_dependence_identity_does_not_replace_report_artifact_identity); the validator-side pass awaits a full-chain fixture",
       "defect": "NONE",
       "owner_view": {
         "owner_class": "BUILDER_NOT_WIRED",
@@ -1009,9 +1009,9 @@
       "check_id": "lint.internal_tokens_displayed",
       "issue": 895,
       "owner": "sprint-qc-validator",
-      "class": "BUILDER_NOT_WIRED",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
       "close_by": "2026-12-15",
-      "reason": "known_gap tokens are not humanised (F9)",
+      "reason": "F3 fixed: the panel humanises gate-note tokens (test_operator_readable_gate_notes); validator pass awaits a full-chain fixture",
       "defect": "F3",
       "owner_view": {
         "owner_class": "REAL_DATA_GAP",
@@ -1022,6 +1022,70 @@
         "scope": "row",
         "row_scope_reason": "the row is one gate note",
         "number_affected": "Schwab transactions coverage."
+      }
+    },
+    {
+      "check_id": "lint.returns",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)",
+      "defect": "A2",
+      "owner_view": {
+        "owner_class": "BUILDER_NOT_WIRED",
+        "scope": "row",
+        "fix": "No annualised or alpha headline from the backtest layer; label every layer and window (#903, #904).",
+        "who": "Engineering (#904)",
+        "how_long": "in review (PR 946)",
+        "finding_check_id": "lint.extreme_cagr",
+        "entity_match": ".*",
+        "row_scope_reason": "the same cause for each listed series: a backtest layer published as the strategy's growth",
+        "what": "The live-plus-backtest line shows growth rates that are backtest artefacts (a 3x replica of vendor signals; the vendor's gross series), published as the strategy's growth with no layer or scale label.",
+        "where": "GrizzlyBears and the crypto strategy, live-plus-backtest mode",
+        "number_affected": "Live-plus-backtest growth and annualised return for those two; the live-only figures are not affected."
+      }
+    },
+    {
+      "check_id": "lint.extreme_alpha",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BY_DESIGN",
+      "close_by": "2026-12-31",
+      "reason": "plausibility lint on spliced vendor backtests; 'or provenance' path not coded (M9)",
+      "defect": "A3",
+      "owner_view": {
+        "owner_class": "BUILDER_NOT_WIRED",
+        "scope": "row",
+        "fix": "No annualised or alpha headline from the backtest layer; label every layer and window (#903, #904).",
+        "who": "Engineering (#904)",
+        "how_long": "in review (PR 946)",
+        "row_scope_reason": "the same cause for each listed series: alpha from a backtest layer, and live versus backtest signs that disagree",
+        "what": "Alpha above 50 percent a year, and alpha that is negative live but positive with the backtest, come from the backtest layer; the sign contradiction is real information about the strategies.",
+        "where": "Alpha table, live-plus-backtest mode",
+        "number_affected": "Live-plus-backtest alpha; live-only alpha is not affected."
+      }
+    },
+    {
+      "check_id": "lint.returns",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)",
+      "defect": "A5",
+      "owner_view": {
+        "owner_class": "BUILDER_NOT_WIRED",
+        "scope": "row",
+        "fix": "Annualise only windows of a year or more; show shorter windows as cumulative (PR 946, #904).",
+        "who": "Engineering (#904)",
+        "how_long": "in review (PR 946)",
+        "finding_check_id": "lint.short_window_annualization",
+        "entity_match": ".*",
+        "row_scope_reason": "one convention applied to every annualised figure",
+        "what": "Figures are annualised from windows shorter than a year (5 to 351 days), so they read as annual rates but are not.",
+        "where": "Annualised return and alpha figures",
+        "number_affected": "Every annualised figure on a window under one year."
       }
     }
   ]

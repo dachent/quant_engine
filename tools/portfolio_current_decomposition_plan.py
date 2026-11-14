@@ -503,6 +503,7 @@ def _layered_history_targets(
     composition: dict[str, dict[str, object]] = {}
     source_age_dispositions: list[dict[str, object]] = []
     selected_source_summaries: dict[str, list[dict[str, Any]]] = {}
+    live_only_fallback_series: set[str] = set()
     selected_admissions = (
         {"INCLUDE_SELECTED_LIVE"}
         if evidence_mode == "LIVE_ONLY"
@@ -521,7 +522,18 @@ def _layered_history_targets(
         modes = _object(coverage_row.get("modes"), "layered strategy modes")
         mode = _object(modes.get(evidence_mode), f"layered mode {evidence_mode}")
         live_mode = _object(modes.get("LIVE_ONLY"), "layered mode LIVE_ONLY")
-        no_matched_prehistory = (
+        # A strategy with a model-live layer the contract has not admitted has no
+        # research series at all (its account is never part of it).  The plan then
+        # carries the strategy's own live-only series, labelled as such, exactly as
+        # it does for a strategy with no matched prehistory; the research view of it
+        # waits for the layer, it does not stop the plan for the other strategies.
+        live_only_fallback = (
+            evidence_mode == "LIVE_PLUS_BACKTEST"
+            and mode.get("status") == "REQUIRED_NOT_READY"
+            and mode.get("reason") == "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED"
+            and live_mode.get("status") == "AVAILABLE"
+        )
+        no_matched_prehistory = live_only_fallback or (
             evidence_mode == "LIVE_PLUS_BACKTEST"
             and mode.get("status") == "REQUIRED_NOT_READY"
             and mode.get("reason")
@@ -538,11 +550,16 @@ def _layered_history_targets(
                 f"{strategy_id}: {reason}"
             )
         planned_series[series_id] = strategy_id
+        if live_only_fallback:
+            live_only_fallback_series.add(series_id)
         summaries = _objects(coverage_row.get("segments"), "layered segment summaries")
         selected_summaries = [
             summary
             for summary in summaries
-            if summary.get("mode_admission") in selected_admissions
+            if summary.get("mode_admission")
+            in (
+                {"INCLUDE_SELECTED_LIVE"} if live_only_fallback else selected_admissions
+            )
         ]
         if not selected_summaries:
             raise CurrentPlanError(
@@ -623,19 +640,28 @@ def _layered_history_targets(
                 for summary in live_summaries
             ),
             "series_id": series_id,
+            # The account-only fallback for a strategy whose model-live layer is
+            # not admitted is never labelled like "no matched prehistory": the
+            # research series is withheld and the missing layer is declared.
             "status": (
                 "AVAILABLE_LIVE_ONLY"
                 if evidence_mode == "LIVE_ONLY"
                 else (
-                    "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
-                    if no_matched_prehistory
-                    else "AVAILABLE_LIVE_PLUS_BACKTEST"
+                    "LIVE_ONLY_RESEARCH_SERIES_WITHHELD_MODEL_LIVE_NOT_ADMITTED"
+                    if live_only_fallback
+                    else (
+                        "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+                        if no_matched_prehistory
+                        else "AVAILABLE_LIVE_PLUS_BACKTEST"
+                    )
                 )
             ),
             "strategy_version": _text(
                 version.get("history_generation_ref"), "history strategy version"
             ),
         }
+        if live_only_fallback:
+            composition[series_id]["missing_layer"] = "MODEL_LIVE"
 
     allowed_layers = (
         {"ACCOUNT_LIVE"}
@@ -643,8 +669,21 @@ def _layered_history_targets(
         else {"ACCOUNT_LIVE", "BACKTEST"}
     )
     selected_projection = [
-        row for row in projection_rows if row["series_id"] in planned_series
+        row
+        for row in projection_rows
+        if row["series_id"] in planned_series
+        and row["series_id"] not in live_only_fallback_series
     ]
+    if live_only_fallback_series:
+        _live_only_headers, live_only_rows = _read_csv(
+            generation_root / "live-only.csv", "layered history live-only projection"
+        )
+        selected_projection.extend(
+            row
+            for row in live_only_rows
+            if row["series_id"] in live_only_fallback_series
+        )
+        selected_projection.sort(key=lambda row: (row["series_id"], row["date"]))
     seen_dates: set[tuple[str, str]] = set()
     selected_counts: dict[str, int] = {series_id: 0 for series_id in planned_series}
     for row in selected_projection:
@@ -657,7 +696,10 @@ def _layered_history_targets(
             raise CurrentPlanError("layered history evidence layer differs from mode")
         if (
             composition[row["series_id"]]["status"]
-            == "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+            in {
+                "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY",
+                "LIVE_ONLY_RESEARCH_SERIES_WITHHELD_MODEL_LIVE_NOT_ADMITTED",
+            }
             and row["evidence_layer"] != "ACCOUNT_LIVE"
         ):
             raise CurrentPlanError(

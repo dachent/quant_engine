@@ -13,12 +13,14 @@ import argparse
 import base64
 from collections import defaultdict
 import csv
+import dataclasses
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from functools import wraps
 import hashlib
 import importlib.util
 import io
+import itertools
 import json
 from pathlib import Path
 import re
@@ -28,6 +30,10 @@ import tempfile
 from typing import Any, Callable, Final, Mapping, NamedTuple, Sequence
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
+
+import account_financing
+import quantbase_fund_days
+import zero_financing_statements
 
 from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
@@ -62,6 +68,7 @@ from quant_engine.portfolio_ledger import (
     validate_dataset_dispositions,
     validate_provider_authority,
 )
+from quant_engine.portfolio_ledger import run_observation_identity
 from quant_engine.portfolio_ledger.returns import (
     AVAILABLE,
     DATE_ONLY,
@@ -1672,6 +1679,54 @@ def _matrixport_capital_anchors(
     return anchors
 
 
+def _quantbase_restated_days(
+    manifest: GenerationManifest,
+    root: Path,
+    run_id: str,
+    price_rows: Sequence[Mapping[str, Any]],
+    fill_closes: Mapping[str, Mapping[date, Decimal]],
+) -> dict[date, quantbase_fund_days.FundDay]:
+    """Fund-day values with each day's fills included (#909)."""
+
+    activity_rel = Path("csv/account_activity.csv")
+    artifact = _find_manifest_artifact(
+        manifest, f"source/{activity_rel.as_posix()}", "quantbase account activity"
+    )
+    rows = _verified_csv_rows(
+        _exact_file(
+            root / "source-runs" / run_id / "artifacts",
+            activity_rel,
+            "quantbase account activity",
+        ),
+        artifact.sha256,
+        {"activity_type", "filled_at", "fund", "fund_title", "quantity", "symbol"},
+        "quantbase account activity",
+    )
+    fund_id = _quantbase_fund_id(rows)
+    legs: list[quantbase_fund_days.Leg] = []
+    for row in rows:
+        filled_at = str(row.get("filled_at") or "").strip()
+        if row.get("activity_type") != "order" or row.get("fund") != fund_id:
+            continue
+        if not filled_at:
+            continue
+        quantity = _observed_decimal(row.get("quantity"), "quantbase order quantity")
+        if quantity is None:
+            continue
+        stamp = _utc_timestamp(filled_at, "quantbase order filled_at")
+        legs.append(
+            (date.fromisoformat(stamp[:10]), str(row.get("symbol") or ""), quantity)
+        )
+    dashboard: dict[date, Decimal] = {}
+    for price_row in price_rows:
+        value = _observed_decimal(price_row.get("value"), "quantbase Volatis value")
+        if value is not None and value > 0:
+            dashboard[_quantbase_day(price_row["time"], "quantbase Volatis time")] = (
+                value
+            )
+    return quantbase_fund_days.corrected_values(dashboard, legs, fill_closes)
+
+
 def _quantbase_nav_observations(
     generation_id: str,
     manifest: GenerationManifest,
@@ -1682,8 +1737,14 @@ def _quantbase_nav_observations(
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
     financial_cutoff: date | None = None,
     cutoff_findings: list[dict[str, Any]] | None = None,
+    fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Admit Quantbase Volatis daily dashboard values as strategy NAV observations."""
+    """Admit Quantbase Volatis daily dashboard values as strategy NAV observations.
+
+    The dashboard value of a day with fills is its pre-fill holdings at that day's
+    close (#909).  With governed ``fill_closes`` the day is restated to its post-fill
+    holdings (see ``quantbase_fund_days``); without them the dashboard value is kept.
+    """
     account_id = _CSV_FACT_ACCOUNT[_QUANTBASE]
     run_id = _run_id(
         _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
@@ -1704,6 +1765,9 @@ def _quantbase_nav_observations(
     rows = _verified_csv_rows(
         path, artifact.sha256, {"time", "value"}, "quantbase Volatis pricehistory"
     )
+    restated: dict[date, quantbase_fund_days.FundDay] = {}
+    if fill_closes is not None:
+        restated = _quantbase_restated_days(manifest, root, run_id, rows, fill_closes)
     observations: list[dict[str, Any]] = []
     for row in rows:
         value = _observed_decimal(row.get("value"), "quantbase Volatis value")
@@ -1728,10 +1792,27 @@ def _quantbase_nav_observations(
         # Same wrapped {currency, status, value} money shape as the catalog
         # providers — downstream readers require it.
         wrapped = {"currency": "USD", "status": "AVAILABLE", "value": row["value"]}
+        fund_day = restated.get(day)
+        if fund_day is not None and fund_day.status == quantbase_fund_days.RESTATED:
+            wrapped = {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": format(fund_day.value.quantize(Decimal("0.01")), "f"),
+            }
         observations.append(
             {
                 "account_id": account_id,
                 "as_of_date": source_id,
+                **(
+                    {
+                        "fill_restatement": {
+                            "dashboard_value": row["value"],
+                            "status": fund_day.status,
+                        }
+                    }
+                    if fund_day is not None
+                    else {}
+                ),
                 "evidence_layer": "ACCOUNT_LIVE",
                 "generation_id": generation_id,
                 "mapping_status": mapping_status,
@@ -2470,15 +2551,17 @@ def _load_spec(path: Path) -> dict[str, Any]:
     expected = base_keys | ({"financial_mvp"} if version == SCHEMA_VERSION else set())
     allowed = {frozenset(expected)}
     if version == SCHEMA_VERSION:
-        optional = ("portfolio_fx_rates", "run_observation")
+        optional = (
+            "portfolio_fx_rates",
+            "run_observation",
+            "account_roles",
+            "quantbase_fill_closes",
+            "zero_financing_observations",
+        )
         allowed.update(
             frozenset({*expected, *subset})
-            for subset in (
-                (),
-                (optional[0],),
-                (optional[1],),
-                optional,
-            )
+            for size in range(len(optional) + 1)
+            for subset in itertools.combinations(optional, size)
         )
     if frozenset(spec) not in allowed or version not in {1, SCHEMA_VERSION}:
         raise ProviderLedgerError("provider-ledger spec keys or version differ")
@@ -2688,8 +2771,11 @@ def _financial_mvp_authority(spec: Mapping[str, Any]) -> dict[str, Any]:
             )
         authority["run_observation"] = observation
         authority["run_observation_path"] = str(observation_path)
-        authority["run_observation_sha256"] = observation_sha256
-        authority["run_observation_size_bytes"] = observation_size
+        # The receipt records the path-normalized identity, never the raw bytes' hash.
+        identity_sha256, identity_size = run_observation_identity(observation)
+        authority["run_observation_sha256"] = identity_sha256
+        authority["run_observation_size_bytes"] = identity_size
+        authority["run_observation_raw_sha256"] = observation_sha256
     return authority
 
 
@@ -3903,6 +3989,248 @@ def _contract_fx_segment(financial_contract: Mapping[str, Any]) -> dict[str, Any
     return segments[0]
 
 
+_ZERO_FINANCING_KEYS: Final = frozenset(
+    {
+        "mapping_path",
+        "mapping_sha256",
+        "provider_id",
+        "statements_dir",
+        "sums_path",
+        "sums_sha256",
+    }
+)
+
+
+def _pinned_file(path_value: object, sha256: object, name: str) -> bytes:
+    path = _absolute_regular_path(path_value, name)
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != sha256:
+        raise ProviderLedgerError(f"{name} identity differs")
+    return raw
+
+
+def _zero_financing_rows(
+    value: object,
+    accounts: set[str],
+    providers: set[str],
+    as_of: date,
+    history_start: Mapping[str, date] | None = None,
+) -> tuple[str, list[dict[str, Any]], list[SourceArtifact]]:
+    """Provider-observed zero-financing days, derived HERE from the retained statements.
+
+    The spec pins the statement directory's SHA256SUMS, the local-only account mapping and
+    names the provider; the ledger re-hashes every statement from disk and runs the reader
+    itself (``zero_financing_statements.build``), so no hand-written artifact can enter and
+    each row's statement hash and page come from bytes the ledger verified.  Returns the
+    provider, the rows (account-level observations: no strategy, dated, pinned) and the
+    source artifacts to record in the generation manifest."""
+
+    ref = _object(value, "zero_financing_observations")
+    capture_keys = {"captures_dir", "captures_sums_path", "captures_sums_sha256"}
+    if set(ref) not in (_ZERO_FINANCING_KEYS, _ZERO_FINANCING_KEYS | capture_keys):
+        raise ProviderLedgerError("zero_financing_observations keys differ")
+    provider_id = _text(ref["provider_id"], "zero_financing_observations.provider_id")
+    if provider_id not in providers:
+        raise ProviderLedgerError(
+            "zero_financing_observations names a provider the spec does not declare"
+        )
+    sums_raw = _pinned_file(ref["sums_path"], ref["sums_sha256"], "statement sums")
+    mapping_raw = _pinned_file(
+        ref["mapping_path"], ref["mapping_sha256"], "statement account mapping"
+    )
+    directory = _absolute_path(ref["statements_dir"], "statements_dir")
+    if not directory.is_dir() or directory.is_symlink():
+        raise ProviderLedgerError("zero_financing_observations statements_dir differs")
+    captures: dict[str, bytes] = {}
+    capture_artifacts: list[SourceArtifact] = []
+    capture_dir: Path | None = None
+    capture_sums_raw: bytes | None = None
+    mapping = None
+    if "captures_dir" in ref:
+        # the post-statement bracket: dated account captures, pinned by their own sums
+        capture_dir = _absolute_path(ref["captures_dir"], "captures_dir")
+        capture_sums_raw = _pinned_file(
+            ref["captures_sums_path"], ref["captures_sums_sha256"], "capture sums"
+        )
+        try:
+            mapping = zero_financing_statements.load_mapping(mapping_raw, provider_id)
+            capture_sums = zero_financing_statements.load_sums(capture_sums_raw)
+        except (ValueError, zero_financing_statements.ZeroFinancingError) as exc:
+            raise ProviderLedgerError(f"zero_financing_observations: {exc}") from exc
+        for name, digest in sorted(capture_sums.items()):
+            path = capture_dir / name
+            if not path.is_file() or path.is_symlink():
+                raise ProviderLedgerError("a pinned capture file is missing")
+            content = path.read_bytes()
+            if hashlib.sha256(content).hexdigest() != digest:
+                raise ProviderLedgerError("a pinned capture file identity differs")
+            capture_artifacts.append(
+                SourceArtifact(
+                    artifact_id=f"zero-financing/{provider_id}/captures/{name}",
+                    sha256=digest,
+                    size_bytes=len(content),
+                    as_of_date=as_of,
+                    schema_name=f"{provider_id}-account-capture",
+                    schema_version="1",
+                )
+            )
+            prefix = f"{provider_id}-capture-"
+            if name.startswith(prefix) and name.endswith(".json"):
+                label = name[len(prefix) : -len(".json")]
+                if label not in mapping:
+                    raise ProviderLedgerError("a capture label is not mapped")
+                captures[mapping[label][0]] = content
+        capture_artifacts.append(
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/captures/SHA256SUMS",
+                sha256=hashlib.sha256(capture_sums_raw).hexdigest(),
+                size_bytes=len(capture_sums_raw),
+                as_of_date=as_of,
+                schema_name="capture-sums",
+                schema_version="1",
+            )
+        )
+    try:
+        artifact = zero_financing_statements.build(
+            directory,
+            zero_financing_statements.load_sums(sums_raw),
+            mapping or zero_financing_statements.load_mapping(mapping_raw, provider_id),
+            provider_id=provider_id,
+            captures=captures or None,
+            capture_dir=capture_dir,
+            cutoff=as_of,
+            history_start=history_start,
+        )
+        rows = zero_financing_statements.validate_rows(artifact, accounts)
+    except (
+        OSError,
+        ValueError,
+        zero_financing_statements.ZeroFinancingError,
+    ) as exc:
+        raise ProviderLedgerError(f"zero_financing_observations: {exc}") from exc
+    artifacts = (
+        [
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/{item['name']}",
+                sha256=item["sha256"],
+                size_bytes=item["size_bytes"],
+                as_of_date=as_of,
+                schema_name=f"{provider_id}-statement-pdf",
+                schema_version="1",
+            )
+            for item in artifact["statement_manifest"]
+        ]
+        + capture_artifacts
+        + [
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/SHA256SUMS",
+                sha256=hashlib.sha256(sums_raw).hexdigest(),
+                size_bytes=len(sums_raw),
+                as_of_date=as_of,
+                schema_name="statement-sums",
+                schema_version="1",
+            ),
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/account-mapping",
+                sha256=hashlib.sha256(mapping_raw).hexdigest(),
+                size_bytes=len(mapping_raw),
+                as_of_date=as_of,
+                schema_name="statement-account-mapping",
+                schema_version="1",
+            ),
+        ]
+    )
+    extractor = zero_financing_statements.extractor_identity().encode("utf-8")
+    artifacts.append(
+        SourceArtifact(
+            artifact_id=f"zero-financing/{provider_id}/extractor-identity",
+            sha256=hashlib.sha256(extractor).hexdigest(),
+            size_bytes=len(extractor),
+            as_of_date=as_of,
+            schema_name="statement-extractor-identity",
+            schema_version="1",
+        )
+    )
+    # every input that can change a row is part of the generation id
+    identity = "\n".join(
+        [
+            hashlib.sha256(sums_raw).hexdigest(),
+            hashlib.sha256(mapping_raw).hexdigest(),
+            hashlib.sha256(capture_sums_raw or b"").hexdigest(),
+            hashlib.sha256(extractor).hexdigest(),
+        ]
+    )
+    generation = f"zero-financing-{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        source_id = f"zero-financing:{row['account_id']}:{row['as_of_date']}"
+        out.append(
+            {
+                **row,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": generation,
+                "mapping_status": "UNMAPPED",
+                "mapping_reason": "ACCOUNT_LEVEL_OBSERVATION",
+                "record_id": f"{row['provider_id']}:{source_id}",
+                "source_record_id": source_id,
+                "strategy_id": None,
+            }
+        )
+    return provider_id, out, artifacts
+
+
+def _quantbase_fill_closes(value: object) -> dict[str, dict[date, Decimal]]:
+    """Governed daily closes of the Volatis fund's symbols (#909): hash-pinned CSVs
+    (``date,close,...``), one per symbol, used to value a fill day after its fills."""
+
+    out: dict[str, dict[date, Decimal]] = {}
+    for item in _objects(value, "quantbase_fill_closes"):
+        ref = _object(item, "quantbase_fill_closes item")
+        if set(ref) != {"symbol", "path", "sha256", "size_bytes"}:
+            raise ProviderLedgerError("quantbase_fill_closes reference keys differ")
+        symbol = _text(ref["symbol"], "quantbase_fill_closes.symbol")
+        if symbol in out:
+            raise ProviderLedgerError("quantbase_fill_closes symbol is duplicated")
+        path = _absolute_regular_path(ref["path"], "quantbase_fill_closes.path")
+        raw = path.read_bytes()
+        if (
+            hashlib.sha256(raw).hexdigest() != ref["sha256"]
+            or len(raw) != ref["size_bytes"]
+        ):
+            raise ProviderLedgerError("quantbase_fill_closes identity differs")
+        series: dict[date, Decimal] = {}
+        for row in csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))):
+            close = _observed_decimal(row.get("close"), "quantbase fill close")
+            if close is None or close <= 0:
+                raise ProviderLedgerError("quantbase fill close is not positive")
+            series[date.fromisoformat(str(row["date"]))] = close
+        if not series:
+            raise ProviderLedgerError("quantbase_fill_closes is empty")
+        out[symbol] = series
+    return out
+
+
+def _reserve_nav_windows(value: object) -> dict[str, list[tuple[date, date, str]]]:
+    """The declared reserve NAV windows (#900) from the pinned governed declaration."""
+
+    ref = _object(value, "account_roles")
+    if set(ref) != {"path", "sha256", "size_bytes"}:
+        raise ProviderLedgerError("account_roles reference keys differ")
+    path = _absolute_regular_path(ref["path"], "account_roles.path")
+    raw = path.read_bytes()
+    if (
+        hashlib.sha256(raw).hexdigest() != ref["sha256"]
+        or len(raw) != ref["size_bytes"]
+    ):
+        raise ProviderLedgerError("account_roles identity differs")
+    try:
+        return account_financing.reserve_nav_windows(
+            account_financing.load_sleeve_roles(raw)
+        )
+    except account_financing.FinancingDeclarationError as exc:
+        raise ProviderLedgerError(f"account_roles is invalid: {exc}") from exc
+
+
 def _portfolio_fx_rates(
     value: object,
     baseline_as_of: date,
@@ -4194,6 +4522,38 @@ def _mapped_strategy(
             active.append(strategy_id)
     unique = sorted(set(active))
     return (unique[0], "MAPPED") if len(unique) == 1 else (None, "UNMAPPED")
+
+
+def _point_unmapped_reason(
+    row: Mapping[str, Any],
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> str:
+    """Why a point-in-time row has no strategy: two active strategies are ambiguous, an
+    unknown account or day is its own reason, and none active is a missing interval."""
+
+    account_id = str(row.get("account_id") or "")
+    day = _row_day(row)
+    if account_id not in accounts or day is None:
+        return "MAPPING_ACCOUNT_OR_DAY_UNKNOWN"
+    active = {
+        str(item["strategy_id"])
+        for item in assignments.get(account_id, ())
+        if isinstance(item.get("strategy_id"), str)
+        and item["strategy_id"] in strategies
+        and item.get("effective_start") not in {None, ""}
+        and _day(item["effective_start"], "assignment.effective_start")
+        <= day
+        <= (
+            date.max
+            if item.get("effective_end") in {None, ""}
+            else _day(item["effective_end"], "assignment.effective_end")
+        )
+    }
+    return (
+        "MAPPING_AMBIGUOUS_POINT" if len(active) > 1 else "MAPPING_NO_ACTIVE_INTERVAL"
+    )
 
 
 def _mapped_strategy_for_period(
@@ -4973,6 +5333,7 @@ class _CsvFactContext(NamedTuple):
     )
     financial_cutoff: date | None
     exceptions: list[dict[str, Any]]
+    fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None
 
 
 def _csv_matrixport_capital_anchors(ctx: _CsvFactContext) -> list[dict[str, Any]]:
@@ -5044,6 +5405,7 @@ def _csv_quantbase_nav_observations(ctx: _CsvFactContext) -> list[dict[str, Any]
         ctx.assignments,
         financial_cutoff=ctx.financial_cutoff,
         cutoff_findings=ctx.exceptions,
+        fill_closes=ctx.fill_closes,
     )
 
 
@@ -5090,6 +5452,7 @@ def _project_account_facts(
     financial_cutoff: date | None = None,
     *,
     requested_as_of: date | None = None,
+    fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     projections: dict[str, list[dict[str, Any]]] = defaultdict(list)
     exceptions: list[dict[str, Any]] = []
@@ -5186,6 +5549,7 @@ def _project_account_facts(
                     fx_rates,
                     financial_cutoff,
                     exceptions,
+                    fill_closes,
                 )
             )
             projections[target_fact].extend(rows)
@@ -5310,6 +5674,10 @@ def _project_account_facts(
                 strategy_id, mapping_status = _mapped_strategy(
                     mapping_row, accounts, strategies, assignments
                 )
+                if native_leverage_observation and mapping_status == "UNMAPPED":
+                    mapping_reason = _point_unmapped_reason(
+                        mapping_row, accounts, strategies, assignments
+                    )
             source_id = _text(
                 row.get("record_id"), f"{provider_id}.{source_fact}.record_id"
             )
@@ -5399,12 +5767,23 @@ def _project_account_facts(
                 record["capital_disposition"] = (
                     "NON_CAPITAL" if amount == 0 else "EXTERNAL_CAPITAL"
                 )
-            projections[target_fact].append(record)
-            if (
+            margin_interest_posting = (
                 provider_id == "schwab"
                 and source_fact == "transactions"
                 and str(row.get("kind") or "").strip().upper() == "MARGIN INTEREST"
+            )
+            if (
+                mapping_status == "UNMAPPED"
+                and "mapping_reason" not in record
+                and (source_fact == "nav_observations" or margin_interest_posting)
             ):
+                # Why a NAV point or a Schwab margin-interest posting has no strategy:
+                # the reserve-window placement needs an explicit reason, never silence.
+                record["mapping_reason"] = _point_unmapped_reason(
+                    mapping_row, accounts, strategies, assignments
+                )
+            projections[target_fact].append(record)
+            if margin_interest_posting:
                 # A retained Schwab MARGIN INTEREST transaction is an actual
                 # cash-posting financing observation.  It remains separate
                 # from owner flows and retains its native signed amount,
@@ -5436,8 +5815,12 @@ def _project_account_facts(
                         "status": "UNMAPPED",
                         **(
                             {}
-                            if mapping_reason is None
-                            else {"mapping_reason": mapping_reason}
+                            if record.get("mapping_reason", mapping_reason) is None
+                            else {
+                                "mapping_reason": record.get(
+                                    "mapping_reason", mapping_reason
+                                )
+                            }
                         ),
                     }
                 )
@@ -9592,6 +9975,7 @@ def _admissions(
     quantbase_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
     matrixport_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
     matrixport_anchor_coverage: Mapping[str, Mapping[str, Any]] | None = None,
+    reserve_nav_windows: Mapping[str, Sequence[tuple[date, date, str]]] | None = None,
 ) -> tuple[ProviderFactAdmission, ...]:
     provider_authority = (
         set(_PROVIDER_CATALOGS)
@@ -9695,46 +10079,71 @@ def _admissions(
             if provider_id in {"matrixport", "quantbase", "schwab"}
             else "finalized_history_coverage"
         )
-        admissions.append(
-            ProviderFactAdmission(
-                provider_id=provider_id,
-                fact_type=fact_type,
-                evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
-                disposition=(
-                    AdmissionDisposition.AUTHORITATIVE
-                    if mapping_status == "MAPPED" and provider_id in provider_authority
-                    else AdmissionDisposition.REFERENCE_ONLY
-                ),
-                effective_start=start,
-                effective_end=end,
-                account_id=account_id,
-                account_reconciliation_sha256=hashlib.sha256(
-                    canonical_json_bytes(
-                        {
-                            "account_id": account_id,
-                            "fact_type": fact_type,
-                            "provider_id": provider_id,
-                            "records": [
-                                {
-                                    "record_id": str(item["record_id"]),
-                                    "source_record_id": str(
-                                        item.get("source_record_id") or ""
-                                    ),
-                                }
-                                for item in sorted(
-                                    rows, key=lambda row: str(row["record_id"])
-                                )
-                            ],
-                            **(
-                                {coverage_key: dict(coverage_claim)}
-                                if coverage_claim is not None
-                                else {}
-                            ),
-                        }
-                    )
-                ).hexdigest(),
-            )
+        base_admission = ProviderFactAdmission(
+            provider_id=provider_id,
+            fact_type=fact_type,
+            evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
+            disposition=(
+                AdmissionDisposition.AUTHORITATIVE
+                if mapping_status == "MAPPED" and provider_id in provider_authority
+                else AdmissionDisposition.REFERENCE_ONLY
+            ),
+            effective_start=start,
+            effective_end=end,
+            account_id=account_id,
+            account_reconciliation_sha256=hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "account_id": account_id,
+                        "fact_type": fact_type,
+                        "provider_id": provider_id,
+                        "records": [
+                            {
+                                "record_id": str(item["record_id"]),
+                                "source_record_id": str(
+                                    item.get("source_record_id") or ""
+                                ),
+                            }
+                            for item in sorted(
+                                rows, key=lambda row: str(row["record_id"])
+                            )
+                        ],
+                        **(
+                            {coverage_key: dict(coverage_claim)}
+                            if coverage_claim is not None
+                            else {}
+                        ),
+                    }
+                )
+            ).hexdigest(),
         )
+        declared_windows = (
+            (reserve_nav_windows or {}).get(account_id)
+            if fact_type == "nav_observations" and mapping_status != "MAPPED"
+            else None
+        )
+        if declared_windows:
+            # The owner declared this account a RESERVE with admit windows (#900): its NAV
+            # is authoritative inside each declared window, proven by the window's closure
+            # basis.  Closure windows keep the observed span; a bridge window carries no
+            # observations of its own, so it is admitted as declared.
+            for w_start, w_end, basis in declared_windows:
+                lo, hi = (
+                    (w_start, w_end)
+                    if basis == "DERIVED_BRIDGE_WITH_CLOSURE"
+                    else (max(start, w_start), min(end, w_end))
+                )
+                if lo <= hi:
+                    admissions.append(
+                        dataclasses.replace(
+                            base_admission,
+                            disposition=AdmissionDisposition.AUTHORITATIVE,
+                            effective_start=lo,
+                            effective_end=hi,
+                        )
+                    )
+        else:
+            admissions.append(base_admission)
     for provider_id, coverage in provider_flow_coverage.items():
         for account_id in sorted(
             set(coverage)
@@ -10729,6 +11138,14 @@ def build_catalog(
         if "portfolio_fx_rates" in spec
         else None
     )
+    reserve_nav_windows = (
+        _reserve_nav_windows(spec["account_roles"]) if "account_roles" in spec else None
+    )
+    fill_closes = (
+        _quantbase_fill_closes(spec["quantbase_fill_closes"])
+        if "quantbase_fill_closes" in spec
+        else None
+    )
     provenance, provenance_artifact = _provenance(spec)
     accounts, strategies, assignments = _assignment_index(
         provenance, _object(authority.get("contract"), "financial MVP contract")
@@ -10782,6 +11199,7 @@ def build_catalog(
             manifest=manifest,
             root=root,
             fx_rates=fx_rates if provider_id == "matrixport" else None,
+            fill_closes=fill_closes,
             requested_as_of=as_of if run_observation is not None else None,
             financial_cutoff=(
                 min(
@@ -10802,6 +11220,69 @@ def build_catalog(
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
+    zero_financing = None
+    if "zero_financing_observations" in spec:
+        # the account type rule reaches back to each account's first NAV day
+        first_nav: dict[str, date] = {}
+        for facts_ in provider_facts.values():
+            for nav_row in facts_.get("nav_observations", []):
+                day_ = _day(nav_row["as_of_date"], "nav as_of_date")
+                account_ = str(nav_row["account_id"])
+                if account_ not in first_nav or day_ < first_nav[account_]:
+                    first_nav[account_] = day_
+        zero_financing = _zero_financing_rows(
+            spec["zero_financing_observations"],
+            accounts,
+            set(spec["providers"]),
+            as_of,
+            first_nav,
+        )
+    if zero_financing is not None:
+        zero_provider, zero_rows, zero_artifacts = zero_financing
+        # each row must belong to an account this provider's own generation observes, and
+        # rows past the provider's financial cutoff are not projected
+        observed_accounts = {
+            row["account_id"]
+            for row in provider_facts.get(zero_provider, {}).get("nav_observations", [])
+        }
+        if any(row["account_id"] not in observed_accounts for row in zero_rows):
+            raise ProviderLedgerError(
+                "zero_financing_observations name an account the provider does not observe"
+            )
+        zero_cutoff = (
+            min(
+                as_of,
+                _day(
+                    _object(
+                        _object(run_observation, "run observation")["providers"],
+                        "run observation providers",
+                    )[zero_provider]["finalized_through"],
+                    f"{zero_provider} observation finality",
+                ),
+            )
+            if run_observation is not None
+            else as_of
+        )
+        projected = [
+            row
+            for row in zero_rows
+            if date.fromisoformat(row["as_of_date"]) <= zero_cutoff
+        ]
+        if projected:  # never create an empty fact collection (ids must not move)
+            combined["financing_liability_observations"].extend(projected)
+            exceptions.extend(
+                {
+                    "account_in_provenance": row["account_id"] in accounts,
+                    "effective_date": row["as_of_date"],
+                    "fact_type": "financing_liability_observations",
+                    "mapping_reason": row["mapping_reason"],
+                    "provider_id": zero_provider,
+                    "record_id": row["record_id"],
+                    "status": "UNMAPPED",
+                }
+                for row in projected
+            )
+        provider_artifacts.extend(zero_artifacts)
 
     authoritative_strategy_ids = {
         str(row.get("strategy_id"))
@@ -11085,6 +11566,7 @@ def build_catalog(
             provider_roots["quantbase"],
             {_CSV_FACT_ACCOUNT[_QUANTBASE]},
         ),
+        reserve_nav_windows=reserve_nav_windows,
     )
     admit_or_declare, admit_or_declare_bytes = _admit_or_declare_receipt(
         authority,

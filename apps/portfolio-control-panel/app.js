@@ -163,6 +163,7 @@
     PROVIDER_LIVE_AVAILABLE: "Provider-live available",
     AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE: "Available: version-matched backtest prehistory plus live",
     AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY: "Available live; no version-matched backtest prehistory",
+    LIVE_ONLY_RESEARCH_SERIES_WITHHELD_MODEL_LIVE_NOT_ADMITTED: "Research series withheld: model-live layer not admitted; the account series is used",
     AVAILABLE_LIVE_ONLY: "Available: live only",
     AVAILABLE_HWM_QUALIFIED: "Available for HWM",
     UNAVAILABLE_SOURCE_LINEAGE_MISMATCH: "Report performance withheld: source-lineage mismatch",
@@ -342,7 +343,7 @@
       // N55 (general): `provider_comparison_reason` is the not-ready reason surface for
       // ANY comparison path, not a benchmark-only or N55-only field; render it beside the
       // disposition whenever the report publishes one.
-      return `${statusText(status)}<span class="cell-secondary">${safe(row.provider_comparison_disposition || "No accepted exact-date provider/model comparison")}</span>${row.provider_comparison_reason ? `<span class="cell-secondary">${safe(row.provider_comparison_reason)}</span>` : ""}`;
+      return `${statusText(status)}<span class="cell-secondary">${safe(row.provider_comparison_disposition || "Model live vs My live comparison not published")}</span>${row.provider_comparison_reason ? `<span class="cell-secondary">${safe(row.provider_comparison_reason)}</span>` : ""}`;
     }
     // A5: `provider_annualization.label` already encodes basis/window (and "(<1 year)"
     // when short); render it beside the annualized figure it describes.
@@ -2357,6 +2358,7 @@
       visibleBasis,
     ];
     if (ctx.headline_status === "NOT_A_HEADLINE_INCLUDES_BACKTEST") lines.push("includes hypothetical backtest: not a live result, no headline");
+    if (ctx.headline_status === "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE") lines.push("window under a year or not a live series: no headline");
     if (ctx.factor_as_of_date) lines.push(`Factors as of ${formatDate(ctx.factor_as_of_date)}${number(ctx.factor_staleness_days) == null ? "" : ` (${integer.format(ctx.factor_staleness_days)} days before the cutoff)`}`);
     const title = `Annualized: ${humanStatus(ctx.annualisation_basis || "UNAVAILABLE").toLowerCase()} · ${humanStatus(ctx.annualisation || "UNAVAILABLE").toLowerCase()} · ${number(ctx.periods_per_year) == null ? "periods per year not published" : `${integer.format(ctx.periods_per_year)} periods per year`}`;
     return { basisStatus, mixedBasis, lines, title };
@@ -3121,13 +3123,13 @@
   const PERF_BENCHMARK_COLORS = { SPY: "#a8b7c5", SPXL: "#e6c36a" };
   // A line's origin decides its stroke: live evidence is solid, every other origin is dashed in its own pattern.
   const PERF_ORIGIN_STYLES = Object.freeze({
-    LIVE: { name: "solid", dash: null },
+    ACCOUNT_LIVE: { name: "solid", dash: null },
     BACKTEST: { name: "dashed", dash: "5 4" },
     MIXED: { name: "dashed", dash: "5 4" },
     DERIVED: { name: "dotted", dash: "2 3" },
-    PROVIDER_MODEL_LIVE: { name: "dash-dot", dash: "9 3 2 3" },
+    MODEL_LIVE: { name: "dash-dot", dash: "9 3 2 3" },
   });
-  const perfOriginStyle = (origin) => (origin == null ? PERF_ORIGIN_STYLES.LIVE : (PERF_ORIGIN_STYLES[origin] || { name: "dashed", dash: "5 4" }));
+  const perfOriginStyle = (origin) => (origin == null ? PERF_ORIGIN_STYLES.ACCOUNT_LIVE : (PERF_ORIGIN_STYLES[origin] || { name: "dashed", dash: "5 4" }));
   const perfSeriesName = (line) => line.display_name || String(line.series_id || "").replace(/^(strategy|market|portfolio):/, "");
   // The block counts only with an integer schema_version (an omitted key must not read as published).
   const perfTab = () => (data.performance_tab && Number.isInteger(data.performance_tab.schema_version) ? data.performance_tab : null);
@@ -3276,7 +3278,7 @@
       const rows = visibleLines.map((line) => ({ line, point: byTime.get(line.key).get(nearest) })).filter((entry) => entry.point);
       cursor.setAttribute("x1", x(nearest).toFixed(1)); cursor.setAttribute("x2", x(nearest).toFixed(1)); cursor.hidden = false;
       tip.hidden = false;
-      tip.innerHTML = `<strong>Week ending ${safe(perfDate(nearest))}</strong>${rows.map(({ line, point }) => `<div><i style="background:${line.color}"></i>${safe(line.name)}<b>${point.value.toFixed(3)} · ${((point.value - 1) * 100).toFixed(1)}%${point.origin && point.origin !== "LIVE" ? ` · ${safe(humanStatus(point.origin).toLowerCase())}` : ""}</b></div>`).join("")}`;
+      tip.innerHTML = `<strong>Week ending ${safe(perfDate(nearest))}</strong>${rows.map(({ line, point }) => `<div><i style="background:${line.color}"></i>${safe(line.name)}<b>${point.value.toFixed(3)} · ${((point.value - 1) * 100).toFixed(1)}%${point.origin && point.origin !== "ACCOUNT_LIVE" ? ` · ${safe(humanStatus(point.origin).toLowerCase())}` : ""}</b></div>`).join("")}`;
       tip.style.left = `${Math.min(box.width - 240, Math.max(0, (x(nearest) / width) * box.width + 12))}px`;
     });
     svg.addEventListener("mouseleave", () => { tip.hidden = true; cursor.hidden = true; });
@@ -3284,7 +3286,7 @@
       + absent.map((line) => `<span class="perf-legend-item is-missing" title="This line has no value at the rebase week of this view"><i style="background:${line.color}"></i>${safe(line.name)} <b>starts after this window</b></span>`).join("")
       + built.missing.map((item) => `<span class="perf-legend-item is-missing" title="${safe(item.reason)}; no other ETF is substituted"><i style="background:${item.color}"></i>${safe(item.name)} <b>unavailable: ${safe(String(item.reason).toLowerCase().replaceAll("_", " "))}</b></span>`).join("");
     $$("[data-perf-series]").forEach((button) => button.addEventListener("click", () => { const key = button.dataset.perfSeries; if (perfHidden.has(key)) perfHidden.delete(key); else perfHidden.add(key); renderPerformanceReturns(); }));
-    const presentOrigins = [...new Set(rebased.flatMap((line) => line.points.map((point) => point.origin)).filter((origin) => origin != null && origin !== "LIVE"))];
+    const presentOrigins = [...new Set(rebased.flatMap((line) => line.points.map((point) => point.origin)).filter((origin) => origin != null && origin !== "ACCOUNT_LIVE"))];
     const styleNote = presentOrigins.length
       ? presentOrigins.map((origin) => `${perfOriginStyle(origin).name} = ${humanStatus(origin).toLowerCase()}`).join(", ")
       : "";

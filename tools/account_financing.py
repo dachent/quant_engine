@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import date
 import json
 import re
 from typing import Final
@@ -73,6 +74,13 @@ class DebitEvidence:
     net_base_debit_days: int = 0
     debit_interest_postings: int = 0
     currency_debit_days: int = 0
+    # Debit rows whose amount is unavailable (a data gap, not a zero) and the base-level
+    # cash days actually observed.  ``None`` means the caller did not measure it.
+    unreadable_debit_rows: int = 0
+    observed_base_days: int | None = None
+    # NAV days (up to the cutoff) with no provider observation of the financing balance;
+    # ``None`` means the caller did not measure coverage.
+    unobserved_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +173,23 @@ def classify(
             state, reason = "NOT_LEVERED", "MARGIN_AVAILABLE_UNUSED_NO_DEBIT_EVIDENCE"
         else:
             state, reason = "NOT_LEVERED", "DECLARED_NO_MARGIN_AND_NO_DEBIT_EVIDENCE"
+        if seen.unreadable_debit_rows:
+            conflicts.append("DEBIT_ROW_AMOUNT_UNAVAILABLE")
+        if state == "NOT_LEVERED":
+            # "Not levered" is a finding, not a default: it needs a verified declaration
+            # AND provider-observed, dated zero-financing days (IBKR base cash rows, or a
+            # generic observed zero-financing row).  A declaration alone, whatever the
+            # facility, is never the evidence; an unmeasured count refuses like zero.
+            if not row.verified:
+                conflicts.append("NOT_LEVERED_DECLARATION_UNVERIFIED")
+            if not seen.observed_base_days:
+                conflicts.append("NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS")
+            elif seen.unobserved_days is None:
+                # the days that need an observation could not be determined
+                conflicts.append("NOT_LEVERED_COVERAGE_UNMEASURED")
+            elif seen.unobserved_days:
+                # coverage is required: every NAV day needs an observation, not just one
+                conflicts.append("NOT_LEVERED_WITH_UNOBSERVED_DAYS")
         result[account] = AccountState(account, state, reason, tuple(conflicts))
     return result
 
@@ -234,4 +259,42 @@ def load_sleeve_roles(raw: bytes) -> dict[str, SleeveRole]:
             tuple(parsed),
             row["evidence_ref"],
         )
+    return out
+
+
+def reserve_nav_windows(
+    roles: Mapping[str, SleeveRole],
+) -> dict[str, list[tuple[date, date, str]]]:
+    """Ledger account id -> the declared windows in which its RESERVE NAV is authoritative.
+
+    Only an account-live reserve with a ledger id and a closed window counts; statement
+    reserves (no ledger account) and open-ended windows are not NAV admission inputs.
+    """
+
+    out: dict[str, list[tuple[date, date, str]]] = {}
+    for role in roles.values():
+        if (
+            role.role != "RESERVE"
+            or role.nav_authority != "ACCOUNT_LIVE"
+            or role.ledger_account_id is None
+        ):
+            continue
+        for start, end, basis in role.admit_windows:
+            if end is None:
+                continue
+            out.setdefault(role.ledger_account_id, []).append(
+                (date.fromisoformat(start), date.fromisoformat(end), basis)
+            )
+    for account, windows in out.items():
+        ordered = sorted(windows)
+        for (_s1, e1, _b1), (s2, _e2, _b2) in zip(ordered, ordered[1:], strict=False):
+            if s2 <= e1:
+                raise FinancingDeclarationError(
+                    f"overlapping RESERVE windows declared for {account}"
+                )
+        for first, last, _basis in ordered:
+            if last < first:
+                raise FinancingDeclarationError(
+                    f"RESERVE window ends before it starts for {account}"
+                )
     return out

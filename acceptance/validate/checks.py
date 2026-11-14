@@ -35,7 +35,7 @@ import re
 from typing import Any, cast
 
 from .. import owner_view as owner_view  # re-exported: the runner uses it
-from . import facts_bindings, payload_rule, shell, sleeve_basis
+from . import facts_bindings, layers, payload_rule, shell, sleeve_basis
 from .generation import (
     APP,
     PAYLOAD_FILES,
@@ -218,6 +218,9 @@ class Context:
     # the governed source of each strategy's opening capital anchor. ``None`` when the
     # run was given no ledger; the opening date then comes from the manifest trace.
     provider_ledger: Mapping[str, Any] | None = None
+    # The provider-ledger admit-or-declare receipt (``--admission-receipt``): the governed
+    # per-item EXCLUDE dispositions. ``None`` is no receipt, which exempts nothing.
+    provider_receipt: Mapping[str, Any] | None = None
     # #624: the ``strategy-basis-declaration/1`` the generation was built with ({strategy id:
     # basis}) and the sleeve facts its sleeve epochs stand on.  ``None`` is no declaration:
     # every strategy is on its parent-account basis and nothing below changes.
@@ -4559,6 +4562,7 @@ def check_derived_cash_evidence(ctx: Context) -> Iterator[Finding]:
 
 StrategyBasisRefusal = sleeve_basis.Refusal
 FactsSources = facts_bindings.FactsSources
+bind_admission_receipt = facts_bindings.bind_admission_receipt
 
 
 def load_facts_sources(
@@ -7931,6 +7935,26 @@ def _dated_sections(
             ("C2",),
             ("c2_descriptive", row),
         )
+    # M5 (#895 F2): the provider reference comparisons carry their own observed end,
+    # published beside the benchmark ones. A provider series that ended before the
+    # cutoff is a stale input; it is labelled NOT_READY with its true end date, never a
+    # commit refusal for staleness itself (a non-date value or one after the cutoff is
+    # refused like the benchmark rows; an absent end date is skipped, the schema owns it).
+    provider_rows = node(ctx.report, "strategy_attribution", "comparisons")
+    for position, row in enumerate(
+        provider_rows if isinstance(provider_rows, list) else []
+    ):
+        if not isinstance(row, dict) or row.get("observed_end") is None:
+            continue
+        yield (
+            f"provider-comparison:{row.get('strategy_id')}",
+            REPORT,
+            f"$.strategy_attribution.comparisons[{position}].observed_end",
+            row.get("observed_end"),
+            row.get("status"),
+            ("M5",),
+            ("m5_provider_series", row),
+        )
     # The alias is only one published view. Check every mode, retaining a
     # divergent alias but avoiding duplicate findings for the same date claim.
     lens_views: list[tuple[str, str, list[Any]]] = []
@@ -8046,6 +8070,13 @@ def _date_role_is_valid(role: tuple[str, Any], status: Any, value: Any) -> bool:
             and end is not None
             and start <= end
             and value == row.get("observed_end")
+        )
+    if kind == "m5_provider_series":
+        return (
+            isinstance(detail.get("strategy_id"), str)
+            and bool(detail["strategy_id"].strip())
+            and _canonical_iso_day(value) is not None
+            and value == detail.get("observed_end")
         )
     if kind == "c4_historical":
         key, metadata = detail
@@ -8323,6 +8354,10 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
                 "provider counted as current at the common EOD although its data ends earlier",
             )
         elif day < cutoff:
+            if _finite_provider_without_active_account(ctx, row):
+                # C5 (#895 F2): a finite-boundary provider that no active account of the
+                # crosswalk draws on ends where its selected manifest ends, by design.
+                continue
             yield _finding(
                 "dates.source_clock",
                 NOT_READY,
@@ -8352,6 +8387,102 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
                 ("C5",),
                 "recurring source is stale at the cutoff (labelled STALE)",
             )
+
+
+_FINITE_BOUNDARY_BASIS = "FINITE_SELECTED_MANIFEST_BOUNDARY"
+
+
+def _finite_provider_without_active_account(
+    ctx: Context, row: Mapping[str, Any]
+) -> bool:
+    """Recomputed, not read from the label: the row says finite and not applicable, and
+    the authoritative crosswalk shows no account of that provider active at the cutoff.
+
+    A missing or unreadable crosswalk, or a provider the crosswalk names with an active
+    account, leaves the finding in place; the producer's own label alone grants nothing.
+    """
+
+    finality = row.get("finality")
+    source = row.get("source_id")
+    crosswalk = ctx.gen.external.crosswalk
+    crosswalk_rows = rows(crosswalk, "rows") if isinstance(crosswalk, dict) else []
+    if (
+        row.get("applies_to_latest_common_eod") is not False
+        or not isinstance(finality, Mapping)
+        or finality.get("basis") != _FINITE_BOUNDARY_BASIS
+        or not isinstance(source, str)
+        or not source.strip()
+        or not crosswalk_rows
+    ):
+        return False
+    wanted = source.strip().casefold()
+    known = {
+        item["provider"].strip().casefold()
+        for item in crosswalk_rows
+        if isinstance(item.get("provider"), str)
+    }
+    if wanted not in known:
+        # Absent from the crosswalk: exempt only when the provider ledger's own receipt
+        # declares every item of this provider excluded with no product effect.
+        return wanted in _receipt_excluded_providers(ctx)
+    return not any(
+        isinstance(item.get("provider"), str)
+        and item["provider"].strip().casefold() == wanted
+        and _epoch_covers_cutoff(item, ctx.cutoff)
+        for item in crosswalk_rows
+    )
+
+
+_RECEIPT_EXCLUSION = (
+    "EXCLUDE",
+    "NO_CURRENT_PRODUCT_CONSUMER",
+    "NO_CURRENT_PRODUCT_EFFECT",
+)
+
+
+def _receipt_excluded_providers(ctx: Context) -> frozenset[str]:
+    """Providers whose every receipt disposition is EXCLUDE / NO_CURRENT_PRODUCT_CONSUMER /
+    NO_CURRENT_PRODUCT_EFFECT, from a receipt whose gate passed.
+
+    One other disposition, one disposition missing a field, a failed gate or no receipt
+    leaves the provider out, so its finding stays; a row that is not an object or has no
+    provider id voids the whole receipt.
+    """
+
+    receipt = ctx.provider_receipt
+    if (
+        not isinstance(receipt, Mapping)
+        or receipt.get("admission_gate_status") != "PASS"
+    ):
+        return frozenset()
+    listed = receipt.get("dispositions")
+    if not isinstance(listed, list):
+        return frozenset()
+    observation = receipt.get("run_observation")
+    if observation is not None and (
+        not isinstance(observation, Mapping)
+        or to_date(observation.get("financial_cutoff")) != ctx.cutoff
+    ):
+        # a receipt observed for another cutoff says nothing about this run
+        return frozenset()
+    clean: dict[str, bool] = {}
+    for item in listed:
+        provider = item.get("provider_id") if isinstance(item, Mapping) else None
+        if not isinstance(provider, str) or not provider.strip():
+            # a row that cannot be attributed to a provider could be any provider's
+            # admitted item: the receipt as a whole is unusable
+            return frozenset()
+        key = provider.strip().casefold()
+        clean[key] = (
+            clean.get(key, True)
+            and (
+                item.get("action"),
+                item.get("reason"),
+                item.get("readiness_impact"),
+            )
+            == _RECEIPT_EXCLUSION
+        )
+    return frozenset(key for key, ok in clean.items() if ok)
 
 
 def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
@@ -8799,14 +8930,43 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
     disclosures = rows(ctx.report, "leverage_disclosures")
     if disclosures:
         reference = universe(ctx)
-        applicable = sorted(
-            reference.active_accounts
-            if reference is not None
-            else {
-                str(row["account_id"])
+        # E8 scope (#894/#895): the check applies to levered accounts. An account is
+        # outside it only when the report itself states ACCOUNT_FINANCING_STATE rows for
+        # it and every one reads NOT_LEVERED; an account with no state row, a LEVERED or
+        # INCIDENTAL_DEBIT one, or an unreadable classification stays applicable, so a
+        # missing declaration never narrows the check.
+        not_levered = {
+            account
+            for account in {
+                str(row.get("account_id"))
                 for row in disclosures
-                if row.get("account_id") is not None
+                if row.get("data_class") == "ACCOUNT_FINANCING"
+                and row.get("measurement_basis") == "ACCOUNT_FINANCING_STATE"
             }
+            if all(
+                row.get("classification") == "NOT_LEVERED"
+                and is_available(row.get("coverage_status"))
+                and "UNVERIFIED" not in str(row.get("coverage_reason"))
+                and "CONFLICT" not in str(row.get("coverage_reason"))
+                and str(row.get("coverage_reason")).split(";")[0]
+                in _NOT_LEVERED_EVIDENCE_REASONS
+                for row in disclosures
+                if str(row.get("account_id")) == account
+                and row.get("data_class") == "ACCOUNT_FINANCING"
+                and row.get("measurement_basis") == "ACCOUNT_FINANCING_STATE"
+            )
+        }
+        applicable = sorted(
+            (
+                reference.active_accounts
+                if reference is not None
+                else {
+                    str(row["account_id"])
+                    for row in disclosures
+                    if row.get("account_id") is not None
+                }
+            )
+            - not_levered
         )
         for measure, entity, basis in (
             (
@@ -8834,6 +8994,8 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
                     )
             if applicable:
                 gap = bool(state)
+            elif reference is not None and not_levered:
+                gap = False  # every active account states NOT_LEVERED: nothing to cover
             else:
                 gap = not any(
                     is_available(row.get("coverage_status")) for row in measured
@@ -8856,6 +9018,15 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
                     "levered account (missing, observed only or unavailable)",
                 )
 
+
+# The only reasons under which a producer's NOT_LEVERED may narrow E8: the declaration
+# plus observed cash days showing no debit (tools/account_financing.classify).
+_NOT_LEVERED_EVIDENCE_REASONS = frozenset(
+    {
+        "MARGIN_AVAILABLE_UNUSED_NO_DEBIT_EVIDENCE",
+        "DECLARED_NO_MARGIN_AND_NO_DEBIT_EVIDENCE",
+    }
+)
 
 # -------------------------------------------------------------------- code checks
 
@@ -11369,6 +11540,89 @@ def _owner_excluded_accounts(ctx: Context) -> dict[str, str]:
     }
 
 
+_RETIRED_DISPOSITION = "EXCLUDED_DEPRECATED_HISTORY_ONLY"
+_RETIRED_VALUE_METRIC = "capital.account.cutoff"
+_RETIRED_DATE_METRIC = "date.source_last_observation"
+_RETIRED_VALUE_TOLERANCE = Decimal("0.01")
+
+
+def _entity_account(entity: object) -> str:
+    return str(entity)
+
+
+def _retired_history_only_accounts(ctx: Context) -> dict[str, date]:
+    """Accounts every crosswalk row of which is a retired history-only exclusion, by the
+    last day of their epoch.
+
+    The epoch ended before the cutoff and no row of the account is active or carries
+    another disposition (an immaterial or still-running account is not retired).
+    """
+
+    reference = universe(ctx)
+    crosswalk = ctx.gen.external.crosswalk
+    if reference is None or not isinstance(crosswalk, dict):
+        return {}
+    ends: dict[str, date] = {}
+    clean: dict[str, bool] = {}
+    for item in rows(crosswalk, "rows"):
+        account = str(item.get("account_id"))
+        end = to_date(item.get("effective_end"))
+        clean[account] = clean.get(account, True) and (
+            item.get("product_epoch_disposition") == _RETIRED_DISPOSITION
+            and end is not None
+            and end < ctx.cutoff
+        )
+        if end is not None:
+            ends[account] = max(end, ends.get(account, end))
+    return {
+        account: ends[account]
+        for account, ok in clean.items()
+        if ok and account in ends and account not in reference.active_accounts
+    }
+
+
+def _retired_value_verified(ctx: Context, account: str) -> bool:
+    """The account's expected capital equals the tracker's within the row tolerance.
+
+    At least one expected capital row must exist and every one must agree; no production
+    view, or a different value, is not verified.
+    """
+
+    wanted = [
+        row
+        for row in ctx.expected or []
+        if row.get("metric_id") == _RETIRED_VALUE_METRIC
+        and _entity_account(row.get("entity")) == account
+    ]
+    if not wanted:
+        return False
+    for row in wanted:
+        views = resolve_metric(ctx, _RETIRED_VALUE_METRIC, str(row.get("entity")))
+        expected = to_decimal(row.get("expected", row.get("value")))
+        if expected is None or not views:
+            return False
+        for view in views:
+            shown = to_decimal(view.value)
+            # the row's own tolerance is not consulted: an exemption needs agreement to
+            # the cent, however loose the baseline row's comparison is
+            if shown is None or abs(shown - expected) > _RETIRED_VALUE_TOLERANCE:
+                return False
+            # never looser than the oracle's own tolerance either (cent cap AND row tolerance)
+            row_tolerance = to_decimal(row.get("tolerance"))
+            if row_tolerance is not None and abs(shown - expected) > row_tolerance:
+                return False
+    return True
+
+
+def _is_retired_date_exemption(ctx: Context, row: Mapping[str, Any]) -> bool:
+    account = _entity_account(row.get("entity"))
+    return (
+        row.get("metric_id") == _RETIRED_DATE_METRIC
+        and account in _retired_history_only_accounts(ctx)
+        and _retired_value_verified(ctx, account)
+    )
+
+
 def _is_owner_exclusion(
     row: Mapping[str, Any], owner_excluded: Mapping[str, str]
 ) -> bool:
@@ -11404,25 +11658,38 @@ def expected_exclusions(ctx: Context) -> list[dict[str, Any]]:
     """
 
     owner_excluded = _owner_excluded_accounts(ctx)
-    return [
-        {
-            "metric_id": row.get("metric_id"),
-            "entity": row.get("entity"),
-            "disposition": owner_excluded[str(row.get("entity"))],
-            "reason": row.get("reason"),
-        }
-        for row in ctx.expected_not_derivable
-        if _is_owner_exclusion(row, owner_excluded)
-    ] + [
-        {
-            "metric_id": row.get("metric_id"),
-            "entity": row.get("entity"),
-            "disposition": "INAPPLICABLE_BY_POLICY",
-            "reason": row.get("reason"),
-        }
-        for row in ctx.expected_not_derivable
-        if _is_policy_inapplicable(row)
-    ]
+    return (
+        [
+            {
+                "metric_id": row.get("metric_id"),
+                "entity": row.get("entity"),
+                "disposition": owner_excluded[str(row.get("entity"))],
+                "reason": row.get("reason"),
+            }
+            for row in ctx.expected_not_derivable
+            if _is_owner_exclusion(row, owner_excluded)
+        ]
+        + [
+            {
+                "metric_id": row.get("metric_id"),
+                "entity": row.get("entity"),
+                "disposition": "INAPPLICABLE_BY_POLICY",
+                "reason": row.get("reason"),
+            }
+            for row in ctx.expected_not_derivable
+            if _is_policy_inapplicable(row)
+        ]
+        + [
+            {
+                "metric_id": row.get("metric_id"),
+                "entity": row.get("entity"),
+                "disposition": f"{_RETIRED_DISPOSITION}_VALUE_VERIFIED",
+                "reason": row.get("reason"),
+            }
+            for row in ctx.expected_not_derivable
+            if _is_retired_date_exemption(ctx, row)
+        ]
+    )
 
 
 def check_expected(ctx: Context) -> Iterator[Finding]:
@@ -11441,7 +11708,11 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
         return
     owner_excluded = _owner_excluded_accounts(ctx)
     for row in ctx.expected_not_derivable:
-        if _is_owner_exclusion(row, owner_excluded) or _is_policy_inapplicable(row):
+        if (
+            _is_owner_exclusion(row, owner_excluded)
+            or _is_policy_inapplicable(row)
+            or _is_retired_date_exemption(ctx, row)
+        ):
             continue
         yield _finding(
             "expected.not_derivable",
@@ -11454,8 +11725,21 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
             _METRIC_DEFECTS.get(str(row.get("metric_id")), ()),
             "metric not derivable from upstream authority",
         )
+    retired = _retired_history_only_accounts(ctx)
     for position, row in enumerate(ctx.expected):
         metric_id = str(row.get("metric_id"))
+        # A retired history-only account's capital is compared by value only: the label
+        # of its last observation is not the cutoff by construction.
+        # the row's own tolerance decides the regression compare; the suppression of the
+        # label needs the cent-exact value check besides
+        retired_account = _entity_account(row.get("entity"))
+        retired_end = (
+            retired.get(retired_account)
+            if metric_id == _RETIRED_VALUE_METRIC
+            and retired_account in retired
+            and _retired_value_verified(ctx, retired_account)
+            else None
+        )
         if metric_id == COVERAGE_END_METRIC:
             # The oracle's proof of a custody cash line's coverage end: no production
             # view carries it by this name; check_capital_coverage_end compares it.
@@ -11485,7 +11769,15 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
                     "metric has no production view and no series to recompute it from",
                 )
             yield from _compare_views(
-                metric_id, label, row, recomputed, expected, unit, tolerance, defects
+                metric_id,
+                label,
+                row,
+                recomputed,
+                expected,
+                unit,
+                tolerance,
+                defects,
+                retired_end,
             )
             continue
         has_window = any(view.end is not None for view in observed)
@@ -11549,12 +11841,46 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
                     "series cannot be recomputed over it",
                 )
             yield from _compare_views(
-                metric_id, label, row, recomputed, expected, unit, tolerance, defects
+                metric_id,
+                label,
+                row,
+                recomputed,
+                expected,
+                unit,
+                tolerance,
+                defects,
+                retired_end,
             )
             continue
         yield from _compare_views(
-            metric_id, label, row, comparable, expected, unit, tolerance, defects
+            metric_id,
+            label,
+            row,
+            comparable,
+            expected,
+            unit,
+            tolerance,
+            defects,
+            retired_end,
         )
+
+
+def _older_label(label: object, oracle: object, retired_end: date | None) -> bool:
+    """A retired account's tracker label strictly earlier than the oracle's and not after
+    its epoch end (the last observation precedes the cutoff-dated oracle row). A newer
+    label, or one past the epoch end, stays a finding."""
+
+    if retired_end is None:
+        return False
+    shown = to_date(str(label)[:10])
+    wanted = to_date(str(oracle)[:10])
+    # both sides must be real dates: a malformed oracle date is not "later than" anything
+    return (
+        shown is not None
+        and wanted is not None
+        and shown <= retired_end
+        and shown < wanted
+    )
 
 
 def _compare_views(
@@ -11566,6 +11892,7 @@ def _compare_views(
     unit: str,
     tolerance: Decimal | None,
     defects: Sequence[str],
+    retired_end: date | None = None,
 ) -> Iterator[Finding]:
     for view in views:
         if not _equal(unit, view.value, expected, tolerance):
@@ -11584,7 +11911,8 @@ def _compare_views(
                 "fixed-baseline expected value differs",
             )
         elif (
-            view.as_of
+            not _older_label(view.as_of, row.get("as_of"), retired_end)
+            and view.as_of
             and row.get("as_of")
             and str(view.as_of)[:10] != str(row.get("as_of"))[:10]
             and metric_id.startswith("capital.")
@@ -12374,6 +12702,23 @@ def _stale_implementation_findings(
     )
 
 
+def check_layer_labels(ctx: Context) -> Iterator[Finding]:
+    """Sprint p123: every series block carries one layer label; no backtest headline."""
+
+    for file, document in (("report", ctx.report), ("panel", ctx.panel)):
+        for path, block in layers.series_blocks(document):
+            for row_id, problem in layers.block_problems(block):
+                yield _finding(
+                    row_id,
+                    BLOCKER_INVARIANT,
+                    path,
+                    problem,
+                    "one labelled series",
+                    file,
+                    path,
+                )
+
+
 CHECKS: tuple[tuple[str, Check], ...] = (
     ("identity.required_sections", check_required_sections),
     ("identity.generation_id", check_generation_id),
@@ -12398,6 +12743,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("capital.account_identity", check_account_identity),
     ("returns.sleeve_basis", check_sleeve_basis),
     ("returns.sleeve_leverage", check_sleeve_leverage),
+    (layers.CHECK_ID, check_layer_labels),
     ("universe.authority_missing", check_universe_authority),
     ("universe.active_set_consistent", check_active_universe),
     ("universe.hardcoded_count_text", check_hardcoded_count_text),

@@ -211,3 +211,15 @@ Code changes go through cross-family review (two non-implementer model
 families) and the merge choke point. The verdict-file and `reviews/superseded`
 conventions are program-workspace conventions (state/tools/prmerge.ps1), not
 part of this repo.
+
+## Capture refresh (#913): declared sources, one table, every login at once
+
+`contracts/capture-sources-v1.json` declares each external source (transport, vault credential name, freshness in days
+against the release cutoff, closure checks, the readers it admits). `tools/capture_refresh.py --cutoff <date> --pins <pins.json>`
+runs S0 for every source that is not fresh and prints one table (source, reason, status, owner step); exit code 3 means a
+login or credential is needed, so ask the owner for all of them in one message. Stages never type credentials, 2FA or
+captchas. A source passes S3 only when its freshness rule and every declared closure check pass (`tools/capture_pipeline.py`:
+NAV identity, coverage, sum-equals-total, cash walk, statement cash, bridge receipt, HWM gap bound, stability); S4 copies the
+hashed files to the retained evidence root and pins them; readers open captured files only through
+`captured_input(source_id, name, ...)`, which refuses `UNCAPTURED_INPUT`, `STALE_INPUT`, `POST_CUTOFF` or `HASH_MISMATCH`.
+Source stages that are not wired yet are declared `NEW_STAGE_REQUIRED` in the contract so the refresh lists them.

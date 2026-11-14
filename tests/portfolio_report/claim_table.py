@@ -182,7 +182,7 @@ def p_evidence_separate(payload: Payload) -> Result:
 
 def b_evidence_separate(payload: Payload) -> None:
     line = _mode_lines(payload, "LIVE_ONLY")[0]
-    line["origin"] = [[0, 2, "BACKTEST"], [3, 9, "LIVE"]]
+    line["origin"] = [[0, 2, "BACKTEST"], [3, 9, "ACCOUNT_LIVE"]]
 
 
 def p_closed_epochs_current(payload: Payload) -> Result:
@@ -217,7 +217,11 @@ def b_closed_epochs_current(payload: Payload) -> None:
 def f_inception_week_mixed(payload: Payload) -> None:
     for line in _mode_lines(payload, "LIVE_PLUS_BACKTEST"):
         if line.get("series_id") == "strategy:A":
-            line["origin"] = [[0, 1, "BACKTEST"], [2, 2, "MIXED"], [3, 9, "LIVE"]]
+            line["origin"] = [
+                [0, 1, "BACKTEST"],
+                [2, 2, "MIXED"],
+                [3, 9, "ACCOUNT_LIVE"],
+            ]
 
 
 def p_inception_week_mixed(payload: Payload) -> Result:
@@ -232,7 +236,10 @@ def p_inception_week_mixed(payload: Payload) -> Result:
             continue
         checked += 1
         first = labels.index("MIXED")
-        if "BACKTEST" not in labels[:first] or "LIVE" not in labels[first + 1 :]:
+        live = {"LIVE", "ACCOUNT_LIVE", "MODEL_LIVE"}
+        if "BACKTEST" not in labels[:first] or not live.intersection(
+            labels[first + 1 :]
+        ):
             misplaced.append(f"{line.get('series_id')}={'/'.join(labels)}")
     if not checked:
         return skip("no LIVE_PLUS_BACKTEST line has a MIXED week")
@@ -249,7 +256,7 @@ def p_inception_week_mixed(payload: Payload) -> Result:
 def b_inception_week_mixed(payload: Payload) -> None:
     for line in _mode_lines(payload, "LIVE_PLUS_BACKTEST"):
         if line.get("kind") == "STRATEGY":
-            line["origin"] = [[0, 3, "MIXED"], [4, 9, "LIVE"]]
+            line["origin"] = [[0, 3, "MIXED"], [4, 9, "ACCOUNT_LIVE"]]
             break
 
 

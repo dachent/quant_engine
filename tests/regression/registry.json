@@ -1,42 +1,134 @@
 {
   "cases": {
+    "accepted_spans_omitted_from_dependence": {
+      "defect": "Robuxio accepted multi-day return spans omitted from the dependence summary (#904 item 9).",
+      "status": "covered",
+      "kill": "Pre-fix _performance_summary takes no spans, so the call raises TypeError and the cumulative return is the daily rows alone.",
+      "test": "tests/regression/test_accepted_spans_omitted_from_dependence.py::test_accepted_spans_omitted_from_dependence"
+    },
+    "alpha_headline_without_standard_error": {
+      "defect": "Alpha tile published as a headline with no standard error, or on a backtest-dominated fit (#904 item 11).",
+      "status": "covered",
+      "kill": "Pre-fix _alpha_context has no headline_status key, so the lookup raises KeyError.",
+      "test": "tests/regression/test_alpha_headline_without_standard_error.py::test_alpha_headline_without_standard_error"
+    },
     "atyr_reverse_split_alias": {
       "defect": "Reverse-split alias missing: a ticker renamed by a reverse split resolves to nothing.",
       "status": "open"
     },
-    "ibkr_total_cash_loan_dropped": {
-      "defect": "IBKR total-cash loan dropped by the leverage disclosure (E8).",
-      "status": "open"
-    },
-    "d8_publication_check_never_passes": {
-      "defect": "D8 publication-state check can never pass for a committed release.",
-      "status": "open"
-    },
-    "robuxio_gross_net_splice": {
-      "defect": "Robuxio hybrid line joins a GROSS backtest to a NET live path.",
-      "status": "open"
-    },
-    "grizzlybears_3x_replica_scale": {
-      "defect": "GrizzlyBears 3x replica shown with no scale warning.",
-      "status": "open"
-    },
-    "matrixport_gap_days": {
-      "defect": "Matrixport gap days not accounted for in the return chain.",
-      "status": "open"
-    },
-    "validator_fixture_values_no_builder_emits": {
-      "defect": "Validator fixtures carry values no builder ever emits, so a check passes on fixtures and fails on real output.",
-      "status": "open"
-    },
-    "scratch_path_sidecar_read": {
-      "defect": "A sidecar is read from a scratch path instead of the hashed input.",
-      "status": "open"
+    "calendar_series_scaled_with_252": {
+      "defect": "Calendar-daily series annualised with 252 periods a year (#904 item 6).",
+      "status": "covered",
+      "kill": "Pre-fix attribution scales a 7-day-a-week series with the declared 252.",
+      "test": "tests/regression/test_calendar_series_scaled_with_252.py::test_calendar_series_scaled_with_252"
     },
     "ci_reports_every_failure": {
       "defect": "CI test step stopped at the first failure (maxfail=1) and hid the rest (#910).",
       "status": "covered",
       "test": "tests/regression/test_ci_reports_every_failure.py::test_pytest_has_no_maxfail",
       "kill": "pyproject addopts contains --maxfail=1 on the pre-fix tree, so the assertion fails."
+    },
+    "d8_publication_check_never_passes": {
+      "defect": "D8 publication-state check can never pass for a committed release.",
+      "status": "open"
+    },
+    "dependence_summary_day_count": {
+      "defect": "Dependence summary annualised on 365.25 days and one period short (#904 item 8).",
+      "status": "covered",
+      "kill": "Pre-fix _performance_summary takes one argument (no backtest count) and windows first-to-last row on 365.25, so the test fails before reaching the 730-day window.",
+      "test": "tests/regression/test_dependence_summary_day_count.py::test_dependence_summary_day_count"
+    },
+    "epoch_table_shared_end_date": {
+      "defect": "Epoch table printed every figure against one shared end date (#904 item 12).",
+      "status": "covered",
+      "kill": "Pre-fix app.js has no per-figure window note (ownWindowNote).",
+      "test": "tests/regression/test_epoch_table_shared_end_date.py::test_epoch_table_shared_end_date"
+    },
+    "fx_coverage_asserted_not_derived": {
+      "defect": "FX fact status asserted PARTIAL whenever any non-USD record exists, never testing per-record coverage (E3).",
+      "status": "covered",
+      "test": "tests/regression/test_fx_coverage_asserted_not_derived.py::test_fx_status_follows_per_record_coverage",
+      "kill": "Pre-fix builder returns PARTIAL for a fully covered record, so the COMPLETE assertion fails."
+    },
+    "grizzlybears_3x_replica_scale": {
+      "defect": "GrizzlyBears 3x replica shown with no scale warning.",
+      "status": "open"
+    },
+    "hybrid_cagr_published": {
+      "defect": "CAGR published on a hybrid series that is mostly vendor backtest (#904 item 10).",
+      "status": "covered",
+      "kill": "Pre-fix a series with backtest observations still carries a cagr value.",
+      "test": "tests/regression/test_hybrid_cagr_published.py::test_hybrid_cagr_published"
+    },
+    "ibkr_total_cash_loan_dropped": {
+      "defect": "IBKR total-cash loan dropped by the leverage disclosure (E8).",
+      "status": "open"
+    },
+    "matrixport_gap_days": {
+      "defect": "Matrixport gap days not accounted for in the return chain.",
+      "status": "covered",
+      "test": "tests/regression/test_matrixport_gap_days.py::test_matrixport_gap_days_are_bounded_or_unavailable",
+      "kill": "On the pre-fix code the numeric HWM is UNAVAILABLE for any span gap, so a bounded gap never assesses BOUNDED (module absent)."
+    },
+    "mwr_short_window_not_primary": {
+      "defect": "Money-weighted XIRR shown as the headline for a window under a year (#904 item 4).",
+      "status": "covered",
+      "kill": "Pre-fix app.js has no mwrShortWindow rule, so the assertion fails.",
+      "test": "tests/regression/test_mwr_short_window_not_primary.py::test_mwr_short_window_not_primary"
+    },
+    "portfolio_twr_no_annual_rate": {
+      "defect": "Portfolio TWR published only as a cumulative figure beside an annual MWR (#904 item 1).",
+      "status": "covered",
+      "kill": "Pre-fix build_portfolio_twr has no annualised_act_365 / trailing_12_months / year_to_date keys, so the lookup raises KeyError.",
+      "test": "tests/regression/test_portfolio_twr_no_annual_rate.py::test_portfolio_twr_no_annual_rate"
+    },
+    "reconciliation_tracking_error_252": {
+      "defect": "Reconciliation tracking error scaled with a hard-coded 252 on any calendar (#904 item 7).",
+      "status": "covered",
+      "kill": "Pre-fix tracking error equals stdev * sqrt(252) for a calendar-daily series, not sqrt(365).",
+      "test": "tests/regression/test_reconciliation_tracking_error_252.py::test_reconciliation_tracking_error_252"
+    },
+    "robuxio_gross_net_splice": {
+      "defect": "Robuxio hybrid line joins a GROSS backtest to a NET live path.",
+      "status": "open"
+    },
+    "ronc_linear_short_window": {
+      "defect": "Return on net capital scaled linearly under a year and geometrically above (#904 item 5).",
+      "status": "covered",
+      "kill": "Pre-fix 40-day RONC of 2.44% is 22.27% (linear) instead of the geometric ACT/365 figure.",
+      "test": "tests/regression/test_ronc_linear_short_window.py::test_ronc_linear_short_window"
+    },
+    "scratch_path_sidecar_read": {
+      "defect": "A sidecar is read from a scratch path instead of the hashed input.",
+      "status": "open"
+    },
+    "short_window_account_cagr": {
+      "defect": "Account CAGR published for a window under 365 days (#904 items 2-3).",
+      "status": "covered",
+      "kill": "Pre-fix portfolio_report._strategies publishes account_live_cagr for windows under 365 days, so a row with a CAGR and no SUPPRESSED_UNDER_365D status breaks the window assertions (existing end-to-end report fixture).",
+      "test": "tests/regression/test_short_window_account_cagr.py::test_short_window_account_cagr"
+    },
+    "sleeve_rate_short_window": {
+      "defect": "Sleeve return per year published from a 280-day window (#904 items 3-4).",
+      "status": "covered",
+      "kill": "Pre-fix _annualise returns a number for 280 days.",
+      "test": "tests/regression/test_sleeve_rate_short_window.py::test_sleeve_rate_short_window"
+    },
+    "stale_capital_labelled_available": {
+      "defect": "Account capital dated before the cutoff labelled AVAILABLE_LATEST_OBSERVATION (capital.as_of_cutoff vs label).",
+      "status": "covered",
+      "test": "tests/regression/test_stale_capital_labelled_available.py::test_stale_last_observation_is_historical",
+      "kill": "Pre-fix builder emits AVAILABLE_LATEST_OBSERVATION for a 2025 observation at a 2026 cutoff."
+    },
+    "tracking_error_population_std": {
+      "defect": "Tracking error computed with the population standard deviation and unlabelled (#904 item 13).",
+      "status": "covered",
+      "kill": "Pre-fix portfolio_target_series uses pstdev for the tracking error, so the source assertion fails.",
+      "test": "tests/regression/test_tracking_error_population_std.py::test_tracking_error_population_std"
+    },
+    "validator_fixture_values_no_builder_emits": {
+      "defect": "Validator fixtures carry values no builder ever emits, so a check passes on fixtures and fails on real output.",
+      "status": "open"
     }
   },
   "tickets": {
@@ -68,6 +160,29 @@
     "903": {
       "cases": [
         "grizzlybears_3x_replica_scale"
+      ]
+    },
+    "904": {
+      "cases": [
+        "accepted_spans_omitted_from_dependence",
+        "alpha_headline_without_standard_error",
+        "calendar_series_scaled_with_252",
+        "dependence_summary_day_count",
+        "epoch_table_shared_end_date",
+        "hybrid_cagr_published",
+        "mwr_short_window_not_primary",
+        "portfolio_twr_no_annual_rate",
+        "reconciliation_tracking_error_252",
+        "ronc_linear_short_window",
+        "short_window_account_cagr",
+        "sleeve_rate_short_window",
+        "tracking_error_population_std"
+      ]
+    },
+    "905": {
+      "cases": [
+        "fx_coverage_asserted_not_derived",
+        "stale_capital_labelled_available"
       ]
     },
     "907": {

@@ -158,6 +158,8 @@ def test_every_other_numeric_entry_point_refuses_another_interpreter(
 # tools that handle floats but reach no pin, with the reason; every other tool that does arithmetic on
 # floats must call ``check_entry_interpreter`` (or be a guarded tool above)
 EXCUSED = {
+    "portfolio_model_vs_actual_derive": "derives from hashed inputs and verifies its own closure; reaches no pin",
+    "capture_governed_price": "records vendor price bars as bytes; no figure reaches a pin",
     "capture_quantbase_har": "records a browser capture; no figure is derived",
     "ci_summary": "reports junit test names and durations; no figure reaches a pin",
     "codex_scope_guard": "scope checks on diffs",
@@ -169,6 +171,9 @@ EXCUSED = {
     "yahoo_fetch_driver": "fetches vendor bytes",
     "release_driver": "orchestrates; its python stages are checked by required_python",
     "release_preflight": "static gate: reads run config and release roots, computes no figure",
+    "release_preflight_g1a": "G1 rows: call the consumers' own validators, compute no figure",
+    "release_preflight_g1b": "consumer-contract rows: call the consumers' own checks, compute no figure",
+    "release_preflight_g2": "product gate: measures a built candidate with the consumers' own checks, computes no figure",
     "release_measurements": "wall-clock and size measurements of the run",
     "release_canary": "filesystem timing and environment probe of the commit path; derives no figure",
     "verify_sleeve_ledger": "re-reads a ledger and compares digests",
