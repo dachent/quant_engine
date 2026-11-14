@@ -461,3 +461,18 @@ def test_a_flawed_empty_row_in_a_mixed_history_never_closes_the_cost() -> None:
             history({**good, **flaw}), days, days[-1], None, require_explicit_zero=True
         )
         assert not result.covered, flaw
+
+
+def test_a_contradictory_source_amount_makes_an_empty_row_malformed() -> None:
+    """Kill test (final round): source_amount, when present, must be the AVAILABLE zero as
+    well; a contradictory amount/source_amount pair never closes the cost."""
+
+    good = [_empty_day(d) for d in DAYS]
+    assert all("source_amount" in r for r in good)
+    assert lc.financing_cost_closure(good, DAYS, DAYS[-1], None).covered
+    for contradicted in (
+        _amt("-3"),
+        {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+    ):
+        rows = [{**good[0], "source_amount": contradicted}, *good[1:]]
+        assert not lc.financing_cost_closure(rows, DAYS, DAYS[-1], None).covered

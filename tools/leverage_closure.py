@@ -103,13 +103,19 @@ def _is_proper_empty_row(row: Mapping[str, Any]) -> bool:
     """An ACCRUAL_SECTION_EMPTY row counts only as the broker's own zero: AVAILABLE,
     exactly 0, bound to the statement account, from the InterestAccruals section."""
 
-    amount = row.get("amount")
-    if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
-        return False
-    try:
-        zero = Decimal(str(amount.get("value"))) == 0
-    except ArithmeticError:
-        return False
+    def exact_zero(amount: object) -> bool:
+        if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
+            return False
+        try:
+            return Decimal(str(amount.get("value"))) == 0
+        except ArithmeticError:
+            return False
+
+    # amount and, when the row carries one, source_amount must both be the AVAILABLE zero:
+    # a contradictory pair is malformed
+    zero = exact_zero(row.get("amount")) and (
+        "source_amount" not in row or exact_zero(row.get("source_amount"))
+    )
     return (
         zero
         and row.get("source_account_scope") == "STATEMENT_ACCOUNT"
