@@ -86,6 +86,7 @@ def _debit_evidence(
     liability: Sequence[Mapping[str, Any]],
     cost: Sequence[Mapping[str, Any]],
     window_start: date | None = None,
+    nav_days: frozenset[str] = frozenset(),
 ) -> account_financing.DebitEvidence:
     base = [
         r
@@ -122,13 +123,9 @@ def _debit_evidence(
             and isinstance(r.get("source_artifact_sha256"), str)
             and _SHA256.fullmatch(r["source_artifact_sha256"]) is not None
         )
-        if (
-            amount is None
-            or amount < 0
-            or not pinned
-            or day is None
-            or (window_start is not None and day < window_start)
-        ):
+        if day is not None and window_start is not None and day < window_start:
+            continue  # before the account's observed window: clipped, not a gap
+        if amount is None or amount < 0 or not pinned or day is None:
             unreadable += 1
         elif amount > 0:
             base_days.add(day.isoformat())
@@ -144,7 +141,18 @@ def _debit_evidence(
     postings = sum(
         1 for r in cost if r.get("classification") == "BROKER_DEBIT_INTEREST"
     )
+    known_days = (
+        observed
+        | {
+            r["as_of_date"]
+            for r in base
+            if r.get("classification") == "NET_CASH_DEBIT_BALANCE"
+            and _amount(r) is not None
+        }
+        | {d for d in base_days if d in nav_days}
+    )
     return account_financing.DebitEvidence(
+        unobserved_days=len(nav_days - known_days),
         net_base_debit_days=len(base_days),
         debit_interest_postings=postings,
         currency_debit_days=len(currency_days),
@@ -230,6 +238,11 @@ def account_financing_rows(
                     if d is not None
                 ),
                 default=None,
+            ),
+            frozenset(
+                str(r["as_of_date"])
+                for r in _until(parts["nav"], cutoff)
+                if r.get("as_of_date")
             ),
         )
         for name, parts in by_account.items()

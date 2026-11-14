@@ -303,9 +303,25 @@ def test_not_levered_needs_observed_cash_days_and_a_verified_declaration() -> No
     pinned = {**empty}
     pinned["financing_liability_observations"] = [
         *empty["financing_liability_observations"],
-        zero,
+        *({**zero, "as_of_date": day} for day in DAYS),
     ]
     assert _quiet_state(pinned)["coverage_status"] == "COMPLETE_DECLARED"
+    # coverage is required: one observed day of three is not enough (F2)
+    partial = {**empty}
+    partial["financing_liability_observations"] = [
+        *empty["financing_liability_observations"],
+        zero,
+    ]
+    refused = _quiet_state(partial)
+    assert refused["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "NOT_LEVERED_WITH_UNOBSERVED_DAYS" in refused["coverage_reason"]
+    # a zero row dated before the account's first NAV day is clipped, not a data gap (E5)
+    early = {**empty}
+    early["financing_liability_observations"] = [
+        *pinned["financing_liability_observations"],
+        {**zero, "as_of_date": "2025-12-01"},
+    ]
+    assert _quiet_state(early)["coverage_status"] == "COMPLETE_DECLARED"
     # without provenance, or with a non-zero amount, it is a gap, not evidence
     for broken in (
         {**zero, "source_artifact_id": None},
