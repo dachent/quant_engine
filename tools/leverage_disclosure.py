@@ -48,30 +48,39 @@ def _until(rows: Sequence[Mapping[str, Any]], cutoff: str) -> list[Mapping[str, 
     return [r for r in rows if day(r) <= cutoff]
 
 
-# A net base cash balance below zero by less than one base-currency unit is rounding dust
-# (a closed account keeps a fractional negative balance for months), not borrowing.
-NET_BASE_DEBIT_DUST: Final = Decimal("1")
-
-
-def _is_borrowing(value: object) -> bool:
+def _amount(row: Mapping[str, Any]) -> Decimal | None:
+    amount = row.get("amount")
+    if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
+        return None
     try:
-        return value is not None and Decimal(str(value)) < -NET_BASE_DEBIT_DUST
+        return Decimal(str(amount.get("value")))
     except ArithmeticError:
-        return False
+        return None
 
 
 def _debit_evidence(
     liability: Sequence[Mapping[str, Any]],
     cost: Sequence[Mapping[str, Any]],
 ) -> account_financing.DebitEvidence:
-    base_days = {
-        r["as_of_date"]
+    base = [
+        r
         for r in liability
         if r.get("aggregation_level") == "BASE_SUMMARY"
         and r.get("measurement_basis") == "TRADE_DATE_CASH_BALANCE"
-        and r.get("classification") == "NET_CASH_DEBIT_BALANCE"
-        and _is_borrowing((r.get("amount") or {}).get("value"))
+    ]
+    # Any net debit is borrowing; a debit row whose amount cannot be read is a data gap,
+    # never a zero; and "no debit" is only evidence when base days were observed at all.
+    base_days = {
+        r["as_of_date"]
+        for r in base
+        if r.get("classification") == "NET_CASH_DEBIT_BALANCE"
     }
+    unreadable = sum(
+        1
+        for r in base
+        if r.get("classification") == "NET_CASH_DEBIT_BALANCE" and _amount(r) is None
+    )
+    observed = {r["as_of_date"] for r in base if _amount(r) is not None}
     currency_days = {
         r["as_of_date"]
         for r in liability
@@ -86,6 +95,8 @@ def _debit_evidence(
         net_base_debit_days=len(base_days),
         debit_interest_postings=postings,
         currency_debit_days=len(currency_days),
+        unreadable_debit_rows=unreadable,
+        observed_base_days=len(observed),
     )
 
 
