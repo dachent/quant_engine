@@ -11535,8 +11535,9 @@ def _entity_account(entity: object) -> str:
     return str(entity).split("|", 1)[0]
 
 
-def _retired_history_only_accounts(ctx: Context) -> frozenset[str]:
-    """Accounts every crosswalk row of which is a retired history-only exclusion.
+def _retired_history_only_accounts(ctx: Context) -> dict[str, date]:
+    """Accounts every crosswalk row of which is a retired history-only exclusion, by the
+    last day of their epoch.
 
     The epoch ended before the cutoff and no row of the account is active or carries
     another disposition (an immaterial or still-running account is not retired).
@@ -11545,21 +11546,24 @@ def _retired_history_only_accounts(ctx: Context) -> frozenset[str]:
     reference = universe(ctx)
     crosswalk = ctx.gen.external.crosswalk
     if reference is None or not isinstance(crosswalk, dict):
-        return frozenset()
-    retired: dict[str, bool] = {}
+        return {}
+    ends: dict[str, date] = {}
+    clean: dict[str, bool] = {}
     for item in rows(crosswalk, "rows"):
         account = str(item.get("account_id"))
         end = to_date(item.get("effective_end"))
-        retired[account] = retired.get(account, True) and (
+        clean[account] = clean.get(account, True) and (
             item.get("product_epoch_disposition") == _RETIRED_DISPOSITION
             and end is not None
             and end < ctx.cutoff
         )
-    return frozenset(
-        account
-        for account, ok in retired.items()
-        if ok and account not in reference.active_accounts
-    )
+        if end is not None:
+            ends[account] = max(end, ends.get(account, end))
+    return {
+        account: ends[account]
+        for account, ok in clean.items()
+        if ok and account in ends and account not in reference.active_accounts
+    }
 
 
 def _retired_value_verified(ctx: Context, account: str) -> bool:
@@ -11705,9 +11709,10 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
         metric_id = str(row.get("metric_id"))
         # A retired history-only account's capital is compared by value only: the label
         # of its last observation is not the cutoff by construction.
-        ignore_as_of = (
-            metric_id == _RETIRED_VALUE_METRIC
-            and _entity_account(row.get("entity")) in retired
+        retired_end = (
+            retired.get(_entity_account(row.get("entity")))
+            if metric_id == _RETIRED_VALUE_METRIC
+            else None
         )
         if metric_id == COVERAGE_END_METRIC:
             # The oracle's proof of a custody cash line's coverage end: no production
@@ -11746,7 +11751,7 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
                 unit,
                 tolerance,
                 defects,
-                ignore_as_of,
+                retired_end,
             )
             continue
         has_window = any(view.end is not None for view in observed)
@@ -11818,7 +11823,7 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
                 unit,
                 tolerance,
                 defects,
-                ignore_as_of,
+                retired_end,
             )
             continue
         yield from _compare_views(
@@ -11830,8 +11835,23 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
             unit,
             tolerance,
             defects,
-            ignore_as_of,
+            retired_end,
         )
+
+
+def _older_label(label: object, oracle: object, retired_end: date | None) -> bool:
+    """A retired account's tracker label strictly earlier than the oracle's and not after
+    its epoch end (the last observation precedes the cutoff-dated oracle row). A newer
+    label, or one past the epoch end, stays a finding."""
+
+    if retired_end is None:
+        return False
+    shown = to_date(str(label)[:10])
+    return (
+        shown is not None
+        and shown <= retired_end
+        and str(label)[:10] < str(oracle)[:10]
+    )
 
 
 def _compare_views(
@@ -11843,7 +11863,7 @@ def _compare_views(
     unit: str,
     tolerance: Decimal | None,
     defects: Sequence[str],
-    ignore_as_of: bool = False,
+    retired_end: date | None = None,
 ) -> Iterator[Finding]:
     for view in views:
         if not _equal(unit, view.value, expected, tolerance):
@@ -11862,7 +11882,7 @@ def _compare_views(
                 "fixed-baseline expected value differs",
             )
         elif (
-            not ignore_as_of
+            not _older_label(view.as_of, row.get("as_of"), retired_end)
             and view.as_of
             and row.get("as_of")
             and str(view.as_of)[:10] != str(row.get("as_of"))[:10]

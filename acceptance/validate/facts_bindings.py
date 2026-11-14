@@ -40,6 +40,7 @@ BINDING_ACCOUNT_ROWS = "BINDING_ACCOUNT_ROWS"
 BINDING_TAG_MAP = "BINDING_TAG_MAP"
 BINDING_CORPORATE_ACTIONS = "BINDING_CORPORATE_ACTIONS"
 BINDING_OLD_SCHEMA = "BINDING_OLD_SCHEMA"
+BINDING_RECEIPT = "BINDING_RECEIPT"
 MIN_CATALOG_SCHEMA = 7
 CATALOG_NAME = "ibkr-catalog.json"
 CATALOG_ARTIFACT = "normalized/ibkr-catalog.json"
@@ -330,3 +331,88 @@ def load_sources(
         except OSError as exc:
             raise Refusal(BINDING_TAG_MAP, f"cannot read {tag_map_path}") from exc
     return FactsSources(ledger=ledger, catalog_raw=catalog_raw, tag_map_raw=tag_raw)
+
+
+RECEIPT_NAME = "admit-or-declare-receipt.json"
+RECEIPT_ARTIFACT = "normalized/admit-or-declare-receipt.json"
+LEDGER_NAME = "provider-ledger.json"
+LEDGER_ARTIFACT = "normalized/provider-ledger.json"
+RECEIPT_TYPE = "PROVIDER_ADMIT_OR_DECLARE_V1"
+
+
+def _json_object(raw: bytes, what: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except ValueError as exc:
+        raise Refusal(BINDING_RECEIPT, f"{what} is not JSON") from exc
+    if not isinstance(value, dict):
+        raise Refusal(BINDING_RECEIPT, f"{what} is not an object")
+    return value
+
+
+def bind_admission_receipt(
+    receipt_path: Path, ledger_path: Path | None
+) -> dict[str, Any]:
+    """The receipt of the same verified provider-ledger generation as ``--provider-ledger``.
+
+    A receipt grants a source-clock exemption, so it is bound like the facts file: it must
+    be the type the pipeline writes, sit in a generation directory whose ``generation.json``
+    is VERIFIED, names that directory as its id and records this receipt's SHA-256 as the
+    ``normalized/admit-or-declare-receipt.json`` artifact; and the ``--provider-ledger``
+    file must be that same generation's catalog, by the same record.  A stale, hand-edited
+    or other-run receipt, or one given without its ledger, is a refusal.
+    """
+
+    try:
+        raw = receipt_path.read_bytes()
+        directory = receipt_path.resolve().parent
+        manifest_raw = (directory / "generation.json").read_bytes()
+    except OSError as exc:
+        raise Refusal(
+            BINDING_RECEIPT, f"cannot read the receipt or its generation.json: {exc}"
+        ) from exc
+    receipt = _json_object(raw, "the receipt")
+    if (
+        receipt.get("receipt_type") != RECEIPT_TYPE
+        or receipt.get("schema_version") != 1
+        or not isinstance(receipt.get("dispositions"), list)
+    ):
+        raise Refusal(
+            BINDING_RECEIPT, "the file is not a provider admit-or-declare receipt"
+        )
+    manifest = _json_object(manifest_raw, "generation.json")
+    if (
+        manifest.get("generation_id") != directory.name
+        or manifest.get("verification") != "VERIFIED"
+    ):
+        raise Refusal(
+            BINDING_RECEIPT, "the receipt's generation is not its verified directory"
+        )
+    recorded = {
+        item.get("artifact_id"): item.get("sha256")
+        for item in manifest.get("artifacts", [])
+        if isinstance(item, Mapping)
+    }
+    if recorded.get(RECEIPT_ARTIFACT) != hashlib.sha256(raw).hexdigest():
+        raise Refusal(
+            BINDING_RECEIPT,
+            "the receipt's SHA-256 is not the one its generation records",
+        )
+    if ledger_path is None:
+        raise Refusal(
+            BINDING_RECEIPT,
+            "a receipt is only usable with the --provider-ledger of its generation",
+        )
+    try:
+        ledger_raw = ledger_path.read_bytes()
+    except OSError as exc:
+        raise Refusal(BINDING_RECEIPT, f"cannot read {ledger_path}") from exc
+    if (
+        ledger_path.resolve().parent != directory
+        or recorded.get(LEDGER_ARTIFACT) != hashlib.sha256(ledger_raw).hexdigest()
+    ):
+        raise Refusal(
+            BINDING_RECEIPT,
+            "--provider-ledger is not the catalog of the receipt's generation",
+        )
+    return receipt
