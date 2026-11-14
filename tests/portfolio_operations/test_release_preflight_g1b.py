@@ -31,8 +31,17 @@ def _load(name: str, relative: str) -> Any:
     spec = importlib.util.spec_from_file_location(name, REPO_ROOT / relative)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(name)
+    # dataclasses resolve their annotations through sys.modules while the module executes;
+    # the entry must not outlive the load (it would replace what other tests import)
     sys.modules[name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
     return module
 
 
