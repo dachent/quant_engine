@@ -3714,3 +3714,47 @@ def test_a_non_blank_non_numeric_nav_attribute_refuses_the_statement(
         assert broken != with_positions
         with pytest.raises(Exception, match="nav\."):
             _coverage_catalog(tmp_path, broken)
+
+
+def test_lot_rows_must_be_covered_by_their_own_summary_instrument(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (final round, Astra/Opus): exposure reads SUMMARY rows, so every LOT
+    instrument needs a SUMMARY row of the same instrument whose quantity and value the
+    LOT rows add up to; otherwise the figure is unverified (OPEN_POSITIONS_UNVERIFIED)."""
+
+    day = date(2026, 1, 3)
+    full = _full_nav(_xml("SYNTH-RAW", day, "114"))
+    head, rest = full.split("<OpenPositions>", 1)
+    tail = rest.split("</OpenPositions>", 1)[1]
+
+    def row(level: str, conid: str, position: str, value: str) -> str:
+        return (
+            f'<OpenPosition accountId="SYNTH-RAW" reportDate="20260103" '
+            f'levelOfDetail="{level}" conid="{conid}" currency="USD" position="{position}" '
+            f'positionValue="{value}" fxRateToBase="1" symbol="S{conid}" />'
+        )
+
+    def with_rows(*rows: str) -> str:
+        return head + "<OpenPositions>" + "".join(rows) + "</OpenPositions>" + tail
+
+    covered = with_rows(row("SUMMARY", "100", "2", "20"), row("LOT", "100", "2", "20"))
+    assert _exposure_status(tmp_path, covered) == "AVAILABLE"
+    two_lots = with_rows(
+        row("SUMMARY", "100", "3", "30"),
+        row("LOT", "100", "1", "10"),
+        row("LOT", "100", "2", "20"),
+    )
+    assert _exposure_status(tmp_path, two_lots) == "AVAILABLE"
+    astra = with_rows(row("SUMMARY", "100", "0", "0"), row("LOT", "200", "5", "5000"))
+    opus = with_rows(row("SUMMARY", "100", "2", "20"), row("LOT", "200", "2", "20"))
+    short_quantity = with_rows(
+        row("SUMMARY", "100", "3", "20"), row("LOT", "100", "2", "20")
+    )
+    short_value = with_rows(
+        row("SUMMARY", "100", "2", "5000"), row("LOT", "100", "2", "20")
+    )
+    for broken in (astra, opus, short_quantity, short_value):
+        assert _exposure_status(tmp_path, broken) != "AVAILABLE"
+        exposure = _exposure(_coverage_catalog(tmp_path, broken))
+        assert exposure["unavailable_reason"] == "OPEN_POSITIONS_UNVERIFIED"

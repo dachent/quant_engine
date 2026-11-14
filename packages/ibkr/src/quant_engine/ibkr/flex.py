@@ -172,6 +172,56 @@ def _nav_numbers(
     return out, unknown
 
 
+_LOT_VALUE_TOLERANCE = Decimal(1)
+
+
+def _lot_coverage_gaps(sections: list[ET.Element]) -> int:
+    """Instruments whose LOT rows are not proven covered by their SUMMARY row.
+
+    Exposure is read from the SUMMARY rows only, so every instrument (conid, else symbol)
+    that has LOT rows must have a SUMMARY row of the same instrument, and the LOT
+    quantities must add up to the SUMMARY quantity and the LOT values to the SUMMARY value
+    (within one unit of the position currency).  Every pinned statement meets this
+    exactly; anything else is partial evidence, not an exposure."""
+
+    summary: dict[str, list[Decimal]] = {}
+    lots: dict[str, list[Decimal]] = {}
+    unkeyed = 0
+    for section in sections:
+        for item in section:
+            if _local(item.tag) != "OpenPosition":
+                continue
+            level = item.attrib.get("levelOfDetail")
+            if level not in ("SUMMARY", "LOT"):
+                continue
+            key = _optional(item.attrib.get("conid")) or _optional(
+                item.attrib.get("symbol")
+            )
+            if key is None:
+                unkeyed += 1
+                continue
+            try:
+                quantity = Decimal(item.attrib.get("position") or "0")
+                value = Decimal(item.attrib.get("positionValue") or "0")
+            except ArithmeticError:
+                unkeyed += 1
+                continue
+            bucket = summary if level == "SUMMARY" else lots
+            total = bucket.setdefault(key, [Decimal(0), Decimal(0)])
+            total[0] += quantity
+            total[1] += value
+    gaps = unkeyed
+    for key, (quantity, value) in lots.items():
+        covering = summary.get(key)
+        if (
+            covering is None
+            or quantity != covering[0]
+            or abs(value - covering[1]) > _LOT_VALUE_TOLERANCE
+        ):
+            gaps += 1
+    return gaps
+
+
 def _not_verified_zero(numbers: tuple[dict[str, Decimal], bool]) -> bool:
     values, unknown = numbers
     return unknown or any(v != 0 for v in values.values())
@@ -881,6 +931,7 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         interest_accruals_section_present=bool(_direct(element, "InterestAccruals")),
         open_positions_section_present=bool(_direct(element, "OpenPositions")),
         open_position_rows_suspect=outside_rows
+        + _lot_coverage_gaps(_direct(element, "OpenPositions"))
         + sum(
             1
             for section in _direct(element, "OpenPositions")
