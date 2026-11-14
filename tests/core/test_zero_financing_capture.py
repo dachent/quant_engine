@@ -291,3 +291,60 @@ def test_descriptive_extra_keys_never_influence_the_verdict(tmp_path: Path) -> N
     del body["transactions_complete"]
     with pytest.raises(zf.ZeroFinancingError, match="shape differs"):
         _build(tmp_path, True, json.dumps(body).encode())
+
+
+def _history(tmp_path: Path, start: date, margin_first: bool = False) -> dict[str, Any]:
+    directory, sums, extract = _world(tmp_path, False)
+    texts = {}
+    # an earlier pinned statement (January) that is a clean retirement one, or a margin one
+    january = f"schwab-stmt-{LABEL}-2026-01-31.pdf"
+    (tmp_path / january).write_bytes(january.encode())
+    sums[january] = hashlib.sha256((tmp_path / january).read_bytes()).hexdigest()
+    texts[january] = _statement("January 1-31, 2026", margin=margin_first)
+    march_text = extract(None)
+
+    def read(path: Path) -> str:
+        return texts.get(path.name, march_text)
+
+    return zf.build(
+        directory,
+        sums,
+        {LABEL: (ACCOUNT, LAST3)},
+        provider_id=PROVIDER,
+        extract=read,
+        captures={ACCOUNT: _capture(tmp_path)},
+        capture_dir=tmp_path,
+        cutoff=CUTOFF,
+        history_start={ACCOUNT: start},
+    )
+
+
+def test_the_type_rule_reaches_back_to_the_first_nav_day(tmp_path: Path) -> None:
+    """Kill test: an account type is a property of the account; days of its ledger history
+    before the first pinned statement rest on the type rule (and say so)."""
+
+    artifact = _history(tmp_path, date(2025, 11, 1))
+    days = _days(artifact)
+    assert days[0] == "2025-11-01" and "2025-12-31" in days and days[-1] == "2026-04-06"
+    early = artifact["rows"][0]
+    assert early["verdict_reason"] == "RETIREMENT_TYPE_WHOLE_HISTORY"
+    assert early["source_field"] == "Statement account type (type rule)"
+    note = artifact["capture_decisions"][0]
+    assert note["whole_history_reason"] == "RETIREMENT_TYPE_WHOLE_HISTORY"
+    assert note["whole_history_days"] == (date(2026, 1, 1) - date(2025, 11, 1)).days
+    # a history that starts inside the statements adds nothing
+    assert (
+        "whole_history_days"
+        not in _history(tmp_path, date(2026, 1, 15))["capture_decisions"][0]
+    )
+
+
+def test_the_type_rule_refuses_an_account_with_a_margin_period_pinned(
+    tmp_path: Path,
+) -> None:
+    """If an earlier pinned statement of the account shows a margin block, the account is
+    not a clean no-margin type: the rule does not reach back."""
+
+    artifact = _history(tmp_path, date(2025, 11, 1), margin_first=True)
+    assert "2025-12-31" not in _days(artifact)
+    assert "whole_history_days" not in artifact["capture_decisions"][0]

@@ -4010,7 +4010,11 @@ def _pinned_file(path_value: object, sha256: object, name: str) -> bytes:
 
 
 def _zero_financing_rows(
-    value: object, accounts: set[str], providers: set[str], as_of: date
+    value: object,
+    accounts: set[str],
+    providers: set[str],
+    as_of: date,
+    history_start: Mapping[str, date] | None = None,
 ) -> tuple[str, list[dict[str, Any]], list[SourceArtifact]]:
     """Provider-observed zero-financing days, derived HERE from the retained statements.
 
@@ -4094,6 +4098,7 @@ def _zero_financing_rows(
             captures=captures or None,
             capture_dir=capture_dir,
             cutoff=as_of,
+            history_start=history_start,
         )
         rows = zero_financing_statements.validate_rows(artifact, accounts)
     except (
@@ -11124,13 +11129,6 @@ def build_catalog(
     accounts, strategies, assignments = _assignment_index(
         provenance, _object(authority.get("contract"), "financial MVP contract")
     )
-    zero_financing = (
-        _zero_financing_rows(
-            spec["zero_financing_observations"], accounts, set(spec["providers"]), as_of
-        )
-        if "zero_financing_observations" in spec
-        else None
-    )
     identities: list[ProviderGenerationIdentity] = []
     provider_coverage: list[dict[str, Any]] = []
     provider_artifacts: list[SourceArtifact] = []
@@ -11201,6 +11199,23 @@ def build_catalog(
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
+    zero_financing = None
+    if "zero_financing_observations" in spec:
+        # the account type rule reaches back to each account's first NAV day
+        first_nav: dict[str, date] = {}
+        for facts_ in provider_facts.values():
+            for nav_row in facts_.get("nav_observations", []):
+                day_ = _day(nav_row["as_of_date"], "nav as_of_date")
+                account_ = str(nav_row["account_id"])
+                if account_ not in first_nav or day_ < first_nav[account_]:
+                    first_nav[account_] = day_
+        zero_financing = _zero_financing_rows(
+            spec["zero_financing_observations"],
+            accounts,
+            set(spec["providers"]),
+            as_of,
+            first_nav,
+        )
     if zero_financing is not None:
         zero_provider, zero_rows, zero_artifacts = zero_financing
         # each row must belong to an account this provider's own generation observes, and

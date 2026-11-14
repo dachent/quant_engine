@@ -538,6 +538,7 @@ def build(
     captures: Mapping[str, bytes] | None = None,
     capture_dir: Path | None = None,
     cutoff: date | None = None,
+    history_start: Mapping[str, date] | None = None,
 ) -> dict[str, Any]:
     extract = extract or _pdftotext  # resolved at call time
     names = sorted(sums)
@@ -703,11 +704,47 @@ def build(
                 why = "RETIREMENT_TYPE_THROUGH_CUTOFF" if holds else "TYPE_NOT_PROVEN"
             elif record["state"] != "ZERO" or record["loan_closing"] != 0:
                 holds, why = False, "LAST_STATEMENT_NOT_ZERO"
-            capture_notes.append(
-                {"account_id": account, "bracket": holds, "reason": why}
-            )
+            note: dict[str, Any] = {
+                "account_id": account,
+                "bracket": holds,
+                "reason": why,
+            }
+            capture_notes.append(note)
             if not holds:
                 continue
+            if record["type_only"] and history_start and account in history_start:
+                # An account type is a property of the account, not of a date: days of the
+                # account's ledger history before its first pinned statement rest on the
+                # type rule (printed on a pinned statement) and not on statements.  Refused
+                # when any pinned period of the account is not a clean type-only period.
+                first_start = spans[0][0]
+                earlier = history_start[account]
+                if all(periods[(account, a, b)]["type_only"] for a, b in spans) and (
+                    earlier < first_start
+                ):
+                    anchor = periods[(account, first_start, spans[0][1])]
+                    for current in _days(earlier, first_start - timedelta(days=1)):
+                        rows.append(
+                            {
+                                "account_id": account,
+                                "as_of_date": current.isoformat(),
+                                "amount": {
+                                    "currency": "USD",
+                                    "status": "AVAILABLE",
+                                    "value": "0",
+                                },
+                                "classification": CLASSIFICATION,
+                                "measurement_basis": BASIS,
+                                "provider_id": provider_id,
+                                "source_artifact_id": f"{prefix}/{anchor['name']}",
+                                "source_artifact_sha256": anchor["digest"],
+                                "source_field": "Statement account type (type rule)",
+                                "source_page": anchor["page"],
+                                "verdict_reason": "RETIREMENT_TYPE_WHOLE_HISTORY",
+                            }
+                        )
+                    note["whole_history_days"] = (first_start - earlier).days
+                    note["whole_history_reason"] = "RETIREMENT_TYPE_WHOLE_HISTORY"
             digest = hashlib.sha256(raw).hexdigest()
             first_new = end + timedelta(days=1)
             if not record["type_only"]:
