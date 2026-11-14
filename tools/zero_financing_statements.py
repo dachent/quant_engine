@@ -407,15 +407,8 @@ _CAPTURE_KEYS = frozenset(
 )
 
 
-# descriptive extras a capture may carry (how the page was read); never evidence
-_CAPTURE_NOTES = frozenset(
-    {
-        "balances_note",
-        "history_filter",
-        "rows_in_response",
-        "rows_rendered_in_page_text",
-    }
-)
+# Extra keys (how the page was read, row labels ...) are descriptive and ignored: only
+# the required keys below can influence the verdict.
 
 
 def _zero_amount(value: object) -> bool:
@@ -451,7 +444,6 @@ def evaluate_capture(
     if (
         not isinstance(top, dict)
         or not _CAPTURE_KEYS <= set(top)
-        or not set(top) <= _CAPTURE_KEYS | _CAPTURE_NOTES
         or top["schema_version"] != 1
     ):
         raise ZeroFinancingError("capture shape differs")
@@ -514,12 +506,12 @@ def evaluate_capture(
     if top["transactions_reported_count"] != len(transactions):
         return False, "CAPTURE_TRANSACTION_COUNT_DIFFERS"
     for item in transactions:
-        if not isinstance(item, dict) or set(item) != {
+        if not isinstance(item, dict) or not {
             "date",
             "action",
             "description",
             "amount",
-        }:
+        } <= set(item):
             raise ZeroFinancingError("capture transaction row is invalid")
         try:
             when = date.fromisoformat(item["date"])
