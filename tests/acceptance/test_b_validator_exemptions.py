@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import copy
 import json
+
+import pytest
 from pathlib import Path
 from typing import Any
 
@@ -156,10 +158,12 @@ ORACLE_AS_OF = "2026-07-17"
 TRACKER_AS_OF = "2025-11-24"
 
 
-def _tracker_row(account: str = RETIRED, value: str = TRACKER_VALUE) -> dict[str, Any]:
+def _tracker_row(
+    account: str = RETIRED, value: str = TRACKER_VALUE, as_of: str = TRACKER_AS_OF
+) -> dict[str, Any]:
     return {
         "account_id": account,
-        "as_of_date": TRACKER_AS_OF,
+        "as_of_date": as_of,
         "latest_value_usd": value,
         "status": "AVAILABLE_LATEST_OBSERVATION",
     }
@@ -320,3 +324,77 @@ def test_the_exemption_is_limited_to_the_last_observation_metric(tmp_path):
     other = {**_last_observation(), "metric_id": "date.source_first_observation"}
     found = _findings(tmp_path, [_expected_capital(RETIRED)], [other])
     assert set(_classes(found, LAST_OBS)) == {checks.NOT_READY}
+
+
+def test_a_tracker_label_newer_than_the_oracles_still_refuses(tmp_path):
+    found = _findings(
+        tmp_path,
+        [_expected_capital(RETIRED)],
+        [],
+        tracker=_tracker_row(as_of="2026-08-01"),
+    )
+    assert set(_classes(found, CAPITAL)) == {checks.BLOCKER_REGRESSION}
+
+
+def test_a_tracker_label_after_the_epoch_end_still_refuses(tmp_path):
+    # older than the oracle's 2026-07-17, but past the account's epoch end 2025-11-24
+    found = _findings(
+        tmp_path,
+        [_expected_capital(RETIRED)],
+        [],
+        tracker=_tracker_row(as_of="2026-01-05"),
+    )
+    assert set(_classes(found, CAPITAL)) == {checks.BLOCKER_REGRESSION}
+
+
+def test_a_tracker_label_on_the_epoch_end_is_exempt(tmp_path):
+    found = _findings(
+        tmp_path,
+        [_expected_capital(RETIRED)],
+        [],
+        tracker=_tracker_row(as_of="2025-11-24"),
+    )
+    assert _classes(found, CAPITAL) == []
+
+
+def test_a_tracker_label_newer_than_an_oracle_inside_the_epoch_still_refuses(tmp_path):
+    # label 2025-11-24 is on the epoch end but newer than the oracle's 2025-10-01
+    row = {**_expected_capital(RETIRED), "as_of": "2025-10-01"}
+    found = _findings(tmp_path, [row], [], tracker=_tracker_row(as_of="2025-11-24"))
+    assert set(_classes(found, CAPITAL)) == {checks.BLOCKER_REGRESSION}
+
+
+def _malformed_receipt_rows() -> list[Any]:
+    return [
+        "fidelity ADMIT",
+        {"action": "ADMIT", "provider_id": ["fidelity"]},
+        {"action": "ADMIT"},
+        {**_disposition(), "provider_id": "  "},
+    ]
+
+
+@pytest.mark.parametrize("bad", _malformed_receipt_rows())
+def test_a_row_without_a_provider_voids_the_whole_receipt(tmp_path, bad):
+    receipt = _receipt(_disposition(), bad)
+    assert [f.klass for f in _source_clock(tmp_path, receipt)] == ["NOT_READY"]
+
+
+def test_a_composite_entity_is_not_the_retired_account(tmp_path):
+    other = {**_last_observation(), "entity": f"{RETIRED}|A1"}
+    found = _findings(tmp_path, [_expected_capital(RETIRED)], [other])
+    assert _classes(found, LAST_OBS) == [checks.NOT_READY]
+
+
+def test_the_value_check_ignores_the_rows_own_tolerance(tmp_path):
+    # 0.25 expected against the tracker's 0.19: a loose row tolerance passes the capital
+    # comparison, but the exemption needs agreement to the cent.
+    row = {**_expected_capital(RETIRED, "0.25"), "tolerance": "1000"}
+    found = _findings(tmp_path, [row], [_last_observation()])
+    assert _classes(found, LAST_OBS) == [checks.NOT_READY]
+
+
+def test_agreement_within_a_cent_verifies(tmp_path):
+    found = _findings(
+        tmp_path, [_expected_capital(RETIRED, "0.195")], [_last_observation()]
+    )
+    assert _classes(found, LAST_OBS) == []
