@@ -104,6 +104,13 @@ def _loan_block(lines: list[str]) -> tuple[Decimal, Decimal] | None:
             for follow in lines[number + 1 : number + 7]:
                 tokens = _MONEY_TOKEN.findall(follow)
                 if len(tokens) >= 2:
+                    if len(tokens) != 4:
+                        # opening, closing, funds available, buying power: a row with
+                        # fewer cannot be anchored to its labels (a blank closing balance
+                        # would pair the opening balance with "Funds Available")
+                        raise ZeroFinancingError(
+                            "margin loan block row is not four amounts"
+                        )
                     if follow.count("$") != len(tokens):
                         raise ZeroFinancingError(
                             "margin loan block has an unparsed amount"
@@ -218,6 +225,8 @@ def parse_statement(text: str, file_period_end: date | None = None) -> dict[str,
             except ValueError:
                 continue
             if start <= end:
+                if (end - start).days > 31:
+                    raise ZeroFinancingError("statement period is longer than a month")
                 periods.add((start, end))
     if len(periods) != 1:
         raise ZeroFinancingError(
@@ -386,9 +395,15 @@ def build(
                 f"statement account differs from the mapped account: {label}"
             )
         if not facts["file_label_matches"]:
-            label_mismatches.append(name)
+            raise ZeroFinancingError(
+                f"file name differs from the printed period: {name}"
+            )
         seen_accounts.add(account)
         key = (account, facts["period_start"], facts["period_end"])
+        if facts["margin_interest_postings"] > len(facts["interest_periods"]):
+            raise ZeroFinancingError(
+                f"a margin-interest posting names no charged period: {name}"
+            )
         state, reason = verdict(facts)
         fingerprint = (
             facts["last3"],
@@ -429,6 +444,9 @@ def build(
         by_account.setdefault(account, []).append((start, end))
     for account, spans in by_account.items():
         spans.sort()
+        for (_s1, e1), (s2, _e2) in zip(spans, spans[1:], strict=False):
+            if s2 <= e1:
+                raise ZeroFinancingError("two statement periods of one account overlap")
         for index, (start, end) in enumerate(spans):
             record = periods[(account, start, end)]
             state, reason = record["state"], record["reason"]

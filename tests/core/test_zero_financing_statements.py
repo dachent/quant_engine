@@ -49,7 +49,8 @@ def _text(
             "        Opening Margin      Closing Margin     Funds Available",
             "        Loan Balance        Loan Balance       to Withdraw *",
             "",
-            block_row or f"        {block[0]}        {block[1]}        $10.00",
+            block_row
+            or f"        {block[0]}        {block[1]}        $10.00        $20.00",
         ]
     if interest is not None:
         lines.append(interest)
@@ -112,7 +113,9 @@ def test_every_condition_failing_makes_a_financing_month(
 
 def test_unparsed_loan_amounts_and_ambiguous_interest_lines_refuse() -> None:
     with pytest.raises(zf.ZeroFinancingError, match="unparsed amount"):
-        _facts(block_row="  $0.00   $0.00   $1,2$0.00")
+        _facts(block_row="  $0.00   $0.00   $5.00   $6.00   $")
+    with pytest.raises(zf.ZeroFinancingError, match="four amounts"):
+        _facts(block_row="  $0.00   $10.00")  # a blank closing balance (E4)
     with pytest.raises(zf.ZeroFinancingError, match="no balances"):
         _facts(block_row="  nothing printed")
     ambiguous = _facts(disclosure="Margin interest was accrued on the balance   45.10")
@@ -299,24 +302,41 @@ def test_build_refuses_what_it_cannot_prove(tmp_path: Path) -> None:
         _build(directory, sums, mapping, nameless)
 
 
-def test_the_same_period_pinned_twice_must_read_identically(tmp_path: Path) -> None:
-    first, second = _name("2026-03-31"), _name("2026-04-30")  # a mislabeled copy
-    same = {
+def test_overlaps_mislabels_unparsed_postings_and_long_periods_refuse(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (E2/E3/E4): a mislabeled copy of a period, overlapping periods, a posting
+    that names no charged period, and a year-long period all refuse."""
+
+    first, second = _name("2026-03-31"), _name("2026-04-30")
+    copy = {
         first: _text(block=None, retirement=True),
-        second: _text(block=None, retirement=True),
+        second: _text(block=None, retirement=True),  # March content under an April name
     }
-    directory, sums, mapping = _world(tmp_path, same)
-    artifact = _build(directory, sums, mapping, same)
-    assert len(artifact["rows"]) == 31
-    assert artifact["duplicate_period_files"] == [second]
-    assert artifact["file_label_mismatches"] == [second]
-    # same blocks and postings, but different interest periods: not identical
-    one = _text(interest="03/20 Expense Margin Interest INTEREST 02/19THRU 03/19")
-    two = _text(interest="03/20 Expense Margin Interest INTEREST 02/20THRU 03/19")
-    differs = {first: one, second: two}
-    directory, sums, mapping = _world(tmp_path, differs)
-    with pytest.raises(zf.ZeroFinancingError, match="two different statements"):
-        _build(directory, sums, mapping, differs)
+    directory, sums, mapping = _world(tmp_path, copy)
+    with pytest.raises(zf.ZeroFinancingError, match="file name differs"):
+        _build(directory, sums, mapping, copy)
+    overlap = {
+        first: _text(block=None, retirement=True),
+        _name("2026-04-18"): _text(
+            block=None, retirement=True, period="March 20-April 18, 2026"
+        ),
+    }
+    directory, sums, mapping = _world(tmp_path, overlap)
+    with pytest.raises(zf.ZeroFinancingError, match="overlap"):
+        _build(directory, sums, mapping, overlap)
+    unparsed = {first: _text(interest="03/20 Expense Margin Interest   12.00")}
+    directory, sums, mapping = _world(tmp_path, unparsed)
+    with pytest.raises(zf.ZeroFinancingError, match="names no charged period"):
+        _build(directory, sums, mapping, unparsed)
+    year = {
+        _name("2026-12-31"): _text(
+            block=None, retirement=True, period="January 1 - December 31, 2026"
+        )
+    }
+    directory, sums, mapping = _world(tmp_path, year)
+    with pytest.raises(zf.ZeroFinancingError, match="longer than a month"):
+        _build(directory, sums, mapping, year)
 
 
 def test_uncovered_days_between_periods_are_listed(tmp_path: Path) -> None:

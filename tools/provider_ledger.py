@@ -11171,11 +11171,25 @@ def build_catalog(
             if run_observation is not None
             else as_of
         )
-        combined["financing_liability_observations"].extend(
+        projected = [
             row
             for row in zero_rows
             if date.fromisoformat(row["as_of_date"]) <= zero_cutoff
-        )
+        ]
+        if projected:  # never create an empty fact collection (ids must not move)
+            combined["financing_liability_observations"].extend(projected)
+            exceptions.extend(
+                {
+                    "account_in_provenance": row["account_id"] in accounts,
+                    "effective_date": row["as_of_date"],
+                    "fact_type": "financing_liability_observations",
+                    "mapping_reason": row["mapping_reason"],
+                    "provider_id": zero_provider,
+                    "record_id": row["record_id"],
+                    "status": "UNMAPPED",
+                }
+                for row in projected
+            )
         provider_artifacts.extend(zero_artifacts)
 
     authoritative_strategy_ids = {
