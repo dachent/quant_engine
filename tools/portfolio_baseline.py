@@ -6380,6 +6380,17 @@ def _with_statement_excluded(
     return _exact_sum([pair[0], total]), (min(days) if days else None)
 
 
+def _statement_pin_without_role(pin: Mapping[str, Any]) -> dict[str, Any]:
+    """The catalog pin (path, sha256, size_bytes) from a spec pin; any key beyond it and ``role`` is refused."""
+
+    unknown = set(pin) - {"path", "sha256", "size_bytes", "role"}
+    if unknown:
+        raise BaselineValidationError(
+            f"statement reserve pin carries unknown key(s): {sorted(unknown)}"
+        )
+    return {k: pin.get(k) for k in ("path", "sha256", "size_bytes")}
+
+
 def _statement_reserve_facts(
     value: object, as_of: date
 ) -> dict[str, list[dict[str, Any]]]:
@@ -6396,7 +6407,7 @@ def _statement_reserve_facts(
             raw = Path(_text(pin.get("path"), "statement reserve path")).read_bytes()
             facts = statement_reserve_nav.statement_reserve_facts(
                 statement_reserve_nav.verified_catalog(
-                    raw, {k: pin.get(k) for k in ("path", "sha256", "size_bytes")}
+                    raw, _statement_pin_without_role(pin)
                 ),
                 as_of,
                 role=str(pin.get("role", "RESERVE")),
