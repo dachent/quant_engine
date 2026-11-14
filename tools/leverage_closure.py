@@ -99,6 +99,24 @@ def _day(text: object) -> date:
     return date.fromisoformat(str(text))
 
 
+def _is_proper_empty_row(row: Mapping[str, Any]) -> bool:
+    """An ACCRUAL_SECTION_EMPTY row counts only as the broker's own zero: AVAILABLE,
+    exactly 0, bound to the statement account, from the InterestAccruals section."""
+
+    amount = row.get("amount")
+    if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
+        return False
+    try:
+        zero = Decimal(str(amount.get("value"))) == 0
+    except ArithmeticError:
+        return False
+    return (
+        zero
+        and row.get("source_account_scope") == "STATEMENT_ACCOUNT"
+        and row.get("source_section") == "InterestAccruals"
+    )
+
+
 def _split_unmapped(
     rows: Sequence[Mapping[str, Any]],
     epoch_start: str | None,
@@ -163,6 +181,17 @@ def financing_cost_closure(
         # The broker's explicit "no accruals" on every statement day, and no other cost
         # row at all (a posting or detail row with no accrual behind it is not explained
         # by an empty section): covered.  A day without the section is not captured.
+        empty_rows = [
+            r
+            for r in cost_rows_all
+            if r.get("measurement_basis") == EMPTY_ACCRUAL_BASIS
+        ]
+        malformed = [r for r in empty_rows if not _is_proper_empty_row(r)]
+        placed_e, gaps_e = _split_unmapped(
+            [r for r in empty_rows if _is_proper_empty_row(r)],
+            epoch_start,
+            reserve_windows,
+        )
         stated_days = {
             str(r.get("as_of_date") or r.get("period_end"))
             for r in cost_rows_all
@@ -174,12 +203,15 @@ def financing_cost_closure(
         placed, unmapped_here = _split_unmapped(rows, epoch_start, reserve_windows)
         return Closure(
             "FINANCING_COST_ACCRUAL_SECTION_EMPTY",
-            bool(days) and not missing and not rows,
+            bool(days) and not missing and not rows and not malformed and not gaps_e,
             {
                 "statement_days": len(days),
                 "empty_section_days": len(empty_days & set(days)),
                 "days_without_section": len(missing),
                 "other_cost_rows": len(rows),
+                "malformed_empty_rows": len(malformed),
+                "empty_rows_mapping_gaps": len(gaps_e),
+                "empty_rows_in_reserve_window": len(placed_e),
                 "unmapped_rows_in_epoch": len(unmapped_here),
                 "reserve_window_rows": len(placed),
             },

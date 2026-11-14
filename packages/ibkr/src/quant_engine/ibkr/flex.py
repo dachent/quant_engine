@@ -148,6 +148,10 @@ def _elements(parent: ET.Element, name: str) -> list[ET.Element]:
     return [item for item in parent.iter() if _local(item.tag) == name]
 
 
+def _direct(parent: ET.Element, name: str) -> list[ET.Element]:
+    return [item for item in parent if _local(item.tag) == name]
+
+
 def _single(parent: ET.Element, name: str) -> ET.Element:
     matches = _elements(parent, name)
     if len(matches) != 1:
@@ -371,11 +375,12 @@ class FlexDailyStatement:
     # InterestAccruals is the broker's "no accruals", a missing one is "not captured".
     interest_accruals_section_present: bool = False
     open_positions_section_present: bool = False
-    # Every OpenPosition element of the statement at any levelOfDetail, and the SUMMARY
-    # rows that state no accountId: "no positions" is zero exposure only when the section
-    # holds no row of any kind; a row without an account never binds to the statement.
+    # Every child element of the OpenPositions section (any tag, any levelOfDetail), and
+    # the suspect ones: a tag other than OpenPosition, a levelOfDetail other than
+    # SUMMARY/LOT, or a row (any level) whose accountId is absent or another account's.
+    # "No positions" is zero exposure only when the section has no child at all.
     open_position_rows_total: int = 0
-    open_position_summary_rows_without_account: int = 0
+    open_position_rows_suspect: int = 0
     # NAV holdings components (stock, options, ...) the statement itself reports nonzero.
     nav_holdings_nonzero: bool = False
 
@@ -743,9 +748,18 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         _cash_report(item, raw_account_id)
         for item in _elements(element, "CashReportCurrency")
     )
-    for section in _elements(element, "InterestAccruals"):
-        # a renamed or unknown child inside a present section must not read as "empty"
-        if any(_local(child.tag) != "InterestAccrualsCurrency" for child in section):
+    for name in ("InterestAccruals", "OpenPositions"):
+        # the section is a direct child of the statement; a copy nested elsewhere is not
+        # the statement's section and must not read as present
+        if len(_elements(element, name)) != len(_direct(element, name)):
+            raise FlexValidationError(f"{name} is nested inside another element")
+    for section in _direct(element, "InterestAccruals"):
+        # a renamed or unknown child, or stray text, must not read as "empty"
+        if (section.text or "").strip() or any(
+            _local(child.tag) != "InterestAccrualsCurrency"
+            or (child.tail or "").strip()
+            for child in section
+        ):
             raise FlexValidationError("InterestAccruals holds an unknown element")
     interest_accruals = tuple(
         _interest_accrual(item, raw_account_id)
@@ -796,14 +810,18 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         cash_reports=cash_reports,
         interest_accruals=interest_accruals,
         tier_interest=tier_interest,
-        interest_accruals_section_present=bool(_elements(element, "InterestAccruals")),
-        open_positions_section_present=bool(_elements(element, "OpenPositions")),
-        open_position_rows_total=len(_elements(element, "OpenPosition")),
-        open_position_summary_rows_without_account=sum(
+        interest_accruals_section_present=bool(_direct(element, "InterestAccruals")),
+        open_positions_section_present=bool(_direct(element, "OpenPositions")),
+        open_position_rows_total=sum(
+            len(list(section)) for section in _direct(element, "OpenPositions")
+        ),
+        open_position_rows_suspect=sum(
             1
-            for item in _elements(element, "OpenPosition")
-            if item.attrib.get("levelOfDetail") == "SUMMARY"
-            and _optional(item.attrib.get("accountId")) is None
+            for section in _direct(element, "OpenPositions")
+            for item in section
+            if _local(item.tag) != "OpenPosition"
+            or item.attrib.get("levelOfDetail") not in ("SUMMARY", "LOT")
+            or _optional(item.attrib.get("accountId")) != raw_account_id
         ),
         nav_holdings_nonzero=any(
             _optional_decimal(nav.attrib.get(key), f"nav.{key}") not in (None, 0)

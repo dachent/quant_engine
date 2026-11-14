@@ -357,8 +357,11 @@ def _empty_day(day: str) -> dict[str, Any]:
         "measurement_basis": "ACCRUAL_SECTION_EMPTY",
         "as_of_date": day,
         "period_end": day,
+        "amount": _amt("0"),
         "source_amount": _amt("0"),
-        "mapping_status": "UNMAPPED",
+        "source_account_scope": "STATEMENT_ACCOUNT",
+        "source_section": "InterestAccruals",
+        "mapping_status": "MAPPED",
     }
 
 
@@ -402,3 +405,26 @@ def test_a_levered_account_needs_an_explicitly_stated_zero_accrual_per_day() -> 
     assert lc.financing_cost_closure(
         stated, DAYS, DAYS[-1], None, require_explicit_zero=True
     ).covered
+
+
+def test_a_malformed_or_unmapped_empty_section_row_never_closes_the_cost() -> None:
+    """Kill tests (round-5 c): the empty-section rows are held to the roll-forward path's
+    standard: AVAILABLE, exactly 0, statement account, the section, and placed."""
+
+    def covered(rows: list[dict[str, Any]], windows: Any = None) -> bool:
+        return lc.financing_cost_closure(rows, DAYS, DAYS[-1], None, windows).covered
+
+    good = [_empty_day(d) for d in DAYS]
+    assert covered(good)
+    for change in (
+        {"amount": {"currency": "USD", "status": "UNAVAILABLE", "value": None}},
+        {"amount": _amt("0.01")},
+        {"source_account_scope": "AMBIGUOUS_REPORTED_ACCOUNT"},
+        {"source_section": "CashReport"},
+    ):
+        assert not covered([{**good[0], **change}, *good[1:]]), change
+    unmapped = [{**r, "mapping_status": "UNMAPPED"} for r in good]
+    assert not covered(unmapped)
+    window = [(date(2026, 1, 5), date(2026, 1, 8), "EXACT_IDENTITY_CLOSURE")]
+    reasoned = [{**r, "mapping_reason": "MAPPING_NO_ACTIVE_INTERVAL"} for r in unmapped]
+    assert covered(reasoned, window)

@@ -455,10 +455,7 @@ def _statements_equal(left: FlexDailyStatement, right: FlexDailyStatement) -> bo
         )
         and left.open_positions_section_present == right.open_positions_section_present
         and left.open_position_rows_total == right.open_position_rows_total
-        and (
-            left.open_position_summary_rows_without_account
-            == right.open_position_summary_rows_without_account
-        )
+        and (left.open_position_rows_suspect == right.open_position_rows_suspect)
         and left.nav_holdings_nonzero == right.nav_holdings_nonzero
         and left.tier_interest == right.tier_interest
         and left.nav_cash == right.nav_cash
@@ -1257,7 +1254,7 @@ def _normalize(
         # reported under another account makes the figure ambiguous (unavailable).
         gross_available = (
             statement.open_positions_section_present
-            and statement.open_position_summary_rows_without_account == 0
+            and statement.open_position_rows_suspect == 0
             and all(
                 position.reported_account_matches_statement
                 for position in statement.positions

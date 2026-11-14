@@ -3431,3 +3431,68 @@ def test_a_refresh_differing_only_in_section_presence_is_not_equal(
     )
     assert not ibkr_generation._statements_equal(absent, present)
     assert ibkr_generation._statements_equal(absent, absent)
+
+
+def test_open_positions_variants_never_read_as_zero_exposure(tmp_path: Path) -> None:
+    """Kill tests (round-5 a): LOT rows carrying another account, a renamed row tag, an
+    unknown level, and any child at all keep exposure UNAVAILABLE; SUMMARY plus LOT rows
+    of the statement's own account (the real shape) stay AVAILABLE."""
+
+    day = date(2026, 1, 3)
+    full = _xml("SYNTH-RAW", day, "114")
+    summary_row = full.split("<OpenPositions>", 1)[1].split("</OpenPositions>", 1)[0]
+    lot_row = summary_row.replace('levelOfDetail="SUMMARY"', 'levelOfDetail="LOT"')
+    assert lot_row != summary_row
+
+    def with_children(children: str) -> str:
+        head, rest = full.split("<OpenPositions>", 1)
+        return (
+            head
+            + "<OpenPositions>"
+            + children
+            + "</OpenPositions>"
+            + rest.split("</OpenPositions>", 1)[1]
+        )
+
+    assert (
+        _exposure_status(tmp_path, with_children(summary_row + lot_row)) == "AVAILABLE"
+    )
+    other_lot = lot_row.replace('accountId="SYNTH-RAW"', 'accountId="OTHER-RAW"')
+    assert _exposure_status(tmp_path, with_children(other_lot)) != "AVAILABLE"
+    assert (
+        _exposure_status(tmp_path, with_children(summary_row + other_lot))
+        != "AVAILABLE"
+    )
+    renamed = summary_row.replace("OpenPosition ", "OpenPositionX ")
+    assert _exposure_status(tmp_path, with_children(renamed)) != "AVAILABLE"
+    assert (
+        _exposure_status(tmp_path, with_children(summary_row + renamed)) != "AVAILABLE"
+    )
+    odd_level = summary_row.replace('levelOfDetail="SUMMARY"', 'levelOfDetail="OTHER"')
+    assert _exposure_status(tmp_path, with_children(odd_level)) != "AVAILABLE"
+    assert _exposure_status(tmp_path, with_children("")) == "AVAILABLE"
+
+
+def test_accrual_section_variants_never_read_as_an_empty_section(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (round-5 b): a renamed row, stray text, or a nested copy of the tag is
+    refused; only a direct, childless, textless section is the broker's 'no accruals'."""
+
+    day = date(2026, 1, 3)
+    for sections in (
+        "<InterestAccruals><InterestAccrual /></InterestAccruals>",
+        "<InterestAccruals>unavailable</InterestAccruals>",
+        "<Wrapper><InterestAccruals/></Wrapper>",
+    ):
+        with pytest.raises(Exception, match="InterestAccruals"):
+            _coverage_catalog(
+                tmp_path, _xml("SYNTH-RAW", day, "114", native_sections=sections)
+            )
+    ok = _coverage_catalog(
+        tmp_path, _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    )
+    assert any(
+        r["measurement_basis"] == "ACCRUAL_SECTION_EMPTY"
+        for r in ok["financing_cost_observations"]
+    )
