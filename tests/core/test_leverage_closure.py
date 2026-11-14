@@ -349,3 +349,56 @@ def test_a_posting_is_placed_only_if_every_date_it_carries_is_inside_the_window(
         ]
         == 1
     )
+
+
+def _empty_day(day: str) -> dict[str, Any]:
+    return {
+        "classification": "NO_ACCRUALS_REPORTED",
+        "measurement_basis": "ACCRUAL_SECTION_EMPTY",
+        "as_of_date": day,
+        "period_end": day,
+        "source_amount": _amt("0"),
+        "mapping_status": "UNMAPPED",
+    }
+
+
+def test_an_explicit_empty_accrual_section_on_every_day_closes_the_cost() -> None:
+    rows = [_empty_day(d) for d in DAYS]
+    closed = lc.financing_cost_closure(rows, DAYS, DAYS[-1], None)
+    assert closed.covered and closed.check_id == "FINANCING_COST_ACCRUAL_SECTION_EMPTY"
+    # the unmapped section rows never count as mapping gaps
+    assert closed.evidence["empty_section_days"] == len(DAYS)
+
+
+def test_a_day_with_no_section_or_any_other_cost_row_is_not_covered() -> None:
+    assert not lc.financing_cost_closure(
+        [_empty_day(d) for d in DAYS[:-1]], DAYS, DAYS[-1], None
+    ).covered
+    posting = {
+        "classification": "BROKER_DEBIT_INTEREST",
+        "measurement_basis": "CASH_POSTING",
+        "source_amount": _amt("-1"),
+        "mapping_status": "MAPPED",
+    }
+    assert not lc.financing_cost_closure(
+        [_empty_day(d) for d in DAYS] + [posting], DAYS, DAYS[-1], None
+    ).covered
+    assert not lc.financing_cost_closure([], DAYS, DAYS[-1], None).covered
+
+
+def test_a_levered_account_needs_an_explicitly_stated_zero_accrual_per_day() -> None:
+    """Kill test (round-5): for a borrowing account an empty accrual section closes a day
+    only when the statement's NAV states the accrual as an explicit zero."""
+
+    def day_row(day: str, stated: bool) -> dict[str, Any]:
+        return {**_empty_day(day), "nav_interest_accruals_stated": stated}
+
+    silent = [day_row(d, False) for d in DAYS]
+    stated = [day_row(d, True) for d in DAYS]
+    assert lc.financing_cost_closure(silent, DAYS, DAYS[-1], None).covered
+    assert not lc.financing_cost_closure(
+        silent, DAYS, DAYS[-1], None, require_explicit_zero=True
+    ).covered
+    assert lc.financing_cost_closure(
+        stated, DAYS, DAYS[-1], None, require_explicit_zero=True
+    ).covered

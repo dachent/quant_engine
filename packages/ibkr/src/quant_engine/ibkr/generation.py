@@ -449,6 +449,17 @@ def _statements_equal(left: FlexDailyStatement, right: FlexDailyStatement) -> bo
         and left.change_in_nav_components == right.change_in_nav_components
         and left.cash_reports == right.cash_reports
         and left.interest_accruals == right.interest_accruals
+        and (
+            left.interest_accruals_section_present
+            == right.interest_accruals_section_present
+        )
+        and left.open_positions_section_present == right.open_positions_section_present
+        and left.open_position_rows_total == right.open_position_rows_total
+        and (
+            left.open_position_summary_rows_without_account
+            == right.open_position_summary_rows_without_account
+        )
+        and left.nav_holdings_nonzero == right.nav_holdings_nonzero
         and left.tier_interest == right.tier_interest
         and left.nav_cash == right.nav_cash
         and left.nav_broker_cash_component == right.nav_broker_cash_component
@@ -998,6 +1009,36 @@ def _normalize(
                 row["period_end"] = report.to_date.isoformat()
                 financing_liability_observations.append(row)
 
+        if (
+            statement.interest_accruals_section_present
+            and not statement.interest_accruals
+            # the statement's own NAV accrual components must not say otherwise
+            and statement.nav_interest_accruals in (None, 0)
+            and statement.nav_margin_financing_charge_accruals in (None, 0)
+        ):
+            empty = source_row(
+                "financing-cost",
+                {
+                    "classification": "NO_ACCRUALS_REPORTED",
+                    "measurement_basis": "ACCRUAL_SECTION_EMPTY",
+                    "source_record_id": (f"interest-accruals-empty:{account_id}:{day}"),
+                    "source_section": "InterestAccruals",
+                    "source_field": "section",
+                },
+                available=True,
+                value=Decimal("0"),
+                currency=statement.base_currency,
+            )
+            empty["source_amount"] = observed_amount(
+                Decimal("0"), statement.base_currency, True
+            )
+            # whether the NAV states the accrual as an explicit zero, or is silent
+            empty["nav_interest_accruals_stated"] = (
+                statement.nav_interest_accruals is not None
+            )
+            empty["period_start"] = day
+            empty["period_end"] = day
+            financing_cost_observations.append(empty)
         for accrual in statement.interest_accruals:
             accrual_available = accrual.reported_account_matches_statement
             for basis, field, value in (
@@ -1211,9 +1252,25 @@ def _normalize(
             ),
             Decimal("0"),
         )
-        gross_available = bool(statement.positions) and all(
-            position.reported_account_matches_statement
-            for position in statement.positions
+        # Each statement's own accountId binds its positions.  An OpenPositions section
+        # with no rows is zero exposure; a missing section is not captured; a position
+        # reported under another account makes the figure ambiguous (unavailable).
+        gross_available = (
+            statement.open_positions_section_present
+            and statement.open_position_summary_rows_without_account == 0
+            and all(
+                position.reported_account_matches_statement
+                for position in statement.positions
+            )
+            and (
+                bool(statement.positions)
+                # zero exposure only when the section holds no row of any level and the
+                # statement's own NAV reports no holdings
+                or (
+                    statement.open_position_rows_total == 0
+                    and not statement.nav_holdings_nonzero
+                )
+            )
         )
         exposure_payload = {
             "classification": "HOLDINGS_GROSS_MARKET_VALUE",
@@ -1228,7 +1285,7 @@ def _normalize(
             "leverage-exposure",
             exposure_payload,
             available=gross_available,
-            value=gross_value if statement.positions else None,
+            value=gross_value if gross_available else None,
             currency=statement.base_currency,
         )
         exposure["as_of_date"] = statement.report_date.isoformat()

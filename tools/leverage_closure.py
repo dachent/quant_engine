@@ -26,6 +26,8 @@ from typing import Any, Final
 
 BASE_LINE: Final = "BASE_SUMMARY"
 _ACCRUAL_BASES: Final = ("ACCRUAL_BALANCE", "PERIOD_ACCRUAL", "ACCRUAL_REVERSAL")
+# One row per statement day whose InterestAccruals section was present with no rows.
+EMPTY_ACCRUAL_BASIS: Final = "ACCRUAL_SECTION_EMPTY"
 _ZERO = Decimal(0)
 
 
@@ -97,14 +99,51 @@ def _day(text: object) -> date:
     return date.fromisoformat(str(text))
 
 
+def _split_unmapped(
+    rows: Sequence[Mapping[str, Any]],
+    epoch_start: str | None,
+    reserve_windows: Sequence[tuple[date, date, str]] | None,
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    """(rows placed in a declared RESERVE window, mapping gaps in the epoch)."""
+
+    placed = [
+        r
+        for r in rows
+        if r.get("mapping_status") != "MAPPED" and in_reserve_window(r, reserve_windows)
+    ]
+    gaps = [
+        r
+        for r in rows
+        if r.get("mapping_status") != "MAPPED"
+        and not in_reserve_window(r, reserve_windows)
+        and (
+            epoch_start is None
+            or str(
+                r.get("value_date")
+                or r.get("accounting_date")
+                or r.get("period_end")
+                or r.get("event_date")
+                or ""
+            )
+            >= epoch_start
+        )
+    ]
+    return placed, gaps
+
+
 def financing_cost_closure(
     cost_rows: Iterable[Mapping[str, Any]],
     statement_days: Sequence[str],
     cutoff: str,
     epoch_start: str | None,
     reserve_windows: Sequence[tuple[date, date, str]] | None = None,
+    require_explicit_zero: bool = False,
 ) -> Closure:
-    """Interest accrual closure for one account, window = its statement days."""
+    """Interest accrual closure for one account, window = its statement days.
+
+    ``require_explicit_zero`` (a levered account, which really borrowed): an empty accrual
+    section closes a day only when the statement's own NAV also states the accrual as an
+    explicit zero, never by silence."""
 
     days = sorted(day for day in set(statement_days) if day <= cutoff)
     rows = [
@@ -113,6 +152,38 @@ def financing_cost_closure(
         if str(r.get("as_of_date") or r.get("period_end") or "") <= cutoff
     ]
     accruals = [r for r in rows if r.get("measurement_basis") in _ACCRUAL_BASES]
+    cost_rows_all = rows
+    empty_days = {
+        str(r.get("as_of_date") or r.get("period_end"))
+        for r in rows
+        if r.get("measurement_basis") == EMPTY_ACCRUAL_BASIS
+    }
+    rows = [r for r in rows if r.get("measurement_basis") != EMPTY_ACCRUAL_BASIS]
+    if not accruals and empty_days:
+        # The broker's explicit "no accruals" on every statement day, and no other cost
+        # row at all (a posting or detail row with no accrual behind it is not explained
+        # by an empty section): covered.  A day without the section is not captured.
+        stated_days = {
+            str(r.get("as_of_date") or r.get("period_end"))
+            for r in cost_rows_all
+            if r.get("measurement_basis") == EMPTY_ACCRUAL_BASIS
+            and r.get("nav_interest_accruals_stated") is True
+        }
+        proven = stated_days if require_explicit_zero else empty_days
+        missing = [d for d in days if d not in proven]
+        placed, unmapped_here = _split_unmapped(rows, epoch_start, reserve_windows)
+        return Closure(
+            "FINANCING_COST_ACCRUAL_SECTION_EMPTY",
+            bool(days) and not missing and not rows,
+            {
+                "statement_days": len(days),
+                "empty_section_days": len(empty_days & set(days)),
+                "days_without_section": len(missing),
+                "other_cost_rows": len(rows),
+                "unmapped_rows_in_epoch": len(unmapped_here),
+                "reserve_window_rows": len(placed),
+            },
+        )
     by_currency: dict[str, dict[str, dict[str, Decimal]]] = defaultdict(
         lambda: defaultdict(dict)
     )
@@ -163,28 +234,7 @@ def financing_cost_closure(
             and previous[1] != _ZERO
         ):
             unexplained.append(f"{currency}:{last_day}:TRAILING_UNOBSERVED")
-    reserve_placed = [
-        r
-        for r in rows
-        if r.get("mapping_status") != "MAPPED" and in_reserve_window(r, reserve_windows)
-    ]
-    unmapped = [
-        r
-        for r in rows
-        if r.get("mapping_status") != "MAPPED"
-        and not in_reserve_window(r, reserve_windows)
-        and (
-            epoch_start is None
-            or str(
-                r.get("value_date")
-                or r.get("accounting_date")
-                or r.get("period_end")
-                or r.get("event_date")
-                or ""
-            )
-            >= epoch_start
-        )
-    ]
+    reserve_placed, unmapped = _split_unmapped(rows, epoch_start, reserve_windows)
     # A row the strategy mapping cannot place is a mapping gap, and an account whose cost
     # has one is not covered; the reasons stay in the evidence so the gap is explainable.
     covered = (
