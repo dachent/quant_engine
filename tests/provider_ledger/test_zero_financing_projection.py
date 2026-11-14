@@ -230,7 +230,28 @@ def _with_captures(pins: "_Pins", tmp_path: Path, **over: Any) -> dict[str, Any]
     directory = tmp_path / "captures"
     directory.mkdir()
     label = zf.statement_label(PROVIDER, LAST3)
-    (directory / "history.csv").write_bytes(b"raw capture bytes")
+    raw = {
+        "history.json": (
+            json.dumps({"brokerageTransactions": [], "bookmark": None}).encode(),
+            "history",
+        ),
+        "balances.json": (
+            json.dumps(
+                {
+                    "brokerageAccountList": [
+                        {
+                            "accountId": f"****{LAST3}",
+                            "cashInvestments": {"marginBalance": 0.0},
+                        }
+                    ]
+                }
+            ).encode(),
+            "balances",
+        ),
+        "balances-page.txt": (b"Balance Subject to Interest   $0.00 ", "balances"),
+    }
+    for raw_name, (content, _kind) in raw.items():
+        (directory / raw_name).write_bytes(content)
     body = {
         "schema_version": 1,
         "provider_id": PROVIDER,
@@ -239,17 +260,21 @@ def _with_captures(pins: "_Pins", tmp_path: Path, **over: Any) -> dict[str, Any]
         "capture_date": "2026-02-03",
         "window_start": "2026-01-20",
         "window_end": "2026-02-03",
-        "balances": {},
+        "balances": {
+            "margin_loan_balance": "0.00",
+            "balance_subject_to_interest": "0.00",
+        },
         "transactions_reported_count": 0,
         "transactions": [],
         "transactions_complete": True,
         "raw_files": [
             {
-                "name": "history.csv",
-                "sha256": hashlib.sha256(b"raw capture bytes").hexdigest(),
-                "size_bytes": len(b"raw capture bytes"),
-                "kind": "history",
+                "name": raw_name,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size_bytes": len(content),
+                "kind": kind,
             }
+            for raw_name, (content, kind) in raw.items()
         ],
     }
     body.update(over)
@@ -258,7 +283,7 @@ def _with_captures(pins: "_Pins", tmp_path: Path, **over: Any) -> dict[str, Any]
     sums = tmp_path / "CAPTURE-SUMS.txt"
     lines = [
         f"{hashlib.sha256((directory / n).read_bytes()).hexdigest()} *{n}"
-        for n in (name, "history.csv")
+        for n in (name, *raw)
     ]
     sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return pins.spec(
@@ -279,13 +304,13 @@ def test_pinned_captures_enter_the_manifest_and_are_hash_checked(
     )
     ids = {a.artifact_id for a in artifacts}
     assert f"zero-financing/{PROVIDER}/captures/SHA256SUMS" in ids
-    assert any(i.endswith("history.csv") for i in ids)
+    assert any(i.endswith("history.json") for i in ids)
     assert len(rows) == 31  # as_of is the statement end: the capture adds no later day
     with pytest.raises(ledger.ProviderLedgerError, match="capture sums identity"):
         ledger._zero_financing_rows(
             {**spec, "captures_sums_sha256": "0" * 64}, {account}, {PROVIDER}, AS_OF
         )
-    (tmp_path / "captures" / "history.csv").write_bytes(b"altered")
+    (tmp_path / "captures" / "history.json").write_bytes(b"altered")
     with pytest.raises(ledger.ProviderLedgerError, match="identity differs"):
         ledger._zero_financing_rows(spec, {account}, {PROVIDER}, AS_OF)
 
@@ -297,3 +322,26 @@ def test_a_capture_of_another_account_is_refused(
     spec = _with_captures(pins, tmp_path, account_last3="999")
     with pytest.raises(ledger.ProviderLedgerError, match="capture account differs"):
         ledger._zero_financing_rows(spec, {"account-" + "a" * 16}, {PROVIDER}, AS_OF)
+
+
+def test_the_generation_id_binds_mapping_captures_and_extractor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill test (N4): a different mapping, capture set or extractor is a different
+    generation, not the same id over different rows."""
+
+    pins = _Pins(tmp_path, monkeypatch)
+    account = "account-" + "a" * 16
+    plain = pins.spec()
+    with_captures = _with_captures(pins, tmp_path)
+
+    def generation(spec: dict[str, Any]) -> str:
+        _provider, rows, _artifacts = ledger._zero_financing_rows(
+            spec, {account}, {PROVIDER}, AS_OF
+        )
+        return str(rows[0]["generation_id"])
+
+    base = generation(plain)
+    assert generation(with_captures) != base
+    monkeypatch.setattr(zf, "extractor_identity", lambda: "pdftotext version 99")
+    assert generation(plain) != base

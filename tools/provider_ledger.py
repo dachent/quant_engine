@@ -4044,6 +4044,7 @@ def _zero_financing_rows(
     captures: dict[str, bytes] = {}
     capture_artifacts: list[SourceArtifact] = []
     capture_dir: Path | None = None
+    capture_sums_raw: bytes | None = None
     mapping = None
     if "captures_dir" in ref:
         # the post-statement bracket: dated account captures, pinned by their own sums
@@ -4139,7 +4140,27 @@ def _zero_financing_rows(
             ),
         ]
     )
-    generation = f"zero-financing-{hashlib.sha256(sums_raw).hexdigest()[:24]}"
+    extractor = zero_financing_statements.extractor_identity().encode("utf-8")
+    artifacts.append(
+        SourceArtifact(
+            artifact_id=f"zero-financing/{provider_id}/extractor-identity",
+            sha256=hashlib.sha256(extractor).hexdigest(),
+            size_bytes=len(extractor),
+            as_of_date=as_of,
+            schema_name="statement-extractor-identity",
+            schema_version="1",
+        )
+    )
+    # every input that can change a row is part of the generation id
+    identity = "\n".join(
+        [
+            hashlib.sha256(sums_raw).hexdigest(),
+            hashlib.sha256(mapping_raw).hexdigest(),
+            hashlib.sha256(capture_sums_raw or b"").hexdigest(),
+            hashlib.sha256(extractor).hexdigest(),
+        ]
+    )
+    generation = f"zero-financing-{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
     out: list[dict[str, Any]] = []
     for row in rows:
         source_id = f"zero-financing:{row['account_id']}:{row['as_of_date']}"

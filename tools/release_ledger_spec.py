@@ -247,8 +247,9 @@ def build(
     ``account_roles`` (the governed declaration file, #900) and ``quantbase_fill_closes``
     (a JSON list of {symbol, path, sha256, size_bytes}, #909) are optional per-cycle pins
     written into the spec; absent, the spec is what it was.  ``zero_financing_observations``
-    is the hash-pinned artifact of provider-observed zero-financing days (see
-    ``zero_financing_statements``); it is pinned by path, sha256 and size.
+    is a pin file (``ZERO_FINANCING_PIN_KEYS``, plus an optional capture trio) naming the
+    retained statements directory, statement sums, account mapping and capture sums, each
+    by path and sha256; the ledger recomputes the zero-financing rows from those bytes.
     """
 
     if resolved.get("schema_version") != release_cycle_manifest.RESOLVED_VERSION:

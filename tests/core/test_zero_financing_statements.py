@@ -46,11 +46,10 @@ def _text(
     if block is not None:
         lines += [
             "        Margin Loan Information",
-            "        Opening Margin      Closing Margin     Funds Available",
+            "                                                Opening Margin      Closing Margin     Funds Available",
             "        Loan Balance        Loan Balance       to Withdraw *",
             "",
-            block_row
-            or f"        {block[0]}        {block[1]}        $10.00        $20.00",
+            block_row or _aligned(block[0], block[1], "$10.00", "$20.00"),
         ]
     if interest is not None:
         lines.append(interest)
@@ -59,6 +58,15 @@ def _text(
     if disclosure:
         lines += ["", disclosure]
     return "\f".join(["\n".join(lines), "page two"])
+
+
+def _aligned(*amounts: str, left: str = "") -> str:
+    """A loan-block row whose amounts sit under the header's column labels."""
+
+    row = left
+    for column, amount in zip((48, 68, 87, 106), amounts, strict=False):
+        row = row.ljust(column) + amount
+    return row
 
 
 POSTING = "03/20 Expense   Margin Interest        INTEREST 02/19THRU 03/19"
@@ -81,14 +89,14 @@ def test_a_clean_margin_month_is_a_zero_month_provisionally() -> None:
         (
             {
                 "block": ("$0.00", "($1,250.00)"),
-                "block_row": "  $0.00   ($1,250.00)   $0.00   $0.00",
+                "block_row": _aligned("$0.00", "($1,250.00)", "$0.00", "$0.00"),
             },
             "MARGIN_LOAN_BALANCE_NONZERO",
         ),
         (
             {
                 "block": ("$0.00", "-$5.00"),
-                "block_row": "  $0.00   -$5.00   $0.00   $0.00",
+                "block_row": _aligned("$0.00", "-$5.00", "$0.00", "$0.00"),
             },
             "MARGIN_LOAN_BALANCE_NONZERO",
         ),
@@ -447,6 +455,8 @@ def test_a_margin_interest_table_is_financing_and_the_loan_block_is_the_right_co
     assert (date(2026, 2, 27), date(2026, 3, 9)) in facts["interest_periods"]
     assert (date(2026, 3, 17), date(2026, 3, 23)) in facts["interest_periods"]
     left = _facts(
-        block_row="  Unrealized   ($1,234.00)   $0.00   $0.00   $50.00   $60.00"
+        block_row=_aligned(
+            "$0.00", "$0.00", "$50.00", "$60.00", left="Unrealized ($1,234.00)"
+        )
     )
     assert left["loan_block"] == (0, 0)
