@@ -278,11 +278,15 @@ def test_a_source_scope_ambiguity_is_never_a_reserve_row() -> None:
     assert not lc.in_reserve_window(row, WINDOW)
 
 
-def test_a_row_with_no_stated_reason_or_an_ambiguous_point_is_never_a_reserve_row() -> None:
+def test_a_row_with_no_stated_reason_or_an_ambiguous_point_is_never_a_reserve_row() -> (
+    None
+):
     """Kill test (round-2 R6 item 3): the ledger now states why a point row is unmapped;
     no reason, or two active strategies, never places the row in a reserve window."""
 
     row = _reserve_series()[0]
-    assert lc.in_reserve_window({**row, "mapping_reason": "MAPPING_NO_ACTIVE_INTERVAL"}, WINDOW)
+    assert lc.in_reserve_window(
+        {**row, "mapping_reason": "MAPPING_NO_ACTIVE_INTERVAL"}, WINDOW
+    )
     for reason in (None, "MAPPING_AMBIGUOUS_POINT", "MAPPING_ACCOUNT_OR_DAY_UNKNOWN"):
         assert not lc.in_reserve_window({**row, "mapping_reason": reason}, WINDOW)

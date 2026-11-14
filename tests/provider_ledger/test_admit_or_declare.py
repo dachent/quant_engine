@@ -3082,8 +3082,16 @@ def test_a_point_row_states_why_it_is_unmapped() -> None:
     accounts, strategies = {"a"}, {"s1", "s2"}
     both = {
         "a": [
-            {"strategy_id": "s1", "effective_start": "2026-01-01", "effective_end": None},
-            {"strategy_id": "s2", "effective_start": "2026-01-01", "effective_end": None},
+            {
+                "strategy_id": "s1",
+                "effective_start": "2026-01-01",
+                "effective_end": None,
+            },
+            {
+                "strategy_id": "s2",
+                "effective_start": "2026-01-01",
+                "effective_end": None,
+            },
         ]
     }
     row = {"account_id": "a", "as_of_date": "2026-02-01"}
@@ -3091,6 +3099,8 @@ def test_a_point_row_states_why_it_is_unmapped() -> None:
     assert reason(row, accounts, strategies, both) == "MAPPING_AMBIGUOUS_POINT"
     assert reason(row, accounts, strategies, {"a": []}) == "MAPPING_NO_ACTIVE_INTERVAL"
     assert (
-        reason({"account_id": "z", "as_of_date": "2026-02-01"}, accounts, strategies, both)
+        reason(
+            {"account_id": "z", "as_of_date": "2026-02-01"}, accounts, strategies, both
+        )
         == "MAPPING_ACCOUNT_OR_DAY_UNKNOWN"
     )

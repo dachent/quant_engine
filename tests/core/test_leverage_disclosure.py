@@ -286,7 +286,9 @@ def test_not_levered_needs_observed_cash_days_and_a_verified_declaration() -> No
     assert _quiet_state(empty)["coverage_status"] == "COMPLETE_DECLARED"
     # a facility that exists needs observed cash days showing no debit
     available = _declaration()
-    available[QUIET] = af.Declared(QUIET, "ACTIVE", "MARGIN_AVAILABLE_UNUSED", True, "x")
+    available[QUIET] = af.Declared(
+        QUIET, "ACTIVE", "MARGIN_AVAILABLE_UNUSED", True, "x"
+    )
     silent = _quiet_state(empty, available)
     assert silent["coverage_status"] == "OBSERVED_UNRECONCILED"
     assert "NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS" in silent["coverage_reason"]
