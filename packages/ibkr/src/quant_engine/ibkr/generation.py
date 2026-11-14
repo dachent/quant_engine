@@ -1035,6 +1035,10 @@ def _normalize(
             empty["nav_interest_accruals_stated"] = statement.nav_interest_stated
             empty["period_start"] = day
             empty["period_end"] = day
+            empty["record_id"] = _record_id(
+                "financing-cost",
+                {k: v for k, v in empty.items() if k != "record_id"},
+            )
             financing_cost_observations.append(empty)
         for accrual in statement.interest_accruals:
             accrual_available = accrual.reported_account_matches_statement
@@ -1296,6 +1300,11 @@ def _normalize(
             exposure["unavailable_reason"] = "OPEN_POSITIONS_UNVERIFIED"
         exposure["as_of_date"] = statement.report_date.isoformat()
         exposure["scope"] = "SUMMARY_HOLDINGS"
+        # the id covers the final published row, scope, date and reason included
+        exposure["record_id"] = _record_id(
+            "leverage-exposure",
+            {k: v for k, v in exposure.items() if k != "record_id"},
+        )
         leverage_exposure_observations.append(exposure)
         for trade in statement.trades:
             security_id = security(trade.conid, trade.currency)

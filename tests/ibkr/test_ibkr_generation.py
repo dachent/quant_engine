@@ -3615,7 +3615,7 @@ def test_a_blank_or_non_numeric_nav_attribute_is_unknown_never_zero(
     day = date(2026, 1, 3)
     clean = _empty_positions(_full_nav(_xml("SYNTH-RAW", day, "114")))
     assert _exposure_status(tmp_path, clean) == "AVAILABLE"
-    for blank in ('stockLong=""', 'stockLong="  "', 'stockLong="n/a"', 'crypto=""'):
+    for blank in ('stockLong=""', 'stockLong="  "', 'crypto=""'):
         name = blank.split("=")[0]
         broken = (
             clean.replace(f'{name}="0"', blank)
@@ -3640,7 +3640,77 @@ def test_a_blank_or_non_numeric_nav_attribute_is_unknown_never_zero(
     for blank in (
         'bondInterestAccrualsComponent=""',
         'bondInterestAccrualsComponent=" "',
-        'bondInterestAccrualsComponent="x"',
     ):
         broken = base.replace('total="114"', 'total="114" ' + blank)
         assert empty_rows(broken) == [], blank
+
+
+def test_published_record_ids_cover_the_final_row(tmp_path: Path) -> None:
+    """Kill test (final round): the exposure and empty-accrual record ids are hashes of the
+    row as published (scope, reason, date included), so changing any of those changes
+    the id."""
+
+    day = date(2026, 1, 3)
+    clean = _full_nav(
+        _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    )
+    unverified = _empty_positions(_xml("SYNTH-RAW", day, "114"))  # NAV holdings silent
+    verified = _empty_positions(clean)
+    for xml, prefix in (
+        (unverified, "leverage-exposure"),
+        (verified, "leverage-exposure"),
+    ):
+        row = _exposure(_coverage_catalog(tmp_path, xml))
+        final = {k: v for k, v in row.items() if k != "record_id"}
+        assert row["record_id"] == ibkr_generation._record_id(prefix, final)
+        for key, other in (
+            ("source_account_scope", "SOMETHING_ELSE"),
+            ("as_of_date", "2000-01-01"),
+        ):
+            assert (
+                ibkr_generation._record_id(prefix, {**final, key: other})
+                != row["record_id"]
+            )
+    assert _exposure(_coverage_catalog(tmp_path, unverified))["unavailable_reason"]
+    empty = next(
+        r
+        for r in _coverage_catalog(tmp_path, verified)["financing_cost_observations"]
+        if r["measurement_basis"] == "ACCRUAL_SECTION_EMPTY"
+    )
+    final_empty = {k: v for k, v in empty.items() if k != "record_id"}
+    assert empty["record_id"] == ibkr_generation._record_id(
+        "financing-cost", final_empty
+    )
+    assert (
+        ibkr_generation._record_id(
+            "financing-cost", {**final_empty, "nav_interest_accruals_stated": False}
+        )
+        != empty["record_id"]
+    )
+
+
+def test_a_non_blank_non_numeric_nav_attribute_refuses_the_statement(
+    tmp_path: Path,
+) -> None:
+    """Kill test (final round F1): only blank/whitespace is 'unknown'; any other
+    non-numeric or non-finite holding/interest attribute refuses the whole file, with
+    positions present too (as it always did)."""
+
+    day = date(2026, 1, 3)
+    with_positions = _full_nav(_xml("SYNTH-RAW", day, "114"))
+    assert _exposure_status(tmp_path, with_positions) == "AVAILABLE"
+    for attribute in (
+        'stock="NaN"',
+        'stockLong="n/a"',
+        'bondInterestAccrualsComponent="Infinity"',
+        'crypto="x"',
+    ):
+        name = attribute.split("=")[0]
+        broken = (
+            with_positions.replace(f'{name}="0"', attribute)
+            if f'{name}="0"' in with_positions
+            else with_positions.replace('total="114"', 'total="114" ' + attribute)
+        )
+        assert broken != with_positions
+        with pytest.raises(Exception, match="nav\."):
+            _coverage_catalog(tmp_path, broken)

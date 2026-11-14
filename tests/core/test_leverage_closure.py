@@ -461,3 +461,42 @@ def test_a_flawed_empty_row_in_a_mixed_history_never_closes_the_cost() -> None:
             history({**good, **flaw}), days, days[-1], None, require_explicit_zero=True
         )
         assert not result.covered, flaw
+
+
+def test_a_contradictory_source_amount_makes_an_empty_row_malformed() -> None:
+    """Kill test (final round): source_amount, when present, must be the AVAILABLE zero as
+    well; a contradictory amount/source_amount pair never closes the cost."""
+
+    good = [_empty_day(d) for d in DAYS]
+    assert all("source_amount" in r for r in good)
+    assert lc.financing_cost_closure(good, DAYS, DAYS[-1], None).covered
+    for contradicted in (
+        _amt("-3"),
+        {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+    ):
+        rows = [{**good[0], "source_amount": contradicted}, *good[1:]]
+        assert not lc.financing_cost_closure(rows, DAYS, DAYS[-1], None).covered
+
+
+def test_the_unstated_count_and_the_flawed_row_count_are_row_counts() -> None:
+    """Kill test (final round F2/F3): the evidence names unstated rows, and the flawed
+    count is distinct rows (a row both unmapped and unstated counts once)."""
+
+    good = [{**_empty_day(d), "nav_interest_accruals_stated": True} for d in DAYS]
+    both = {
+        **good[0],
+        "mapping_status": "UNMAPPED",
+        "nav_interest_accruals_stated": False,
+    }
+    # the unstated duplicate on a day that also has a good row: covered=False, with a counter
+    rows = [both, *good[1:], {**good[0]}]
+    result = lc.financing_cost_closure(
+        rows, DAYS, DAYS[-1], None, require_explicit_zero=True
+    )
+    assert not result.covered
+    assert result.evidence["empty_rows_unstated"] == 1
+    mixed = [_accrual(DAYS[0], "ACCRUAL_BALANCE", "0"), both]
+    rolled = lc.financing_cost_closure(
+        mixed, DAYS, DAYS[-1], None, require_explicit_zero=True
+    )
+    assert rolled.evidence["empty_section_rows_flawed"] == 1
