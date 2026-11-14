@@ -3505,10 +3505,9 @@ def test_open_positions_variants_never_read_as_zero_exposure(tmp_path: Path) -> 
         != "AVAILABLE"
     )
     renamed = summary_row.replace("OpenPosition ", "OpenPositionX ")
-    assert _exposure_status(tmp_path, with_children(renamed)) != "AVAILABLE"
-    assert (
-        _exposure_status(tmp_path, with_children(summary_row + renamed)) != "AVAILABLE"
-    )
+    for children in (renamed, summary_row + renamed):
+        with pytest.raises(Exception, match="OpenPositions"):  # unparsed row: refused
+            _exposure_status(tmp_path, with_children(children))
     odd_level = summary_row.replace('levelOfDetail="SUMMARY"', 'levelOfDetail="OTHER"')
     assert _exposure_status(tmp_path, with_children(odd_level)) != "AVAILABLE"
     assert _exposure_status(tmp_path, with_children("")) == "AVAILABLE"
@@ -3537,3 +3536,29 @@ def test_accrual_section_variants_never_read_as_an_empty_section(
         r["measurement_basis"] == "ACCRUAL_SECTION_EMPTY"
         for r in ok["financing_cost_observations"]
     )
+
+
+def test_unparsed_open_positions_content_refuses_the_parse(tmp_path: Path) -> None:
+    """Kill test (round-7 F1): a renamed row or an error text inside OpenPositions is not
+    an empty section; and gross long/short holdings do not net to zero."""
+
+    day = date(2026, 1, 3)
+    clean = _empty_positions(_full_nav(_xml("SYNTH-RAW", day, "114")))
+    assert _exposure_status(tmp_path, clean) == "AVAILABLE"
+    renamed = clean.replace(
+        "<OpenPositions></OpenPositions>",
+        '<OpenPositions><OpenPositionV2 positionValue="5000"/></OpenPositions>',
+    )
+    texted = clean.replace(
+        "<OpenPositions></OpenPositions>",
+        "<OpenPositions>error: data not ready</OpenPositions>",
+    )
+    for broken in (renamed, texted):
+        assert broken != clean
+        with pytest.raises(Exception, match="OpenPositions"):
+            _coverage_catalog(tmp_path, broken)
+    gross = clean.replace(
+        'total="114"', 'total="114" stockLong="5000" stockShort="-5000"'
+    )
+    assert gross != clean
+    assert _exposure_status(tmp_path, gross) != "AVAILABLE"

@@ -787,6 +787,14 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         # the statement's section and must not read as present
         if len(_elements(element, name)) != len(_direct(element, name)):
             raise FlexValidationError(f"{name} is nested inside another element")
+    for section in _direct(element, "OpenPositions"):
+        # stray text or a child other than OpenPosition (a renamed row, an error message)
+        # is unparsed content, never an empty section
+        if (section.text or "").strip() or any(
+            _local(child.tag) != "OpenPosition" or (child.tail or "").strip()
+            for child in section
+        ):
+            raise FlexValidationError("OpenPositions holds unknown content")
     for section in _direct(element, "InterestAccruals"):
         # a renamed or unknown child, or stray text, must not read as "empty"
         if (section.text or "").strip() or any(
