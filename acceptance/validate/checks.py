@@ -8444,7 +8444,8 @@ def _receipt_excluded_providers(ctx: Context) -> frozenset[str]:
     NO_CURRENT_PRODUCT_EFFECT, from a receipt whose gate passed.
 
     One other disposition, one disposition missing a field, a failed gate or no receipt
-    leaves the provider out, so its finding stays.
+    leaves the provider out, so its finding stays; a row that is not an object or has no
+    provider id voids the whole receipt.
     """
 
     receipt = ctx.provider_receipt
@@ -8453,11 +8454,16 @@ def _receipt_excluded_providers(ctx: Context) -> frozenset[str]:
         or receipt.get("admission_gate_status") != "PASS"
     ):
         return frozenset()
+    listed = receipt.get("dispositions")
+    if not isinstance(listed, list):
+        return frozenset()
     clean: dict[str, bool] = {}
-    for item in rows(receipt, "dispositions"):
-        provider = item.get("provider_id")
+    for item in listed:
+        provider = item.get("provider_id") if isinstance(item, Mapping) else None
         if not isinstance(provider, str) or not provider.strip():
-            continue
+            # a row that cannot be attributed to a provider could be any provider's
+            # admitted item: the receipt as a whole is unusable
+            return frozenset()
         key = provider.strip().casefold()
         clean[key] = (
             clean.get(key, True)
@@ -11529,10 +11535,11 @@ def _owner_excluded_accounts(ctx: Context) -> dict[str, str]:
 _RETIRED_DISPOSITION = "EXCLUDED_DEPRECATED_HISTORY_ONLY"
 _RETIRED_VALUE_METRIC = "capital.account.cutoff"
 _RETIRED_DATE_METRIC = "date.source_last_observation"
+_RETIRED_VALUE_TOLERANCE = Decimal("0.01")
 
 
 def _entity_account(entity: object) -> str:
-    return str(entity).split("|", 1)[0]
+    return str(entity)
 
 
 def _retired_history_only_accounts(ctx: Context) -> dict[str, date]:
@@ -11583,13 +11590,15 @@ def _retired_value_verified(ctx: Context, account: str) -> bool:
         return False
     for row in wanted:
         views = resolve_metric(ctx, _RETIRED_VALUE_METRIC, str(row.get("entity")))
-        unit = metric_unit(_RETIRED_VALUE_METRIC, row.get("unit"))
-        expected = row.get("expected", row.get("value"))
-        if not views or not all(
-            _equal(unit, view.value, expected, to_decimal(row.get("tolerance")))
-            for view in views
-        ):
+        expected = to_decimal(row.get("expected", row.get("value")))
+        if expected is None or not views:
             return False
+        for view in views:
+            shown = to_decimal(view.value)
+            # the row's own tolerance is not consulted: an exemption needs agreement to
+            # the cent, however loose the baseline row's comparison is
+            if shown is None or abs(shown - expected) > _RETIRED_VALUE_TOLERANCE:
+                return False
     return True
 
 

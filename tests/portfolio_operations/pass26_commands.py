@@ -483,12 +483,13 @@ def write(OUT: Path) -> None:
                 "flag": flag,
                 "reason": "pass 26 validated the panel without the basis inputs the attended run used, so a "
                 "p123-ai-factor sleeve row had no declaration to be checked against; the driver passes the "
-                "run's own declaration, sleeve facts, provider ledger, ibkr root and tag map",
+                "run's own declaration, sleeve facts, provider ledger, its admit-or-declare receipt (the source of the receipt-based source-clock exemption), ibkr root and tag map",
             }
             for flag in (
                 "--strategy-basis",
                 "--sleeve-facts",
                 "--provider-ledger",
+                "--admission-receipt",
                 "--ibkr-root",
                 "--tag-map",
             )
