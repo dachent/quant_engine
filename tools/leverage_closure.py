@@ -178,21 +178,28 @@ def financing_cost_closure(
         if r.get("measurement_basis") == EMPTY_ACCRUAL_BASIS
     }
     rows = [r for r in rows if r.get("measurement_basis") != EMPTY_ACCRUAL_BASIS]
+    # The empty-section rows are validated whichever path the account takes (a mixed
+    # history of ordinary accrual days and empty days included): malformed rows, mapping
+    # gaps, and (require_explicit_zero) rows whose NAV does not state the zero.
+    empty_rows = [
+        r for r in cost_rows_all if r.get("measurement_basis") == EMPTY_ACCRUAL_BASIS
+    ]
+    malformed = [r for r in empty_rows if not _is_proper_empty_row(r)]
+    placed_e, gaps_e = _split_unmapped(
+        [r for r in empty_rows if _is_proper_empty_row(r)],
+        epoch_start,
+        reserve_windows,
+    )
+    unstated_e = [
+        r
+        for r in empty_rows
+        if require_explicit_zero and r.get("nav_interest_accruals_stated") is not True
+    ]
+    empty_bad = bool(malformed or gaps_e or unstated_e)
     if not accruals and empty_days:
         # The broker's explicit "no accruals" on every statement day, and no other cost
         # row at all (a posting or detail row with no accrual behind it is not explained
         # by an empty section): covered.  A day without the section is not captured.
-        empty_rows = [
-            r
-            for r in cost_rows_all
-            if r.get("measurement_basis") == EMPTY_ACCRUAL_BASIS
-        ]
-        malformed = [r for r in empty_rows if not _is_proper_empty_row(r)]
-        placed_e, gaps_e = _split_unmapped(
-            [r for r in empty_rows if _is_proper_empty_row(r)],
-            epoch_start,
-            reserve_windows,
-        )
         stated_days = {
             str(r.get("as_of_date") or r.get("period_end"))
             for r in cost_rows_all
@@ -204,11 +211,7 @@ def financing_cost_closure(
         placed, unmapped_here = _split_unmapped(rows, epoch_start, reserve_windows)
         return Closure(
             "FINANCING_COST_ACCRUAL_SECTION_EMPTY",
-            bool(days)
-            and not days_unproven
-            and not rows
-            and not malformed
-            and not gaps_e,
+            bool(days) and not days_unproven and not rows and not empty_bad,
             {
                 "statement_days": len(days),
                 "empty_section_days": len(empty_days & set(days)),
@@ -279,6 +282,7 @@ def financing_cost_closure(
         and not unavailable
         and not unexplained
         and not unmapped
+        and not empty_bad
         and checked > 0
     )
     return Closure(
@@ -292,6 +296,7 @@ def financing_cost_closure(
             "unexplained_steps": sorted(unexplained)[:20],
             "unexplained_step_count": len(unexplained),
             "unmapped_rows_in_epoch": len(unmapped),
+            "empty_section_rows_flawed": len(malformed) + len(gaps_e) + len(unstated_e),
             "reserve_window_rows": len(reserve_placed),
             "unmapped_reasons": dict(
                 sorted(Counter(str(r.get("mapping_reason")) for r in unmapped).items())

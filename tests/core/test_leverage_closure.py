@@ -428,3 +428,36 @@ def test_a_malformed_or_unmapped_empty_section_row_never_closes_the_cost() -> No
     window = [(date(2026, 1, 5), date(2026, 1, 8), "EXACT_IDENTITY_CLOSURE")]
     reasoned = [{**r, "mapping_reason": "MAPPING_NO_ACTIVE_INTERVAL"} for r in unmapped]
     assert covered(reasoned, window)
+
+
+def test_a_flawed_empty_row_in_a_mixed_history_never_closes_the_cost() -> None:
+    """Kill test (final round P1-A): ordinary zero accruals on some days plus an empty row
+    on another day: the empty row is validated on this path too (unmapped, unstated,
+    malformed rows all refuse), exactly as when no ordinary accrual exists."""
+
+    days = ["2026-01-05", "2026-01-06", "2026-01-07"]
+
+    def zero_accrual(day: str) -> list[dict[str, Any]]:
+        return [
+            _accrual(day, "ACCRUAL_BALANCE", "0"),
+            _accrual(day, "PERIOD_ACCRUAL", "0"),
+            _accrual(day, "ACCRUAL_REVERSAL", "0"),
+        ]
+
+    def history(last: dict[str, Any]) -> list[dict[str, Any]]:
+        return [*zero_accrual(days[0]), *zero_accrual(days[1]), last]
+
+    good = {**_empty_day(days[2]), "nav_interest_accruals_stated": True}
+    assert lc.financing_cost_closure(
+        history(good), days, days[-1], None, require_explicit_zero=True
+    ).covered
+    for flaw in (
+        {"mapping_status": "UNMAPPED"},
+        {"nav_interest_accruals_stated": False},
+        {"amount": _amt("0.5")},
+        {"source_account_scope": "AMBIGUOUS_REPORTED_ACCOUNT"},
+    ):
+        result = lc.financing_cost_closure(
+            history({**good, **flaw}), days, days[-1], None, require_explicit_zero=True
+        )
+        assert not result.covered, flaw

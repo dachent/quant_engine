@@ -3604,3 +3604,43 @@ def test_section_attributes_and_rows_outside_the_section_are_never_benign(
 
     totals = clean.replace('total="114"', 'total="114" totalLong="5" totalShort="-5"')
     assert _exposure_status(tmp_path, totals) == "AVAILABLE"
+
+
+def test_a_blank_or_non_numeric_nav_attribute_is_unknown_never_zero(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (final round P1-B): a blank, whitespace or non-numeric holding or
+    interest attribute makes the evidence unverifiable (no zero exposure, no empty row)."""
+
+    day = date(2026, 1, 3)
+    clean = _empty_positions(_full_nav(_xml("SYNTH-RAW", day, "114")))
+    assert _exposure_status(tmp_path, clean) == "AVAILABLE"
+    for blank in ('stockLong=""', 'stockLong="  "', 'stockLong="n/a"', 'crypto=""'):
+        name = blank.split("=")[0]
+        broken = (
+            clean.replace(f'{name}="0"', blank)
+            if f'{name}="0"' in clean
+            else clean.replace('total="114"', 'total="114" ' + blank)
+        )
+        assert broken != clean
+        assert _exposure_status(tmp_path, broken) != "AVAILABLE", blank
+
+    base = _full_nav(
+        _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    )
+
+    def empty_rows(xml: str) -> list[dict[str, Any]]:
+        return [
+            r
+            for r in _coverage_catalog(tmp_path, xml)["financing_cost_observations"]
+            if r["measurement_basis"] == "ACCRUAL_SECTION_EMPTY"
+        ]
+
+    assert len(empty_rows(base)) == 1
+    for blank in (
+        'bondInterestAccrualsComponent=""',
+        'bondInterestAccrualsComponent=" "',
+        'bondInterestAccrualsComponent="x"',
+    ):
+        broken = base.replace('total="114"', 'total="114" ' + blank)
+        assert empty_rows(broken) == [], blank

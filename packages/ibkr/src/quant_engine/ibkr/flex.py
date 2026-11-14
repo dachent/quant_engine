@@ -155,14 +155,28 @@ _NAV_INTEREST_CORE = (
 
 def _nav_numbers(
     nav: ET.Element, selector: re.Pattern[str], exclude: re.Pattern[str] | None
-) -> dict[str, Decimal]:
+) -> tuple[dict[str, Decimal], bool]:
+    """The selected NAV attributes as numbers, and whether any is unknown: a blank,
+    whitespace or non-numeric value is not an explicit zero."""
+
     out: dict[str, Decimal] = {}
+    unknown = False
     for key, value in nav.attrib.items():
         if selector.search(key) and not (exclude and exclude.search(key)):
-            parsed = _optional_decimal(value, f"nav.{key}")
-            if parsed is not None:
+            try:
+                parsed = Decimal(value.strip()) if value.strip() else None
+            except ArithmeticError:
+                parsed = None
+            if parsed is None or not parsed.is_finite():
+                unknown = True
+            else:
                 out[key] = parsed
-    return out
+    return out, unknown
+
+
+def _not_verified_zero(numbers: tuple[dict[str, Decimal], bool]) -> bool:
+    values, unknown = numbers
+    return unknown or any(v != 0 for v in values.values())
 
 
 def _account_matches(element: ET.Element, raw_account_id: str) -> bool:
@@ -881,15 +895,15 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
             len(list(section)) for section in _direct(element, "OpenPositions")
         )
         + outside_rows,
-        nav_holdings_nonzero=any(
-            v != 0
-            for v in _nav_numbers(nav, _NAV_HOLDINGS_NAME, _NAV_NOT_HOLDINGS).values()
+        # "nonzero" also covers an unknown (blank/non-numeric) holding: not a verified zero
+        nav_holdings_nonzero=_not_verified_zero(
+            _nav_numbers(nav, _NAV_HOLDINGS_NAME, _NAV_NOT_HOLDINGS)
         ),
         nav_holdings_complete=all(
             _optional(nav.attrib.get(key)) is not None for key in _NAV_HOLDINGS_CORE
         ),
-        nav_interest_nonzero=any(
-            v != 0 for v in _nav_numbers(nav, _NAV_INTEREST_NAME, None).values()
+        nav_interest_nonzero=_not_verified_zero(
+            _nav_numbers(nav, _NAV_INTEREST_NAME, None)
         ),
         nav_interest_stated=all(
             _optional(nav.attrib.get(key)) is not None for key in _NAV_INTEREST_CORE
