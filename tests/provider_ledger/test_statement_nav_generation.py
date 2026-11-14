@@ -112,9 +112,7 @@ def _spec(
         "baseline": {"statement_count": len(statements)},
         "coverage_end": coverage[1],
         "coverage_start": coverage[0],
-        "crosswalk": [
-            {"external_account_id": external, "internal_account_id": ACCOUNT}
-        ],
+        "crosswalk": [{gen.EXTERNAL_KEY: external, "internal_account_id": ACCOUNT}],
         "identity": PLAN,
         "provider": provider,
         "roots": {"statements": str(tmp_path / "statements")},

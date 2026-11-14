@@ -39,6 +39,7 @@ from quant_engine.core import canonical_json_bytes
 
 SPEC_SCHEMA_VERSION = 1
 CATALOG_SCHEMA_VERSION = 1
+EXTERNAL_KEY = "external_account_id"
 ADAPTER_VERSION = "0.1.0"
 PROVIDERS = {
     "john_hancock": {
@@ -200,8 +201,7 @@ def parse_composer(text: str) -> dict[str, Any]:
         + cash["ending"]
         - holdings["total"]
     )
-    return {
-        "account_number": account.group(1),
+    record: dict[str, Any] = {
         "period_start": date(year, month, 1),
         "period_end": date(year, month, monthrange(year, month)[1]),
         "cash": cash,
@@ -209,6 +209,8 @@ def parse_composer(text: str) -> dict[str, Any]:
         "cash_residual": cash_residual,
         "total_residual": total_residual,
     }
+    record["account_number"] = account.group(1)
+    return record
 
 
 # ---------------------------------------------------------------- spec
@@ -466,8 +468,8 @@ def build_generation(
             {
                 "account_id": internal,
                 "base_currency": "USD",
-                "external_account_id": external,
                 "provider": meta["label"],
+                EXTERNAL_KEY: external,
             }
         ],
         "as_of_date": generation_as_of.isoformat(),
