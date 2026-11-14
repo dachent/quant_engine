@@ -385,6 +385,144 @@ def load_sums(raw: bytes) -> dict[str, str]:
     return sums
 
 
+_OUTGOING = re.compile(
+    r"(?i)\b(buy|bought|purchase|withdraw|transfer|journal|wire|fee|margin interest|"
+    r"loan|advance|debit|sell short|expense)\b"
+)
+_CAPTURE_KEYS = frozenset(
+    {
+        "schema_version",
+        "provider_id",
+        "account_last3",
+        "captured_at_utc",
+        "capture_date",
+        "window_start",
+        "window_end",
+        "balances",
+        "transactions_reported_count",
+        "transactions",
+        "transactions_complete",
+        "raw_files",
+    }
+)
+
+
+def _zero_amount(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        return _parse_money(value if "$" in value else "$" + value.strip()) == 0
+    except ZeroFinancingError:
+        return False
+
+
+def evaluate_capture(
+    raw: bytes,
+    *,
+    provider_id: str,
+    last3: str,
+    last_end: date,
+    cutoff: date,
+    raw_dir: Path | None,
+    margin_account: bool = True,
+) -> tuple[bool, str]:
+    """(bracket holds, reason) for a dated account capture after the last statement.
+
+    Structure, account, window and raw-file hashes are refused (an exception); a capture
+    that is sound but shows borrowing evidence (nonzero balance, a transaction that can
+    create a debit, incomplete list) only fails the bracket, leaving those days
+    unobserved."""
+
+    try:
+        top = json.loads(raw)
+    except ValueError as exc:
+        raise ZeroFinancingError("capture is not JSON") from exc
+    if (
+        not isinstance(top, dict)
+        or set(top) != _CAPTURE_KEYS
+        or top["schema_version"] != 1
+    ):
+        raise ZeroFinancingError("capture shape differs")
+    if top["provider_id"] != provider_id:
+        raise ZeroFinancingError("capture is for another provider")
+    if top["account_last3"] != last3:
+        raise ZeroFinancingError("capture account differs from the mapped account")
+    try:
+        capture_date = date.fromisoformat(top["capture_date"])
+        window_start = date.fromisoformat(top["window_start"])
+        window_end = date.fromisoformat(top["window_end"])
+    except (TypeError, ValueError) as exc:
+        raise ZeroFinancingError("capture dates are invalid") from exc
+    if (
+        capture_date < cutoff
+        or window_end != capture_date
+        or window_start > last_end + timedelta(days=1)
+    ):
+        raise ZeroFinancingError(
+            "capture does not cover the days after the last statement"
+        )
+    files = top["raw_files"]
+    if not isinstance(files, list) or not files:
+        raise ZeroFinancingError("capture names no raw files")
+    for item in files:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"name", "sha256", "size_bytes", "kind"}
+            or raw_dir is None
+        ):
+            raise ZeroFinancingError("capture raw file entry is invalid")
+        path = raw_dir / str(item["name"])
+        content = (
+            path.read_bytes() if path.is_file() and not path.is_symlink() else None
+        )
+        if (
+            content is None
+            or hashlib.sha256(content).hexdigest() != item["sha256"]
+            or len(content) != item["size_bytes"]
+        ):
+            raise ZeroFinancingError("capture raw file identity differs")
+    if not margin_account:
+        # a no-margin account type: the capture only has to show the account at its date
+        return True, "ACCOUNT_EXISTS_AT_CAPTURE"
+    balances = top["balances"]
+    if not isinstance(balances, dict):
+        raise ZeroFinancingError("capture balances are absent")
+    # absent fields refuse; a nonzero balance only fails the bracket
+    for key in ("margin_loan_balance", "balance_subject_to_interest"):
+        if not isinstance(balances.get(key), str) or not balances[key].strip():
+            raise ZeroFinancingError(f"capture {key} is absent")
+    if not (
+        _zero_amount(balances["margin_loan_balance"])
+        and _zero_amount(balances["balance_subject_to_interest"])
+    ):
+        return False, "CAPTURE_MARGIN_BALANCE_NOT_ZERO"
+    transactions = top["transactions"]
+    if not isinstance(transactions, list) or top["transactions_complete"] is not True:
+        return False, "CAPTURE_TRANSACTIONS_NOT_COMPLETE"
+    if top["transactions_reported_count"] != len(transactions):
+        return False, "CAPTURE_TRANSACTION_COUNT_DIFFERS"
+    for item in transactions:
+        if not isinstance(item, dict) or set(item) != {
+            "date",
+            "action",
+            "description",
+            "amount",
+        }:
+            raise ZeroFinancingError("capture transaction row is invalid")
+        try:
+            when = date.fromisoformat(item["date"])
+        except (TypeError, ValueError) as exc:
+            raise ZeroFinancingError("capture transaction date is invalid") from exc
+        if not window_start <= when <= window_end:
+            raise ZeroFinancingError("capture transaction is outside its window")
+        text = f"{item['action']} {item['description']}"
+        amount = str(item["amount"]).strip()
+        negative = amount.startswith(("-", "(")) or amount.endswith("-")
+        if negative or _OUTGOING.search(text):
+            return False, "CAPTURE_TRANSACTION_CAN_CREATE_A_DEBIT"
+    return True, "BRACKET_PROVEN_BY_CAPTURE"
+
+
 def build(
     pdf_dir: Path,
     sums: Mapping[str, str],
@@ -393,6 +531,9 @@ def build(
     provider_id: str,
     extract: Callable[[Path], str] | None = None,
     artifact_prefix: str | None = None,
+    captures: Mapping[str, bytes] | None = None,
+    capture_dir: Path | None = None,
+    cutoff: date | None = None,
 ) -> dict[str, Any]:
     extract = extract or _pdftotext  # resolved at call time
     names = sorted(sums)
@@ -473,6 +614,7 @@ def build(
             "digest": digest,
             "page": page,
             "type_only": retirement_type,
+            "loan_closing": facts["loan_block"][1] if facts["loan_block"] else None,
         }
         for first, last in facts["interest_periods"]:
             interest_days.setdefault(account, set()).update(_days(first, last))
@@ -531,6 +673,81 @@ def build(
                         "verdict_reason": reason,
                     }
                 )
+    # Days after an account's latest statement, up to the cutoff, from its dated capture:
+    # a retirement type still stands (the account exists at the capture date); a margin
+    # account's final period and the days after it count only when the bracket holds.
+    capture_notes: list[dict[str, Any]] = []
+    if captures and cutoff is not None:
+        last3_of = {account: last3 for account, last3 in mapping.values()}
+        for account, spans in by_account.items():
+            if account not in captures:
+                continue
+            start, end = spans[-1]
+            record = periods[(account, start, end)]
+            raw = captures[account]
+            holds, why = evaluate_capture(
+                raw,
+                provider_id=provider_id,
+                last3=last3_of[account],
+                last_end=end,
+                cutoff=cutoff,
+                raw_dir=capture_dir,
+                margin_account=not record["type_only"],
+            )
+            if record["type_only"]:
+                holds = record["state"] == "ZERO"
+                why = "RETIREMENT_TYPE_THROUGH_CUTOFF" if holds else "TYPE_NOT_PROVEN"
+            elif record["state"] != "ZERO" or record["loan_closing"] != 0:
+                holds, why = False, "LAST_STATEMENT_NOT_ZERO"
+            capture_notes.append(
+                {"account_id": account, "bracket": holds, "reason": why}
+            )
+            if not holds:
+                continue
+            digest = hashlib.sha256(raw).hexdigest()
+            first_new = end + timedelta(days=1)
+            if not record["type_only"]:
+                # the final statement period is proven by the bracket, not by a next
+                # statement: re-admit its days (minus the days an interest range charged)
+                first_new = start
+                rows[:] = [
+                    r
+                    for r in rows
+                    if not (
+                        r["account_id"] == account
+                        and date.fromisoformat(r["as_of_date"]) >= start
+                    )
+                ]
+                unobserved[:] = [
+                    u
+                    for u in unobserved
+                    if not (
+                        u["account_id"] == account
+                        and u["period_start"] == start.isoformat()
+                    )
+                ]
+            for current in _days(first_new, cutoff):
+                if current in interest_days.get(account, ()):
+                    continue
+                rows.append(
+                    {
+                        "account_id": account,
+                        "as_of_date": current.isoformat(),
+                        "amount": {
+                            "currency": "USD",
+                            "status": "AVAILABLE",
+                            "value": "0",
+                        },
+                        "classification": CLASSIFICATION,
+                        "measurement_basis": BASIS,
+                        "provider_id": provider_id,
+                        "source_artifact_id": f"{prefix}/capture/{account}",
+                        "source_artifact_sha256": digest,
+                        "source_field": "Account capture: margin loan balance and activity",
+                        "source_page": 1,
+                        "verdict_reason": why,
+                    }
+                )
     removed = sorted(
         (
             {"account_id": a, "as_of_date": d.isoformat()}
@@ -560,6 +777,7 @@ def build(
         "duplicate_period_files": sorted(duplicate_periods),
         "interest_charged_days": removed,
         "coverage_gaps": _gaps(periods),
+        "capture_decisions": sorted(capture_notes, key=lambda n: n["account_id"]),
     }
 
 
