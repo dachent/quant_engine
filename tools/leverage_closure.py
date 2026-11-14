@@ -201,7 +201,9 @@ def financing_cost_closure(
         for r in empty_rows
         if require_explicit_zero and r.get("nav_interest_accruals_stated") is not True
     ]
-    empty_bad = bool(malformed or gaps_e or unstated_e)
+    # distinct rows, not conditions: a row that is both a gap and unstated counts once
+    flawed_rows = {id(r) for r in (*malformed, *gaps_e, *unstated_e)}
+    empty_bad = bool(flawed_rows)
     if not accruals and empty_days:
         # The broker's explicit "no accruals" on every statement day, and no other cost
         # row at all (a posting or detail row with no accrual behind it is not explained
@@ -224,6 +226,7 @@ def financing_cost_closure(
                 "days_without_section": len(days_unproven),
                 "other_cost_rows": len(rows),
                 "malformed_empty_rows": len(malformed),
+                "empty_rows_unstated": len(unstated_e),
                 "empty_rows_mapping_gaps": len(gaps_e),
                 "empty_rows_in_reserve_window": len(placed_e),
                 "unmapped_rows_in_epoch": len(unmapped_here),
@@ -302,7 +305,7 @@ def financing_cost_closure(
             "unexplained_steps": sorted(unexplained)[:20],
             "unexplained_step_count": len(unexplained),
             "unmapped_rows_in_epoch": len(unmapped),
-            "empty_section_rows_flawed": len(malformed) + len(gaps_e) + len(unstated_e),
+            "empty_section_rows_flawed": len(flawed_rows),
             "reserve_window_rows": len(reserve_placed),
             "unmapped_reasons": dict(
                 sorted(Counter(str(r.get("mapping_reason")) for r in unmapped).items())

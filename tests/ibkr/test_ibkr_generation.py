@@ -3615,7 +3615,7 @@ def test_a_blank_or_non_numeric_nav_attribute_is_unknown_never_zero(
     day = date(2026, 1, 3)
     clean = _empty_positions(_full_nav(_xml("SYNTH-RAW", day, "114")))
     assert _exposure_status(tmp_path, clean) == "AVAILABLE"
-    for blank in ('stockLong=""', 'stockLong="  "', 'stockLong="n/a"', 'crypto=""'):
+    for blank in ('stockLong=""', 'stockLong="  "', 'crypto=""'):
         name = blank.split("=")[0]
         broken = (
             clean.replace(f'{name}="0"', blank)
@@ -3640,7 +3640,6 @@ def test_a_blank_or_non_numeric_nav_attribute_is_unknown_never_zero(
     for blank in (
         'bondInterestAccrualsComponent=""',
         'bondInterestAccrualsComponent=" "',
-        'bondInterestAccrualsComponent="x"',
     ):
         broken = base.replace('total="114"', 'total="114" ' + blank)
         assert empty_rows(broken) == [], blank
@@ -3688,3 +3687,30 @@ def test_published_record_ids_cover_the_final_row(tmp_path: Path) -> None:
         )
         != empty["record_id"]
     )
+
+
+def test_a_non_blank_non_numeric_nav_attribute_refuses_the_statement(
+    tmp_path: Path,
+) -> None:
+    """Kill test (final round F1): only blank/whitespace is 'unknown'; any other
+    non-numeric or non-finite holding/interest attribute refuses the whole file, with
+    positions present too (as it always did)."""
+
+    day = date(2026, 1, 3)
+    with_positions = _full_nav(_xml("SYNTH-RAW", day, "114"))
+    assert _exposure_status(tmp_path, with_positions) == "AVAILABLE"
+    for attribute in (
+        'stock="NaN"',
+        'stockLong="n/a"',
+        'bondInterestAccrualsComponent="Infinity"',
+        'crypto="x"',
+    ):
+        name = attribute.split("=")[0]
+        broken = (
+            with_positions.replace(f'{name}="0"', attribute)
+            if f'{name}="0"' in with_positions
+            else with_positions.replace('total="114"', 'total="114" ' + attribute)
+        )
+        assert broken != with_positions
+        with pytest.raises(Exception, match="nav\."):
+            _coverage_catalog(tmp_path, broken)

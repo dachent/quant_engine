@@ -156,21 +156,19 @@ _NAV_INTEREST_CORE = (
 def _nav_numbers(
     nav: ET.Element, selector: re.Pattern[str], exclude: re.Pattern[str] | None
 ) -> tuple[dict[str, Decimal], bool]:
-    """The selected NAV attributes as numbers, and whether any is unknown: a blank,
-    whitespace or non-numeric value is not an explicit zero."""
+    """The selected NAV attributes as numbers, and whether any is unknown: a blank or
+    whitespace value is not an explicit zero; a non-numeric or non-finite one refuses
+    the statement, as it always has."""
 
     out: dict[str, Decimal] = {}
     unknown = False
     for key, value in nav.attrib.items():
         if selector.search(key) and not (exclude and exclude.search(key)):
-            try:
-                parsed = Decimal(value.strip()) if value.strip() else None
-            except ArithmeticError:
-                parsed = None
-            if parsed is None or not parsed.is_finite():
-                unknown = True
+            if not value.strip():
+                unknown = True  # blank or whitespace: unknown, not an explicit zero
             else:
-                out[key] = parsed
+                # any non-blank value must be a finite decimal, or the file is refused
+                out[key] = _decimal(value, f"nav.{key}")
     return out, unknown
 
 

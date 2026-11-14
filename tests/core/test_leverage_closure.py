@@ -476,3 +476,27 @@ def test_a_contradictory_source_amount_makes_an_empty_row_malformed() -> None:
     ):
         rows = [{**good[0], "source_amount": contradicted}, *good[1:]]
         assert not lc.financing_cost_closure(rows, DAYS, DAYS[-1], None).covered
+
+
+def test_the_unstated_count_and_the_flawed_row_count_are_row_counts() -> None:
+    """Kill test (final round F2/F3): the evidence names unstated rows, and the flawed
+    count is distinct rows (a row both unmapped and unstated counts once)."""
+
+    good = [{**_empty_day(d), "nav_interest_accruals_stated": True} for d in DAYS]
+    both = {
+        **good[0],
+        "mapping_status": "UNMAPPED",
+        "nav_interest_accruals_stated": False,
+    }
+    # the unstated duplicate on a day that also has a good row: covered=False, with a counter
+    rows = [both, *good[1:], {**good[0]}]
+    result = lc.financing_cost_closure(
+        rows, DAYS, DAYS[-1], None, require_explicit_zero=True
+    )
+    assert not result.covered
+    assert result.evidence["empty_rows_unstated"] == 1
+    mixed = [_accrual(DAYS[0], "ACCRUAL_BALANCE", "0"), both]
+    rolled = lc.financing_cost_closure(
+        mixed, DAYS, DAYS[-1], None, require_explicit_zero=True
+    )
+    assert rolled.evidence["empty_section_rows_flawed"] == 1
