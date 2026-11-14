@@ -11607,6 +11607,10 @@ def _retired_value_verified(ctx: Context, account: str) -> bool:
             # the cent, however loose the baseline row's comparison is
             if shown is None or abs(shown - expected) > _RETIRED_VALUE_TOLERANCE:
                 return False
+            # never looser than the oracle's own tolerance either (cent cap AND row tolerance)
+            row_tolerance = to_decimal(row.get("tolerance"))
+            if row_tolerance is not None and abs(shown - expected) > row_tolerance:
+                return False
     return True
 
 

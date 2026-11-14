@@ -386,6 +386,7 @@ def bind_admission_receipt(
     receipt = _json_object(raw, "the receipt")
     if (
         receipt.get("receipt_type") != RECEIPT_TYPE
+        or type(receipt.get("schema_version")) is not int
         or receipt.get("schema_version") != 1
         or not isinstance(receipt.get("dispositions"), list)
     ):
@@ -412,15 +413,20 @@ def bind_admission_receipt(
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list):
         raise Refusal(BINDING_RECEIPT, "generation.json records no artifact list")
-    ids = [item.get("artifact_id") for item in artifacts if isinstance(item, Mapping)]
-    if len(ids) != len(set(map(str, ids))):
-        # two records for one artifact id: which one the generation vouches for is open
-        raise Refusal(BINDING_RECEIPT, "generation.json records an artifact id twice")
-    recorded = {
-        item.get("artifact_id"): item.get("sha256")
-        for item in artifacts
-        if isinstance(item, Mapping)
-    }
+    recorded: dict[str, Any] = {}
+    for item in artifacts:
+        if not isinstance(item, Mapping):
+            continue
+        artifact_id = item.get("artifact_id")
+        if not isinstance(artifact_id, str):
+            raise Refusal(
+                BINDING_RECEIPT, "generation.json records a malformed artifact id"
+            )
+        if artifact_id in recorded:
+            raise Refusal(
+                BINDING_RECEIPT, "generation.json records an artifact id twice"
+            )
+        recorded[artifact_id] = item.get("sha256")
     if recorded.get(RECEIPT_ARTIFACT) != hashlib.sha256(raw).hexdigest():
         raise Refusal(
             BINDING_RECEIPT,
