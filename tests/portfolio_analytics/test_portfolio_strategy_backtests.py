@@ -298,3 +298,13 @@ def test_model_live_must_start_after_the_backtest() -> None:
         _build_layered(
             RETURNS + overlapping, _live_label("2025-01-03", "2025-01-07", 2)
         )
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [{"layer": "MODEL_LIVE"}, "not-a-mapping", {"layer": "MODEL_LIVE", "window": 3}],
+)
+def test_a_malformed_segment_label_is_a_refusal_not_a_traceback(broken: object) -> None:
+    manifest_bytes, returns_bytes = _layered(RETURNS + LIVE_ROWS, label=broken)  # type: ignore[arg-type]
+    with pytest.raises(StrategyBacktestsError, match="inadmissible layer"):
+        backtests._build_from_contents(manifest_bytes, returns_bytes)

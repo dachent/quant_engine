@@ -4440,6 +4440,22 @@ def _matrixport_account_is_unadmitted(
     return True
 
 
+def _bundle_backtest_rows(
+    raw_rows: Sequence[dict[str, str]], series_id: object
+) -> list[dict[str, str]]:
+    """A series' BACKTEST rows of a strategy-history bundle.
+
+    The bundle also carries MODEL_LIVE rows (a layer of its own, admitted under its
+    own segment); they are never part of the backtest reconstruction.
+    """
+
+    return [
+        row
+        for row in raw_rows
+        if row["series_id"] == series_id and row["evidence_layer"] == "BACKTEST"
+    ]
+
+
 def _strategies_without_a_backtest_layer(
     corrections: Mapping[str, Mapping[str, object]],
 ) -> set[str]:
@@ -7587,11 +7603,9 @@ def validate_layered_history_generation(
         for strategy_id, strategy in strategies.items():
             if raw_rows is None:
                 continue
-            selected = [
-                row
-                for row in raw_rows
-                if row["series_id"] == strategy.get("history_series_id")
-            ]
+            selected = _bundle_backtest_rows(
+                raw_rows, strategy.get("history_series_id")
+            )
             version_status, version = _contract_version(strategy)
             if (
                 not selected
