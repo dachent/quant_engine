@@ -73,17 +73,17 @@ def statement_label(provider_id: str, last3: str) -> str:
     return hashlib.sha256(f"acct-{provider_id}-{last3}".encode()).hexdigest()[:8]
 
 
-_MONEY_TOKEN = re.compile(r"\(?-?\$[\d,]+\.\d\d\)?")
+_MONEY_AMOUNT = re.compile(r"\(?-?\$[\d,]+\.\d\d\)?")
 _MARGIN_INTEREST_WORDS = re.compile(r"margin\s+interest", re.I)
 _DATED_LINE = re.compile(r"^[ \t]*\d{1,2}/\d{1,2}(/\d{2,4})?[ \t]")
 _AMOUNT_AT_END = re.compile(r"\(?-?[\d,]+\.\d\d\)?[ \t]*$")
 _TRANSACTIONS_SUMMARY = "Transactions - Summary"
 
 
-def _parse_money(token: str) -> Decimal:
+def _parse_money(amount_text: str) -> Decimal:
     """One printed amount as a signed number: "$1,250.00", "($1,250.00)", "-$5.00"."""
 
-    text = token.strip()
+    text = amount_text.strip()
     negative = text.startswith("(") or text.startswith("-") or text.endswith("-")
     digits = re.sub(r"[^\d.]", "", text)
     if not re.fullmatch(r"\d+(\.\d\d)", digits) and not re.fullmatch(r"\d+", digits):
@@ -102,22 +102,22 @@ def _loan_block(lines: list[str]) -> tuple[Decimal, Decimal] | None:
     for number, line in enumerate(lines):
         if "Opening Margin" in line and "Closing Margin" in line:
             for follow in lines[number + 1 : number + 7]:
-                tokens = _MONEY_TOKEN.findall(follow)
-                if len(tokens) >= 2:
-                    if len(tokens) < 4:
+                amounts = _MONEY_AMOUNT.findall(follow)
+                if len(amounts) >= 2:
+                    if len(amounts) < 4:
                         # opening, closing, funds available, buying power: a row with
                         # fewer cannot be anchored to its labels (a blank closing balance
                         # would pair the opening balance with "Funds Available")
                         raise ZeroFinancingError(
                             "margin loan block row is not four amounts"
                         )
-                    if follow.count("$") != len(tokens):
+                    if follow.count("$") != len(amounts):
                         raise ZeroFinancingError(
                             "margin loan block has an unparsed amount"
                         )
                     # the block is the right-hand column: its four amounts are the last
                     # four on the line (another column may print amounts to their left)
-                    block = tokens[-4:]
+                    block = amounts[-4:]
                     return _parse_money(block[0]), _parse_money(block[1])
             raise ZeroFinancingError("margin loan block has no balances")
     return None
@@ -166,10 +166,10 @@ def _incomplete(lines: list[str]) -> str | None:
     for number, line in enumerate(lines):
         if _TRANSACTIONS_SUMMARY in line:
             for follow in lines[number + 1 : number + 9]:
-                tokens = _MONEY_TOKEN.findall(follow)
-                if len(tokens) >= 6:
+                amounts = _MONEY_AMOUNT.findall(follow)
+                if len(amounts) >= 6:
                     # beginning cash, the activity columns, ending cash: activity is zero
-                    if any(_parse_money(t) != 0 for t in tokens[1:-1]):
+                    if any(_parse_money(t) != 0 for t in amounts[1:-1]):
                         return "ACTIVITY_SUMMARY_WITHOUT_TRANSACTION_DETAILS"
                     return None
             return "TRANSACTIONS_SUMMARY_UNREADABLE"
