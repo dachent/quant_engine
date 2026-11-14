@@ -753,6 +753,7 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "requested_as_of",
         "evidence_dest",
         "node",
+        "identity_scheme",
         "workspace_root",
         "evaluated_on",
         "selected_inputs",
