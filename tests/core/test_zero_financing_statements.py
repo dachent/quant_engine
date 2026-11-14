@@ -253,3 +253,35 @@ def test_validate_rows_refuses_every_malformed_row() -> None:
             zf.validate_rows(bad, {ACCOUNT})
     with pytest.raises(zf.ZeroFinancingError, match="repeat"):
         zf.validate_rows({**artifact, "rows": [row, row]}, {ACCOUNT})
+
+
+def test_days_a_later_interest_posting_charged_are_never_zero_days(
+    tmp_path: Path,
+) -> None:
+    """Kill test: a debit on the last days of January posts its interest in the February
+    statement ("INTEREST 01/29THRU 02/25"); January's own statement shows no posting, but
+    those January days are financing days and carry no zero row."""
+
+    january = f"schwab-stmt-{LABEL}-2026-01-31.pdf"
+    february = f"schwab-stmt-{LABEL}-2026-02-28.pdf"
+    texts = {
+        january: _text(period="January 1-31, 2026"),
+        february: _text(period="February 1-28, 2026", interest=True).replace(
+            "INTEREST 02/19THRU 03/19", "INTEREST 01/29THRU 02/25"
+        ),
+    }
+    directory, sums, mapping = _world(tmp_path, texts)
+    artifact = zf.build(directory, sums, mapping, extract=_extract(texts))
+    days = {r["as_of_date"] for r in artifact["rows"]}
+    assert "2026-01-28" in days and "2026-01-29" not in days
+    assert "2026-01-31" not in days and "2026-02-25" not in days
+    removed = {d["as_of_date"] for d in artifact["interest_charged_days_removed"]}
+    assert removed == {"2026-01-29", "2026-01-30", "2026-01-31"}
+    assert facts_interest_year() == date(2025, 12, 30)
+
+
+def facts_interest_year() -> date:
+    text = _text(period="January 1-31, 2026", interest=True).replace(
+        "INTEREST 02/19THRU 03/19", "INTEREST 12/30THRU 01/28"
+    )
+    return zf.parse_statement(text, None)["interest_periods"][0][0]

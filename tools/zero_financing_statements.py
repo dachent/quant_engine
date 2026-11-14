@@ -58,6 +58,12 @@ _LOAN_MOVE = re.compile(
     r"loan[ \t]+(advance|repayment)|margin[ \t]+borrow)",
     re.M | re.I,
 )
+# A margin-interest posting names the days it charged: "INTEREST 03/30THRU 04/28".  Those
+# days were financing days whichever statement month they fall in (a debit on the 30th
+# posts in the NEXT statement), so they are never zero days.
+_INTEREST_PERIOD = re.compile(
+    r"INTEREST[ \t]+(\d{2})/(\d{2})[ \t]*THRU[ \t]+(\d{2})/(\d{2})"
+)
 _SHA = re.compile(r"[0-9a-f]{64}")
 
 
@@ -88,6 +94,19 @@ def _loan_block(text: str) -> tuple[Decimal, Decimal] | None:
                     return _money(pair["open"]), _money(pair["close"])
             raise ZeroFinancingError("margin loan block has no balances")
     return None
+
+
+def _interest_periods(text: str, period_end: date) -> list[tuple[date, date]]:
+    out: list[tuple[date, date]] = []
+    for match in _INTEREST_PERIOD.finditer(text):
+        m1, d1, m2, d2 = (int(g) for g in match.groups())
+        year2 = period_end.year if m2 <= period_end.month else period_end.year - 1
+        year1 = year2 if m1 <= m2 else year2 - 1
+        try:
+            out.append((date(year1, m1, d1), date(year2, m2, d2)))
+        except ValueError:
+            raise ZeroFinancingError("margin interest period is not a date") from None
+    return out
 
 
 def _labelled(lines: list[str], label: str, window: int = 3) -> list[str]:
@@ -146,6 +165,7 @@ def parse_statement(text: str, file_period_end: date | None = None) -> dict[str,
         "loan_block": _loan_block(text),
         "margin_interest_postings": len(_INTEREST.findall(text)),
         "loan_movements": len(_LOAN_MOVE.findall(text)),
+        "interest_periods": _interest_periods(text, end),
     }
 
 
@@ -244,6 +264,7 @@ def build(
     unobserved: list[dict[str, Any]] = []
     seen_accounts: set[str] = set()
     label_mismatches: list[str] = []
+    interest_days: dict[str, set[date]] = {}
     duplicate_periods: list[str] = []
     periods: dict[tuple[str, date, date], tuple[Any, str]] = {}
     names = sorted(sums)
@@ -291,6 +312,8 @@ def build(
             duplicate_periods.append(name)
             continue
         periods[period_key] = (fingerprint, name)
+        for first, last in facts["interest_periods"]:
+            interest_days.setdefault(account, set()).update(_days(first, last))
         state, reason = verdict(facts)
         if state != "ZERO":
             unobserved.append(
@@ -319,6 +342,14 @@ def build(
                     "source_page": page,
                 }
             )
+    # days a margin-interest posting charged are financing days in any month
+    removed = [
+        r
+        for r in rows
+        if date.fromisoformat(r["as_of_date"]) in interest_days.get(r["account_id"], ())
+    ]
+    removed_ids = {id(r) for r in removed}
+    rows = [r for r in rows if id(r) not in removed_ids]
     keys = [(r["account_id"], r["as_of_date"]) for r in rows]
     if len(keys) != len(set(keys)):
         raise ZeroFinancingError("two statements cover the same account day")
@@ -332,6 +363,10 @@ def build(
         "statements": len(names),
         "file_label_mismatches": sorted(label_mismatches),
         "duplicate_period_files": sorted(duplicate_periods),
+        "interest_charged_days_removed": [
+            {"account_id": r["account_id"], "as_of_date": r["as_of_date"]}
+            for r in sorted(removed, key=lambda r: (r["account_id"], r["as_of_date"]))
+        ],
         "coverage_gaps": _gaps(periods),
         "accounts": sorted(seen_accounts),
     }
