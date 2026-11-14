@@ -427,3 +427,26 @@ def test_interest_periods_name_the_days_that_were_charged() -> None:
     )
     first, last = zf.parse_statement(text, None)["interest_periods"][0]
     assert (first, last) == (date(2025, 12, 30), date(2026, 1, 28))
+
+
+def test_a_margin_interest_table_is_financing_and_the_loan_block_is_the_right_column() -> (
+    None
+):
+    """The statement's Margin Interest table lists the stretches of debit days; any range
+    makes the month a financing month and the ranges are never zero days.  A left column
+    that prints amounts before the loan block must not be read as the block (real case)."""
+
+    table = (
+        "Margin Interest\n"
+        "Date   Average Margin Daily Balance($)   Int Rate(%)   Interest Paid($)\n"
+        "02/27-03/09   ($100.00)   12.075   1.00   03/17-03/23   ($50.00)   12.075   0.50\n"
+        "\nPending / Open Activity"
+    )
+    facts = _facts(disclosure=table)
+    assert zf.verdict(facts) == ("FINANCING", "MARGIN_DEBIT_DAYS_IN_PERIOD")
+    assert (date(2026, 2, 27), date(2026, 3, 9)) in facts["interest_periods"]
+    assert (date(2026, 3, 17), date(2026, 3, 23)) in facts["interest_periods"]
+    left = _facts(
+        block_row="  Unrealized   ($1,234.00)   $0.00   $0.00   $50.00   $60.00"
+    )
+    assert left["loan_block"] == (0, 0)

@@ -104,7 +104,7 @@ def _loan_block(lines: list[str]) -> tuple[Decimal, Decimal] | None:
             for follow in lines[number + 1 : number + 7]:
                 tokens = _MONEY_TOKEN.findall(follow)
                 if len(tokens) >= 2:
-                    if len(tokens) != 4:
+                    if len(tokens) < 4:
                         # opening, closing, funds available, buying power: a row with
                         # fewer cannot be anchored to its labels (a blank closing balance
                         # would pair the opening balance with "Funds Available")
@@ -115,7 +115,10 @@ def _loan_block(lines: list[str]) -> tuple[Decimal, Decimal] | None:
                         raise ZeroFinancingError(
                             "margin loan block has an unparsed amount"
                         )
-                    return _parse_money(tokens[0]), _parse_money(tokens[1])
+                    # the block is the right-hand column: its four amounts are the last
+                    # four on the line (another column may print amounts to their left)
+                    block = tokens[-4:]
+                    return _parse_money(block[0]), _parse_money(block[1])
             raise ZeroFinancingError("margin loan block has no balances")
     return None
 
@@ -183,6 +186,37 @@ def _interest_periods(text: str, period_end: date) -> list[tuple[date, date]]:
             out.append((date(year1, m1, d1), date(year2, m2, d2)))
         except ValueError:
             raise ZeroFinancingError("margin interest period is not a date") from None
+    return out
+
+
+_TABLE_RANGE = re.compile(r"(\d{2})/(\d{2})-(\d{2})/(\d{2})")
+
+
+def _interest_table_ranges(
+    lines: list[str], period_end: date
+) -> list[tuple[date, date]]:
+    """The day ranges of the statement's "Margin Interest" table (average daily balance,
+    rate and interest per range): each range is a stretch of days with a margin debit."""
+
+    out: list[tuple[date, date]] = []
+    for number, line in enumerate(lines):
+        if line.strip() != "Margin Interest":
+            continue
+        for follow in lines[number + 1 : number + 14]:
+            if follow.strip().startswith("Pending"):
+                break
+            for match in _TABLE_RANGE.finditer(follow):
+                m1, d1, m2, d2 = (int(g) for g in match.groups())
+                year2 = (
+                    period_end.year if m2 <= period_end.month else period_end.year - 1
+                )
+                year1 = year2 if m1 <= m2 else year2 - 1
+                try:
+                    out.append((date(year1, m1, d1), date(year2, m2, d2)))
+                except ValueError:
+                    raise ZeroFinancingError(
+                        "margin interest range is not a date"
+                    ) from None
     return out
 
 
@@ -256,7 +290,9 @@ def parse_statement(text: str, file_period_end: date | None = None) -> dict[str,
         "margin_interest_postings": postings,
         "margin_interest_ambiguous": ambiguous,
         "loan_movements": len(_LOAN_MOVE.findall(text)),
-        "interest_periods": _interest_periods(text, end),
+        "interest_periods": _interest_periods(text, end)
+        + _interest_table_ranges(lines, end),
+        "interest_table_ranges": len(_interest_table_ranges(lines, end)),
         "block_page": _page_of(text, "Margin Loan Information"),
         "header_page": _page_of(text, "Statement Period"),
     }
@@ -284,6 +320,8 @@ def verdict(facts: Mapping[str, Any]) -> tuple[str, str]:
         return "FINANCING", "MARGIN_LOAN_BALANCE_NONZERO"
     if facts["margin_interest_postings"]:
         return "FINANCING", "MARGIN_INTEREST_POSTED_IN_PERIOD"
+    if facts["interest_table_ranges"]:
+        return "FINANCING", "MARGIN_DEBIT_DAYS_IN_PERIOD"
     if facts["loan_movements"]:
         return "FINANCING", "MARGIN_LOAN_MOVEMENT_IN_PERIOD"
     return "ZERO", "LOAN_ZERO_NO_INTEREST_NO_MOVEMENT"
