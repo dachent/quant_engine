@@ -218,6 +218,9 @@ class Context:
     # the governed source of each strategy's opening capital anchor. ``None`` when the
     # run was given no ledger; the opening date then comes from the manifest trace.
     provider_ledger: Mapping[str, Any] | None = None
+    # The provider-ledger admit-or-declare receipt (``--admission-receipt``): the governed
+    # per-item EXCLUDE dispositions. ``None`` is no receipt, which exempts nothing.
+    provider_receipt: Mapping[str, Any] | None = None
     # #624: the ``strategy-basis-declaration/1`` the generation was built with ({strategy id:
     # basis}) and the sleeve facts its sleeve epochs stand on.  ``None`` is no declaration:
     # every strategy is on its parent-account basis and nothing below changes.
@@ -8417,12 +8420,55 @@ def _finite_provider_without_active_account(
         for item in crosswalk_rows
         if isinstance(item.get("provider"), str)
     }
-    return wanted in known and not any(
+    if wanted not in known:
+        # Absent from the crosswalk: exempt only when the provider ledger's own receipt
+        # declares every item of this provider excluded with no product effect.
+        return wanted in _receipt_excluded_providers(ctx)
+    return not any(
         isinstance(item.get("provider"), str)
         and item["provider"].strip().casefold() == wanted
         and _epoch_covers_cutoff(item, ctx.cutoff)
         for item in crosswalk_rows
     )
+
+
+_RECEIPT_EXCLUSION = (
+    "EXCLUDE",
+    "NO_CURRENT_PRODUCT_CONSUMER",
+    "NO_CURRENT_PRODUCT_EFFECT",
+)
+
+
+def _receipt_excluded_providers(ctx: Context) -> frozenset[str]:
+    """Providers whose every receipt disposition is EXCLUDE / NO_CURRENT_PRODUCT_CONSUMER /
+    NO_CURRENT_PRODUCT_EFFECT, from a receipt whose gate passed.
+
+    One other disposition, one disposition missing a field, a failed gate or no receipt
+    leaves the provider out, so its finding stays.
+    """
+
+    receipt = ctx.provider_receipt
+    if (
+        not isinstance(receipt, Mapping)
+        or receipt.get("admission_gate_status") != "PASS"
+    ):
+        return frozenset()
+    clean: dict[str, bool] = {}
+    for item in rows(receipt, "dispositions"):
+        provider = item.get("provider_id")
+        if not isinstance(provider, str) or not provider.strip():
+            continue
+        key = provider.strip().casefold()
+        clean[key] = (
+            clean.get(key, True)
+            and (
+                item.get("action"),
+                item.get("reason"),
+                item.get("readiness_impact"),
+            )
+            == _RECEIPT_EXCLUSION
+        )
+    return frozenset(key for key, ok in clean.items() if ok)
 
 
 def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
@@ -11480,6 +11526,78 @@ def _owner_excluded_accounts(ctx: Context) -> dict[str, str]:
     }
 
 
+_RETIRED_DISPOSITION = "EXCLUDED_DEPRECATED_HISTORY_ONLY"
+_RETIRED_VALUE_METRIC = "capital.account.cutoff"
+_RETIRED_DATE_METRIC = "date.source_last_observation"
+
+
+def _entity_account(entity: object) -> str:
+    return str(entity).split("|", 1)[0]
+
+
+def _retired_history_only_accounts(ctx: Context) -> frozenset[str]:
+    """Accounts every crosswalk row of which is a retired history-only exclusion.
+
+    The epoch ended before the cutoff and no row of the account is active or carries
+    another disposition (an immaterial or still-running account is not retired).
+    """
+
+    reference = universe(ctx)
+    crosswalk = ctx.gen.external.crosswalk
+    if reference is None or not isinstance(crosswalk, dict):
+        return frozenset()
+    retired: dict[str, bool] = {}
+    for item in rows(crosswalk, "rows"):
+        account = str(item.get("account_id"))
+        end = to_date(item.get("effective_end"))
+        retired[account] = retired.get(account, True) and (
+            item.get("product_epoch_disposition") == _RETIRED_DISPOSITION
+            and end is not None
+            and end < ctx.cutoff
+        )
+    return frozenset(
+        account
+        for account, ok in retired.items()
+        if ok and account not in reference.active_accounts
+    )
+
+
+def _retired_value_verified(ctx: Context, account: str) -> bool:
+    """The account's expected capital equals the tracker's within the row tolerance.
+
+    At least one expected capital row must exist and every one must agree; no production
+    view, or a different value, is not verified.
+    """
+
+    wanted = [
+        row
+        for row in ctx.expected or []
+        if row.get("metric_id") == _RETIRED_VALUE_METRIC
+        and _entity_account(row.get("entity")) == account
+    ]
+    if not wanted:
+        return False
+    for row in wanted:
+        views = resolve_metric(ctx, _RETIRED_VALUE_METRIC, str(row.get("entity")))
+        unit = metric_unit(_RETIRED_VALUE_METRIC, row.get("unit"))
+        expected = row.get("expected", row.get("value"))
+        if not views or not all(
+            _equal(unit, view.value, expected, to_decimal(row.get("tolerance")))
+            for view in views
+        ):
+            return False
+    return True
+
+
+def _is_retired_date_exemption(ctx: Context, row: Mapping[str, Any]) -> bool:
+    account = _entity_account(row.get("entity"))
+    return (
+        row.get("metric_id") == _RETIRED_DATE_METRIC
+        and account in _retired_history_only_accounts(ctx)
+        and _retired_value_verified(ctx, account)
+    )
+
+
 def _is_owner_exclusion(
     row: Mapping[str, Any], owner_excluded: Mapping[str, str]
 ) -> bool:
@@ -11515,25 +11633,38 @@ def expected_exclusions(ctx: Context) -> list[dict[str, Any]]:
     """
 
     owner_excluded = _owner_excluded_accounts(ctx)
-    return [
-        {
-            "metric_id": row.get("metric_id"),
-            "entity": row.get("entity"),
-            "disposition": owner_excluded[str(row.get("entity"))],
-            "reason": row.get("reason"),
-        }
-        for row in ctx.expected_not_derivable
-        if _is_owner_exclusion(row, owner_excluded)
-    ] + [
-        {
-            "metric_id": row.get("metric_id"),
-            "entity": row.get("entity"),
-            "disposition": "INAPPLICABLE_BY_POLICY",
-            "reason": row.get("reason"),
-        }
-        for row in ctx.expected_not_derivable
-        if _is_policy_inapplicable(row)
-    ]
+    return (
+        [
+            {
+                "metric_id": row.get("metric_id"),
+                "entity": row.get("entity"),
+                "disposition": owner_excluded[str(row.get("entity"))],
+                "reason": row.get("reason"),
+            }
+            for row in ctx.expected_not_derivable
+            if _is_owner_exclusion(row, owner_excluded)
+        ]
+        + [
+            {
+                "metric_id": row.get("metric_id"),
+                "entity": row.get("entity"),
+                "disposition": "INAPPLICABLE_BY_POLICY",
+                "reason": row.get("reason"),
+            }
+            for row in ctx.expected_not_derivable
+            if _is_policy_inapplicable(row)
+        ]
+        + [
+            {
+                "metric_id": row.get("metric_id"),
+                "entity": row.get("entity"),
+                "disposition": f"{_RETIRED_DISPOSITION}_VALUE_VERIFIED",
+                "reason": row.get("reason"),
+            }
+            for row in ctx.expected_not_derivable
+            if _is_retired_date_exemption(ctx, row)
+        ]
+    )
 
 
 def check_expected(ctx: Context) -> Iterator[Finding]:
@@ -11552,7 +11683,11 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
         return
     owner_excluded = _owner_excluded_accounts(ctx)
     for row in ctx.expected_not_derivable:
-        if _is_owner_exclusion(row, owner_excluded) or _is_policy_inapplicable(row):
+        if (
+            _is_owner_exclusion(row, owner_excluded)
+            or _is_policy_inapplicable(row)
+            or _is_retired_date_exemption(ctx, row)
+        ):
             continue
         yield _finding(
             "expected.not_derivable",
@@ -11565,8 +11700,15 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
             _METRIC_DEFECTS.get(str(row.get("metric_id")), ()),
             "metric not derivable from upstream authority",
         )
+    retired = _retired_history_only_accounts(ctx)
     for position, row in enumerate(ctx.expected):
         metric_id = str(row.get("metric_id"))
+        # A retired history-only account's capital is compared by value only: the label
+        # of its last observation is not the cutoff by construction.
+        ignore_as_of = (
+            metric_id == _RETIRED_VALUE_METRIC
+            and _entity_account(row.get("entity")) in retired
+        )
         if metric_id == COVERAGE_END_METRIC:
             # The oracle's proof of a custody cash line's coverage end: no production
             # view carries it by this name; check_capital_coverage_end compares it.
@@ -11596,7 +11738,15 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
                     "metric has no production view and no series to recompute it from",
                 )
             yield from _compare_views(
-                metric_id, label, row, recomputed, expected, unit, tolerance, defects
+                metric_id,
+                label,
+                row,
+                recomputed,
+                expected,
+                unit,
+                tolerance,
+                defects,
+                ignore_as_of,
             )
             continue
         has_window = any(view.end is not None for view in observed)
@@ -11660,11 +11810,27 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
                     "series cannot be recomputed over it",
                 )
             yield from _compare_views(
-                metric_id, label, row, recomputed, expected, unit, tolerance, defects
+                metric_id,
+                label,
+                row,
+                recomputed,
+                expected,
+                unit,
+                tolerance,
+                defects,
+                ignore_as_of,
             )
             continue
         yield from _compare_views(
-            metric_id, label, row, comparable, expected, unit, tolerance, defects
+            metric_id,
+            label,
+            row,
+            comparable,
+            expected,
+            unit,
+            tolerance,
+            defects,
+            ignore_as_of,
         )
 
 
@@ -11677,6 +11843,7 @@ def _compare_views(
     unit: str,
     tolerance: Decimal | None,
     defects: Sequence[str],
+    ignore_as_of: bool = False,
 ) -> Iterator[Finding]:
     for view in views:
         if not _equal(unit, view.value, expected, tolerance):
@@ -11695,7 +11862,8 @@ def _compare_views(
                 "fixed-baseline expected value differs",
             )
         elif (
-            view.as_of
+            not ignore_as_of
+            and view.as_of
             and row.get("as_of")
             and str(view.as_of)[:10] != str(row.get("as_of"))[:10]
             and metric_id.startswith("capital.")

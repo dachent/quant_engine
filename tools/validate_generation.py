@@ -309,6 +309,14 @@ def _parser() -> argparse.ArgumentParser:
         "of each strategy's opening capital anchor for the CAGR window check",
     )
     parser.add_argument(
+        "--admission-receipt",
+        type=Path,
+        help="the provider ledger's admit-or-declare-receipt.json: a finite provider "
+        "absent from the crosswalk is exempt from the source-clock row only when every "
+        "one of its dispositions there is EXCLUDE / NO_CURRENT_PRODUCT_CONSUMER / "
+        "NO_CURRENT_PRODUCT_EFFECT",
+    )
+    parser.add_argument(
         "--strategy-basis",
         type=Path,
         help="strategy-basis-declaration/1 the generation was built with (#624): the "
@@ -396,6 +404,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 raise ContractError("--provider-ledger carries no capital_anchors list")
             provider_ledger = loaded
+        provider_receipt: dict[str, Any] | None = None
+        if args.admission_receipt is not None:
+            try:
+                receipt = json.loads(args.admission_receipt.read_bytes())
+            except (OSError, ValueError) as exc:
+                raise ContractError(
+                    f"--admission-receipt is unreadable: {exc}"
+                ) from exc
+            if not isinstance(receipt, dict) or not isinstance(
+                receipt.get("dispositions"), list
+            ):
+                raise ContractError("--admission-receipt carries no dispositions list")
+            provider_receipt = receipt
         strategy_basis: dict[str, str] | None = None
         if args.strategy_basis is not None:
             try:
@@ -462,6 +483,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_not_derivable=not_derivable,
         corrections=corrections,
         provider_ledger=provider_ledger,
+        provider_receipt=provider_receipt,
         strategy_basis=strategy_basis,
         sleeve_facts=sleeve_facts,
         facts_sources=facts_sources,
