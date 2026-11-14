@@ -904,8 +904,8 @@ def admit_input(
     """S4. Only a PASS verdict issued by :func:`verify` and unchanged since (every field equals the registered one) for
     this exact manifest is admitted; as-of and cutoff come from the verdict, never from the caller. Every hash is checked
     before anything is copied; files are copied into a staging directory, re-hashed, and renamed into
-    ``<evidence_root>/<source_id>/<cutoff>`` (create-only). Under the pin lock an unpinned leftover directory (a crash
-    between rename and pin) is removed first; the pin (keyed by source and cutoff, relative root, manifest digest) is
+    ``<evidence_root>/<source_id>/<cutoff>`` (create-only). Under the pin lock an existing destination directory (a crash
+    leftover, or evidence whose pin file is lost) is refused and never removed; the pin (keyed by source and cutoff, relative root, manifest digest) is
     written atomically, and the copy is rolled back if that write fails."""
     if (
         _ISSUED.get(verdict.token) != verdict.issued_fields()
@@ -951,9 +951,12 @@ def admit_input(
         if verdict.cutoff in by_cutoff:
             raise CaptureRefused("CREATE_ONLY_EXISTS", f"pin {rel_root}")
         if dest.exists():
-            shutil.rmtree(
-                dest
-            )  # unpinned leftover of a crash between rename and pin: garbage, not evidence
+            # Never delete an existing destination: with the pin file missing or the
+            # cutoff unpinned it may be the only copy of captured evidence. A crash
+            # leftover is removed by the operator, who can look at it first.
+            raise CaptureRefused(
+                "DEST_EXISTS_UNPINNED", f"{rel_root} exists; not removed"
+            )
         try:
             for src, rel, digest in jobs:
                 tgt = staging / rel

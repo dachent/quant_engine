@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 import json
+import shutil
 from pathlib import Path
 import threading
 
@@ -1583,8 +1584,12 @@ def test_pin_store_schema_stale_lock_orphan_and_reserved_manifest_name(tmp_path)
         parents=True
     )  # orphan from a crash between rename and pin
     (ev / s.source_id / CUT / "junk").write_bytes(b"x")
-    cp.admit_input(s, v, **kw)  # the stale lock is broken and the orphan replaced
-    assert not (ev / s.source_id / CUT / "junk").exists() and not lock.exists()
+    # R9: an existing destination is refused and never deleted, pin file missing or not
+    assert code_of(cp.admit_input, s, v, **kw) == "DEST_EXISTS_UNPINNED"
+    assert (ev / s.source_id / CUT / "junk").read_bytes() == b"x"
+    shutil.rmtree(ev / s.source_id / CUT)  # the operator looked at it and removed it
+    cp.admit_input(s, v, **kw)  # the stale lock is broken
+    assert not lock.exists()
     assert code_of(cp._safe_rel, "capture-manifest.json") == "UNSAFE_PATH"
 
 
