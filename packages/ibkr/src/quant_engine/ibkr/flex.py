@@ -140,7 +140,9 @@ _NAV_HOLDINGS_NAME = re.compile(
     r"|long|short)",
     re.IGNORECASE,
 )
-_NAV_NOT_HOLDINGS = re.compile(r"(accrual|component|cash|alias|model)", re.IGNORECASE)
+_NAV_NOT_HOLDINGS = re.compile(
+    r"(accrual|component|cash|alias|model|^total)", re.IGNORECASE
+)
 # Interest/financing components of the NAV element: all must be zero when the statement
 # claims "no accruals"; the core ones must be stated.
 _NAV_INTEREST_NAME = re.compile(r"(interest|financing|incentive)", re.IGNORECASE)
@@ -768,10 +770,16 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
             continue
         change_components.append((key, _decimal(value, f"change.{key}")))
 
+    # Positions are read only inside the statement's own OpenPositions section; an
+    # OpenPosition element anywhere else is counted as suspect, never silently collected.
     positions = tuple(
         _position(item, raw_account_id)
-        for item in _elements(element, "OpenPosition")
+        for section in _direct(element, "OpenPositions")
+        for item in section
         if item.attrib.get("levelOfDetail") == "SUMMARY"
+    )
+    outside_rows = len(_elements(element, "OpenPosition")) - sum(
+        len(list(section)) for section in _direct(element, "OpenPositions")
     )
     trades = tuple(
         _trade(item, raw_account_id)
@@ -787,6 +795,12 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         # the statement's section and must not read as present
         if len(_elements(element, name)) != len(_direct(element, name)):
             raise FlexValidationError(f"{name} is nested inside another element")
+    for name in ("OpenPositions", "InterestAccruals"):
+        # The statement's sections carry no attributes (every pinned statement agrees); an
+        # attribute such as error="..." on a section is unparsed content, not a benign one.
+        for section in _direct(element, name):
+            if section.attrib:
+                raise FlexValidationError(f"{name} carries unexpected attributes")
     for section in _direct(element, "OpenPositions"):
         # stray text or a child other than OpenPosition (a renamed row, an error message)
         # is unparsed content, never an empty section
@@ -854,10 +868,8 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         tier_interest=tier_interest,
         interest_accruals_section_present=bool(_direct(element, "InterestAccruals")),
         open_positions_section_present=bool(_direct(element, "OpenPositions")),
-        open_position_rows_total=sum(
-            len(list(section)) for section in _direct(element, "OpenPositions")
-        ),
-        open_position_rows_suspect=sum(
+        open_position_rows_suspect=outside_rows
+        + sum(
             1
             for section in _direct(element, "OpenPositions")
             for item in section
@@ -865,6 +877,10 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
             or item.attrib.get("levelOfDetail") not in ("SUMMARY", "LOT")
             or _optional(item.attrib.get("accountId")) != raw_account_id
         ),
+        open_position_rows_total=sum(
+            len(list(section)) for section in _direct(element, "OpenPositions")
+        )
+        + outside_rows,
         nav_holdings_nonzero=any(
             v != 0
             for v in _nav_numbers(nav, _NAV_HOLDINGS_NAME, _NAV_NOT_HOLDINGS).values()

@@ -159,9 +159,10 @@ def financing_cost_closure(
 ) -> Closure:
     """Interest accrual closure for one account, window = its statement days.
 
-    ``require_explicit_zero`` (a levered account, which really borrowed): an empty accrual
-    section closes a day only when the statement's own NAV also states the accrual as an
-    explicit zero, never by silence."""
+    ``require_explicit_zero`` (always set by the disclosure: every account that reaches this
+    closure is levered, an incidental debit or a conflicted NOT_LEVERED one): an empty
+    accrual section closes a day only when the statement's own NAV also states the accrual
+    as an explicit zero, never by silence."""
 
     days = sorted(day for day in set(statement_days) if day <= cutoff)
     rows = [

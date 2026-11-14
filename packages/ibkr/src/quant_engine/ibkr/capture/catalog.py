@@ -30,7 +30,9 @@ KIND_SECURITY = "security-reference"
 WINDOW_RANGE = "range"
 WINDOW_SINGLE_DAY = "single_day"
 
-# Sections the existing strict reader (flex.parse_flex_file) requires.
+# Sections the capture gate (capture/verify.py) requires of an activity statement.  The
+# generation reader (flex.parse_flex_file) requires all but InterestAccruals, which older
+# pinned statements may lack and which only the capture gate enforces.
 ACTIVITY_SECTIONS = (
     "AccountInformation",
     "CashTransactions",

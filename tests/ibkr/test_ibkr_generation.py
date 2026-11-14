@@ -3562,3 +3562,45 @@ def test_unparsed_open_positions_content_refuses_the_parse(tmp_path: Path) -> No
     )
     assert gross != clean
     assert _exposure_status(tmp_path, gross) != "AVAILABLE"
+
+
+def test_section_attributes_and_rows_outside_the_section_are_never_benign(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (round-8): the sections carry no attributes (every pinned statement
+    agrees), so an error="..." attribute refuses; OpenPosition rows outside the section
+    are suspect, never collected; totalLong/totalShort are not holdings."""
+
+    day = date(2026, 1, 3)
+    clean = _empty_positions(_full_nav(_xml("SYNTH-RAW", day, "114")))
+    assert _exposure_status(tmp_path, clean) == "AVAILABLE"
+
+    attr = clean.replace("<OpenPositions>", '<OpenPositions error="data not ready">')
+    assert attr != clean
+    with pytest.raises(Exception, match="OpenPositions"):
+        _coverage_catalog(tmp_path, attr)
+    ia = _full_nav(
+        _xml(
+            "SYNTH-RAW",
+            day,
+            "114",
+            native_sections='<InterestAccruals error="x"/>',
+        )
+    )
+    with pytest.raises(Exception, match="InterestAccruals"):
+        _coverage_catalog(tmp_path, ia)
+
+    own = (
+        '<OpenPosition accountId="SYNTH-RAW" reportDate="20260103" '
+        'levelOfDetail="LOT" conid="100" currency="USD" position="2" '
+        'positionValue="20" fxRateToBase="1" symbol="SYNTH" />'
+    )
+    no_account = own.replace('accountId="SYNTH-RAW" ', "").replace("LOT", "SUMMARY")
+    other = own.replace("SYNTH-RAW", "OTHER-RAW").replace("LOT", "SUMMARY")
+    for stray in (own, no_account, other):
+        outside = clean.replace("</FlexStatement>", stray + "</FlexStatement>")
+        assert outside != clean
+        assert _exposure_status(tmp_path, outside) != "AVAILABLE", stray
+
+    totals = clean.replace('total="114"', 'total="114" totalLong="5" totalShort="-5"')
+    assert _exposure_status(tmp_path, totals) == "AVAILABLE"
