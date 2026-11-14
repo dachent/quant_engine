@@ -285,7 +285,9 @@ def test_not_levered_needs_observed_cash_days_and_a_verified_declaration() -> No
     # a declaration alone (NO_MARGIN_FACILITY included) is never the evidence
     refused = _quiet_state(empty)
     assert refused["coverage_status"] == "OBSERVED_UNRECONCILED"
-    assert "NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS" in refused["coverage_reason"]
+    assert (
+        "NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS" in refused["coverage_reason"]
+    )
     # a pinned, provider-observed zero-financing row satisfies it (any provider)
     zero = {
         "account_id": QUIET,
@@ -322,7 +324,9 @@ def test_not_levered_needs_observed_cash_days_and_a_verified_declaration() -> No
     )
     silent = _quiet_state(empty, available)
     assert silent["coverage_status"] == "OBSERVED_UNRECONCILED"
-    assert "NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS" in silent["coverage_reason"]
+    assert (
+        "NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS" in silent["coverage_reason"]
+    )
     # and the conflicted account still gets closure rows, so a route to closure exists
     rows = ld.account_financing_rows(
         available, empty, cutoff=CUTOFF, generation_id=SHA, catalog_sha256=SHA
@@ -335,3 +339,25 @@ def test_not_levered_needs_observed_cash_days_and_a_verified_declaration() -> No
     unverified = _quiet_state(_catalog(base_cash=True), declaration)
     assert unverified["coverage_status"] == "OBSERVED_UNRECONCILED"
     assert "NOT_LEVERED_DECLARATION_UNVERIFIED" in unverified["coverage_reason"]
+
+
+def test_a_conflicted_not_levered_account_reports_the_missing_field_not_no_row() -> (
+    None
+):
+    """Kill test (round-3 F3): E8 gets an uncovered exposure row naming the missing
+    observed_zero_financing_days, never NO_ROW."""
+
+    empty = _catalog(base_cash=True)
+    empty["financing_liability_observations"] = [
+        r for r in empty["financing_liability_observations"] if r["account_id"] != QUIET
+    ]
+    rows = ld.account_financing_rows(
+        _declaration(), empty, cutoff=CUTOFF, generation_id=SHA, catalog_sha256=SHA
+    )
+    exposure = next(
+        r
+        for r in rows
+        if r["account_id"] == QUIET and r["data_class"] == "LEVERAGE_EXPOSURE"
+    )
+    assert exposure["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "observed_zero_financing_days" in exposure["coverage_reason"]

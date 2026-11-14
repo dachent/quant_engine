@@ -247,7 +247,7 @@ def test_a_declaration_alone_never_makes_an_account_not_levered() -> None:
     for account in (B, C):
         for seen in (af.DebitEvidence(), af.DebitEvidence(observed_base_days=0)):
             state = af.classify(declared, {account: seen}, [account])[account]
-            assert "NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS" in state.conflicts
+            assert "NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS" in state.conflicts
         ok = af.classify(
             declared, {account: af.DebitEvidence(observed_base_days=3)}, [account]
         )[account]
