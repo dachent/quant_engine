@@ -6956,7 +6956,20 @@ def test_report_emits_account_financing_rows_from_the_owner_declaration(
     }
     provider_catalog = {
         "financing_cost_observations": [posting],
-        "financing_liability_observations": [],
+        "financing_liability_observations": [
+            {
+                "account_id": account,
+                "aggregation_level": "BASE_SUMMARY",
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "10"},
+                "as_of_date": "2026-01-03",
+                "classification": "NET_CASH_CREDIT_BALANCE",
+                "measurement_basis": "TRADE_DATE_CASH_BALANCE",
+                "provider_id": "ibkr",
+                "record_id": f"ibkr:cash-{account}",
+                "strategy_id": "strategy-1",
+            }
+            for account in (quiet, debit)
+        ],
         "leverage_exposure_observations": [],
         "nav_observations": nav,
         "positions": [],

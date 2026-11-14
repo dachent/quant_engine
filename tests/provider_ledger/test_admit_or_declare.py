@@ -2965,3 +2965,77 @@ def test_the_run_observation_identity_ignores_roots_and_finality_directories() -
     assert world_a != run_observation_identity(
         observation("/world-F/c", "/world-F/finality", "f" * 64)
     )
+
+
+def _identity_observation(roots: dict[str, str]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "financial_cutoff": "2026-11-06",
+        "providers": {
+            provider: {
+                "root": root,
+                "generation_id": "a" * 64,
+                "finality_evidence": {
+                    "path": f"{root}/finality.json",
+                    "sha256": "e" * 64,
+                    "size_bytes": 10,
+                },
+            }
+            for provider, root in roots.items()
+        },
+    }
+
+
+def test_the_run_observation_identity_binds_every_provider_root() -> None:
+    """Kill test (R4): same inputs under two world names share one identity; a provider
+    pointing at a different root layout, or two providers swapping roots, does not; and
+    the identity does not depend on the order the providers are listed."""
+
+    from quant_engine.portfolio_ledger.provider_admission import (
+        run_observation_identity,
+    )
+
+    world_f = {"ibkr": "/world-F/runs/a", "schwab": "/world-F/runs/b"}
+    bs = chr(92)
+    world_p = {
+        "ibkr": bs.join(("D:", "w-proof", "runs", "a")),
+        "schwab": bs.join(("D:", "w-proof", "runs", "b")),
+    }
+    base = run_observation_identity(_identity_observation(world_f))
+    assert base == run_observation_identity(_identity_observation(world_p))
+    assert base == run_observation_identity(
+        _identity_observation(dict(reversed(list(world_f.items()))))
+    )
+    moved = {"ibkr": "/world-F/runs/a", "schwab": "/world-F/runs/other"}
+    assert base != run_observation_identity(_identity_observation(moved))
+    swapped = {"ibkr": "/world-F/runs/b", "schwab": "/world-F/runs/a"}
+    assert base != run_observation_identity(_identity_observation(swapped))
+
+
+def test_the_run_observation_locator_refuses_two_distinct_matching_files(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+
+    import portfolio_pipeline_materialize as materialize
+
+    name = "run-observation.json"
+    first = _identity_observation({"ibkr": "/w/runs/a", "schwab": "/w/runs/b"})
+    # same identity (world name differs), different raw bytes
+    second = _identity_observation({"ibkr": "/x/runs/a", "schwab": "/x/runs/b"})
+    top = tmp_path / "top"
+    (top / "gen" / "inner").mkdir(parents=True)
+    (tmp_path / name).write_text(json.dumps(first), encoding="utf-8")
+    (top / name).write_text(json.dumps(second), encoding="utf-8")
+    identity = materialize.run_observation_identity(first)[0]
+    assert identity == materialize.run_observation_identity(second)[0]
+    assert hashlib.sha256((top / name).read_bytes()).hexdigest() != hashlib.sha256(
+        (tmp_path / name).read_bytes()
+    ).hexdigest()
+    with pytest.raises(materialize.MaterializationError, match="ambiguous"):
+        materialize._locate_run_observation(None, top / "gen" / "inner", name, identity)
+    (tmp_path / name).unlink()
+    assert (
+        materialize._locate_run_observation(None, top / "gen" / "inner", name, identity)
+        == top / name
+    )

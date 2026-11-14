@@ -8887,6 +8887,9 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
                 row.get("classification") == "NOT_LEVERED"
                 and is_available(row.get("coverage_status"))
                 and "UNVERIFIED" not in str(row.get("coverage_reason"))
+                and "CONFLICT" not in str(row.get("coverage_reason"))
+                and str(row.get("coverage_reason")).split(";")[0]
+                in _NOT_LEVERED_EVIDENCE_REASONS
                 for row in disclosures
                 if str(row.get("account_id")) == account
                 and row.get("data_class") == "ACCOUNT_FINANCING"
@@ -8955,6 +8958,15 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
                     "levered account (missing, observed only or unavailable)",
                 )
 
+
+# The only reasons under which a producer's NOT_LEVERED may narrow E8: the declaration
+# plus observed cash days showing no debit (tools/account_financing.classify).
+_NOT_LEVERED_EVIDENCE_REASONS = frozenset(
+    {
+        "MARGIN_AVAILABLE_UNUSED_NO_DEBIT_EVIDENCE",
+        "DECLARED_NO_MARGIN_AND_NO_DEBIT_EVIDENCE",
+    }
+)
 
 # -------------------------------------------------------------------- code checks
 

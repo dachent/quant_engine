@@ -74,6 +74,10 @@ class DebitEvidence:
     net_base_debit_days: int = 0
     debit_interest_postings: int = 0
     currency_debit_days: int = 0
+    # Debit rows whose amount is unavailable (a data gap, not a zero) and the base-level
+    # cash days actually observed.  ``None`` means the caller did not measure it.
+    unreadable_debit_rows: int = 0
+    observed_base_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +170,15 @@ def classify(
             state, reason = "NOT_LEVERED", "MARGIN_AVAILABLE_UNUSED_NO_DEBIT_EVIDENCE"
         else:
             state, reason = "NOT_LEVERED", "DECLARED_NO_MARGIN_AND_NO_DEBIT_EVIDENCE"
+        if seen.unreadable_debit_rows:
+            conflicts.append("DEBIT_ROW_AMOUNT_UNAVAILABLE")
+        if state == "NOT_LEVERED":
+            # "Not levered" is a finding, not a default: it needs verified declaration
+            # evidence and observed base cash days showing no debit.
+            if not row.verified:
+                conflicts.append("NOT_LEVERED_DECLARATION_UNVERIFIED")
+            if seen.observed_base_days == 0:
+                conflicts.append("NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS")
         result[account] = AccountState(account, state, reason, tuple(conflicts))
     return result
 

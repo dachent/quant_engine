@@ -108,6 +108,21 @@ def _catalog(*, base_cash: bool, break_accrual: bool = False) -> dict[str, Any]:
         if base_cash
         else []
     )
+    if base_cash:
+        # the quiet and incidental accounts have observed cash days with no debit
+        liability += [
+            {
+                "account_id": a,
+                "provider_id": "ibkr",
+                "aggregation_level": "BASE_SUMMARY",
+                "measurement_basis": "TRADE_DATE_CASH_BALANCE",
+                "classification": "NET_CASH_CREDIT_BALANCE",
+                "as_of_date": d,
+                "amount": _amt("10"),
+            }
+            for a in (QUIET, DEBIT)
+            for d in DAYS
+        ]
     exposure = [
         {
             "account_id": LEVERED,
@@ -210,34 +225,68 @@ def test_a_row_after_the_cutoff_does_not_move_the_state_and_unverified_is_visibl
     assert state["coverage_reason"].endswith("VERIFICATION=UNVERIFIED")
 
 
-def test_a_dust_net_base_debit_is_not_borrowing() -> None:
-    """A closed account keeps a fractional negative cash balance; that is not leverage."""
+def _quiet_state(catalog: dict[str, Any], declaration=None) -> dict[str, Any]:
+    rows = ld.account_financing_rows(
+        declaration or _declaration(),
+        catalog,
+        cutoff=CUTOFF,
+        generation_id=SHA,
+        catalog_sha256=SHA,
+    )
+    return next(r for r in rows if r["account_id"] == QUIET)
 
-    catalog = _catalog(base_cash=False)
-    catalog["financing_liability_observations"] = [
-        {
-            "account_id": QUIET,
-            "provider_id": "ibkr",
-            "aggregation_level": "BASE_SUMMARY",
-            "measurement_basis": "TRADE_DATE_CASH_BALANCE",
-            "classification": "NET_CASH_DEBIT_BALANCE",
-            "as_of_date": day,
-            "amount": _amt(value),
-        }
-        for day, value in zip(DAYS, ("-0.0016", "-0.0016", "-1.5"), strict=True)
+
+def _quiet_debit(value: str, day_index: int = 0) -> dict[str, Any]:
+    return {
+        "account_id": QUIET,
+        "provider_id": "ibkr",
+        "aggregation_level": "BASE_SUMMARY",
+        "measurement_basis": "TRADE_DATE_CASH_BALANCE",
+        "classification": "NET_CASH_DEBIT_BALANCE",
+        "as_of_date": DAYS[day_index],
+        "amount": _amt(value),
+    }
+
+
+def test_a_dust_net_base_debit_is_still_borrowing() -> None:
+    """Kill test (R6): no ruling makes a small net debit not-borrowing."""
+
+    catalog = _catalog(base_cash=True)
+    catalog["financing_liability_observations"].append(_quiet_debit("-0.0016"))
+    state = _quiet_state(catalog)
+    assert state["classification"] == "LEVERED"
+    assert "DECLARED_NO_FACILITY_BUT_NET_BASE_DEBIT" in state["coverage_reason"]
+
+
+def test_an_unreadable_debit_row_is_a_data_gap_not_a_zero() -> None:
+    """Kill test (R6): a net-debit row with no amount cannot make the account NOT_LEVERED."""
+
+    catalog = _catalog(base_cash=True)
+    gap = _quiet_debit("-5")
+    gap["amount"] = {"currency": "USD", "status": "UNAVAILABLE", "value": None}
+    catalog["financing_liability_observations"].append(gap)
+    state = _quiet_state(catalog)
+    assert state["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "DEBIT_ROW_AMOUNT_UNAVAILABLE" in state["coverage_reason"]
+
+
+def test_not_levered_needs_observed_cash_days_and_a_verified_declaration() -> None:
+    """Kill test (R6): NOT_LEVERED is a finding.  Without observed base cash days (the
+    producer simply emitted nothing) or with an unverified declaration it is a conflict,
+    never COMPLETE_DECLARED."""
+
+    good = _quiet_state(_catalog(base_cash=True))
+    assert good["classification"] == "NOT_LEVERED"
+    assert good["coverage_status"] == "COMPLETE_DECLARED"
+    empty = _catalog(base_cash=True)
+    empty["financing_liability_observations"] = [
+        r for r in empty["financing_liability_observations"] if r["account_id"] != QUIET
     ]
-    rows = ld.account_financing_rows(
-        _declaration(), catalog, cutoff=CUTOFF, generation_id=SHA, catalog_sha256=SHA
-    )
-    quiet = next(r for r in rows if r["account_id"] == QUIET)
-    # one day of real (above-dust) debit makes it levered, and a declared
-    # NO_MARGIN_FACILITY account is then a conflict; dust days alone do not count.
-    assert quiet["classification"] == "LEVERED"
-    assert "DECLARED_NO_FACILITY_BUT_NET_BASE_DEBIT" in quiet["coverage_reason"]
-    catalog["financing_liability_observations"][2]["amount"] = _amt("-0.4")
-    rows = ld.account_financing_rows(
-        _declaration(), catalog, cutoff=CUTOFF, generation_id=SHA, catalog_sha256=SHA
-    )
-    assert next(r for r in rows if r["account_id"] == QUIET)["classification"] == (
-        "NOT_LEVERED"
-    )
+    silent = _quiet_state(empty)
+    assert silent["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "NOT_LEVERED_WITHOUT_OBSERVED_CASH_DAYS" in silent["coverage_reason"]
+    declaration = _declaration()
+    declaration[QUIET] = af.Declared(QUIET, "ACTIVE", "NO_MARGIN_FACILITY", False, "x")
+    unverified = _quiet_state(_catalog(base_cash=True), declaration)
+    assert unverified["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "NOT_LEVERED_DECLARATION_UNVERIFIED" in unverified["coverage_reason"]

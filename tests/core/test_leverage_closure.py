@@ -71,12 +71,12 @@ def test_a_gap_day_may_carry_only_what_the_missing_days_could_accrue() -> None:
     assert lc.financing_cost_closure(rows, DAYS, DAYS[-1], None).covered
 
 
-def test_an_unmapped_posting_is_counted_and_explained_never_a_closure_failure() -> None:
-    """The 772 unmapped financing rows of the R3 ledger are reserve-account costs and
-    pre-assignment postings (PERIOD_MAPPING_MISSING_VALIDATED_INTERVAL): strategy mapping
-    is not account closure, so they are carried in the evidence, not used to withhold it."""
+def test_an_unmapped_posting_withholds_the_closure_and_is_explained() -> None:
+    """Kill test (R6): a cost row the strategy mapping cannot place is a mapping gap.
+    No ruling relaxes it, so the account is not covered; the reason stays in the evidence."""
 
     rows = _series(["-1", "-2", "-3", "-4"])
+    assert lc.financing_cost_closure(rows, DAYS, DAYS[-1], "2026-01-05").covered
     rows.append(
         {
             "classification": "BROKER_DEBIT_INTEREST",
@@ -89,21 +89,13 @@ def test_an_unmapped_posting_is_counted_and_explained_never_a_closure_failure() 
         }
     )
     result = lc.financing_cost_closure(rows, DAYS, DAYS[-1], "2026-01-05")
-    assert result.covered
-    assert result.evidence["strategy_unmapped_rows"] == 1
-    assert result.evidence["strategy_unmapped_reasons"] == {
+    assert not result.covered
+    assert result.evidence["unmapped_rows_in_epoch"] == 1
+    assert result.evidence["unmapped_reasons"] == {
         "PERIOD_MAPPING_MISSING_VALIDATED_INTERVAL": 1
     }
-    # an accrual that does not roll forward still withholds it, mapped or not
-    broken = _series(["-1", "-2", "-3", "-4"])
-    for row in broken:
-        row["mapping_status"] = "UNMAPPED"
-        if (
-            row["period_end"] == DAYS[2]
-            and row["measurement_basis"] == "PERIOD_ACCRUAL"
-        ):
-            row["source_amount"] = _amt("-90")
-    assert not lc.financing_cost_closure(broken, DAYS, DAYS[-1], None).covered
+    # dated before the strategy epoch, the same row is outside the window that matters
+    assert lc.financing_cost_closure(rows, DAYS, DAYS[-1], "2026-01-08").covered
 
 
 def test_the_base_line_is_ignored_when_currency_lines_exist() -> None:
@@ -171,35 +163,36 @@ def test_an_unavailable_cash_day_counts_as_missing_not_as_absent_history() -> No
     assert closure.evidence["missing_days"] == 1
 
 
-def test_a_reserve_accounts_unmapped_cutoff_exposure_and_nav_still_close() -> None:
+def test_an_unmapped_cutoff_exposure_or_nav_does_not_close() -> None:
+    """Kill test (R6): gross exposure and NAV at the cutoff must both be MAPPED."""
+
     exposure = [
         {
             "as_of_date": "2026-01-07",
-            "mapping_status": "UNMAPPED",
+            "mapping_status": "MAPPED",
             "amount": _amt("140"),
         }
     ]
-    nav = [
-        {"as_of_date": "2026-01-07", "mapping_status": "UNMAPPED", "nav": _amt("100")}
-    ]
+    nav = [{"as_of_date": "2026-01-07", "mapping_status": "MAPPED", "nav": _amt("100")}]
     closure, gross, value = lc.gross_exposure(exposure, nav, "2026-01-07")
     assert closure.covered and (gross, value) == (140, 100)
-    duplicated = [*exposure, *exposure]
-    assert not lc.gross_exposure(duplicated, nav, "2026-01-07")[0].covered
+    for rows in (exposure, nav):
+        unmapped = [{**rows[0], "mapping_status": "UNMAPPED"}]
+        args = (unmapped, nav) if rows is exposure else (exposure, unmapped)
+        assert not lc.gross_exposure(*args, "2026-01-07")[0].covered
 
 
-def test_a_provider_without_an_accrual_series_closes_on_its_cash_postings() -> None:
-    """Schwab states margin interest only as posted cash (six postings on the reserve)."""
+def test_a_provider_without_an_accrual_series_is_not_covered_by_its_postings() -> None:
+    """Kill test (R6): postings alone are not an accrual roll-forward.  A provider that
+    states cost only as posted cash (Schwab) stays uncovered until a governed ruling
+    names a different closure."""
 
     posting = {
         "classification": "BROKER_DEBIT_INTEREST",
         "measurement_basis": "CASH_POSTING",
         "source_amount": _amt("-11.26"),
+        "mapping_status": "MAPPED",
     }
     result = lc.financing_cost_closure([posting, posting], DAYS, DAYS[-1], None)
-    assert result.covered and result.evidence["postings"] == 2
-    unpriced = {**posting, "source_amount": {"status": "UNAVAILABLE", "value": None}}
-    assert not lc.financing_cost_closure(
-        [posting, unpriced], DAYS, DAYS[-1], None
-    ).covered
-    assert not lc.financing_cost_closure([], DAYS, DAYS[-1], None).covered
+    assert not result.covered
+    assert result.check_id == "FINANCING_COST_ACCRUAL_ROLLFORWARD"
