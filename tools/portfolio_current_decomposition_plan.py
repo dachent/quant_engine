@@ -640,19 +640,28 @@ def _layered_history_targets(
                 for summary in live_summaries
             ),
             "series_id": series_id,
+            # The account-only fallback for a strategy whose model-live layer is
+            # not admitted is never labelled like "no matched prehistory": the
+            # research series is withheld and the missing layer is declared.
             "status": (
                 "AVAILABLE_LIVE_ONLY"
                 if evidence_mode == "LIVE_ONLY"
                 else (
-                    "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
-                    if no_matched_prehistory
-                    else "AVAILABLE_LIVE_PLUS_BACKTEST"
+                    "LIVE_ONLY_RESEARCH_SERIES_WITHHELD_MODEL_LIVE_NOT_ADMITTED"
+                    if live_only_fallback
+                    else (
+                        "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+                        if no_matched_prehistory
+                        else "AVAILABLE_LIVE_PLUS_BACKTEST"
+                    )
                 )
             ),
             "strategy_version": _text(
                 version.get("history_generation_ref"), "history strategy version"
             ),
         }
+        if live_only_fallback:
+            composition[series_id]["missing_layer"] = "MODEL_LIVE"
 
     allowed_layers = (
         {"ACCOUNT_LIVE"}
@@ -687,7 +696,10 @@ def _layered_history_targets(
             raise CurrentPlanError("layered history evidence layer differs from mode")
         if (
             composition[row["series_id"]]["status"]
-            == "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+            in {
+                "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY",
+                "LIVE_ONLY_RESEARCH_SERIES_WITHHELD_MODEL_LIVE_NOT_ADMITTED",
+            }
             and row["evidence_layer"] != "ACCOUNT_LIVE"
         ):
             raise CurrentPlanError(
