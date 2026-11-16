@@ -31,7 +31,7 @@ from pathlib import Path
 import re
 import shutil
 import time
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlsplit
 import uuid
 
@@ -849,6 +849,33 @@ def verify(
 # ----------------------------------------------------------------------------- S4 admit / S5 consume
 
 
+_T = TypeVar("_T")
+
+
+def _sharing_violation(exc: OSError) -> bool:
+    """A Windows file-sharing race (access denied or sharing violation), not a real failure."""
+
+    return isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in (5, 32)
+
+
+def _retry_sharing(
+    action: Callable[[], _T], *, give_up: Callable[[], None] | None = None
+) -> _T:
+    """Run ``action``, retrying a bounded number of times with backoff on a sharing violation.
+    ``give_up`` runs before each retry and may raise (a racer that lost to a finished winner)."""
+
+    for attempt in range(10):
+        try:
+            return action()
+        except OSError as exc:
+            if not _sharing_violation(exc) or attempt == 9:
+                raise
+            if give_up is not None:
+                give_up()
+            time.sleep(0.02 * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
 class _PinLock:
     """Exclusive lock file next to the pin file (create-or-wait). It records the holder's pid and time; a lock older than
     ``LOCK_STALE_SECONDS`` (a crashed holder) is broken, so one crash cannot wedge every later admission."""
@@ -863,6 +890,9 @@ class _PinLock:
                 with self.path.open("x") as fh:
                     fh.write(f"{os.getpid()} {time.time()}")
                 return
+            except PermissionError:
+                # the holder's unlink is still pending on Windows: the lock is taken, wait
+                time.sleep(0.05)
             except FileExistsError:
                 try:
                     if time.time() - self.path.stat().st_mtime > LOCK_STALE_SECONDS:
@@ -874,14 +904,23 @@ class _PinLock:
         raise CaptureRefused("PIN_LOCK_TIMEOUT")
 
     def __exit__(self, *_: object) -> None:
-        self.path.unlink(missing_ok=True)
+        _retry_sharing(lambda: self.path.unlink(missing_ok=True))
+
+
+def _refuse_if_exists(dest: Path, rel_root: str) -> None:
+    """A racer whose rename was refused while the destination now exists lost to the winner."""
+
+    if dest.exists():
+        raise CaptureRefused(
+            "CREATE_ONLY_EXISTS", f"{rel_root} was admitted concurrently"
+        )
 
 
 def _read_pins(pin_path: Path) -> dict[str, dict[str, Any]]:
     p = Path(pin_path)
     if not p.exists():
         return {}
-    doc = json.loads(p.read_text(encoding="utf-8"))
+    doc = json.loads(_retry_sharing(lambda: p.read_text(encoding="utf-8")))
     if (
         not isinstance(doc, dict)
         or doc.get("schema_version") != 2
@@ -968,7 +1007,10 @@ def admit_input(
                     )
             shutil.copyfile(manifest_path, staging / MANIFEST_NAME)
             dest.parent.mkdir(parents=True, exist_ok=True)
-            staging.rename(dest)
+            _retry_sharing(
+                lambda: staging.rename(dest),
+                give_up=lambda: _refuse_if_exists(dest, rel_root),
+            )
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -984,7 +1026,7 @@ def admit_input(
                 + "\n"
             )
             tmp.write_text(payload, encoding="utf-8", newline="\n")
-            tmp.replace(pin_path)
+            _retry_sharing(lambda: tmp.replace(pin_path))
         except BaseException:
             shutil.rmtree(dest, ignore_errors=True)
             raise
