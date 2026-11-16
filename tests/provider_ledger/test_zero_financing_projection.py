@@ -399,3 +399,32 @@ def test_financing_days_from_a_reconciled_interest_table_enter_the_ledger_rows(
     assert by_day["2026-01-02"]["amount"]["value"] == "54206.22"
     assert by_day["2026-01-05"]["classification"] == "ZERO_FINANCING_OBSERVED"
     assert all(r["measurement_basis"] == "OBSERVED_ZERO_FINANCING_DAY" for r in rows)
+
+
+def test_a_capture_of_an_unmapped_account_is_pinned_but_never_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bank checking account has no ledger account: its capture stays in the manifest
+    and changes no row."""
+
+    pins = _Pins(tmp_path, monkeypatch)
+    account = "account-" + "a" * 16
+    spec = _with_captures(pins, tmp_path)
+    directory = Path(spec["captures_dir"])
+    stray = directory / f"{PROVIDER}-capture-deadbeef.json"
+    stray.write_bytes(b"{}")
+    sums = Path(spec["captures_sums_path"])
+    sums.write_text(
+        sums.read_text(encoding="utf-8")
+        + f"{hashlib.sha256(b'{}').hexdigest()} *{stray.name}\n",
+        encoding="utf-8",
+    )
+    spec = {
+        **spec,
+        "captures_sums_sha256": hashlib.sha256(sums.read_bytes()).hexdigest(),
+    }
+    _provider, rows, artifacts = ledger._zero_financing_rows(
+        spec, {account}, {PROVIDER}, AS_OF
+    )
+    assert len(rows) == 31
+    assert any(a.artifact_id.endswith(stray.name) for a in artifacts)

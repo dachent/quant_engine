@@ -4077,9 +4077,10 @@ def _zero_financing_rows(
             prefix = f"{provider_id}-capture-"
             if name.startswith(prefix) and name.endswith(".json"):
                 label = name[len(prefix) : -len(".json")]
-                if label not in mapping:
-                    raise ProviderLedgerError("a capture label is not mapped")
-                captures[mapping[label][0]] = content
+                if label in mapping:
+                    captures[mapping[label][0]] = content
+                # a capture of an account that is not mapped (a bank checking account that
+                # has no ledger account) is pinned in the manifest and read by nothing
         capture_artifacts.append(
             SourceArtifact(
                 artifact_id=f"zero-financing/{provider_id}/captures/SHA256SUMS",
