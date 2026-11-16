@@ -117,7 +117,9 @@ def _market_holidays(year: int) -> set[date]:
             return day + timedelta(days=1)
         return day
 
-    fixed = [date(year, 1, 1), date(year, 6, 19), date(year, 7, 4), date(year, 12, 25)]
+    fixed = [date(year, 1, 1), date(year, 7, 4), date(year, 12, 25)]
+    if year >= 2022:
+        fixed.append(date(year, 6, 19))  # Juneteenth, observed by the market from 2022
     return {
         *(observed(d) for d in fixed),
         _nth_weekday(year, 1, 0, 3),  # Martin Luther King Jr. Day

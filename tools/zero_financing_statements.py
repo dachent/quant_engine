@@ -342,6 +342,10 @@ def _interest_paid_period(lines: list[str]) -> Decimal | None:
 _FIXED_HOLIDAYS = frozenset({(1, 1), (7, 4), (12, 25)})
 
 
+def _is_business(day: date) -> bool:
+    return day.weekday() < 5 and (day.month, day.day) not in _FIXED_HOLIDAYS
+
+
 def _business_day(day: date, step: int) -> date:
     """The nearest business day at or beyond ``day`` in the direction of ``step``
     (weekends and the fixed-date holidays are skipped)."""
@@ -351,7 +355,7 @@ def _business_day(day: date, step: int) -> date:
     return day
 
 
-def reconcile_interest(facts: Mapping[str, Any]) -> tuple[bool, str]:
+def reconcile_interest(facts: dict[str, Any]) -> tuple[bool, str]:
     """(reconciled, reason): the statement's charged periods, printed ranges and the
     interest paid agree, so the days of a charged period outside every printed range carry
     no interest.  Anything that does not agree refuses the refinement (the month stays
@@ -387,27 +391,62 @@ def reconcile_interest(facts: Mapping[str, Any]) -> tuple[bool, str]:
     if sum((r[4] for r in ranges), Decimal(0)) != paid:
         return False, "INTEREST_DOES_NOT_RECONCILE"
     block = facts["loan_block"]
+    facts["bridges"] = {}
+    facts["no_zero"] = set()
     if block is not None:
         # A loan outstanding on a statement's first (last) day, inside a charged period, must
-        # be inside a printed range: interest accrues every day it is outstanding.  The
-        # balance carried in may show on the day before the period or on its first business
-        # day (a holiday accrues nothing), and the closing balance on the last business day.
+        # be inside a printed range: interest accrues every day it is outstanding.  Walking
+        # from the boundary to the first printed day, only non-business days (a weekend or a
+        # holiday settles nothing, so the loan is still outstanding) may be crossed; they are
+        # published as financing days at that range's average, never as zero.  A business
+        # day without a printed range breaks the chain and the month is not reconciled.
         start, end = facts["period_start"], facts["period_end"]
 
-        def printed(day: date) -> bool:
-            return any(first <= day <= last for first, last, *_rest in ranges)
+        def printed_range(day: date) -> Any:
+            return next((r for r in ranges if r[0] <= day <= r[1]), None)
 
         def charged(day: date) -> bool:
             return any(a <= day <= b for a, b in periods)
 
-        opening_days = (start - timedelta(days=1), _business_day(start, 1))
-        closing_days = (end, _business_day(end, -1))
-        if abs(block[0]) >= _INTEREST_DUST and any(map(charged, opening_days)):
-            if not any(printed(d) for d in opening_days):
-                return False, "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES"
-        if abs(block[1]) >= _INTEREST_DUST and any(map(charged, closing_days)):
-            if not any(printed(d) for d in closing_days):
-                return False, "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES"
+        def bridge(first_day: date, step: int, source: Any) -> None:
+            """Non-business days from ``first_day`` in the direction of ``step`` carry the
+            loan at ``source``'s average until a business day is reached."""
+
+            day = first_day
+            while start <= day <= end and not _is_business(day) and charged(day):
+                if printed_range(day) is None:
+                    facts["bridges"][day] = source[2]
+                day += timedelta(days=step)
+
+        opening, closing = block
+        if abs(opening) >= _INTEREST_DUST and charged(start):
+            before = printed_range(start - timedelta(days=1))
+            if before is not None:
+                # carried in through the last day before the period: the loan stays
+                # outstanding over any non-business days that follow
+                bridge(start, 1, before)
+            else:
+                day, crossed = start, []
+                while printed_range(day) is None:
+                    if not (start <= day <= end) or _is_business(day):
+                        return False, "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES"
+                    crossed.append(day)
+                    day += timedelta(days=1)
+                for crossed_day in crossed:
+                    facts["bridges"][crossed_day] = printed_range(day)[2]
+                if charged(start - timedelta(days=1)):
+                    # the day before the period carried the loan but printed no interest:
+                    # it is not a zero day
+                    facts["no_zero"].add(start - timedelta(days=1))
+        if abs(closing) >= _INTEREST_DUST and charged(end):
+            day = end
+            while printed_range(day) is None:
+                if not (start <= day <= end) or _is_business(day):
+                    return False, "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES"
+                facts["bridges"][day] = 0
+                day -= timedelta(days=1)
+            for crossed_day in [d for d, v in facts["bridges"].items() if v == 0]:
+                facts["bridges"][crossed_day] = printed_range(day)[2]
     return True, "INTEREST_RECONCILED"
 
 
@@ -598,6 +637,10 @@ def verdict(facts: Mapping[str, Any]) -> tuple[str, str]:
 
     if facts["layout_issue"]:
         return "UNVERIFIED", f"LAYOUT_{facts['layout_issue']}"
+    paid = facts["interest_paid_period"]
+    if paid is not None and paid > 0 and not facts["margin_interest_postings"]:
+        # interest was paid but no posting line was read: something is missing
+        return "UNVERIFIED", "INTEREST_PAID_WITHOUT_POSTING"
     no_margin_feature = facts["retirement"] and facts["loan_block"] is None
     if facts["incomplete"] and not no_margin_feature:
         # a retirement account has no margin feature: its transaction listing is not
@@ -1340,6 +1383,26 @@ def _ladder_discard_reason(
             if (deep and day not in own) or (day in own and ladder[day] >= 0):
                 return "LADDER_DISAGREES_WITH_RECONCILED_INTEREST"
     opening, closing = record["loan_opening"], record["loan_closing"]
+    begin = record["ladder_begin"]
+    if (
+        opening is not None
+        and begin is not None
+        and abs(max(Decimal(0), -begin) - abs(opening)) > _INTEREST_DUST
+    ):
+        return "LADDER_BEGINNING_CASH_DISAGREES_WITH_OPENING_LOAN"
+    if (
+        closing is not None
+        and abs(max(Decimal(0), -ladder[end]) - abs(closing)) > _INTEREST_DUST
+    ):
+        return "LADDER_ENDING_CASH_DISAGREES_WITH_CLOSING_LOAN"
+    if coverage is not None:
+        for first, last, average, *_r in coverage[1]:
+            inside = [d for d in _days(first, last) if d in ladder]
+            if not inside:
+                continue
+            mean = sum((-ladder[d] for d in inside), Decimal(0)) / len(inside)
+            if abs(mean - average) > max(_INTEREST_DUST, average * Decimal("0.05")):
+                return "LADDER_MEAN_DISAGREES_WITH_PRINTED_AVERAGE"
     if opening is not None and abs(opening) >= _INTEREST_DUST and ladder[start] >= 0:
         return "LADDER_CONTRADICTS_OPENING_LOAN"
     if closing is not None:
@@ -1360,6 +1423,8 @@ def _refine_table_from_raw(facts: dict[str, Any], raw_text: str) -> None:
     plain = _interest_table_ranges(lines, end, 40)
     layout_plain = facts["interest_periods"][len(facts["thru_periods"]) :]
     if not set(layout_plain) <= set(plain) or len(plain) < len(layout_plain):
+        if plain and set(plain) != set(layout_plain):
+            facts["layout_issue"] = "TABLE_READS_DISAGREE"
         return
     facts["interest_periods"] = list(facts["thru_periods"]) + plain
     facts["interest_table_ranges"] = len(plain)
@@ -1480,7 +1545,8 @@ def build(
             "loan_closing": facts["loan_block"][1] if facts["loan_block"] else None,
             "loan_opening": facts["loan_block"][0] if facts["loan_block"] else None,
             "no_interest": not facts["margin_interest_postings"]
-            and not facts["interest_table_ranges"],
+            and not facts["interest_table_ranges"]
+            and not facts["interest_paid_period"],
             "interest_charged": bool(
                 facts["margin_interest_postings"]
                 or facts["interest_table_ranges"]
@@ -1492,7 +1558,10 @@ def build(
             "number": facts["full_number"],
             "details_page": facts["details_page"],
             "coverage": None,
+            "bridges": {},
+            "no_zero": set(),
             "ladder": None,
+            "ladder_begin": None,
             "ladder_reason": None,
             "refine_reason": None,
             "table_page": facts["table_page"] or facts["header_page"],
@@ -1500,6 +1569,8 @@ def build(
         if state == "FINANCING":
             ok, why = reconcile_interest(facts)
             periods[key]["refine_reason"] = why
+            periods[key]["bridges"] = dict(facts.get("bridges", {})) if ok else {}
+            periods[key]["no_zero"] = set(facts.get("no_zero", ())) if ok else set()
             if ok:
                 periods[key]["coverage"] = (
                     list(facts["thru_periods"]),
@@ -1508,12 +1579,13 @@ def build(
             if raw_text is not None and facts["loan_block"] is not None:
                 periods[key]["ladder_reason"] = "CASH_LADDER_NOT_TRIED"
                 try:
-                    ladder, _begin, why_ladder = parse_cash_ladder(
+                    ladder, begin_cash, why_ladder = parse_cash_ladder(
                         raw_text, facts["period_start"], facts["period_end"]
                     )
                 except ZeroFinancingError:
-                    ladder, why_ladder = None, "RAW_TEXT_UNAVAILABLE"
+                    ladder, begin_cash, why_ladder = None, None, "RAW_TEXT_UNAVAILABLE"
                 periods[key]["ladder"] = ladder
+                periods[key]["ladder_begin"] = begin_cash
                 periods[key]["ladder_reason"] = why_ladder
         for first, last in facts["interest_periods"]:
             interest_days.setdefault(account, set()).update(_days(first, last))
@@ -1695,6 +1767,11 @@ def build(
                         "two statements charge the same account day"
                     )
                 hit = next((d for d in details if d[0] <= current <= d[1]), None)
+                if hit is None and current in record["no_zero"]:
+                    continue  # a day that carried a printed loan without interest
+                if hit is None and current in record["bridges"]:
+                    # a non-business day between a carried loan and its first printed range
+                    hit = (current, current, record["bridges"][current], "BRIDGE")
                 charged[(account, current)] = (record, hit)
     tail_rows: list[tuple[str, date, dict[str, Any]]] = []
     for (account, start, end), record in periods.items():
@@ -1767,7 +1844,11 @@ def build(
             "verdict_reason": (
                 "INTEREST_RECONCILED_NO_RANGE"
                 if hit is None
-                else f"INTEREST_RANGE_{hit[0]:%m/%d}-{hit[1]:%m/%d}_RECONCILED"
+                else (
+                    "INTEREST_RANGE_BRIDGED_OVER_NON_BUSINESS_DAYS"
+                    if len(hit) == 4
+                    else f"INTEREST_RANGE_{hit[0]:%m/%d}-{hit[1]:%m/%d}_RECONCILED"
+                )
             ),
         }
         if hit is not None:
@@ -1799,16 +1880,39 @@ def build(
     # A closing ladder never overrides interest evidence (reconciled ranges, proven zero
     # days): it fills only the days nothing else covers.
     have = {(r["account_id"], r["as_of_date"]) for r in rows}
+    zero_keys = {
+        (r["account_id"], r["as_of_date"])
+        for r in rows
+        if r["classification"] == CLASSIFICATION
+    }
     for (account, start, end), record in sorted(periods.items()):
         ladder = record["ladder"]
         if ladder is None:
             continue
+        if any(
+            balance <= -_INTEREST_DUST and (account, day.isoformat()) in zero_keys
+            for day, balance in ladder.items()
+        ):
+            # a deep debit day another source published as zero: the sources disagree
+            record["ladder"], record["ladder_reason"] = (
+                None,
+                "LADDER_DISAGREES_WITH_ZERO_ROW",
+            )
+            continue
+        final = not any(sp[0] == end + timedelta(days=1) for sp in by_account[account])
+        tail_from = start
+        if record["coverage"] is not None:
+            tail_from = max(b for _a, b in record["coverage"][0]) + timedelta(days=1)
         for current, balance in sorted(ladder.items()):
             if (cutoff is not None and current > cutoff) or (
                 (account, current.isoformat()) in have
             ):
                 continue
             debit = balance < 0
+            if not debit and final and current >= tail_from:
+                # the last statement's tail needs the next statement (or the capture)
+                # to prove a zero; trade-date cash >= 0 does not
+                continue
             if not debit and current in interest_days.get(account, ()):
                 # trade-date cash >= 0 does not prove a zero loan on a day interest was
                 # charged for (by any statement of the account): only a reconciled table
