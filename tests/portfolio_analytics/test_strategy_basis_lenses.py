@@ -316,8 +316,9 @@ def test_the_hybrid_plan_of_an_unadmitted_model_live_strategy_is_its_live_series
     )
     assert (
         result["composition"][SERIES]["status"]
-        == "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+        == "LIVE_ONLY_RESEARCH_SERIES_WITHHELD_MODEL_LIVE_NOT_ADMITTED"
     )
+    assert result["composition"][SERIES]["missing_layer"] == "MODEL_LIVE"
     primary = [row for row in result["rows"] if row["series_id"] == SERIES]
     expected = strategy_basis.rows_from_sleeve_facts(_bytes(_facts()), AI)
     assert {row["evidence_layer"] for row in primary} == {"ACCOUNT_LIVE"}
