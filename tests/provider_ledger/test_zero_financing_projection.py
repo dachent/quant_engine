@@ -345,3 +345,57 @@ def test_the_generation_id_binds_mapping_captures_and_extractor(
     assert generation(with_captures) != base
     monkeypatch.setattr(zf, "extractor_identity", lambda: "pdftotext version 99")
     assert generation(plain) != base
+
+
+def test_financing_days_from_a_reconciled_interest_table_enter_the_ledger_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Range-average financing days travel with their declared measurement; the zero days
+    around them are observed zeros (the interest paid reconciles to the ranges)."""
+
+    pins = _Pins(tmp_path, monkeypatch)
+    account = "account-" + "a" * 16
+    text = "\f".join(
+        [
+            "\n".join(
+                [
+                    "   CUST",
+                    "   Account Number   Statement Period",
+                    f"   ****-*{LAST3}   January 1-31, 2026",
+                    "Transactions - Summary",
+                    "",
+                    "   row",
+                    "   $1.00  $0.00  $0.00  $0.00  $0.00  $0.00  $1.00",
+                    "   Margin Loan Information",
+                    "   Opening Margin      Closing Margin      Funds Available     Buying Power",
+                    "   Loan Balance        Loan Balance",
+                    "",
+                    "   $0.00               $0.00               $10.00              $20.00",
+                    "   Margin Loan Rates   Interest Paid on Margin  Interest Paid on Margin",
+                    "   Vary by Balance     Loan - This Period **    Loan - YTD **",
+                    "",
+                    "   10.075% - 11.825%   ($47.47)   ($47.47)",
+                    "01/29 Expense     Margin Interest           INTEREST 12/30THRU 01/28",
+                    "Margin Interest",
+                    "",
+                    "Date   Average Margin  Interest",
+                    "   Daily Balance($) Int Rate(%)  Paid($)",
+                    "",
+                    "01/02-01/04   (54,206.22) 10.375   46.88   01/16-01/26   (164.90) 11.825   0.59",
+                ]
+            ),
+            "page two",
+        ]
+    )
+    monkeypatch.setattr(zf, "_pdftotext", lambda path: text)
+    _provider, rows, _artifacts = ledger._zero_financing_rows(
+        pins.spec(), {account}, {PROVIDER}, AS_OF
+    )
+    by_day = {r["as_of_date"]: r for r in rows}
+    assert min(by_day) == "2025-12-30" and max(by_day) == "2026-01-28"
+    financing = [r for r in rows if r["classification"] == "OBSERVED_FINANCING_DAY"]
+    assert len(financing) == 3 + 11
+    assert {r["amount_measurement"] for r in financing} == {"RANGE_AVERAGE"}
+    assert by_day["2026-01-02"]["amount"]["value"] == "54206.22"
+    assert by_day["2026-01-05"]["classification"] == "ZERO_FINANCING_OBSERVED"
+    assert all(r["measurement_basis"] == "OBSERVED_ZERO_FINANCING_DAY" for r in rows)

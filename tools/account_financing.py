@@ -81,6 +81,9 @@ class DebitEvidence:
     # NAV days (up to the cutoff) with no provider observation of the financing balance;
     # ``None`` means the caller did not measure coverage.
     unobserved_days: int | None = None
+    # Debit days whose amount is a statement range average (disclosed estimate, never a
+    # day balance); a subset of ``net_base_debit_days``.
+    range_average_debit_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -161,6 +164,8 @@ def classify(
         conflicts: list[str] = []
         if seen.net_base_debit_days:
             state, reason = "LEVERED", "NET_BASE_CASH_NEGATIVE"
+            if seen.range_average_debit_days >= seen.net_base_debit_days:
+                reason = "OBSERVED_FINANCING_DAYS_RANGE_AVERAGE"
             if row.facility == "NO_MARGIN_FACILITY":
                 conflicts.append("DECLARED_NO_FACILITY_BUT_NET_BASE_DEBIT")
         elif row.facility == "MARGIN_USED":

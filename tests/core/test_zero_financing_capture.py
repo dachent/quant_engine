@@ -62,6 +62,8 @@ def _capture(
     account_in_raw: str = LAST3,
     raw_kind: str = "history",
     page_extra: str = "",
+    raw_loan: float = 0.0,
+    with_info: bool = True,
     cash_line: str | None = None,
     **over: Any,
 ) -> bytes:
@@ -95,6 +97,16 @@ def _capture(
                 "cashInvestments": {
                     "marginBalance": float(margin) if raw_margin is None else raw_margin
                 },
+                **(
+                    {
+                        "marginsInfo": {
+                            "balanceSubjectInterest": raw_loan,
+                            "tradeDateBalance": 0,
+                        }
+                    }
+                    if with_info
+                    else {}
+                ),
             }
         ]
     }
@@ -463,6 +475,8 @@ def test_a_cash_credit_in_the_margin_field_is_not_a_loan_only_when_the_page_says
         {"raw_margin": 237.07},  # no cash total on the page
         {"raw_margin": 0.0, "cash_line": "-5.00"},  # negative cash
         {"page_extra": "Margin Loan Balance   $5.00\n"},  # a loan line
+        {"raw_loan": 5.0},  # raw balanceSubjectInterest says there is a loan
+        {"with_info": False},  # raw loan fields absent
     ):
         refused = _build(tmp_path, True, _capture(tmp_path, **over))
         assert refused["rows"] == []
