@@ -823,7 +823,7 @@ def _unmocked_fixture(
         "outputs": receipt_outputs,
         "product": {
             "contract_sha256": _sha256(canonical_json_bytes(contract)),
-            "history_policy_id": "PORT-HISTORY-TRUTH-1",
+            "history_policy_id": "PORT-HISTORY-TRUTH-2",
             "history_policy_version": 1,
             "product_id": "FINANCIAL_MVP",
             "product_version": "1",

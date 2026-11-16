@@ -108,6 +108,21 @@ def _catalog(*, base_cash: bool, break_accrual: bool = False) -> dict[str, Any]:
         if base_cash
         else []
     )
+    if base_cash:
+        # the quiet and incidental accounts have observed cash days with no debit
+        liability += [
+            {
+                "account_id": a,
+                "provider_id": "ibkr",
+                "aggregation_level": "BASE_SUMMARY",
+                "measurement_basis": "TRADE_DATE_CASH_BALANCE",
+                "classification": "NET_CASH_CREDIT_BALANCE",
+                "as_of_date": d,
+                "amount": _amt("10"),
+            }
+            for a in (QUIET, DEBIT)
+            for d in DAYS
+        ]
     exposure = [
         {
             "account_id": LEVERED,
@@ -208,3 +223,362 @@ def test_a_row_after_the_cutoff_does_not_move_the_state_and_unverified_is_visibl
     state = next(r for r in rows if r["account_id"] == QUIET)
     assert state["classification"] == "NOT_LEVERED"
     assert state["coverage_reason"].endswith("VERIFICATION=UNVERIFIED")
+
+
+def _quiet_state(catalog: dict[str, Any], declaration=None) -> dict[str, Any]:
+    rows = ld.account_financing_rows(
+        declaration or _declaration(),
+        catalog,
+        cutoff=CUTOFF,
+        generation_id=SHA,
+        catalog_sha256=SHA,
+    )
+    return next(r for r in rows if r["account_id"] == QUIET)
+
+
+def _quiet_debit(value: str, day_index: int = 0) -> dict[str, Any]:
+    return {
+        "account_id": QUIET,
+        "provider_id": "ibkr",
+        "aggregation_level": "BASE_SUMMARY",
+        "measurement_basis": "TRADE_DATE_CASH_BALANCE",
+        "classification": "NET_CASH_DEBIT_BALANCE",
+        "as_of_date": DAYS[day_index],
+        "amount": _amt(value),
+    }
+
+
+def test_a_dust_net_base_debit_is_still_borrowing() -> None:
+    """Kill test (R6): no ruling makes a small net debit not-borrowing."""
+
+    catalog = _catalog(base_cash=True)
+    catalog["financing_liability_observations"].append(_quiet_debit("-0.0016"))
+    state = _quiet_state(catalog)
+    assert state["classification"] == "LEVERED"
+    assert "DECLARED_NO_FACILITY_BUT_NET_BASE_DEBIT" in state["coverage_reason"]
+
+
+def test_an_unreadable_debit_row_is_a_data_gap_not_a_zero() -> None:
+    """Kill test (R6): a net-debit row with no amount cannot make the account NOT_LEVERED."""
+
+    catalog = _catalog(base_cash=True)
+    gap = _quiet_debit("-5")
+    gap["amount"] = {"currency": "USD", "status": "UNAVAILABLE", "value": None}
+    catalog["financing_liability_observations"].append(gap)
+    state = _quiet_state(catalog)
+    assert state["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "DEBIT_ROW_AMOUNT_UNAVAILABLE" in state["coverage_reason"]
+
+
+def test_not_levered_needs_observed_cash_days_and_a_verified_declaration() -> None:
+    """Kill test (R6): NOT_LEVERED is a finding.  Without observed base cash days (the
+    producer simply emitted nothing) or with an unverified declaration it is a conflict,
+    never COMPLETE_DECLARED."""
+
+    good = _quiet_state(_catalog(base_cash=True))
+    assert good["classification"] == "NOT_LEVERED"
+    assert good["coverage_status"] == "COMPLETE_DECLARED"
+    empty = _catalog(base_cash=True)
+    empty["financing_liability_observations"] = [
+        r for r in empty["financing_liability_observations"] if r["account_id"] != QUIET
+    ]
+    # a declaration alone (NO_MARGIN_FACILITY included) is never the evidence
+    refused = _quiet_state(empty)
+    assert refused["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert (
+        "NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS" in refused["coverage_reason"]
+    )
+    # a pinned, provider-observed zero-financing row satisfies it (any provider)
+    zero = {
+        "account_id": QUIET,
+        "provider_id": "ibkr",
+        "measurement_basis": "OBSERVED_ZERO_FINANCING_DAY",
+        "classification": "ZERO_FINANCING_OBSERVED",
+        "as_of_date": DAYS[0],
+        "amount": _amt("0"),
+        "source_artifact_id": "pins/statement-2026-01.txt",
+        "source_field": "Balance Subject to Interest",
+        "source_artifact_sha256": "a" * 64,
+    }
+    pinned = {**empty}
+    pinned["financing_liability_observations"] = [
+        *empty["financing_liability_observations"],
+        *({**zero, "as_of_date": day} for day in DAYS),
+    ]
+    assert _quiet_state(pinned)["coverage_status"] == "COMPLETE_DECLARED"
+    # coverage is required: one observed day of three is not enough (F2)
+    partial = {**empty}
+    partial["financing_liability_observations"] = [
+        *empty["financing_liability_observations"],
+        zero,
+    ]
+    refused = _quiet_state(partial)
+    assert refused["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "NOT_LEVERED_WITH_UNOBSERVED_DAYS" in refused["coverage_reason"]
+    # a zero row dated before the account's first NAV day is clipped, not a data gap (E5)
+    early = {**empty}
+    early["financing_liability_observations"] = [
+        *pinned["financing_liability_observations"],
+        {**zero, "as_of_date": "2025-12-01"},
+    ]
+    assert _quiet_state(early)["coverage_status"] == "COMPLETE_DECLARED"
+    # without provenance, or with a non-zero amount, it is a gap, not evidence
+    for broken in (
+        {**zero, "source_artifact_id": None},
+        {**zero, "source_field": None},
+        {**zero, "amount": _amt("-5")},
+        {**zero, "source_artifact_sha256": None},
+        {**zero, "source_artifact_sha256": "xyz"},
+        {**zero, "source_artifact_id": True, "source_field": 1},
+        {**zero, "as_of_date": "0000"},
+        {**zero, "as_of_date": "0"},
+        {**zero, "as_of_date": "2025-13-99"},
+        {**zero, "as_of_date": "2025-12-31"},  # before the account's window
+    ):
+        bad = {**empty}
+        bad["financing_liability_observations"] = [
+            *empty["financing_liability_observations"],
+            broken,
+        ]
+        assert _quiet_state(bad)["coverage_status"] == "OBSERVED_UNRECONCILED"
+    # a facility that exists needs observed cash days showing no debit
+    available = _declaration()
+    available[QUIET] = af.Declared(
+        QUIET, "ACTIVE", "MARGIN_AVAILABLE_UNUSED", True, "x"
+    )
+    silent = _quiet_state(empty, available)
+    assert silent["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert (
+        "NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS" in silent["coverage_reason"]
+    )
+    # and the conflicted account still gets closure rows, so a route to closure exists
+    rows = ld.account_financing_rows(
+        available, empty, cutoff=CUTOFF, generation_id=SHA, catalog_sha256=SHA
+    )
+    assert any(
+        r["account_id"] == QUIET and r["data_class"] == "FINANCING_COST" for r in rows
+    )
+    declaration = _declaration()
+    declaration[QUIET] = af.Declared(QUIET, "ACTIVE", "NO_MARGIN_FACILITY", False, "x")
+    unverified = _quiet_state(_catalog(base_cash=True), declaration)
+    assert unverified["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "NOT_LEVERED_DECLARATION_UNVERIFIED" in unverified["coverage_reason"]
+
+
+def test_a_conflicted_not_levered_account_reports_the_missing_field_not_no_row() -> (
+    None
+):
+    """Kill test (round-3 F3): E8 gets an uncovered exposure row naming the missing
+    observed_zero_financing_days, never NO_ROW."""
+
+    empty = _catalog(base_cash=True)
+    empty["financing_liability_observations"] = [
+        r for r in empty["financing_liability_observations"] if r["account_id"] != QUIET
+    ]
+    rows = ld.account_financing_rows(
+        _declaration(), empty, cutoff=CUTOFF, generation_id=SHA, catalog_sha256=SHA
+    )
+    exposure = next(
+        r
+        for r in rows
+        if r["account_id"] == QUIET and r["data_class"] == "LEVERAGE_EXPOSURE"
+    )
+    assert exposure["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "observed_zero_financing_days" in exposure["coverage_reason"]
+
+
+def test_a_positive_borrowed_balance_row_is_a_debit_day_not_an_unreadable_row() -> None:
+    """A provider-observed positive borrowed balance is borrowing: LEVERED, and for a
+    declared NO_MARGIN_FACILITY account a conflict."""
+
+    catalog = _catalog(base_cash=True)
+    catalog["financing_liability_observations"].append(
+        {
+            "account_id": QUIET,
+            "provider_id": "ibkr",
+            "measurement_basis": "OBSERVED_ZERO_FINANCING_DAY",
+            "classification": "ZERO_FINANCING_OBSERVED",
+            "as_of_date": DAYS[1],
+            "amount": _amt("12.5"),
+            "source_artifact_id": "pins/statement-2026-01.txt",
+            "source_field": "Margin Loan Balance",
+            "source_artifact_sha256": "b" * 64,
+        }
+    )
+    state = _quiet_state(catalog)
+    assert state["classification"] == "LEVERED"
+    assert "DECLARED_NO_FACILITY_BUT_NET_BASE_DEBIT" in state["coverage_reason"]
+
+
+def test_an_incidental_debit_account_needs_a_stated_zero_not_a_silent_nav() -> None:
+    """Kill test (round-6): every account that reaches the cost closure (incidental debit
+    included) closes an empty accrual section only on a stated zero."""
+
+    def catalog(stated: bool) -> dict[str, Any]:
+        cat = _catalog(base_cash=True)
+        cat["financing_liability_observations"] += [
+            {
+                "account_id": QUIET,
+                "provider_id": "ibkr",
+                "aggregation_level": "CURRENCY",
+                "measurement_basis": "TRADE_DATE_CASH_BALANCE",
+                "classification": "CASH_DEBIT_BALANCE",
+                "as_of_date": d,
+                "amount": _amt("-500", "EUR"),
+            }
+            for d in DAYS
+        ]
+        cat["financing_cost_observations"] += [
+            {
+                "account_id": QUIET,
+                "provider_id": "ibkr",
+                "classification": "NO_ACCRUALS_REPORTED",
+                "measurement_basis": "ACCRUAL_SECTION_EMPTY",
+                "as_of_date": d,
+                "period_end": d,
+                "amount": _amt("0"),
+                "source_account_scope": "STATEMENT_ACCOUNT",
+                "source_section": "InterestAccruals",
+                "mapping_status": "MAPPED",
+                "nav_interest_accruals_stated": stated,
+            }
+            for d in DAYS
+        ]
+        return cat
+
+    def cost_status(stated: bool) -> str:
+        rows = ld.account_financing_rows(
+            _declaration(),
+            catalog(stated),
+            cutoff=CUTOFF,
+            generation_id=SHA,
+            catalog_sha256=SHA,
+        )
+        state = next(
+            r
+            for r in rows
+            if r["account_id"] == QUIET and r["data_class"] == "ACCOUNT_FINANCING"
+        )
+        assert state["classification"] == "INCIDENTAL_DEBIT"
+        return next(
+            r["coverage_status"]
+            for r in rows
+            if r["account_id"] == QUIET and r["data_class"] == "FINANCING_COST"
+        )
+
+    assert cost_status(False) == "OBSERVED_UNRECONCILED"
+    assert cost_status(True) == "COMPLETE_RECONCILED"
+
+
+def test_a_sparse_nav_series_never_narrows_the_required_days() -> None:
+    """Kill test (Fable C): required days are the account's calendar span, not its NAV
+    dates; a sparse NAV with a gap, a gap to the cutoff, or no NAV days is a conflict."""
+
+    base = _catalog(base_cash=True)
+    quiet_nav = [r for r in base["nav_observations"] if r["account_id"] == QUIET]
+    assert len(quiet_nav) >= 2
+    zero = {
+        "account_id": QUIET,
+        "provider_id": "ibkr",
+        "measurement_basis": "OBSERVED_ZERO_FINANCING_DAY",
+        "classification": "ZERO_FINANCING_OBSERVED",
+        "amount": _amt("0"),
+        "source_artifact_id": "pins/s.txt",
+        "source_field": "Balance Subject to Interest",
+        "source_artifact_sha256": "a" * 64,
+    }
+    # NAV only on its first and a much later day; zero rows only on those two days
+    sparse = {**base}
+    first, last = {**quiet_nav[0], "as_of_date": "2025-12-01"}, quiet_nav[-1]
+    sparse["nav_observations"] = [
+        r for r in base["nav_observations"] if r["account_id"] != QUIET
+    ] + [first, last]
+    sparse["financing_liability_observations"] = [
+        r for r in base["financing_liability_observations"] if r["account_id"] != QUIET
+    ] + [
+        {**zero, "as_of_date": first["as_of_date"]},
+        {**zero, "as_of_date": last["as_of_date"]},
+    ]
+    refused = _quiet_state(sparse)
+    assert refused["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "NOT_LEVERED_WITH_UNOBSERVED_DAYS" in refused["coverage_reason"]
+    # no NAV days at all: the required days are unknown, never zero
+    nothing = {
+        **sparse,
+        "nav_observations": [
+            r for r in sparse["nav_observations"] if r["account_id"] != QUIET
+        ],
+    }
+    assert "NOT_LEVERED_COVERAGE_UNMEASURED" in _quiet_state(nothing)["coverage_reason"]
+
+
+def test_range_average_financing_days_make_the_account_levered_not_not_levered() -> (
+    None
+):
+    """Statement range-average financing days are borrowing evidence (a disclosed
+    estimate): the account is LEVERED with the observed-financing reason, never
+    NOT_LEVERED, and the rows are not read as day balances."""
+
+    catalog = _catalog(base_cash=True)
+    row = {
+        "account_id": QUIET,
+        "provider_id": "ibkr",
+        "measurement_basis": "OBSERVED_ZERO_FINANCING_DAY",
+        "classification": "OBSERVED_FINANCING_DAY",
+        "amount": _amt("428.09"),
+        "amount_measurement": "RANGE_AVERAGE",
+        "as_of_date": DAYS[0],
+        "source_artifact_id": "pins/s.txt",
+        "source_field": "Margin Interest table: range average margin daily balance",
+        "source_artifact_sha256": "a" * 64,
+    }
+    catalog["financing_liability_observations"] = [
+        *[
+            r
+            for r in catalog["financing_liability_observations"]
+            if r["account_id"] != QUIET
+        ],
+        row,
+    ]
+    state = _quiet_state(catalog)
+    assert state["classification"] == "LEVERED"
+    assert "OBSERVED_FINANCING_DAYS_RANGE_AVERAGE" in state["coverage_reason"]
+
+
+def test_every_nav_day_and_every_weekday_of_a_gap_is_required() -> None:
+    """Kill tests (Opus F-1/O-3, Astra P1-5): each NAV day needs an observation; every
+    weekday between NAV days or up to the cutoff is required (only weekends and US market
+    holidays are exempt); unknown NAV days are unknown (never zero)."""
+
+    from datetime import date
+
+    count = ld._unobserved_days
+    week = frozenset(f"2026-04-{d:02d}" for d in range(6, 11))  # Mon .. Fri
+    assert count(week, {"2026-04-07", "2026-04-09"}) == 3  # Mon, Wed, Fri unobserved
+    assert count(week, set(week)) == 0
+    mon_fri = frozenset({"2026-03-02", "2026-03-06"})
+    assert count(mon_fri, set(mon_fri)) == 3  # Tue, Wed, Thu
+    mon_tue_fri = frozenset({"2026-03-02", "2026-03-03", "2026-03-06"})
+    assert count(mon_tue_fri, set(mon_tue_fri)) == 2
+    fri_wed = frozenset({"2026-01-30", "2026-02-04"})
+    assert count(fri_wed, set(fri_wed)) == 2  # Mon 2 and Tue 3 February; weekend exempt
+    good_friday = frozenset({"2026-04-02", "2026-04-06"})  # Thu .. Mon, 04-03 a holiday
+    assert count(good_friday, set(good_friday)) == 0
+    last = frozenset({"2026-03-02"})
+    assert count(last, set(last)) == 0
+    assert count(last, set(last), date(2026, 3, 6)) == 4  # four weekdays at the tail
+    assert count(last, set(last), date(2026, 3, 8)) == 4  # a weekend tail adds nothing
+    assert count(None, set()) is None and count(frozenset(), set()) is None
+    assert ld.market_holidays(2026) >= {date(2026, 4, 3), date(2026, 11, 26)}
+
+
+def test_the_market_holiday_list_matches_the_nyse_calendar() -> None:
+    """Kill tests (Opus follow-ons): Labor Day is a holiday, a Saturday New Year is not
+    observed (2021-12-31 traded), Juneteenth only from 2022."""
+
+    from datetime import date
+
+    assert date(2025, 9, 1) in ld.market_holidays(2025)  # Labor Day
+    assert date(2021, 12, 31) not in ld.market_holidays(2022)
+    assert date(2021, 6, 18) not in ld.market_holidays(2021)
+    assert date(2022, 6, 20) in ld.market_holidays(2022)  # Juneteenth observed Monday

@@ -3660,8 +3660,10 @@ def test_a_receipt_carrying_benchmark_account_return_is_the_epoch_splice(
 
     stale = run(build(tmp_path / "daily", Spec(report=[daily])))
     assert [
-        f.check_id for f in stale if f.check_id == "returns.benchmark_account_return"
-    ] == ["returns.benchmark_account_return"]
+        (f.check_id, f.klass)
+        for f in stale
+        if f.check_id == "returns.benchmark_account_return"
+    ] == [("returns.benchmark_account_return", checks.BLOCKER_INVARIANT)]
 
 
 def _benchmark_findings(tmp_path: Path, *mutators: Mutator) -> list[Any]:

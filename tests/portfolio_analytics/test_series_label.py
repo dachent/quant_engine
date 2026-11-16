@@ -95,3 +95,20 @@ def test_forbidden_wording_anywhere_in_a_block_is_refused() -> None:
 def test_forbidden_wording() -> None:
     assert sl.forbidden_wording("Portfolio123 provider-live book: 2026")
     assert not sl.forbidden_wording(sl.LABEL_TEXT[sl.MODEL_LIVE])
+
+
+def test_research_series_and_my_live_series_are_never_mixed() -> None:
+    assert sl.MODE_LABELS["LIVE_PLUS_BACKTEST"] == (
+        "Research series (backtest + model live)"
+    )
+    assert sl.MODE_LABELS["LIVE_ONLY"] == "My live"
+    # Account never in the research series; model live never in my live.
+    assert not sl.kind_allows("LIVE_PLUS_BACKTEST", sl.ACCOUNT_LIVE)
+    assert not sl.kind_allows("LIVE_ONLY", sl.MODEL_LIVE)
+    assert not sl.kind_allows("LIVE_ONLY", sl.BACKTEST)
+    # The copy is in no series kind, with or without a model-live layer.
+    for mode in sl.MODE_LABELS:
+        assert not sl.kind_allows(mode, sl.COPY_RECORD)
+        assert not sl.kind_allows_without_model_live(mode, sl.COPY_RECORD)
+    # Strategies with no model-live source keep backtest then account, labelled.
+    assert sl.kind_allows_without_model_live("LIVE_PLUS_BACKTEST", sl.ACCOUNT_LIVE)

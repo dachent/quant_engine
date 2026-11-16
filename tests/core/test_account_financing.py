@@ -50,6 +50,7 @@ def test_the_three_states_follow_declaration_and_evidence() -> None:
         {
             B: af.DebitEvidence(debit_interest_postings=6),
             C: af.DebitEvidence(currency_debit_days=3),
+            D: af.DebitEvidence(observed_base_days=5, unobserved_days=0),
         },
         [A, B, C, D],
     )
@@ -165,3 +166,91 @@ def test_a_sleeve_role_naming_an_undeclared_ledger_account_or_no_window_is_refus
     ):
         with pytest.raises(af.FinancingDeclarationError):
             af.load_sleeve_roles(_with_roles([bad]))
+
+
+def test_reserve_nav_windows_come_only_from_account_live_reserves_with_closed_windows() -> (
+    None
+):
+    acct = "account-" + "a" * 16
+    raw = _with_roles(
+        [
+            _role(
+                sleeve_alias="live",
+                ledger_account_id=acct,
+                nav_authority="ACCOUNT_LIVE",
+                admit_windows=[
+                    {
+                        "start": "2026-01-01",
+                        "end": "2026-01-02",
+                        "basis": "EXACT_FLOW_CLOSURE",
+                    },
+                    {"start": "2026-01-03", "end": None, "basis": "EXACT_FLOW_CLOSURE"},
+                ],
+            ),
+            _role(sleeve_alias="statement"),
+            _role(sleeve_alias="excluded", role="EXCLUDED_IMMATERIAL"),
+        ]
+    )
+    windows = af.reserve_nav_windows(af.load_sleeve_roles(raw))
+    assert list(windows) == [acct]
+    assert [(w[0].isoformat(), w[1].isoformat()) for w in windows[acct]] == [
+        ("2026-01-01", "2026-01-02")
+    ]
+
+
+def _roles(
+    windows_a: list[dict[str, str]], windows_b: list[dict[str, str]] | None = None
+) -> bytes:
+    top = json.loads(_declaration(**{A: "MARGIN_USED"}))
+    top["sleeve_roles"] = [
+        {
+            "sleeve_alias": alias,
+            "role": "RESERVE",
+            "ledger_account_id": A,
+            "nav_authority": "ACCOUNT_LIVE",
+            "admit_windows": windows,
+            "evidence_ref": "owner",
+        }
+        for alias, windows in (("r1", windows_a), ("r2", windows_b))
+        if windows is not None
+    ]
+    return json.dumps(top).encode()
+
+
+def _win(start: str, end: str) -> dict[str, str]:
+    return {"start": start, "end": end, "basis": "EXACT_IDENTITY_CLOSURE"}
+
+
+def test_overlapping_declared_reserve_windows_refuse() -> None:
+    ok = af.reserve_nav_windows(
+        af.load_sleeve_roles(
+            _roles([_win("2026-01-01", "2026-01-31"), _win("2026-02-01", "2026-02-28")])
+        )
+    )
+    assert len(ok[A]) == 2
+    for blob in (
+        _roles([_win("2026-01-01", "2026-01-31"), _win("2026-01-31", "2026-02-28")]),
+        _roles([_win("2026-01-01", "2026-01-31")], [_win("2026-01-15", "2026-02-15")]),
+        _roles([_win("2026-02-01", "2026-01-01")]),
+    ):
+        with pytest.raises(af.FinancingDeclarationError):
+            af.reserve_nav_windows(af.load_sleeve_roles(blob))
+
+
+def test_a_declaration_alone_never_makes_an_account_not_levered() -> None:
+    """Kill test (control ruling): NOT_LEVERED needs provider-observed zero-financing
+    days whatever the declared facility; an unmeasured count refuses like zero."""
+
+    declared = (
+        _load()
+    )  # B is NO_MARGIN_FACILITY, verified; C is MARGIN_AVAILABLE_UNUSED
+    for account in (B, C):
+        for seen in (af.DebitEvidence(), af.DebitEvidence(observed_base_days=0)):
+            state = af.classify(declared, {account: seen}, [account])[account]
+            assert "NOT_LEVERED_WITHOUT_OBSERVED_ZERO_FINANCING_DAYS" in state.conflicts
+        ok = af.classify(
+            declared,
+            {account: af.DebitEvidence(observed_base_days=3, unobserved_days=0)},
+            [account],
+        )[account]
+        assert ok.state == "NOT_LEVERED" and ok.conflicts == ()

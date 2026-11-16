@@ -4894,6 +4894,9 @@ def _derived_value_index(
     return found
 
 
+derived_value_index = _derived_value_index  # public name: the release preflight (G1) reads finality evidence with it
+
+
 def _derived_value_basis(
     index: Sequence[Mapping[str, Any]] | None, account_id: object, as_of_date: object
 ) -> dict[str, Any] | None:
@@ -5049,6 +5052,7 @@ def _accounts(
     derived_values: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     latest = _latest_nav(catalog)
+    cutoff = catalog.get("as_of_date")
     synthetic_controls = strategy_product_controls is not None and all(
         re.fullmatch(r"strategy-[0-9]+", strategy_id)
         for strategy_id in strategy_product_controls
@@ -5091,6 +5095,10 @@ def _accounts(
         elif account_id in latest:
             as_of, value = latest[account_id]
             status = "AVAILABLE_LATEST_OBSERVATION"
+            if isinstance(cutoff, str) and as_of < cutoff:
+                # A last observation dated before the cutoff is retained history,
+                # labelled as such; it never claims to be a current-capital value.
+                status = "HISTORICAL_LAST_OBSERVATION"
         else:
             as_of, value, status = None, None, "UNAVAILABLE_NO_NAV"
         account_row = {
@@ -7518,6 +7526,25 @@ def _implementation_return_attribution_contract(
     }
 
 
+def check_implementation_return_attribution(
+    path: Path,
+    *,
+    portfolio_as_of: str,
+    expected_policy_evidence: Mapping[str, Any] | None = None,
+) -> None:
+    """Run the report's own contract check on an attribution file; raises ``ReportValidationError``.
+
+    Release preflight calls this on the file the prep chain writes, minutes in, instead of learning the
+    same refusal 27 minutes into the attended build (R3 refusals 10, 11).
+    """
+
+    _implementation_return_attribution_contract(
+        path,
+        portfolio_as_of=portfolio_as_of,
+        expected_policy_evidence=expected_policy_evidence,
+    )
+
+
 _ADMITTED_PREHISTORY_BACKTEST_STATUS = "EVIDENCED"
 _ADMITTED_PREHISTORY_UNDECLARED_BACKTEST = frozenset({"UNAVAILABLE", "NOT_APPLICABLE"})
 _ACCEPTED_LIVE_VERSION_PREFIX = "accepted-live-path:"
@@ -9136,12 +9163,18 @@ def _leverage_disclosures(
                     account_financing_path, "account financing declaration"
                 )
             )
+            declaration_bytes = _regular_file_bytes(
+                account_financing_path, "account financing declaration"
+            )
             summary = leverage_disclosure.account_financing_rows(
                 declaration,
                 provider_catalog,
                 cutoff=cutoff,
                 generation_id=catalog_generation_id,
                 catalog_sha256=catalog_sha256,
+                reserve_windows=account_financing.reserve_nav_windows(
+                    account_financing.load_sleeve_roles(declaration_bytes)
+                ),
             )
         except account_financing.FinancingDeclarationError as exc:
             raise ReportValidationError(str(exc)) from exc

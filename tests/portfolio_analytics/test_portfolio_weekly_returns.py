@@ -72,6 +72,7 @@ def _correlation_fixture(
     source_artifact_id: str = "provider-rollforward/layered-strategy-returns.csv",
     strategy_count: int = 9,
     backtest_date: str = "2026-07-20",
+    model_live: bool = False,
 ) -> tuple[Path, Path]:
     strategy_returns = tmp_path / "strategy-returns.csv"
     selected_strategies = STRATEGIES[:strategy_count]
@@ -96,6 +97,22 @@ def _correlation_fixture(
                 },
             ]
         )
+        if index == 0 and model_live:
+            rows.extend(
+                {
+                    "date": day,
+                    "evidence_layer": "MODEL_LIVE",
+                    "return": value,
+                    "series_id": strategy,
+                    "strategy_version": version,
+                }
+                for day, value in (
+                    ("2026-07-22", "0.01"),
+                    ("2026-07-23", "0.02"),
+                    ("2026-07-27", "0.03"),
+                    ("2026-07-28", "0.01"),
+                )
+            )
         if index == 0:
             rows.append(
                 {
@@ -125,6 +142,15 @@ def _correlation_fixture(
             **base,
             "backtest_observations_used": 1 if index == 0 else 0,
         }
+        if index == 0 and model_live:
+            combined[strategy].update(
+                {
+                    "live_evidence_layer": "MODEL_LIVE",
+                    "live_inception": "2026-07-22",
+                    "live_observations": 4,
+                    "layer_flags": [],
+                }
+            )
     correlation = {
         "analytics_schema_version": 2,
         "complete_through": "2026-07-31",
@@ -401,6 +427,57 @@ def test_weekly_generation_compounds_and_keeps_evidence_modes_separate(
     )
     assert consumed["analytics_schema_version"] == 2
     assert identity["generation_id"] == published["generation_id"]
+
+
+def test_research_series_weeks_name_their_layer_and_never_use_the_account(
+    tmp_path: Path,
+) -> None:
+    """Kill test (Grok 2): MODEL_LIVE is indexed, the account is not in the research
+    series, a boundary week is BACKTEST, and no headline is allowed with a backtest."""
+
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path, model_live=True)
+    plan_bundle = _plan_fixture(tmp_path)
+    output_root = tmp_path / "weekly"
+    candidate = weekly.build_candidate(
+        correlation_root, strategy_returns, plan_bundle, output_root
+    )
+    candidate_dir = Path(candidate["candidate_dir"])
+    assert weekly.verify_candidate(
+        correlation_root, strategy_returns, plan_bundle, candidate_dir
+    )["all_passed"]
+    payload = json.loads(
+        (candidate_dir / "weekly-returns.json").read_text(encoding="utf-8")
+    )
+    rows = {row["series_id"]: row for row in payload["series"]}
+    model = rows["strategy:Strategy 0"]
+    research = model["values_by_mode"]["LIVE_PLUS_BACKTEST"]
+    # 0.03 and 0.01 compound: the model-live record, not the account's 0.10 / -0.05
+    assert research["2026-07-27"] == "0.0403"
+    assert model["values_by_mode"]["LIVE_ONLY"]["2026-07-27"] == "0.045"
+    meta = model["observation_meta_by_mode"]["LIVE_PLUS_BACKTEST"]
+    assert "ORIGIN_BACKTEST" in meta["2026-07-20"][4]  # boundary week, not collapsed
+    assert "ORIGIN_MODEL_LIVE" not in meta["2026-07-20"][4]
+    assert "ORIGIN_MODEL_LIVE" in meta["2026-07-27"][4]
+    assert not any("ACCOUNT" in flag for flag in meta["2026-07-27"][4])
+    coverage = model["mode_coverage"]["LIVE_PLUS_BACKTEST"]
+    assert coverage["research_live_layer"] == "MODEL_LIVE"
+    assert coverage["research_live_inception"] == "2026-07-22"
+    assert [item["layer"] for item in coverage["segment_labels"]] == [
+        "BACKTEST",
+        "MODEL_LIVE",
+    ]
+    assert coverage["headline_allowed"] is False
+    assert coverage["layer_flags"] == []
+
+    # a strategy with no model-live source keeps the account, flagged per week
+    plain = rows["strategy:Strategy 1"]["observation_meta_by_mode"][
+        "LIVE_PLUS_BACKTEST"
+    ]["2026-07-27"]
+    assert "ORIGIN_ACCOUNT_LIVE" in plain[4]
+
+
+def test_model_live_is_a_legal_gap_fill_origin_flag() -> None:
+    assert "ORIGIN_MODEL_LIVE" in weekly.GAP_FILL_ORIGIN_FLAGS
 
 
 def test_current_partial_week_is_visible_by_default(tmp_path: Path) -> None:

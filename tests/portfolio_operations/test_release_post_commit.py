@@ -436,9 +436,9 @@ def test_the_repository_moving_during_the_steps_is_a_refusal(
     real = tool.repo_identity
     calls = {"n": 0}
 
-    def identity(repo: Path) -> tuple[str, bool]:
+    def identity(repo: Path, scheme: str = "git-commit-v1") -> tuple[str, bool]:
         calls["n"] += 1
-        head, clean = real(repo)
+        head, clean = real(repo, scheme)
         return (head, clean) if calls["n"] == 1 else (head, False)
 
     monkeypatch.setattr(tool, "repo_identity", identity)
@@ -502,3 +502,153 @@ def test_the_published_panel_render_check_is_a_step_when_the_panel_dir_is_given(
     else:
         assert status == 1
         assert "published-render exited 1" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", ["rehearsal-fails", "restore-fails"])
+def test_a_non_blocking_rehearsal_that_fails_is_recorded_and_never_refuses(
+    world: dict[str, Any], mode: str
+) -> None:
+    """RULING-D 5.2: the release is verified before the rehearsal runs; its failure is a recorded finding."""
+
+    (world["tools"] / "mode.txt").write_text(mode, encoding="utf-8")
+    out = world["tmp"] / "post" / "rehearsal-receipt.json"
+    assert (
+        tool.main(
+            [*world["args"][:-3], "--rehearsal-out", str(out), *world["args"][-3:]]
+        )
+        == 0
+    )
+    main_receipt = json.loads(Path(_flag(world["args"], "--out")).read_bytes())
+    assert main_receipt["rehearsal"] == "NON_BLOCKING"
+    assert [s["step"] for s in main_receipt["steps"]] == [
+        "post-release-verify",
+        "post-commit-validate",
+        "post-commit-validation",
+    ]
+    receipt = json.loads(out.read_bytes())
+    assert receipt["status"] == "FAIL" and receipt["blocking"] is False
+    assert [s["step"] for s in receipt["steps"]] == [
+        "recovery-rehearsal",
+        "clean-room-restore",
+    ]
+
+
+def test_a_non_blocking_rehearsal_that_passes_is_recorded_pass(
+    world: dict[str, Any],
+) -> None:
+    out = world["tmp"] / "post" / "rehearsal-receipt.json"
+    assert (
+        tool.main(
+            [*world["args"][:-3], "--rehearsal-out", str(out), *world["args"][-3:]]
+        )
+        == 0
+    )
+    assert json.loads(out.read_bytes())["status"] == "PASS"
+
+
+def test_a_failing_gate_step_still_refuses_with_a_non_blocking_rehearsal(
+    world: dict[str, Any],
+) -> None:
+    (world["tools"] / "mode.txt").write_text("qc-fails", encoding="utf-8")
+    out = world["tmp"] / "post" / "rehearsal-receipt.json"
+    assert (
+        tool.main(
+            [*world["args"][:-3], "--rehearsal-out", str(out), *world["args"][-3:]]
+        )
+        == 1
+    )
+    assert not out.exists()
+
+
+def _tree_args(world: dict[str, Any], identity: str, scheme: str) -> list[str]:
+    args = _set(world["args"], "--harness-code-commit", identity)
+    return [
+        *args[: args.index("--repo-root")],
+        "--identity-scheme",
+        scheme,
+        *args[args.index("--repo-root") :],
+    ]
+
+
+def test_a_git_tree_v2_release_verifies_against_the_head_tree(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A git-tree-v2 run binds its code identity to HEAD^{tree}; a commit sha is not it."""
+
+    tree = _git(world["repo"], "rev-parse", "HEAD^{tree}")
+    assert tool.main(_tree_args(world, tree, "git-tree-v2")) == 0, (
+        capsys.readouterr().err
+    )
+
+
+def test_a_git_tree_v2_release_refuses_the_commit_sha_and_a_dirty_tree(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    tree = _git(world["repo"], "rev-parse", "HEAD^{tree}")
+    assert tool.main(_tree_args(world, world["head"], "git-tree-v2")) == 1
+    assert "not clean" in capsys.readouterr().err
+    (world["repo"] / "dirty.txt").write_text("x", encoding="utf-8")
+    assert tool.main(_tree_args(world, tree, "git-tree-v2")) == 1
+    assert "not clean" in capsys.readouterr().err
+
+
+def test_the_legacy_scheme_still_binds_to_the_commit(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    tree = _git(world["repo"], "rev-parse", "HEAD^{tree}")
+    assert tool.main(_tree_args(world, tree, "git-commit-v1")) == 1
+    assert "not clean" in capsys.readouterr().err
+    assert tool.main(_tree_args(world, world["head"], "git-commit-v1")) == 0
+
+
+def test_the_stage_carries_the_render_environment_and_its_own_evidence_dir() -> None:
+    """The render step needs the Playwright environment the QA stages declare, and its
+    create-only output must not land in the commit stage's production evidence."""
+
+    graph = json.loads(
+        (REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json").read_bytes()
+    )
+    stages = {stage["id"]: stage for stage in graph["stages"]}
+    post = stages["post-commit-verify"]
+    assert post["env"] == stages["qa-browser"]["env"]
+    argv = post["argv"]
+    assert argv[argv.index("--identity-scheme") + 1] == "{identity_scheme}"
+    assert graph["paths"]["post_release_evidence"].startswith("{post_commit}/")
+    assert argv[argv.index("--post-evidence-dir") + 1] == "{post_release_evidence}"
+
+
+def test_a_failed_attempt_never_blocks_the_retry() -> None:
+    """Every create-only path the stage writes lies under its one declared output
+    ``{post_commit}``. The driver refuses a rerun that would collide, naming the earlier
+    attempt, and ``--replace`` moves that whole directory aside (kept as evidence); no
+    path outside it (such as the commit stage's production evidence) can hold a failed
+    attempt's receipt and block the retry."""
+
+    graph = json.loads(
+        (REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json").read_bytes()
+    )
+    stage = next(s for s in graph["stages"] if s["id"] == "post-commit-verify")
+    assert stage["outputs"] == ["{post_commit}"]
+
+    def expand(text: str) -> str:
+        for _ in range(5):
+            for name, value in graph["paths"].items():
+                text = text.replace("{" + name + "}", value)
+        return text
+
+    root = expand("{post_commit}")
+    argv = [item for item in stage["argv"] if isinstance(item, str)]
+    argv = argv[: argv.index("--")]
+    written = (
+        "--post-evidence-dir",
+        "--rehearsal-root",
+        "--clean-room",
+        "--post-pointers",
+        "--log-dir",
+        "--out",
+        "--rehearsal-out",
+        "--post-findings",
+    )
+    for flag in written:
+        value = expand(argv[argv.index(flag) + 1])
+        assert value.startswith(root + "/"), f"{flag} {value} is outside {root}"

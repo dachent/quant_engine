@@ -797,6 +797,40 @@ def _exclusion_readiness_impact(
     )
 
 
+def run_observation_identity(observation: Mapping[str, Any]) -> tuple[str, int]:
+    """sha256 and size of a run observation with every world-specific locator removed.
+
+    The observation names each provider's absolute ``root`` and the absolute path of
+    its finality evidence, so its raw bytes depend on the directory the world was built
+    in.  The admit-or-declare receipt is a ledger artifact: it records this identity
+    (roots reduced to their leaf directory name, finality paths to the file name,
+    hashes kept), so the ledger
+    generation id is a function of the data and never of the world's directory name.
+    """
+
+    normalized: dict[str, Any] = json.loads(json.dumps(observation))
+    providers = normalized.get("providers")
+    if isinstance(providers, dict):
+        # Each root stays bound by its leaf directory name, case-folded: the leaf is the
+        # root's own name (dataIBKR, matrixport ...), never the world, drive or profile
+        # it was built under, and unlike a common-prefix layout it does not depend on
+        # where the other providers' roots sit.  The data itself is bound by each row's
+        # generation_id and evidence hashes.
+        for row in providers.values():
+            if not isinstance(row, dict):
+                continue
+            if isinstance(row.get("root"), str):
+                parts = [p for p in re.split(r"[\\/]", row["root"]) if p]
+                row["root"] = parts[-1].casefold() if parts else ""
+            evidence = row.get("finality_evidence")
+            if isinstance(evidence, dict) and isinstance(evidence.get("path"), str):
+                evidence["path"] = re.split(r"[\\/]", evidence["path"])[-1]
+    content = json.dumps(
+        normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(content).hexdigest(), len(content)
+
+
 def validate_admit_or_declare_receipt(
     value: Mapping[str, object],
     *,

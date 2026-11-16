@@ -446,6 +446,18 @@ run used, so a sleeve row is checked against the declaration it was restated fro
 optional flags and adds them to the validator only when given. Without them the declaration-dependent items
 (`returns.sleeve_basis` and its invariants) are not evaluated and the ceremony reports different findings than the run.
 
+Every `validate_generation.py` call (the six stage groups `g2`, `validate-panel`, `lane-replica`, `lane-real`, the ceremony
+group and `post-commit`, and `release_replica.py`'s own findings and post-commit calls) also carries `--admission-receipt
+{ledger_receipt}`: the provider ledger generation's `admit-or-declare-receipt.json` (`{run}/stages/ledger/generations/{ledger_id}/`),
+the file the ledger stage writes beside `provider-ledger.json`. It lets the C5 source-clock check treat a finite provider the
+crosswalk never names (Fidelity) as out of scope, and only when every receipt disposition for that provider is
+`EXCLUDE` / `NO_CURRENT_PRODUCT_CONSUMER` / `NO_CURRENT_PRODUCT_EFFECT`. The validator binds it before use and exits 2 if it
+is unusable: the receipt type and schema version, its `disposition_sha256` and `inventory_sha256` recomputed, a
+`run_observation.financial_cutoff` equal to the run's cutoff, and a VERIFIED `generation.json` beside it that records the
+receipt's and the `--provider-ledger` file's SHA-256 (the ledger must be that same generation's). Without the flag the
+Fidelity `dates.source_clock` row stays NOT_READY. `tests/portfolio_operations/test_release_admission_receipt_wiring.py`
+fails if any validator call omits it.
+
 ## Re-running a pass on a fresh world
 
 Cold-operator checklist (R3), with the numbered recipe below as the detail: (a) the release-inputs root and its manifest
@@ -576,5 +588,29 @@ release is never retired). `post-release-verify` refuses to run from a checkout 
 
 G3 (`g3:spec-pair`) compares the real and replica specs with the replica gate's own `topology` function; `lane-real` and `lane-replica` recheck it at entry, so a topology mismatch (R3 refusal 19) is found in seconds, not after the lane.
 
-Not built yet, and named in `release_preflight.COVERAGE` so a green G0 is not read as "inputs are fine": G1 consumer contracts
-(1-4, 7, 8, 10, 11, 13), G2 product measurements (12, 17) and the consumer freshness limit (14).
+The commit-path canary (`docs` section above) is wired in as two recheck rows, not G0 rows: `lane-real` declares `canary:baseline` (runs the canary over the coordination root and every authority root at lane entry, refuses on FAIL, and records `{cycle}/preflight/canary-baseline.json`), and `commit` declares `canary:commit-path` (refuses with no baseline, runs the canary again against the baseline timings, and refuses on a FAIL or any environment-fingerprint difference since the baseline).
+
+`ops/mvp2-release/run-config.release-a.example.json` is the value-free run-config template for release A (cutoff 2026-11-06, the same as R3c; `release_cutoffs` states it): every `<...>` is an operator path or pin, and the keys G0 reads are listed in `release_preflight.CONFIG_KEYS`. The cutoff of release B is a placeholder until the owner states it.
+G1 (`release_preflight.py g1 --config run.json`, after the prep chain, before `attended`; `attended` needs a G1 receipt too) calls the consumers' own validators on the run's inputs: `g1:ledger-spec` (`provider_ledger.build_catalog`; refusals 1-4), `g1:attended-launch` (`check_attended_launch`; 7), `g1:sleeve-facts` (`build_sleeve_facts` into a scratch directory; 8), `g1:finality-evidence` (`derived_value_index`; 13).
+
+Not built yet, and named in `release_preflight.COVERAGE` so a green gate is not read as "inputs are fine": G1 attribution contract (10, 11), G2 product measurements (12, 17) and the consumer freshness limit (14).
+## Product gate (G2) and the non-blocking rehearsal
+
+`g2` is a builtin stage between `attended` and `qa-browser`. It measures the built panel candidate with the
+consumers' own code: `panel_payload_size` against its committed budget (R3 refusal 17) and the stage's own
+`validator_argv` (`validate_generation.py`, R3 refusals 12 and 16). Rows: `g2:candidate`, `g2:payload-size`,
+`g2:validator-findings`; PASS and FAIL only. The receipt `{cycle}/preflight/g2.json` is bound to the run
+configuration, the code identity and the candidate id, and `qa-browser` declares `needs_gate: ["g2"]`. Run it by hand
+with `python tools/release_preflight_g2.py g2 --config run.json`. Whether `validate_generation.py` accepts a
+candidate directory without a release pointer is exercised only by a real run; a refusal there is a FAIL, never a pass.
+
+`post-commit-verify` passes `--rehearsal-out`: the post-release verify, the revalidation and the rendered-UI check
+still refuse the release, but the recovery rehearsal and the clean-room restore run after the receipt is written,
+every step runs, and the outcome goes to `rehearsal-receipt.json` (`qe-post-commit-rehearsal/1`, `blocking: false`).
+A failed rehearsal is a finding for the owner, not a refusal.
+
+### Usable by default (G0 config, stale PREPARED releases)
+
+`release_fresh_world.py config` fills the keys G0 reads: `free_space_floor_gb` (60), `release_cutoffs` for the run's own label (release B's cutoff stays the owner's: `--set-json release_cutoffs='{"A":"...","B":"..."}'`), `authority_roots` from `--data-root ID=DIR` (a provider root of the stage graph), `scratch_roots` and an `evidence_dest` that is a sibling of the cycle (one inside the cycle is replaced), and `retire_ticket` (`884`). `--set-json KEY=JSON` stores dict and list values; `--set` still stores strings.
+
+A `real-lane` that fails after its dry-run retires the PREPARED release it made (archive, then move aside, never delete) when `retire_ticket` is configured, so the next run's `authority:no-stale-prepared` row is not blocked. Leftovers of an abandoned run: `release_preflight.py retire-stale --coordination-root DIR --ticket N --archive-dir DIR [--keep RELEASE_ID]`.

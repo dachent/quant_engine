@@ -461,3 +461,87 @@ def test_a_linked_generation_directory_itself_is_refused_for_every_file_read_fro
     with pytest.raises(tool.LedgerSpecError) as linked:
         tool._file_facts(generation / "generation.json", "manifest", generation)
     assert linked.value.code == "PATH_ESCAPES_ROOT"
+
+
+def test_account_roles_and_fill_closes_reach_the_spec_only_when_given(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """#900 / #909: optional per-cycle pins; absent, the spec is what it was."""
+
+    assert "account_roles" not in _build(world)["spec"]
+    declaration = tmp_path / "declaration.json"
+    declaration.write_bytes(b'{"x": 1}')
+    closes = tmp_path / "closes.json"
+    closes.write_text(
+        json.dumps(
+            [{"symbol": "TQQQ", "path": "p.csv", "sha256": "a" * 64, "size_bytes": 3}]
+        ),
+        encoding="utf-8",
+    )
+    spec = tool.build(
+        world["resolved"],
+        world["predecessor"],
+        world["out"],
+        world["provenance"],
+        account_roles=declaration,
+        quantbase_fill_closes=closes,
+    )["spec"]
+    assert spec["account_roles"]["sha256"] == hashlib.sha256(b'{"x": 1}').hexdigest()
+    assert spec["account_roles"]["size_bytes"] == 8
+    assert spec["quantbase_fill_closes"][0]["symbol"] == "TQQQ"
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]", encoding="utf-8")
+    with pytest.raises(tool.LedgerSpecError):
+        tool.build(
+            world["resolved"],
+            world["predecessor"],
+            world["out"],
+            world["provenance"],
+            quantbase_fill_closes=empty,
+        )
+
+
+def test_the_zero_financing_artifact_is_pinned_carried_and_passed_through(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """The artifact of provider-observed zero-financing days rides the ledger spec like the
+    other per-cycle pins: pinned by path/sha256/size, carried from the predecessor spec
+    when not given again."""
+
+    assert "zero_financing_observations" not in _build(world)["spec"]
+    artifact = tmp_path / "zero.json"
+    keys = (
+        "mapping_path",
+        "mapping_sha256",
+        "provider_id",
+        "statements_dir",
+        "sums_path",
+        "sums_sha256",
+    )
+    artifact.write_text(json.dumps({k: f"v-{k}" for k in keys}), encoding="utf-8")
+    spec = tool.build(
+        world["resolved"],
+        world["predecessor"],
+        world["out"],
+        world["provenance"],
+        zero_financing_observations=artifact,
+    )["spec"]
+    pin = spec["zero_financing_observations"]
+    assert pin == {k: f"v-{k}" for k in keys}
+    broken = tmp_path / "broken.json"
+    broken.write_text(json.dumps({"provider_id": "x"}), encoding="utf-8")
+    with pytest.raises(tool.LedgerSpecError):
+        tool.build(
+            world["resolved"],
+            world["predecessor"],
+            world["out"],
+            world["provenance"],
+            zero_financing_observations=broken,
+        )
+    carried = tool.build(
+        world["resolved"],
+        {**world["predecessor"], "zero_financing_observations": pin},
+        world["out"],
+        world["provenance"],
+    )["spec"]
+    assert carried["zero_financing_observations"] == pin

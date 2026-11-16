@@ -26,6 +26,7 @@ REGISTER = ROOT / "acceptance" / "validate" / "unreachable.json"
 PROVEN = {
     "identity.publication_state": "test_d8_builder_output_validates.py",
     "identity.release_pinned": "test_d8_builder_output_validates.py",
+    "layers.series_blocks": "test_layer_labels_check.py",
 }
 CLASSES = {
     "BUILDER_BUG",

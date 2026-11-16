@@ -5,7 +5,9 @@ the provider observations the report already carries:
 
 * ``ACCOUNT_FINANCING``: the state (``LEVERED`` / ``INCIDENTAL_DEBIT`` / ``NOT_LEVERED``)
   with the reason, so a non-levered account is an explicit row, never an absent one;
-* ``FINANCING_COST / RECONCILED_FINANCING_COST``: levered and incidental-debit accounts;
+* ``FINANCING_COST / RECONCILED_FINANCING_COST``: levered and incidental-debit accounts,
+  and a NOT_LEVERED account whose state carries a conflict (no observed zero-financing
+  days, unverified declaration), so the open evidence has a row to close;
 * ``FINANCING_LIABILITY / BORROWED_PRINCIPAL`` and ``LEVERAGE_EXPOSURE / GROSS_EXPOSURE``:
   levered accounts.
 
@@ -17,7 +19,9 @@ which check failed, never a covered status.  A pure function of its inputs.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import date, timedelta
 from decimal import Decimal
+import re
 from typing import Any, Final
 
 import account_financing
@@ -27,6 +31,7 @@ COVERED: Final = "COMPLETE_RECONCILED"
 DECLARED: Final = "COMPLETE_DECLARED"
 NOT_COVERED: Final = "OBSERVED_UNRECONCILED"
 _NO_AMOUNT: Final = {"status": "UNAVAILABLE", "value": None}
+_SHA256: Final = re.compile(r"[0-9a-f]{64}")
 
 
 def _evidence_text(closure: leverage_closure.Closure) -> str:
@@ -48,17 +53,188 @@ def _until(rows: Sequence[Mapping[str, Any]], cutoff: str) -> list[Mapping[str, 
     return [r for r in rows if day(r) <= cutoff]
 
 
+# One row per account-day on which the provider's own margin-loan / debit / borrowed-balance
+# field read zero (or the account type has no margin feature): the generic input a reader
+# emits for providers without IBKR's base cash rows.
+ZERO_FINANCING_BASIS: Final = "OBSERVED_ZERO_FINANCING_DAY"
+
+
+def _amount(row: Mapping[str, Any]) -> Decimal | None:
+    amount = row.get("amount")
+    if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
+        return None
+    try:
+        return Decimal(str(amount.get("value")))
+    except ArithmeticError:
+        return None
+
+
+def _iso_day(value: object) -> date | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+# days the market closed outside the regular calendar (national days of mourning, storms)
+_SPECIAL_CLOSURES: Final = (
+    date(2012, 10, 29),
+    date(2012, 10, 30),
+    date(2018, 12, 5),
+    date(2025, 1, 9),
+)
+
+
+def _easter(year: int) -> date:
+    a, b, c = year % 19, year // 100, year % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    m = (32 + 2 * e + 2 * i - h - k) % 7
+    n = (a + 11 * h + 22 * m) // 451
+    month, day = divmod(h + m - 7 * n + 114, 31)
+    return date(year, month, day + 1)
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
+    first = date(year, month, 1)
+    day = first + timedelta(days=(weekday - first.weekday()) % 7)
+    return day + timedelta(weeks=n - 1)
+
+
+def _last_monday_of_may(year: int) -> date:
+    day = date(year, 5, 31)
+    return day - timedelta(days=day.weekday())
+
+
+def market_holidays(year: int) -> set[date]:
+    """US equity market holidays of a year (a Saturday holiday is observed the Friday
+    before, a Sunday holiday the Monday after)."""
+
+    def observed(day: date) -> date:
+        if day.weekday() == 5:
+            return day - timedelta(days=1)
+        if day.weekday() == 6:
+            return day + timedelta(days=1)
+        return day
+
+    fixed = [date(year, 7, 4), date(year, 12, 25)]
+    fixed.extend(d for d in _SPECIAL_CLOSURES if d.year == year)
+    if date(year, 1, 1).weekday() != 5:  # New Year's Day on a Saturday is not observed
+        fixed.append(date(year, 1, 1))
+    if year >= 2022:
+        fixed.append(date(year, 6, 19))  # Juneteenth, observed by the market from 2022
+    return {
+        *(observed(d) for d in fixed),
+        _nth_weekday(year, 1, 0, 3),  # Martin Luther King Jr. Day
+        _nth_weekday(year, 2, 0, 3),  # Presidents Day
+        _easter(year) - timedelta(days=2),  # Good Friday
+        _last_monday_of_may(year),  # Memorial Day
+        _nth_weekday(year, 9, 0, 1),  # Labor Day
+        _nth_weekday(year, 11, 3, 4),  # Thanksgiving
+    }
+
+
+def _unobserved_days(
+    nav_days: frozenset[str] | None,
+    known_days: set[str] | frozenset[str],
+    cutoff: date | None = None,
+) -> int | None:
+    """How many required days lack an observation of the financing balance, or None when
+    the requirement cannot be known (no NAV days).
+
+    Every NAV day is required, and so is every weekday between two NAV days or between the
+    last NAV day and the cutoff: a sparse NAV series never narrows the requirement to its
+    own dates.  Only weekend days and US market holidays inside such a stretch are not
+    required."""
+
+    days = sorted(d for d in (_iso_day(x) for x in (nav_days or ())) if d is not None)
+    if not days:
+        return None
+    required = {d for d in days}
+    stops = days + ([cutoff] if cutoff is not None and cutoff > days[-1] else [])
+    holidays: dict[int, set[date]] = {}
+    for before, after in zip(stops, stops[1:], strict=False):
+        for offset in range(1, (after - before).days + 1):
+            day = before + timedelta(days=offset)
+            if day.weekday() >= 5:
+                continue
+            if day not in holidays.setdefault(day.year, market_holidays(day.year)):
+                required.add(day)
+    known = {d for d in (_iso_day(x) for x in known_days) if d is not None}
+    return len(required - known)
+
+
 def _debit_evidence(
     liability: Sequence[Mapping[str, Any]],
     cost: Sequence[Mapping[str, Any]],
+    window_start: date | None = None,
+    nav_days: frozenset[str] | None = None,
+    cutoff: date | None = None,
 ) -> account_financing.DebitEvidence:
-    base_days = {
-        r["as_of_date"]
+    base = [
+        r
         for r in liability
         if r.get("aggregation_level") == "BASE_SUMMARY"
         and r.get("measurement_basis") == "TRADE_DATE_CASH_BALANCE"
-        and r.get("classification") == "NET_CASH_DEBIT_BALANCE"
+    ]
+    # Any net debit is borrowing; a debit row whose amount cannot be read is a data gap,
+    # never a zero; and "no debit" is only evidence when base days were observed at all.
+    base_days = {
+        r["as_of_date"]
+        for r in base
+        if r.get("classification") == "NET_CASH_DEBIT_BALANCE"
     }
+    unreadable = sum(
+        1
+        for r in base
+        if r.get("classification") == "NET_CASH_DEBIT_BALANCE" and _amount(r) is None
+    )
+    range_days: set[str] = set()
+    observed = {r["as_of_date"] for r in base if _amount(r) is not None}
+    # Generic provider-observed financing day (any provider): ``amount`` is the provider's
+    # borrowed balance for the day (never negative).  Exactly 0 is an observed zero day; a
+    # positive balance is borrowing (a debit day); anything else is a data gap.  The row
+    # must be pinned (source_artifact_id, a 64-hex source_artifact_sha256), name the
+    # provider field it was read from, and be dated inside the account's window.
+    for r in liability:
+        if r.get("measurement_basis") != ZERO_FINANCING_BASIS:
+            continue
+        amount = _amount(r)
+        day = _iso_day(r.get("as_of_date"))
+        pinned = (
+            _text(r.get("source_artifact_id"))
+            and _text(r.get("source_field"))
+            and isinstance(r.get("source_artifact_sha256"), str)
+            and _SHA256.fullmatch(r["source_artifact_sha256"]) is not None
+        )
+        if (
+            day is not None
+            and window_start is not None
+            and day < window_start
+            and amount is not None
+            and amount == 0
+            and pinned
+        ):
+            continue  # a zero before the account's observed window: clipped, not a gap
+        if amount is None or amount < 0 or not pinned or day is None:
+            unreadable += 1
+        elif amount > 0:
+            base_days.add(day.isoformat())
+            if r.get("amount_measurement") == "RANGE_AVERAGE":
+                # the amount is a statement range average: a disclosed estimate that is
+                # never read as a day balance (borrowed_principal ignores these rows)
+                range_days.add(day.isoformat())
+        else:
+            observed.add(day.isoformat())
     currency_days = {
         r["as_of_date"]
         for r in liability
@@ -69,10 +245,24 @@ def _debit_evidence(
     postings = sum(
         1 for r in cost if r.get("classification") == "BROKER_DEBIT_INTEREST"
     )
+    known_days = (
+        observed
+        | {
+            r["as_of_date"]
+            for r in base
+            if r.get("classification") == "NET_CASH_DEBIT_BALANCE"
+            and _amount(r) is not None
+        }
+        | base_days
+    )
     return account_financing.DebitEvidence(
+        unobserved_days=_unobserved_days(nav_days, known_days, cutoff),
         net_base_debit_days=len(base_days),
+        range_average_debit_days=len(range_days & base_days),
         debit_interest_postings=postings,
         currency_debit_days=len(currency_days),
+        unreadable_debit_rows=unreadable,
+        observed_base_days=len(observed),
     )
 
 
@@ -119,8 +309,12 @@ def account_financing_rows(
     generation_id: str,
     catalog_sha256: str,
     account_ids: Iterable[str] | None = None,
+    reserve_windows: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """The summary rows of every named account (default: every declared account)."""
+    """The summary rows of every named account (default: every declared account).
+
+    ``reserve_windows`` (account id -> declared RESERVE windows) is the only way an
+    unmapped reserve row is attributed; absent, nothing is."""
 
     names = sorted(set(declaration if account_ids is None else account_ids))
     by_account: dict[str, dict[str, list[Mapping[str, Any]]]] = {
@@ -140,7 +334,22 @@ def account_financing_rows(
                 bucket[key].append(item)
     evidence = {
         name: _debit_evidence(
-            _until(parts["liability"], cutoff), _until(parts["cost"], cutoff)
+            _until(parts["liability"], cutoff),
+            _until(parts["cost"], cutoff),
+            min(
+                (
+                    d
+                    for d in (_iso_day(r.get("as_of_date")) for r in parts["nav"])
+                    if d is not None
+                ),
+                default=None,
+            ),
+            frozenset(
+                str(r["as_of_date"])
+                for r in _until(parts["nav"], cutoff)
+                if r.get("as_of_date")
+            ),
+            _iso_day(cutoff) if isinstance(cutoff, str) else cutoff,
         )
         for name, parts in by_account.items()
     }
@@ -204,7 +413,7 @@ def account_financing_rows(
                 f"{state.reason}{';CONFLICT=' + conflict_text if conflict_text else ''}{unverified}",
             )
         )
-        if state.state == "NOT_LEVERED":
+        if state.state == "NOT_LEVERED" and not state.conflicts:
             continue
         mapped_days = sorted(
             {
@@ -218,7 +427,14 @@ def account_financing_rows(
         )
         epoch_start = mapped_days[0] if mapped_days else None
         cost_closure = leverage_closure.financing_cost_closure(
-            parts["cost"], statement_days, cutoff, epoch_start
+            parts["cost"],
+            statement_days,
+            cutoff,
+            epoch_start,
+            (reserve_windows or {}).get(name),
+            # every account that reaches the cost closure (levered, incidental debit, or a
+            # conflicted NOT_LEVERED) closes an empty accrual section only on a stated zero
+            require_explicit_zero=True,
         )
         rows.append(
             make(
@@ -229,6 +445,22 @@ def account_financing_rows(
                 _evidence_text(cost_closure),
             )
         )
+        if state.state == "NOT_LEVERED":
+            # A conflicted NOT_LEVERED account: an uncovered exposure row that names what
+            # is missing, so E8 reports NOT_READY with the evidence reason, never NO_ROW.
+            rows.append(
+                make(
+                    "LEVERAGE_EXPOSURE",
+                    "GROSS_EXPOSURE",
+                    "GROSS_EXPOSURE",
+                    NOT_COVERED,
+                    "NOT_LEVERED_UNPROVEN: needs observed_zero_financing_days "
+                    "(provider-observed, source_artifact_sha256-pinned) and a "
+                    "verified declaration;"
+                    f"CONFLICT={conflict_text}",
+                )
+            )
+            continue
         if state.state != "LEVERED":
             continue
         currencies = {
@@ -257,7 +489,7 @@ def account_financing_rows(
             )
         )
         exposure_closure, gross, nav = leverage_closure.gross_exposure(
-            parts["exposure"], parts["nav"], cutoff
+            parts["exposure"], parts["nav"], cutoff, (reserve_windows or {}).get(name)
         )
         rows.append(
             make(

@@ -50,6 +50,7 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.core import inventory_identity
+import series_label
 import sleeve_disclosures
 import strategy_basis_lens_moves
 from portfolio_private_stage import validate_private_stage_target
@@ -4603,6 +4604,29 @@ def _number_text(value: float) -> str:
     return format(value, ".12g")
 
 
+_MACHINE_PARAMETERISED = re.compile(
+    r"\b([a-z]+(?:_[a-z]+)+):([A-Za-z0-9_:.-]*[A-Za-z0-9_])"
+)
+_MACHINE_UPPER = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
+
+
+def _operator_readable(note: Any) -> Any:
+    """#895 F3: a gate note is shown to the operator, so internal tokens become words.
+
+    ``name_part:argument`` reads as ``name part (argument)`` and ``UPPER_CASE`` as
+    ``upper case``; the facts that carry the tokens are not changed, only the display.
+    """
+
+    if not isinstance(note, str):
+        return note
+    note = _MACHINE_PARAMETERISED.sub(
+        lambda match: f"{match.group(1).replace('_', ' ')} ({match.group(2)})", note
+    )
+    return _MACHINE_UPPER.sub(
+        lambda match: match.group(0).replace("_", " ").lower(), note
+    )
+
+
 def _hwm_policy(
     evaluation_date: date, policy_snapshot: bytes | None = None
 ) -> tuple[dict[str, Any], str]:
@@ -5528,6 +5552,41 @@ def _available_prefixed(status: object) -> str:
     return text if text.startswith("AVAILABLE_") else "AVAILABLE_" + text
 
 
+def _fit_segments(
+    row: Mapping[str, Any], start: Any, end: Any, observations: int
+) -> list[series_label.SeriesLabel]:
+    """The labelled segment a factor fit was run on, for `headline_allowed`."""
+
+    if not (isinstance(start, str) and isinstance(end, str)):
+        return []
+    layer = row.get("evidence_layer")
+    if layer is None:
+        layer = "ACCOUNT_LIVE"  # composition already fails closed on backtest
+    if layer not in {"ACCOUNT_LIVE", "PROVIDER_LIVE"}:
+        return []  # BACKTEST, hybrid or unknown: never a live segment
+    model_only = layer == "PROVIDER_LIVE"
+    # the fit's window opens at the close before its first aligned return
+    try:
+        start = (date.fromisoformat(start) - timedelta(days=1)).isoformat()
+    except ValueError:
+        return []
+    try:
+        return [
+            series_label.SeriesLabel(
+                layer="MODEL_LIVE" if model_only else "ACCOUNT_LIVE",
+                entity_id=str(row.get("series_id") or "fit"),
+                entity_role="MODEL_BOOK" if model_only else "ACCOUNT",
+                first=start,
+                last=end,
+                observations=max(observations, 1),
+                currency="USD",
+                return_basis="FACTOR_FIT",
+            )
+        ]
+    except (series_label.SeriesLabelError, ValueError):
+        return []
+
+
 def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
     """What a reader needs next to an alpha tile: window, n, SE, t, backtest share, basis.
 
@@ -5622,6 +5681,12 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         headline_status = "NOT_A_HEADLINE_COMPOSITION_UNKNOWN"
     elif t_stat is None:
         headline_status = "NOT_A_HEADLINE_NO_STANDARD_ERROR"
+    elif not series_label.headline_allowed(
+        _fit_segments(row, start, end, used if isinstance(used, int) else 1)
+    ):
+        # sprint-p123's layer rule: only MODEL_LIVE / ACCOUNT_LIVE segments, over
+        # at least one year
+        headline_status = "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE"
     else:
         headline_status = "HEADLINE_ALLOWED"
     return {
@@ -9037,9 +9102,12 @@ def _model_account_gap_underwriting(
             != "PROVEN_COMPATIBLE"
         ):
             unresolved_causes.append("REFERENCE_VERSION_COMPATIBILITY_NOT_PROVEN")
-        if strategy.get("cash_drag_status") != "AVAILABLE":
+        import portfolio_cash_drag
+        import portfolio_report as reporter
+
+        if strategy.get("cash_drag_status") != portfolio_cash_drag.STATUS_EVIDENCED:
             unresolved_causes.append("COMPLETE_DAILY_ACCOUNT_CASH_PATH_UNAVAILABLE")
-        if strategy.get("fees_status") != "AVAILABLE_COMPLETE":
+        if strategy.get("fees_status") != reporter.FEES_STATUS_EVIDENCED:
             unresolved_causes.append("ACCOUNT_BOUND_FEE_PATH_INCOMPLETE")
         unresolved_causes.extend(
             [
@@ -11331,7 +11399,7 @@ def _panel_data(
             {
                 "item": item,
                 "label": label,
-                "note": fact.get("known_gap")
+                "note": _operator_readable(fact.get("known_gap"))
                 or "Accepted within the declared boundary",
                 "status": fact.get("status"),
             }
@@ -11389,6 +11457,12 @@ def _panel_data(
         }
     )
     provenance = _objects(report.get("provenance"), "provenance")
+    hwm_policy_row = {
+        "artifact": "portfolio-hwm-policy",
+        "as_of_date": hwm_policy["evaluation_date"],
+        "schema": "portfolio-hwm-policy/2",
+        "sha256": hwm_policy_hash,
+    }
     provenance = [
         {
             "artifact": "portfolio-report-generation",
@@ -11490,12 +11564,10 @@ def _panel_data(
             "schema": "portfolio-strategy-underwriting-policy/1",
             "sha256": underwriting_policy_hash,
         },
-        {
-            "artifact": "portfolio-hwm-policy",
-            "as_of_date": hwm_policy["evaluation_date"],
-            "schema": "portfolio-hwm-policy/2",
-            "sha256": hwm_policy_hash,
-        },
+        # #895 F9: the report already carries this identity row; ``provenance`` still
+        # names the report's own rows here (the assignment completes after this
+        # literal), so an identical row is not repeated and a differing one stays.
+        *([hwm_policy_row] if hwm_policy_row not in provenance else []),
         *(
             [
                 {

@@ -349,6 +349,12 @@ def _pins(value: object, label: str) -> None:
             _pins(nested, f"{label}[{index}]")
 
 
+def verify_pins(value: object, label: str) -> None:
+    """Public entry of the consumer's own pin check (release preflight re-opens every pin where it will be read)."""
+
+    _pins(value, label)
+
+
 def _date(value: object, label: str) -> str:
     if not isinstance(value, str):
         raise AttendedPreparationError(f"{label} is invalid")
@@ -1315,6 +1321,29 @@ def _validated_inputs(
         )
     if _date(evaluated_on, "evaluated_on") < cutoff:
         raise AttendedPreparationError("evaluated_on precedes financial cutoff")
+    if "captured_inputs" in config:
+        # weekly-refresh specs read only captured, admitted, hash-verified inputs (#913)
+        import capture_pipeline as _capture
+
+        contract = ROOT / "contracts" / "capture-sources-v1.json"
+        try:
+            config = _capture.resolve_captured_inputs(
+                config,
+                cutoff=cutoff,
+                sources=_capture.load_sources(contract, repo_root=ROOT),
+                readers=_capture.load_readers(contract, repo_root=ROOT),
+            )
+        except _capture.CaptureRefused as exc:
+            raise AttendedPreparationError(f"captured inputs: {exc.code}") from exc
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            OSError,
+        ) as exc:  # corrupt pin file, odd shapes: stable, not raw
+            raise AttendedPreparationError(
+                f"captured inputs: MALFORMED ({type(exc).__name__})"
+            ) from exc
     _pins(config, "preparation specification")
     retained_generations = config.get("retained_verified_generations")
     if isinstance(retained_generations, Mapping) and isinstance(
@@ -1909,6 +1938,9 @@ def _build_sleeve_facts(
     except (OSError, sleeve_release.SleeveFactsReleaseError) as exc:
         raise AttendedPreparationError(f"sleeve facts are refused: {exc}") from exc
     return sleeve_release.selected_paths(selection, destination)
+
+
+build_sleeve_facts = _build_sleeve_facts  # public name: the release preflight (G1) calls the same builder
 
 
 def _preparation_input_identity(

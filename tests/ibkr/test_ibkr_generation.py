@@ -3241,3 +3241,520 @@ def test_a_base_only_cash_line_becomes_a_net_loan_row_not_a_dropped_loan(
     assert {r["classification"] for r in currency} == {"CASH_BALANCE"}
     # the two levels never share a record id, so a consumer can sum one level
     assert len({r["record_id"] for r in rows}) == len(rows)
+
+
+FULL_ZERO_NAV = (
+    'stock="0" options="0" bonds="0" commodities="0" funds="0" notes="0" crypto="0" '
+    'cfdUnrealizedPl="0" forexCfdUnrealizedPl="0" interestAccruals="0" '
+    'brokerInterestAccrualsComponent="0" marginFinancingChargeAccruals="0"'
+)
+
+
+def _full_nav(xml: str) -> str:
+    return xml.replace('total="114"', 'total="114" ' + FULL_ZERO_NAV, 1)
+
+
+def _coverage_catalog(tmp_path: Path, xml: str) -> dict[str, Any]:
+    path = tmp_path / "coverage.xml"
+    path.write_text(xml, encoding="utf-8")
+    statement = parse_flex_file(path, artifact_id="synthetic/coverage.xml").statements[
+        0
+    ]
+    return ibkr_generation._normalize(
+        [statement],
+        {
+            "accounts": [
+                {
+                    "account_id": "account-ibkr-synthetic",
+                    "base_currency": "USD",
+                    "role": "INVESTMENT",
+                }
+            ],
+            "assignments": [],
+        },
+        {"SYNTH-RAW": "account-ibkr-synthetic"},
+        [],
+        frozenset(),
+        0,
+        None,
+    )
+
+
+def _exposure(catalog: dict[str, Any]) -> dict[str, Any]:
+    return next(
+        row
+        for row in catalog["leverage_exposure_observations"]
+        if row["measurement_basis"] == "GROSS_POSITION_MARKET_VALUE"
+    )
+
+
+def test_an_empty_open_positions_section_is_zero_exposure_bound_to_the_statement(
+    tmp_path: Path,
+) -> None:
+    """Kill test (control 2026-11-13): zero positions are zero exposure when the
+    statement carries the section; a missing section is not captured; a position
+    reported under another account makes the figure ambiguous."""
+
+    day = date(2026, 1, 3)
+    full = _full_nav(_xml("SYNTH-RAW", day, "114"))
+    rows = full.split("<OpenPosition ")
+    assert len(rows) == 2
+    empty_section = (
+        rows[0] + "</OpenPositions>" + rows[1].split("</OpenPositions>", 1)[1]
+    )
+    zero = _exposure(_coverage_catalog(tmp_path, empty_section))
+    assert zero["amount"] == {"currency": "USD", "status": "AVAILABLE", "value": "0"}
+    assert zero["source_account_scope"] == "STATEMENT_ACCOUNT"
+
+    with pytest.raises(Exception, match="OpenPositions"):  # a missing section refuses
+        _coverage_catalog(
+            tmp_path, _xml("SYNTH-RAW", day, "114", omit_section="OpenPositions")
+        )
+
+    other = full.replace(
+        '<OpenPosition accountId="SYNTH-RAW"', '<OpenPosition accountId="OTHER-RAW"'
+    )
+    ambiguous = _exposure(_coverage_catalog(tmp_path, other))
+    assert ambiguous["amount"]["status"] != "AVAILABLE"
+    assert ambiguous["source_account_scope"] == "AMBIGUOUS_REPORTED_ACCOUNT"
+
+    assert _exposure(_coverage_catalog(tmp_path, full))["amount"]["value"] == "20"
+
+
+def test_an_empty_interest_accruals_section_is_recorded_distinct_from_a_missing_one(
+    tmp_path: Path,
+) -> None:
+    day = date(2026, 1, 3)
+
+    def empty_rows(xml: str) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in _coverage_catalog(tmp_path, xml)["financing_cost_observations"]
+            if row["measurement_basis"] == "ACCRUAL_SECTION_EMPTY"
+        ]
+
+    absent = _xml("SYNTH-RAW", day, "114")
+    assert empty_rows(absent) == []
+    present = _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    rows = empty_rows(present)
+    assert len(rows) == 1
+    assert rows[0]["period_end"] == "2026-01-03"
+    assert rows[0]["classification"] == "NO_ACCRUALS_REPORTED"
+    withrows = _xml(
+        "SYNTH-RAW",
+        day,
+        "114",
+        native_sections=(
+            '<InterestAccruals><InterestAccrualsCurrency accountId="SYNTH-RAW" '
+            'currency="USD" fromDate="20260102" toDate="20260103" '
+            'startingAccrualBalance="0" interestAccrued="-1" accrualReversal="1" '
+            'endingAccrualBalance="0" fxTranslation="0" /></InterestAccruals>'
+        ),
+    )
+    assert empty_rows(withrows) == []
+
+
+def _empty_positions(xml: str) -> str:
+    head, rest = xml.split("<OpenPosition ", 1)
+    return head + "</OpenPositions>" + rest.split("</OpenPositions>", 1)[1]
+
+
+def _exposure_status(tmp_path: Path, xml: str) -> str:
+    return str(_exposure(_coverage_catalog(tmp_path, xml))["amount"]["status"])
+
+
+def test_zero_exposure_refuses_when_the_statement_says_otherwise(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (round-5 item 1): LOT-only or level-less rows, a SUMMARY row without
+    accountId, and NAV holdings with no positions all leave exposure UNAVAILABLE."""
+
+    day = date(2026, 1, 3)
+    full = _full_nav(_xml("SYNTH-RAW", day, "114"))
+    clean_empty = _empty_positions(full)
+    assert _exposure_status(tmp_path, clean_empty) == "AVAILABLE"
+
+    lot_only = full.replace(
+        'levelOfDetail="SUMMARY" conid="100"', 'levelOfDetail="LOT" conid="100"'
+    )
+    assert lot_only != full
+    assert _exposure_status(tmp_path, lot_only) != "AVAILABLE"
+    no_level = full.replace('levelOfDetail="SUMMARY" conid="100"', 'conid="100"')
+    assert _exposure_status(tmp_path, no_level) != "AVAILABLE"
+
+    no_account = full.replace('<OpenPosition accountId="SYNTH-RAW"', "<OpenPosition")
+    assert no_account != full
+    assert _exposure_status(tmp_path, no_account) != "AVAILABLE"
+
+    for attribute in (
+        'stock="100"',
+        'crypto="50"',
+        'forexCfdUnrealizedPl="7"',
+        'stockLong="100"',
+        'slbDirectSecuritiesLent="9"',
+    ):
+        name = attribute.split("=")[0]
+        holdings = (
+            clean_empty.replace(f'{name}="0"', attribute)
+            if f'{name}="0"' in clean_empty
+            else clean_empty.replace('total="114"', 'total="114" ' + attribute)
+        )
+        assert holdings != clean_empty
+        assert _exposure_status(tmp_path, holdings) != "AVAILABLE", attribute
+    # silence is not zero: a core holdings attribute missing, or none stated at all
+    silent = clean_empty.replace(' crypto="0"', "")
+    assert silent != clean_empty
+    assert _exposure_status(tmp_path, silent) != "AVAILABLE"
+    unstated = _empty_positions(_xml("SYNTH-RAW", day, "114"))
+    assert _exposure_status(tmp_path, unstated) != "AVAILABLE"
+    # an unverifiable figure is not an account ambiguity
+    exposure = _exposure(_coverage_catalog(tmp_path, unstated))
+    assert exposure["source_account_scope"] == "STATEMENT_ACCOUNT"
+    assert exposure["unavailable_reason"] == "OPEN_POSITIONS_UNVERIFIED"
+
+
+def test_an_empty_accrual_section_contradicted_by_the_statement_is_not_recorded(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (round-5 item 2): a nonzero NAV accrual, or a renamed child inside the
+    section, never reads as 'no accruals'."""
+
+    day = date(2026, 1, 3)
+
+    def empty_rows(xml: str) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in _coverage_catalog(tmp_path, xml)["financing_cost_observations"]
+            if row["measurement_basis"] == "ACCRUAL_SECTION_EMPTY"
+        ]
+
+    silent_base = _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    assert len(empty_rows(silent_base)) == 1
+    assert empty_rows(silent_base)[0]["nav_interest_accruals_stated"] is False
+    base = _full_nav(silent_base)
+    assert empty_rows(base)[0]["nav_interest_accruals_stated"] is True
+    for name, value in (
+        ("interestAccruals", "-12.34"),
+        ("brokerInterestAccrualsComponent", "-5"),
+        ("marginFinancingChargeAccruals", "-1"),
+    ):
+        contradicted = base.replace(f'{name}="0"', f'{name}="{value}"')
+        assert contradicted != base
+        assert empty_rows(contradicted) == [], name
+    # another interest component not on the core list is held to the same standard
+    other = silent_base.replace(
+        'total="114"', 'total="114" bondInterestAccrualsComponent="-3"'
+    )
+    assert empty_rows(other) == []
+    renamed = _xml(
+        "SYNTH-RAW",
+        day,
+        "114",
+        native_sections="<InterestAccruals><InterestAccrualsByCurrency/></InterestAccruals>",
+    )
+    with pytest.raises(Exception, match="InterestAccruals"):
+        _coverage_catalog(tmp_path, renamed)
+
+
+def test_a_refresh_differing_only_in_section_presence_is_not_equal(
+    tmp_path: Path,
+) -> None:
+    day = date(2026, 1, 3)
+    path = tmp_path / "eq.xml"
+
+    def parse(xml: str) -> Any:
+        path.write_text(xml, encoding="utf-8")
+        return parse_flex_file(path, artifact_id="synthetic/eq.xml").statements[0]
+
+    absent = parse(_xml("SYNTH-RAW", day, "114"))
+    present = parse(
+        _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    )
+    assert not ibkr_generation._statements_equal(absent, present)
+    assert ibkr_generation._statements_equal(absent, absent)
+
+
+def test_open_positions_variants_never_read_as_zero_exposure(tmp_path: Path) -> None:
+    """Kill tests (round-5 a): LOT rows carrying another account, a renamed row tag, an
+    unknown level, and any child at all keep exposure UNAVAILABLE; SUMMARY plus LOT rows
+    of the statement's own account (the real shape) stay AVAILABLE."""
+
+    day = date(2026, 1, 3)
+    full = _full_nav(_xml("SYNTH-RAW", day, "114"))
+    summary_row = full.split("<OpenPositions>", 1)[1].split("</OpenPositions>", 1)[0]
+    lot_row = summary_row.replace('levelOfDetail="SUMMARY"', 'levelOfDetail="LOT"')
+    assert lot_row != summary_row
+
+    def with_children(children: str) -> str:
+        head, rest = full.split("<OpenPositions>", 1)
+        return (
+            head
+            + "<OpenPositions>"
+            + children
+            + "</OpenPositions>"
+            + rest.split("</OpenPositions>", 1)[1]
+        )
+
+    assert (
+        _exposure_status(tmp_path, with_children(summary_row + lot_row)) == "AVAILABLE"
+    )
+    other_lot = lot_row.replace('accountId="SYNTH-RAW"', 'accountId="OTHER-RAW"')
+    assert _exposure_status(tmp_path, with_children(other_lot)) != "AVAILABLE"
+    assert (
+        _exposure_status(tmp_path, with_children(summary_row + other_lot))
+        != "AVAILABLE"
+    )
+    renamed = summary_row.replace("OpenPosition ", "OpenPositionX ")
+    for children in (renamed, summary_row + renamed):
+        with pytest.raises(Exception, match="OpenPositions"):  # unparsed row: refused
+            _exposure_status(tmp_path, with_children(children))
+    odd_level = summary_row.replace('levelOfDetail="SUMMARY"', 'levelOfDetail="OTHER"')
+    assert _exposure_status(tmp_path, with_children(odd_level)) != "AVAILABLE"
+    assert _exposure_status(tmp_path, with_children("")) == "AVAILABLE"
+
+
+def test_accrual_section_variants_never_read_as_an_empty_section(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (round-5 b): a renamed row, stray text, or a nested copy of the tag is
+    refused; only a direct, childless, textless section is the broker's 'no accruals'."""
+
+    day = date(2026, 1, 3)
+    for sections in (
+        "<InterestAccruals><InterestAccrual /></InterestAccruals>",
+        "<InterestAccruals>unavailable</InterestAccruals>",
+        "<Wrapper><InterestAccruals/></Wrapper>",
+    ):
+        with pytest.raises(Exception, match="InterestAccruals"):
+            _coverage_catalog(
+                tmp_path, _xml("SYNTH-RAW", day, "114", native_sections=sections)
+            )
+    ok = _coverage_catalog(
+        tmp_path, _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    )
+    assert any(
+        r["measurement_basis"] == "ACCRUAL_SECTION_EMPTY"
+        for r in ok["financing_cost_observations"]
+    )
+
+
+def test_unparsed_open_positions_content_refuses_the_parse(tmp_path: Path) -> None:
+    """Kill test (round-7 F1): a renamed row or an error text inside OpenPositions is not
+    an empty section; and gross long/short holdings do not net to zero."""
+
+    day = date(2026, 1, 3)
+    clean = _empty_positions(_full_nav(_xml("SYNTH-RAW", day, "114")))
+    assert _exposure_status(tmp_path, clean) == "AVAILABLE"
+    renamed = clean.replace(
+        "<OpenPositions></OpenPositions>",
+        '<OpenPositions><OpenPositionV2 positionValue="5000"/></OpenPositions>',
+    )
+    texted = clean.replace(
+        "<OpenPositions></OpenPositions>",
+        "<OpenPositions>error: data not ready</OpenPositions>",
+    )
+    for broken in (renamed, texted):
+        assert broken != clean
+        with pytest.raises(Exception, match="OpenPositions"):
+            _coverage_catalog(tmp_path, broken)
+    gross = clean.replace(
+        'total="114"', 'total="114" stockLong="5000" stockShort="-5000"'
+    )
+    assert gross != clean
+    assert _exposure_status(tmp_path, gross) != "AVAILABLE"
+
+
+def test_section_attributes_and_rows_outside_the_section_are_never_benign(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (round-8): the sections carry no attributes (every pinned statement
+    agrees), so an error="..." attribute refuses; OpenPosition rows outside the section
+    are suspect, never collected; totalLong/totalShort are not holdings."""
+
+    day = date(2026, 1, 3)
+    clean = _empty_positions(_full_nav(_xml("SYNTH-RAW", day, "114")))
+    assert _exposure_status(tmp_path, clean) == "AVAILABLE"
+
+    attr = clean.replace("<OpenPositions>", '<OpenPositions error="data not ready">')
+    assert attr != clean
+    with pytest.raises(Exception, match="OpenPositions"):
+        _coverage_catalog(tmp_path, attr)
+    ia = _full_nav(
+        _xml(
+            "SYNTH-RAW",
+            day,
+            "114",
+            native_sections='<InterestAccruals error="x"/>',
+        )
+    )
+    with pytest.raises(Exception, match="InterestAccruals"):
+        _coverage_catalog(tmp_path, ia)
+
+    own = (
+        '<OpenPosition accountId="SYNTH-RAW" reportDate="20260103" '
+        'levelOfDetail="LOT" conid="100" currency="USD" position="2" '
+        'positionValue="20" fxRateToBase="1" symbol="SYNTH" />'
+    )
+    no_account = own.replace('accountId="SYNTH-RAW" ', "").replace("LOT", "SUMMARY")
+    other = own.replace("SYNTH-RAW", "OTHER-RAW").replace("LOT", "SUMMARY")
+    for stray in (own, no_account, other):
+        outside = clean.replace("</FlexStatement>", stray + "</FlexStatement>")
+        assert outside != clean
+        assert _exposure_status(tmp_path, outside) != "AVAILABLE", stray
+
+    totals = clean.replace('total="114"', 'total="114" totalLong="5" totalShort="-5"')
+    assert _exposure_status(tmp_path, totals) == "AVAILABLE"
+
+
+def test_a_blank_or_non_numeric_nav_attribute_is_unknown_never_zero(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (final round P1-B): a blank, whitespace or non-numeric holding or
+    interest attribute makes the evidence unverifiable (no zero exposure, no empty row)."""
+
+    day = date(2026, 1, 3)
+    clean = _empty_positions(_full_nav(_xml("SYNTH-RAW", day, "114")))
+    assert _exposure_status(tmp_path, clean) == "AVAILABLE"
+    for blank in ('stockLong=""', 'stockLong="  "', 'crypto=""'):
+        name = blank.split("=")[0]
+        broken = (
+            clean.replace(f'{name}="0"', blank)
+            if f'{name}="0"' in clean
+            else clean.replace('total="114"', 'total="114" ' + blank)
+        )
+        assert broken != clean
+        assert _exposure_status(tmp_path, broken) != "AVAILABLE", blank
+
+    base = _full_nav(
+        _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    )
+
+    def empty_rows(xml: str) -> list[dict[str, Any]]:
+        return [
+            r
+            for r in _coverage_catalog(tmp_path, xml)["financing_cost_observations"]
+            if r["measurement_basis"] == "ACCRUAL_SECTION_EMPTY"
+        ]
+
+    assert len(empty_rows(base)) == 1
+    for blank in (
+        'bondInterestAccrualsComponent=""',
+        'bondInterestAccrualsComponent=" "',
+    ):
+        broken = base.replace('total="114"', 'total="114" ' + blank)
+        assert empty_rows(broken) == [], blank
+
+
+def test_published_record_ids_cover_the_final_row(tmp_path: Path) -> None:
+    """Kill test (final round): the exposure and empty-accrual record ids are hashes of the
+    row as published (scope, reason, date included), so changing any of those changes
+    the id."""
+
+    day = date(2026, 1, 3)
+    clean = _full_nav(
+        _xml("SYNTH-RAW", day, "114", native_sections="<InterestAccruals/>")
+    )
+    unverified = _empty_positions(_xml("SYNTH-RAW", day, "114"))  # NAV holdings silent
+    verified = _empty_positions(clean)
+    for xml, prefix in (
+        (unverified, "leverage-exposure"),
+        (verified, "leverage-exposure"),
+    ):
+        row = _exposure(_coverage_catalog(tmp_path, xml))
+        final = {k: v for k, v in row.items() if k != "record_id"}
+        assert row["record_id"] == ibkr_generation._record_id(prefix, final)
+        for key, other in (
+            ("source_account_scope", "SOMETHING_ELSE"),
+            ("as_of_date", "2000-01-01"),
+        ):
+            assert (
+                ibkr_generation._record_id(prefix, {**final, key: other})
+                != row["record_id"]
+            )
+    assert _exposure(_coverage_catalog(tmp_path, unverified))["unavailable_reason"]
+    empty = next(
+        r
+        for r in _coverage_catalog(tmp_path, verified)["financing_cost_observations"]
+        if r["measurement_basis"] == "ACCRUAL_SECTION_EMPTY"
+    )
+    final_empty = {k: v for k, v in empty.items() if k != "record_id"}
+    assert empty["record_id"] == ibkr_generation._record_id(
+        "financing-cost", final_empty
+    )
+    assert (
+        ibkr_generation._record_id(
+            "financing-cost", {**final_empty, "nav_interest_accruals_stated": False}
+        )
+        != empty["record_id"]
+    )
+
+
+def test_a_non_blank_non_numeric_nav_attribute_refuses_the_statement(
+    tmp_path: Path,
+) -> None:
+    """Kill test (final round F1): only blank/whitespace is 'unknown'; any other
+    non-numeric or non-finite holding/interest attribute refuses the whole file, with
+    positions present too (as it always did)."""
+
+    day = date(2026, 1, 3)
+    with_positions = _full_nav(_xml("SYNTH-RAW", day, "114"))
+    assert _exposure_status(tmp_path, with_positions) == "AVAILABLE"
+    for attribute in (
+        'stock="NaN"',
+        'stockLong="n/a"',
+        'bondInterestAccrualsComponent="Infinity"',
+        'crypto="x"',
+    ):
+        name = attribute.split("=")[0]
+        broken = (
+            with_positions.replace(f'{name}="0"', attribute)
+            if f'{name}="0"' in with_positions
+            else with_positions.replace('total="114"', 'total="114" ' + attribute)
+        )
+        assert broken != with_positions
+        with pytest.raises(Exception, match="nav\."):
+            _coverage_catalog(tmp_path, broken)
+
+
+def test_lot_rows_must_be_covered_by_their_own_summary_instrument(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (final round, Astra/Opus): exposure reads SUMMARY rows, so every LOT
+    instrument needs a SUMMARY row of the same instrument whose quantity and value the
+    LOT rows add up to; otherwise the figure is unverified (OPEN_POSITIONS_UNVERIFIED)."""
+
+    day = date(2026, 1, 3)
+    full = _full_nav(_xml("SYNTH-RAW", day, "114"))
+    head, rest = full.split("<OpenPositions>", 1)
+    tail = rest.split("</OpenPositions>", 1)[1]
+
+    def row(level: str, conid: str, position: str, value: str) -> str:
+        return (
+            f'<OpenPosition accountId="SYNTH-RAW" reportDate="20260103" '
+            f'levelOfDetail="{level}" conid="{conid}" currency="USD" position="{position}" '
+            f'positionValue="{value}" fxRateToBase="1" symbol="S{conid}" />'
+        )
+
+    def with_rows(*rows: str) -> str:
+        return head + "<OpenPositions>" + "".join(rows) + "</OpenPositions>" + tail
+
+    covered = with_rows(row("SUMMARY", "100", "2", "20"), row("LOT", "100", "2", "20"))
+    assert _exposure_status(tmp_path, covered) == "AVAILABLE"
+    two_lots = with_rows(
+        row("SUMMARY", "100", "3", "30"),
+        row("LOT", "100", "1", "10"),
+        row("LOT", "100", "2", "20"),
+    )
+    assert _exposure_status(tmp_path, two_lots) == "AVAILABLE"
+    astra = with_rows(row("SUMMARY", "100", "0", "0"), row("LOT", "200", "5", "5000"))
+    opus = with_rows(row("SUMMARY", "100", "2", "20"), row("LOT", "200", "2", "20"))
+    short_quantity = with_rows(
+        row("SUMMARY", "100", "3", "20"), row("LOT", "100", "2", "20")
+    )
+    short_value = with_rows(
+        row("SUMMARY", "100", "2", "5000"), row("LOT", "100", "2", "20")
+    )
+    for broken in (astra, opus, short_quantity, short_value):
+        assert _exposure_status(tmp_path, broken) != "AVAILABLE"
+        exposure = _exposure(_coverage_catalog(tmp_path, broken))
+        assert exposure["unavailable_reason"] == "OPEN_POSITIONS_UNVERIFIED"

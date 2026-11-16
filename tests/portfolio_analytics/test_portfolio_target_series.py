@@ -2298,6 +2298,68 @@ def test_a_deprecated_retained_history_disposition_is_admitted(tmp_path):
     assert proof["bundle_id"] == "b" * 64
 
 
+def _bundle_in(tmp_path, name):
+    (tmp_path / name).mkdir()
+    return _history_bundle(tmp_path / name, [])
+
+
+def _with_model_live(manifest, returns, live_date, **declared):
+    """The Alpha bundle plus one MODEL_LIVE row and the definition that declares it."""
+
+    returns.write_text(
+        returns.read_text(encoding="utf-8")
+        + f"Alpha,{live_date},0.01,MODEL_LIVE,alpha-current:v1"
+        + chr(10),
+        encoding="utf-8",
+        newline="",
+    )
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["returns_artifact"]["sha256"] = hashlib.sha256(
+        returns.read_bytes()
+    ).hexdigest()
+    document["returns_artifact"]["size_bytes"] = returns.stat().st_size
+    document["series"][0].update(
+        {
+            "model_live_observations": 1,
+            "model_live_start": live_date,
+            "model_live_end": live_date,
+            "provider_launch": "2026-01-01",
+            **declared,
+        }
+    )
+    manifest.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+
+
+def test_model_live_rows_are_checked_against_the_declared_window(tmp_path):
+    """Kill tests: the model-live layer is bound to its own window and the launch."""
+
+    manifest, returns = _bundle_in(tmp_path, "ok")
+    _with_model_live(manifest, returns, "2026-01-02")
+    live: dict = {}
+    target_series._strategy_history_returns(manifest, returns, model_live_out=live)
+    assert [row["date"] for row in live["Alpha"]] == ["2026-01-02"]
+
+    # a row before the provider launch is neither layer
+    early_manifest, early_returns = _bundle_in(tmp_path, "early")
+    _with_model_live(
+        early_manifest, early_returns, "2026-01-02", provider_launch="2026-01-05"
+    )
+    with pytest.raises(TargetSeriesError, match="model-live bounds differ"):
+        target_series._strategy_history_returns(
+            early_manifest, early_returns, model_live_out={}
+        )
+
+    # the declared window must be the rows' window
+    wrong_manifest, wrong_returns = _bundle_in(tmp_path, "wrong")
+    _with_model_live(
+        wrong_manifest, wrong_returns, "2026-01-02", model_live_end="2026-01-03"
+    )
+    with pytest.raises(TargetSeriesError, match="model-live bounds differ"):
+        target_series._strategy_history_returns(
+            wrong_manifest, wrong_returns, model_live_out={}
+        )
+
+
 def test_an_available_history_cannot_hide_inside_a_disposition(tmp_path):
     """The allow-list stays narrow: a captured, admissible status is refused."""
 

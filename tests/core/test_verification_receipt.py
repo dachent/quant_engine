@@ -508,3 +508,61 @@ def test_allowed_read_only_children_are_exactly_these():
     assert not vr.allowed_child_command("git -C C:/repo checkout main")
     assert not vr.allowed_child_command("git -C C:/repo show HEAD:docs/x.json")
     assert not vr.allowed_child_command("cmd.exe /c del x")
+
+
+_STAGE = """
+import json, sys
+from pathlib import Path
+from quant_engine.core import verification_receipt as vr
+
+repo, data, state = (Path(a) for a in sys.argv[1:4])
+events = []
+
+def compute():
+    events.append("LIVE")
+    total = 0
+    for path in sorted(data.iterdir()):
+        value = json.loads(path.read_text(encoding="utf-8"))["v"]
+        if value >= 5:
+            raise SystemExit("verifier refuses: value out of range")
+        total += value
+    return {"status": "PASS", "total": total}
+
+result = vr.run_with_receipt(
+    "toy", {"spec": "s"}, repo_root=repo, state_root=state, compute=compute,
+    on_reuse=lambda _sha: events.append("REUSED"),
+)
+print(events[0] if events else "?", result["total"])
+"""
+
+
+def _stage(world, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    script = tmp_path / "stage.py"
+    script.write_text(_STAGE, encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            str(world["repo"]),
+            str(world["data"]),
+            str(world["state"]),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**__import__("os").environ, vr.MODE_ENV: "persist"},
+    )
+
+
+def test_cross_stage_a_one_byte_tamper_after_a_pass_forces_a_rerun_that_refuses(
+    world, tmp_path
+):
+    first = _stage(world, tmp_path)  # stage N: passes, stores a receipt
+    assert first.returncode == 0 and first.stdout.split() == ["LIVE", "3"], first
+    second = _stage(world, tmp_path)  # stage N+1, new process, same bytes: reuse
+    assert second.returncode == 0 and second.stdout.split() == ["REUSED", "3"], second
+    # one byte of an input the verifier read changes between the stages
+    (world["data"] / "a.json").write_text('{"v": 9}', encoding="utf-8")
+    third = _stage(world, tmp_path)
+    assert third.returncode != 0 and "verifier refuses" in third.stderr, third
+    assert "REUSED" not in third.stdout

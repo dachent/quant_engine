@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/model-vs-actual-derive-spec.schema.json",
+  "title": "Declared inputs and recipe for the model-vs-actual audit input derive tool",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact",
+    "schema_version",
+    "audit_written",
+    "inputs",
+    "recipe"
+  ],
+  "properties": {
+    "artifact": {
+      "const": "model-vs-actual-derive-spec"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "audit_written": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "inputs": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "ref_label": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "recipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_input",
+        "strategies"
+      ],
+      "properties": {
+        "base_input": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ledger_input": {
+          "type": "string",
+          "minLength": 1
+        },
+        "completed_pulls": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "strategies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "strategy_id",
+              "ops"
+            ],
+            "properties": {
+              "strategy_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "ops": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "op"
+                  ],
+                  "properties": {
+                    "op": {
+                      "enum": [
+                        "window_bridge",
+                        "ln_waterfall",
+                        "adjclose_extension",
+                        "extend_epoch",
+                        "set_notes",
+                        "append_notes",
+                        "clear_unavailable"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "as_of": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    }
+  }
+}

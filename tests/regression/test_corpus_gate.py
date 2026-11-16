@@ -57,8 +57,10 @@ def test_ticket_citing_unknown_case_is_refused() -> None:
 def test_release_gate_reports_every_open_case_and_uncited_ticket() -> None:
     found = gate.check_release(REGISTRY, ["910", "894", "999"])
     text = "\n".join(found)
-    assert "atyr_reverse_split_alias: open case" in text
-    assert "matrixport_gap_days: open case" in text  # all of them, not the first
+    opened = [k for k, v in REGISTRY["cases"].items() if v["status"] == "open"]
+    assert len(opened) >= 2
+    for case_id in opened:  # all of them, not the first
+        assert f"{case_id}: open case" in text
     assert "#894: cited case ibkr_total_cash_loan_dropped is not covered" in text
     assert "#999: closed ticket cites no regression case" in text
     assert "#910" not in text

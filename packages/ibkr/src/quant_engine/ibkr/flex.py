@@ -122,6 +122,111 @@ def _optional_decimal(value: str | None, name: str) -> Decimal | None:
     return _decimal(value, name)
 
 
+# Holdings components of the NAV element.  The core set must all be stated (silence is not
+# zero); any other attribute that names a holding is held to the same zero standard.
+_NAV_HOLDINGS_CORE = (
+    "stock",
+    "options",
+    "bonds",
+    "commodities",
+    "funds",
+    "notes",
+    "crypto",
+    "cfdUnrealizedPl",
+    "forexCfdUnrealizedPl",
+)
+_NAV_HOLDINGS_NAME = re.compile(
+    r"(stock|option|bond|commodit|fund|note|warrant|crypto|cfd|forex|ipo|phys|slb"
+    r"|long|short)",
+    re.IGNORECASE,
+)
+_NAV_NOT_HOLDINGS = re.compile(
+    r"(accrual|component|cash|alias|model|^total)", re.IGNORECASE
+)
+# Interest/financing components of the NAV element: all must be zero when the statement
+# claims "no accruals"; the core ones must be stated.
+_NAV_INTEREST_NAME = re.compile(r"(interest|financing|incentive)", re.IGNORECASE)
+_NAV_INTEREST_CORE = (
+    "interestAccruals",
+    "brokerInterestAccrualsComponent",
+    "marginFinancingChargeAccruals",
+)
+
+
+def _nav_numbers(
+    nav: ET.Element, selector: re.Pattern[str], exclude: re.Pattern[str] | None
+) -> tuple[dict[str, Decimal], bool]:
+    """The selected NAV attributes as numbers, and whether any is unknown: a blank or
+    whitespace value is not an explicit zero; a non-numeric or non-finite one refuses
+    the statement, as it always has."""
+
+    out: dict[str, Decimal] = {}
+    unknown = False
+    for key, value in nav.attrib.items():
+        if selector.search(key) and not (exclude and exclude.search(key)):
+            if not value.strip():
+                unknown = True  # blank or whitespace: unknown, not an explicit zero
+            else:
+                # any non-blank value must be a finite decimal, or the file is refused
+                out[key] = _decimal(value, f"nav.{key}")
+    return out, unknown
+
+
+_LOT_VALUE_TOLERANCE = Decimal(1)
+
+
+def _lot_coverage_gaps(sections: list[ET.Element]) -> int:
+    """Instruments whose LOT rows are not proven covered by their SUMMARY row.
+
+    Exposure is read from the SUMMARY rows only, so every instrument (conid, else symbol)
+    that has LOT rows must have a SUMMARY row of the same instrument, and the LOT
+    quantities must add up to the SUMMARY quantity and the LOT values to the SUMMARY value
+    (within one unit of the position currency).  Every pinned statement meets this
+    exactly; anything else is partial evidence, not an exposure."""
+
+    summary: dict[str, list[Decimal]] = {}
+    lots: dict[str, list[Decimal]] = {}
+    unkeyed = 0
+    for section in sections:
+        for item in section:
+            if _local(item.tag) != "OpenPosition":
+                continue
+            level = item.attrib.get("levelOfDetail")
+            if level not in ("SUMMARY", "LOT"):
+                continue
+            key = _optional(item.attrib.get("conid")) or _optional(
+                item.attrib.get("symbol")
+            )
+            if key is None:
+                unkeyed += 1
+                continue
+            try:
+                quantity = Decimal(item.attrib.get("position") or "0")
+                value = Decimal(item.attrib.get("positionValue") or "0")
+            except ArithmeticError:
+                unkeyed += 1
+                continue
+            bucket = summary if level == "SUMMARY" else lots
+            total = bucket.setdefault(key, [Decimal(0), Decimal(0)])
+            total[0] += quantity
+            total[1] += value
+    gaps = unkeyed
+    for key, (quantity, value) in lots.items():
+        covering = summary.get(key)
+        if (
+            covering is None
+            or quantity != covering[0]
+            or abs(value - covering[1]) > _LOT_VALUE_TOLERANCE
+        ):
+            gaps += 1
+    return gaps
+
+
+def _not_verified_zero(numbers: tuple[dict[str, Decimal], bool]) -> bool:
+    values, unknown = numbers
+    return unknown or any(v != 0 for v in values.values())
+
+
 def _account_matches(element: ET.Element, raw_account_id: str) -> bool:
     observed = _optional(element.attrib.get("accountId"))
     return observed is None or observed == raw_account_id
@@ -134,6 +239,10 @@ def _require_account_match(element: ET.Element, raw_account_id: str) -> None:
 
 def _elements(parent: ET.Element, name: str) -> list[ET.Element]:
     return [item for item in parent.iter() if _local(item.tag) == name]
+
+
+def _direct(parent: ET.Element, name: str) -> list[ET.Element]:
+    return [item for item in parent if _local(item.tag) == name]
 
 
 def _single(parent: ET.Element, name: str) -> ET.Element:
@@ -355,6 +464,23 @@ class FlexDailyStatement:
     nav_interest_accruals: Decimal | None = None
     nav_broker_interest_accruals_component: Decimal | None = None
     nav_margin_financing_charge_accruals: Decimal | None = None
+    # The statement carried the section (possibly with no rows): an explicit empty
+    # InterestAccruals is the broker's "no accruals", a missing one is "not captured".
+    interest_accruals_section_present: bool = False
+    open_positions_section_present: bool = False
+    # Every child element of the OpenPositions section (any tag, any levelOfDetail), and
+    # the suspect ones: a tag other than OpenPosition, a levelOfDetail other than
+    # SUMMARY/LOT, or a row (any level) whose accountId is absent or another account's.
+    # "No positions" is zero exposure only when the section has no child at all.
+    open_position_rows_total: int = 0
+    open_position_rows_suspect: int = 0
+    # NAV holdings components the statement reports: any nonzero, and whether every core
+    # component is stated at all.
+    nav_holdings_nonzero: bool = False
+    nav_holdings_complete: bool = False
+    # NAV interest/financing components: any nonzero, and whether the core ones are stated.
+    nav_interest_nonzero: bool = False
+    nav_interest_stated: bool = False
 
 
 @dataclass(frozen=True)
@@ -706,10 +832,16 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
             continue
         change_components.append((key, _decimal(value, f"change.{key}")))
 
+    # Positions are read only inside the statement's own OpenPositions section; an
+    # OpenPosition element anywhere else is counted as suspect, never silently collected.
     positions = tuple(
         _position(item, raw_account_id)
-        for item in _elements(element, "OpenPosition")
+        for section in _direct(element, "OpenPositions")
+        for item in section
         if item.attrib.get("levelOfDetail") == "SUMMARY"
+    )
+    outside_rows = len(_elements(element, "OpenPosition")) - sum(
+        len(list(section)) for section in _direct(element, "OpenPositions")
     )
     trades = tuple(
         _trade(item, raw_account_id)
@@ -720,6 +852,33 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         _cash_report(item, raw_account_id)
         for item in _elements(element, "CashReportCurrency")
     )
+    for name in ("InterestAccruals", "OpenPositions"):
+        # the section is a direct child of the statement; a copy nested elsewhere is not
+        # the statement's section and must not read as present
+        if len(_elements(element, name)) != len(_direct(element, name)):
+            raise FlexValidationError(f"{name} is nested inside another element")
+    for name in ("OpenPositions", "InterestAccruals"):
+        # The statement's sections carry no attributes (every pinned statement agrees); an
+        # attribute such as error="..." on a section is unparsed content, not a benign one.
+        for section in _direct(element, name):
+            if section.attrib:
+                raise FlexValidationError(f"{name} carries unexpected attributes")
+    for section in _direct(element, "OpenPositions"):
+        # stray text or a child other than OpenPosition (a renamed row, an error message)
+        # is unparsed content, never an empty section
+        if (section.text or "").strip() or any(
+            _local(child.tag) != "OpenPosition" or (child.tail or "").strip()
+            for child in section
+        ):
+            raise FlexValidationError("OpenPositions holds unknown content")
+    for section in _direct(element, "InterestAccruals"):
+        # a renamed or unknown child, or stray text, must not read as "empty"
+        if (section.text or "").strip() or any(
+            _local(child.tag) != "InterestAccrualsCurrency"
+            or (child.tail or "").strip()
+            for child in section
+        ):
+            raise FlexValidationError("InterestAccruals holds an unknown element")
     interest_accruals = tuple(
         _interest_accrual(item, raw_account_id)
         for item in _elements(element, "InterestAccrualsCurrency")
@@ -769,6 +928,35 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         cash_reports=cash_reports,
         interest_accruals=interest_accruals,
         tier_interest=tier_interest,
+        interest_accruals_section_present=bool(_direct(element, "InterestAccruals")),
+        open_positions_section_present=bool(_direct(element, "OpenPositions")),
+        open_position_rows_suspect=outside_rows
+        + _lot_coverage_gaps(_direct(element, "OpenPositions"))
+        + sum(
+            1
+            for section in _direct(element, "OpenPositions")
+            for item in section
+            if _local(item.tag) != "OpenPosition"
+            or item.attrib.get("levelOfDetail") not in ("SUMMARY", "LOT")
+            or _optional(item.attrib.get("accountId")) != raw_account_id
+        ),
+        open_position_rows_total=sum(
+            len(list(section)) for section in _direct(element, "OpenPositions")
+        )
+        + outside_rows,
+        # "nonzero" also covers an unknown (blank/non-numeric) holding: not a verified zero
+        nav_holdings_nonzero=_not_verified_zero(
+            _nav_numbers(nav, _NAV_HOLDINGS_NAME, _NAV_NOT_HOLDINGS)
+        ),
+        nav_holdings_complete=all(
+            _optional(nav.attrib.get(key)) is not None for key in _NAV_HOLDINGS_CORE
+        ),
+        nav_interest_nonzero=_not_verified_zero(
+            _nav_numbers(nav, _NAV_INTEREST_NAME, None)
+        ),
+        nav_interest_stated=all(
+            _optional(nav.attrib.get(key)) is not None for key in _NAV_INTEREST_CORE
+        ),
         nav_cash=_optional_decimal(nav.attrib.get("cash"), "nav.cash"),
         nav_broker_cash_component=_optional_decimal(
             nav.attrib.get("brokerCashComponent"), "nav.brokerCashComponent"

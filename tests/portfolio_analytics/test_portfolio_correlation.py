@@ -519,6 +519,8 @@ def _write_mode_fixture(
     backtest_version: str = "v1",
     duplicate_live: bool = False,
     stale_live_series: str | None = None,
+    model_live_series: str | None = None,
+    model_live_start: int = 6,
 ) -> tuple[Path, Path, list[date]]:
     root.mkdir(parents=True)
     days = _days(20)
@@ -536,6 +538,16 @@ def _write_mode_fixture(
                     backtest_version,
                 ]
             )
+            if series_id == model_live_series and index >= model_live_start:
+                rows.append(
+                    [
+                        series_id,
+                        day.isoformat(),
+                        format(value + 0.0003, ".17g"),
+                        "MODEL_LIVE",
+                        "v1",
+                    ]
+                )
             if (
                 index >= 10
                 and not (series_id == "a" and index == 14)
@@ -668,6 +680,77 @@ def test_live_and_backtest_modes_are_separate_and_live_wins_overlap(
         combined_performance["annualization_status"] == "SUPPRESSED_INCLUDES_BACKTEST"
     )
     assert combined_performance["maximum_drawdown"] is not None
+
+
+def test_research_series_is_backtest_then_model_live_and_never_the_account(
+    tmp_path: Path,
+) -> None:
+    """Kill test (Grok 2): a strategy with a model-live layer gets backtest strictly
+    before model-live inception plus MODEL_LIVE; the account is only in LIVE_ONLY.
+    A strategy without one keeps backtest plus account, flagged and never annualised."""
+
+    root = tmp_path / "mode-source"
+    _source, spec, days = _write_mode_fixture(root, model_live_series="a")
+    result, _manifest, _content = correlation.build_correlation(spec, root)
+    modes = cast(dict[str, dict[str, Any]], result["dependence_modes"])
+    live = modes["LIVE_ONLY"]["series_composition"]["a"]
+    research = modes["LIVE_PLUS_BACKTEST"]["series_composition"]["a"]
+
+    assert live["live_evidence_layer"] == "ACCOUNT_LIVE"
+    assert live["live_observations"] == 9
+    assert research["live_evidence_layer"] == "MODEL_LIVE"
+    assert research["live_inception"] == days[6].isoformat()
+    assert research["live_observations"] == 14
+    # backtest strictly before model-live inception, not before the account start
+    assert research["backtest_observations_used"] == 6
+    assert research["layers_present"] == ["BACKTEST", "MODEL_LIVE"]
+    assert research["layer_flags"] == []
+    assert research["status"] == "AVAILABLE_BACKTEST_PREHISTORY_PLUS_MODEL_LIVE"
+    # the research series is not the account path: its live digest is the model's
+    assert (
+        research["canonical_live_series_sha256"] != live["canonical_live_series_sha256"]
+    )
+    performance = modes["LIVE_PLUS_BACKTEST"]["performance"]["a"]
+    assert performance["return_observations"] == 20
+    assert performance["cagr"] is None
+
+    # no model-live source: backtest then account, flagged
+    plain = modes["LIVE_PLUS_BACKTEST"]["series_composition"]["b"]
+    assert plain["live_evidence_layer"] == "ACCOUNT_LIVE"
+    assert plain["layers_present"] == ["BACKTEST", "ACCOUNT_LIVE"]
+    assert plain["layer_flags"] == ["NO_MODEL_LIVE_LAYER"]
+    assert modes["LIVE_ONLY"]["series_composition"]["b"]["layer_flags"] == []
+
+
+def test_drawdown_component_never_emits_a_collapsed_backtest_plus_layer(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "mode-source"
+    _source, spec, _days = _write_mode_fixture(root, model_live_series="a")
+    result, _manifest, _content = correlation.build_correlation(spec, root)
+    text = json.dumps(result)
+    assert "BACKTEST_PLUS_" not in text
+    found: list[Any] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if "evidence_layers" in node and "adverse_loss_fraction" in node:
+                found.append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(result)
+    by_series = {item["series_id"]: item for item in found}
+    assert by_series["a"]["evidence_layer"] in {"LIVE_PLUS_BACKTEST", "LIVE_ONLY"}
+    layered = [
+        item["evidence_layers"]
+        for item in found
+        if item["evidence_layers"] and item["evidence_layer"] == "LIVE_PLUS_BACKTEST"
+    ]
+    assert ["BACKTEST", "MODEL_LIVE"] in layered
 
 
 def test_schema_v2_complete_through_is_common_live_series_end(

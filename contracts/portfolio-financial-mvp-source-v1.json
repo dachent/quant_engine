@@ -785,7 +785,7 @@
    },
    "funded_membership": {
     "status": "EVIDENCED",
-    "authority": "HASH_BOUND_IBKR_INTERNAL_TRANSFER_MEMBERSHIP_AND_ACCOUNT_NAV; ZERO_AGGREGATE_INVESTED_CAPITAL_EFFECT; PORT-HISTORY-TRUTH-1",
+    "authority": "HASH_BOUND_IBKR_INTERNAL_TRANSFER_MEMBERSHIP_AND_ACCOUNT_NAV; ZERO_AGGREGATE_INVESTED_CAPITAL_EFFECT; PORT-HISTORY-TRUTH-2",
     "effective_start": "2025-11-20",
     "effective_end": null
    },
@@ -908,7 +908,7 @@
    },
    "funded_membership": {
     "status": "EVIDENCED",
-    "authority": "HASH_BOUND_QUANTBASE_FIRST_CAPITAL_RECONCILED_POSITIVE_NAV_AND_COST_BASIS; PORT-HISTORY-TRUTH-1",
+    "authority": "HASH_BOUND_QUANTBASE_FIRST_CAPITAL_RECONCILED_POSITIVE_NAV_AND_COST_BASIS; PORT-HISTORY-TRUTH-2",
     "effective_start": "2024-10-15",
     "effective_end": null
    },
@@ -990,7 +990,7 @@
    },
    "funded_membership": {
     "status": "EVIDENCED",
-    "authority": "HASH_BOUND_MATRIXPORT_SUCCESSFUL_SUBSCRIPTION_AND_FIRST_CONFIRMED_NAV; PORT-HISTORY-TRUTH-1",
+    "authority": "HASH_BOUND_MATRIXPORT_SUCCESSFUL_SUBSCRIPTION_AND_FIRST_CONFIRMED_NAV; PORT-HISTORY-TRUTH-2",
     "effective_start": "2025-12-06",
     "effective_end": null
    },
@@ -1283,10 +1283,10 @@
   }
  ],
  "history_corrections": {
-  "policy_id": "PORT-HISTORY-TRUTH-1",
-  "policy_version": 1,
+  "policy_id": "PORT-HISTORY-TRUTH-2",
+  "policy_version": 2,
   "owner_issue": 319,
-  "splice_policy": "SELECT_ONE_ACCEPTED_LIVE_LAYER; BACKTEST_ONLY_WHEN_EXACT_VERSION_MATCHED_AND_STRICTLY_BEFORE_LIVE_INCEPTION; NEVER_RELABEL_PROVIDER_EVIDENCE_AS_ACCOUNT_LIVE",
+  "splice_policy": "RESEARCH_SERIES_IS_BACKTEST_STRICTLY_BEFORE_MODEL_LIVE_INCEPTION_THEN_MODEL_LIVE_NEVER_ACCOUNT_LIVE; MY_LIVE_SERIES_IS_ACCOUNT_LIVE_ONLY; BACKTEST_ONLY_WHEN_EXACT_VERSION_MATCHED; COPY_RECORD_NEVER_IN_A_SERIES; NEVER_RELABEL_PROVIDER_EVIDENCE_AS_ACCOUNT_LIVE",
   "materialized_segment_identities": [
    {
     "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
@@ -1804,7 +1804,7 @@
     "interval": {
      "assignment_date": null,
      "observed_start": "2020-05-12",
-     "observed_end": "2026-01-21",
+     "observed_end": "2025-05-09",
      "effective_start": null,
      "effective_end": null
     },
@@ -1857,7 +1857,7 @@
       "api"
      ]
     },
-    "disposition_reason": "The governed generation contains one hash-bound live/simulation twin and a reproducible model-return candidate. The exact product version the producer derives is now asserted, and the twin is split at this strategy's own account-live inception: the rows before it are version-matched prehistory, and the simulation that continues beside the live book after it is retained as the not-admitted overlap.",
+    "disposition_reason": "The governed generation contains one hash-bound live/simulation twin and a reproducible model-return candidate. The exact product version the producer derives is asserted, and the twin is split at the model book own live inception: the rows strictly before it are version-matched prehistory, and the simulation that continues beside the live book after it is retained as the not-admitted overlap. The model-live record is a separate layer and the owner account is never part of the research series.",
     "readiness": "READY",
     "blockers": []
    },
@@ -1892,7 +1892,7 @@
     },
     "mode_admission": {
      "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
-     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
+     "LIVE_PLUS_BACKTEST": "NOT_APPLICABLE"
     },
     "readiness": "READY",
     "source_id": "owner-account-live-history",
@@ -1923,6 +1923,62 @@
      "compatibility": "ACCOUNT_OWNED",
      "authority": "SAME_SELECTED_PROVIDER_LEDGER_ACCOUNT_PATH"
     }
+   },
+   {
+    "correction_id": "p123-ai-model-live",
+    "strategy_id": "p123-ai-factor",
+    "source_id": "owner-account-live-history",
+    "evidence_layer": "MODEL_LIVE",
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_PROVIDER_MODEL_BOOK_PERFORMANCE_RECORD"
+    },
+    "capture": {
+     "status": "NOT_CAPTURED",
+     "capture_defect": "MODEL_LIVE_ROWS_NOT_IN_THE_COMMITTED_GENERATION_ADMITTED_AT_THE_NEXT_REAL_DATA_REBUILD",
+     "generation_id": null,
+     "generation_sha256": null,
+     "as_of": null
+    },
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc",
+     "compatibility": "EXACT_MATCH",
+     "authority": "SAME_LIVE_SIM_TWIN_VERSION_AS_THE_BACKTEST"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2025-05-12",
+     "observed_end": null,
+     "effective_start": null,
+     "effective_end": null
+    },
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "MODEL_LIVE_IS_NOT_OWNER_FUNDING"
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "NOT_APPLICABLE",
+     "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"
+    },
+    "source_receipts": [
+     {
+      "artifact_role": "provider-ledger-generation-manifest",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+     }
+    ],
+    "disposition_reason": "The model book own live record from its inception. It continues the research series after the sim-twin backtest ends strictly before it, is never part of the my-live series, and is admitted when the rebuilt provider-ledger generation carries its rows and the release carrier binds that generation here.",
+    "readiness": "REQUIRED_NOT_READY",
+    "blockers": [
+     898
+    ]
    },
    {
     "correction_id": "p123-eu-account-live",
@@ -1961,7 +2017,7 @@
     },
     "mode_admission": {
      "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
-     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
+     "LIVE_PLUS_BACKTEST": "NOT_APPLICABLE"
     },
     "source_receipts": [
      {
@@ -2060,10 +2116,10 @@
     "blockers": []
    },
    {
-    "correction_id": "p123-eu-provider-live",
+    "correction_id": "p123-eu-copy-record",
     "strategy_id": "p123-eu",
     "source_id": "portfolio123-model-generation",
-    "evidence_layer": "PROVIDER_LIVE",
+    "evidence_layer": "COPY_RECORD",
     "history_existence": {
      "status": "EXISTS",
      "authority": "EXACT_CONNECTED_MODEL_HAR_MANAGED_STRATEGY_PERFORMANCE_WITH_EQUITY_CURVE_RECONCILIATION"
@@ -2092,7 +2148,7 @@
      "status": "NOT_APPLICABLE",
      "event_date": null,
      "account_live_start": null,
-     "authority": "PROVIDER_MODEL_IS_NOT_OWNER_FUNDING"
+     "authority": "COPY_RECORD_IS_NOT_OWNER_FUNDING"
     },
     "mode_admission": {
      "LIVE_ONLY": "EXCLUDE_COMPARISON_ONLY",
@@ -2146,10 +2202,84 @@
      "return_observations": 196,
      "transform_id": "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1"
     },
-    "disposition_reason": "The exact provider-managed Strategy performance level is captured and a deterministic candidate P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1 is reproducible. Cash Added reconciles to the equity curve but its financial interpretation is not approved and is not used in the candidate return formula. No provider-live return is admitted; #303 must admit or declare the transform while preserving separation from the IBKR owner account-live path.",
+    "disposition_reason": "The exact provider-managed Strategy performance level is captured and a deterministic candidate P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1 is reproducible. Cash Added reconciles to the equity curve but its financial interpretation is not approved and is not used in the candidate return formula. No copy-record return enters any series (the copy is a diagnostic, refused in every mode); #303 must admit or declare the transform while preserving separation from the IBKR owner account-live path and from the model-live record.",
     "readiness": "REQUIRED_NOT_READY",
     "blockers": [
      303
+    ]
+   },
+   {
+    "correction_id": "p123-eu-model-live",
+    "strategy_id": "p123-eu",
+    "source_id": "strategy-backtests",
+    "evidence_layer": "MODEL_LIVE",
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_PROVIDER_PUBLISHED_DESIGNER_MODEL_EQUITY_CURVE_AFTER_PROVIDER_LAUNCH"
+    },
+    "capture": {
+     "status": "NOT_CAPTURED",
+     "capture_defect": "MODEL_LIVE_ROWS_NOT_IN_THE_COMMITTED_GENERATION_ADMITTED_AT_THE_NEXT_REAL_DATA_REBUILD",
+     "generation_id": null,
+     "generation_sha256": null,
+     "as_of": null
+    },
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
+     "compatibility": "EXACT_MATCH",
+     "authority": "EXACT_RETAINED_VENDOR_VERSION_AFTER_PROVIDER_LAUNCH"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2024-02-19",
+     "observed_end": null,
+     "effective_start": null,
+     "effective_end": null
+    },
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "MODEL_LIVE_IS_NOT_OWNER_FUNDING"
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "NOT_APPLICABLE",
+     "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"
+    },
+    "source_receipts": [
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab"
+     },
+     {
+      "artifact_role": "strategy-backtests-catalog",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/catalog.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "catalog.json",
+      "sha256": "1c9d14c180ef715dc4bbfa41ab47588c5bebde82c30bd16ea7d896b696cc70a5"
+     },
+     {
+      "artifact_role": "strategy-backtests-returns",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/returns.csv",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "returns.csv",
+      "sha256": "b7d66345d5223b007051b1be042b822d399267cce04af798ae75c3367c80af75"
+     }
+    ],
+    "disposition_reason": "The designer model own live record after its provider launch, carried by the same governed designer-model generation as the backtest before it. It continues the research series, is never part of the my-live series, and is admitted when the rebuilt strategy-backtests generation carries its rows and the release carrier binds that generation here.",
+    "readiness": "REQUIRED_NOT_READY",
+    "blockers": [
+     898
     ]
    },
    {

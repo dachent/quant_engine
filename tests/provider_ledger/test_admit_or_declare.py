@@ -267,7 +267,7 @@ def _retained_p123_admit_or_declare_fixture() -> tuple[
     correction = next(
         item
         for item in contract["history_corrections"]["corrections"]
-        if item["correction_id"] == "p123-eu-provider-live"
+        if item["correction_id"] == "p123-eu-copy-record"
     )
     assert correction["capture"] == {
         "status": "CAPTURED_GOVERNED",
@@ -1429,7 +1429,9 @@ def test_finality_requires_selected_native_sources_and_account_scope(
 
 
 def _stage_world(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_spec: dict[str, object] | None = None,
 ) -> tuple[Any, bytes, dict[str, Any], Path, dict[str, object]]:
     """Exercise the real stage/verify producer seam with existing synthetic inputs.
 
@@ -1480,6 +1482,7 @@ def _stage_world(
         "schema_version": 2,
         "strategy_inputs": {},
         "strategy_provider_map": {"synthetic-required": "ibkr"},
+        **(extra_spec or {}),
     }
     spec_path = tmp_path / "spec.json"
     spec_path.write_bytes(canonical_json_bytes(spec))
@@ -2924,3 +2927,183 @@ def test_p123_managed_returns_compound_to_the_reported_total_not_the_marker(
     assert wealth == Decimal(150) / Decimal(100)
     marker_wealth = (Decimal(1) + Decimal(3) / 100) * (Decimal(1) + Decimal(1) / 100)
     assert wealth != marker_wealth
+
+
+def test_the_run_observation_identity_ignores_roots_and_finality_directories() -> None:
+    """Kill test (#907 item 5): a real-shaped observation names each provider's absolute
+    root and finality-evidence path; the receipt's identity of it must not move with them."""
+
+    def observation(root: str, evidence_dir: str, evidence_sha: str) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "financial_cutoff": "2026-11-06",
+            "captured_at_utc": "2026-11-10T12:00:00Z",
+            "policy_contract_sha256": "c" * 64,
+            "providers": {
+                provider: {
+                    "root": f"{root}/{provider}",
+                    "generation_id": "a" * 64,
+                    "finality_evidence": {
+                        "path": f"{evidence_dir}{chr(92)}{provider}{chr(92)}finality.json",
+                        "sha256": evidence_sha,
+                        "size_bytes": 10,
+                    },
+                }
+                for provider in ("ibkr", "schwab")
+            },
+        }
+
+    from quant_engine.portfolio_ledger.provider_admission import (
+        run_observation_identity,
+    )
+
+    world_a = run_observation_identity(
+        observation("/world-F/c", "/world-F/finality", "e" * 64)
+    )
+    world_b = run_observation_identity(
+        observation("D:/other/world-proof/c", "D:/other/f", "e" * 64)
+    )
+    assert world_a == world_b
+    # the evidence content still binds: a different file hash is a different identity
+    assert world_a != run_observation_identity(
+        observation("/world-F/c", "/world-F/finality", "f" * 64)
+    )
+
+
+def _identity_observation(roots: dict[str, str]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "financial_cutoff": "2026-11-06",
+        "providers": {
+            provider: {
+                "root": root,
+                "generation_id": "a" * 64,
+                "finality_evidence": {
+                    "path": f"{root}/finality.json",
+                    "sha256": "e" * 64,
+                    "size_bytes": 10,
+                },
+            }
+            for provider, root in roots.items()
+        },
+    }
+
+
+def test_the_run_observation_identity_binds_every_provider_root() -> None:
+    """Kill test (R4): same inputs under two world names share one identity; a provider
+    pointing at a different root layout, or two providers swapping roots, does not; and
+    the identity does not depend on the order the providers are listed."""
+
+    from quant_engine.portfolio_ledger.provider_admission import (
+        run_observation_identity,
+    )
+
+    world_f = {"ibkr": "/world-F/runs/a", "schwab": "/world-F/runs/b"}
+    bs = chr(92)
+    world_p = {
+        "ibkr": bs.join(("D:", "w-proof", "runs", "a")),
+        "schwab": bs.join(("D:", "w-proof", "runs", "b")),
+    }
+    base = run_observation_identity(_identity_observation(world_f))
+    assert base == run_observation_identity(_identity_observation(world_p))
+    assert base == run_observation_identity(
+        _identity_observation(dict(reversed(list(world_f.items()))))
+    )
+    moved = {"ibkr": "/world-F/runs/a", "schwab": "/world-F/runs/other"}
+    assert base != run_observation_identity(_identity_observation(moved))
+    swapped = {"ibkr": "/world-F/runs/b", "schwab": "/world-F/runs/a"}
+    assert base != run_observation_identity(_identity_observation(swapped))
+
+
+def test_the_run_observation_locator_refuses_two_distinct_matching_files(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+
+    import portfolio_pipeline_materialize as materialize
+
+    name = "run-observation.json"
+    first = _identity_observation({"ibkr": "/w/runs/a", "schwab": "/w/runs/b"})
+    # same identity (world name differs), different raw bytes
+    second = _identity_observation({"ibkr": "/x/runs/a", "schwab": "/x/runs/b"})
+    top = tmp_path / "top"
+    (top / "gen" / "inner").mkdir(parents=True)
+    (tmp_path / name).write_text(json.dumps(first), encoding="utf-8")
+    (top / name).write_text(json.dumps(second), encoding="utf-8")
+    identity = materialize.run_observation_identity(first)[0]
+    assert identity == materialize.run_observation_identity(second)[0]
+    assert (
+        hashlib.sha256((top / name).read_bytes()).hexdigest()
+        != hashlib.sha256((tmp_path / name).read_bytes()).hexdigest()
+    )
+    with pytest.raises(materialize.MaterializationError, match="ambiguous"):
+        materialize._locate_run_observation(None, top / "gen" / "inner", name, identity)
+    (tmp_path / name).unlink()
+    assert (
+        materialize._locate_run_observation(None, top / "gen" / "inner", name, identity)
+        == top / name
+    )
+
+
+def test_the_run_observation_identity_survives_the_real_two_prefix_layout() -> None:
+    """Kill test (round-2 R4): the real observation keeps one root under the world
+    directory and the other roots under the owner's data folders, so no textual common
+    prefix exists.  World name, drive, profile and case must not enter the identity;
+    each root's own leaf still does."""
+
+    from quant_engine.portfolio_ledger.provider_admission import (
+        run_observation_identity,
+    )
+
+    def world(name: str, data: str, drive: str = "C:") -> dict[str, Any]:
+        return _identity_observation(
+            {
+                "matrixport": f"{drive}/Dev/scratch/qe-r3/{name}/matrixport",
+                "ibkr": f"{data}/dataIBKR",
+                "schwab": f"{data}/dataSchwab",
+            }
+        )
+
+    profile = "C:/Users/Someone/V Capital/investing - Documents/_quant_engine"
+    base = run_observation_identity(world("world-F", profile))
+    assert base == run_observation_identity(world("world-G", profile))
+    assert base == run_observation_identity(world("world-A2", profile.upper(), "D:"))
+    assert base == run_observation_identity(
+        world("w-x", "E:/other-owner/_quant_engine".replace("/", chr(92)))
+    )
+    renamed_leaf = _identity_observation(
+        {
+            "matrixport": "C:/Dev/scratch/qe-r3/world-F/matrixport",
+            "ibkr": f"{profile}/dataIBKR-other",
+            "schwab": f"{profile}/dataSchwab",
+        }
+    )
+    assert base != run_observation_identity(renamed_leaf)
+
+
+def test_a_point_row_states_why_it_is_unmapped() -> None:
+    accounts, strategies = {"a"}, {"s1", "s2"}
+    both = {
+        "a": [
+            {
+                "strategy_id": "s1",
+                "effective_start": "2026-01-01",
+                "effective_end": None,
+            },
+            {
+                "strategy_id": "s2",
+                "effective_start": "2026-01-01",
+                "effective_end": None,
+            },
+        ]
+    }
+    row = {"account_id": "a", "as_of_date": "2026-02-01"}
+    reason = ledger._point_unmapped_reason
+    assert reason(row, accounts, strategies, both) == "MAPPING_AMBIGUOUS_POINT"
+    assert reason(row, accounts, strategies, {"a": []}) == "MAPPING_NO_ACTIVE_INTERVAL"
+    assert (
+        reason(
+            {"account_id": "z", "as_of_date": "2026-02-01"}, accounts, strategies, both
+        )
+        == "MAPPING_ACCOUNT_OR_DAY_UNKNOWN"
+    )

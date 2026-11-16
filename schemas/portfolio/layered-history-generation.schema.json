@@ -170,7 +170,7 @@
         "contract_sha256": {"$ref": "#/$defs/sha256"},
         "product_id": {"const": "FINANCIAL_MVP"},
         "product_version": {"type": "string", "minLength": 1},
-        "history_policy_id": {"const": "PORT-HISTORY-TRUTH-1"},
+        "history_policy_id": {"const": "PORT-HISTORY-TRUTH-2"},
         "history_policy_version": {"type": "integer", "minimum": 1}
       }
     },

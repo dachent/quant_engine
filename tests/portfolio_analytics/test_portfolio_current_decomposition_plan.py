@@ -1820,6 +1820,68 @@ def test_hybrid_fallback_rejects_unavailable_live_history(
         )
 
 
+def _withhold_model_live(
+    monkeypatch: pytest.MonkeyPatch, *, live_status: str = "AVAILABLE"
+) -> None:
+    original_load = planner._load_json
+
+    def coverage(path: Path, name: str) -> tuple[dict[str, Any], bytes]:
+        value, content = original_load(path, name)
+        if name == "layered coverage":
+            qsi = next(
+                row for row in value["strategies"] if row["strategy_id"] == "qsi"
+            )
+            qsi["modes"]["LIVE_PLUS_BACKTEST"]["status"] = "REQUIRED_NOT_READY"
+            qsi["modes"]["LIVE_PLUS_BACKTEST"]["reason"] = (
+                "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED"
+            )
+            qsi["modes"]["LIVE_ONLY"]["status"] = live_status
+        return value, content
+
+    monkeypatch.setattr(planner, "_load_json", coverage)
+
+
+def test_unadmitted_model_live_is_declared_never_labelled_as_no_prehistory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The account-only fallback names the missing MODEL_LIVE layer (R10)."""
+    inputs = _fixture(tmp_path)
+    _withhold_model_live(monkeypatch)
+    outputs, manifest = planner.build_bundle(
+        evidence_mode="LIVE_PLUS_BACKTEST",
+        **{key: value for key, value in inputs.items() if key != "plan_document"},
+    )
+    compositions = {
+        series: composition
+        for spec in manifest["specs"]
+        for series, composition in json.loads(outputs[spec["path"]])[
+            "series_composition"
+        ].items()
+    }
+    assert compositions["QSI"]["status"] == (
+        "LIVE_ONLY_RESEARCH_SERIES_WITHHELD_MODEL_LIVE_NOT_ADMITTED"
+    )
+    assert compositions["QSI"]["missing_layer"] == "MODEL_LIVE"
+    assert compositions["QSI"]["backtest_observations_used"] == 0
+    # a strategy that merely lacks matched prehistory keeps its own label
+    assert compositions["TT Portfolio"]["status"] == (
+        "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+    )
+    assert "missing_layer" not in compositions["TT Portfolio"]
+
+
+def test_unadmitted_model_live_without_account_series_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _fixture(tmp_path)
+    _withhold_model_live(monkeypatch, live_status="REQUIRED_NOT_READY")
+    with pytest.raises(planner.CurrentPlanError, match="is not ready for qsi"):
+        planner.build_bundle(
+            evidence_mode="LIVE_PLUS_BACKTEST",
+            **{key: value for key, value in inputs.items() if key != "plan_document"},
+        )
+
+
 def test_layered_history_age_warns_and_release_qc_states_the_same_age(
     tmp_path: Path,
 ) -> None:

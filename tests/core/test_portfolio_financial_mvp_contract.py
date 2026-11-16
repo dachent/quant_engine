@@ -1075,7 +1075,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "91c6d4a8da1f8fb1ef76d0a908347a03a1214e59ae3ea2218a16b33595baf3f8"
+        "98f35a39b2f000bc49d53ac25470f0eea4ef851140937c5c65aca66371d58d1b"
     )
 
 
@@ -1892,7 +1892,7 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     erased_correction = next(
         row
         for row in erased_correction_assertion["history_corrections"]["corrections"]
-        if row["correction_id"] == "p123-eu-provider-live"
+        if row["correction_id"] == "p123-eu-copy-record"
     )
     erased_correction["strategy_version"] = {
         "status": "UNRESOLVED",
@@ -1922,7 +1922,7 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     p123_eu_correction = next(
         row
         for row in swapped_correction_receipts["history_corrections"]["corrections"]
-        if row["correction_id"] == "p123-eu-provider-live"
+        if row["correction_id"] == "p123-eu-copy-record"
     )
     p123_eu_correction["source_receipts"] = [
         row
@@ -2054,7 +2054,7 @@ def test_p123_history_accepts_exact_eu_vintage_with_current_ai_vintage() -> None
     """The accepted EU evidence remains distinct from the current AI generation."""
 
     contract = _contract()
-    eu = _history_correction(contract, "p123-eu-provider-live")
+    eu = _history_correction(contract, "p123-eu-copy-record")
     ai = _history_correction(contract, "p123-ai-backtest-candidate")
 
     assert eu["capture"] == {
@@ -2121,7 +2121,7 @@ def test_p123_eu_historical_capture_rejects_accepted_authority_tampering(
     field: str, replacement: str
 ) -> None:
     contract = _contract()
-    eu = _history_correction(contract, "p123-eu-provider-live")
+    eu = _history_correction(contract, "p123-eu-copy-record")
     eu["capture"][field] = replacement
 
     with pytest.raises(
@@ -2144,7 +2144,7 @@ def test_p123_eu_historical_receipts_reject_accepted_authority_tampering(
     artifact_role: str,
 ) -> None:
     contract = _contract()
-    eu = _history_correction(contract, "p123-eu-provider-live")
+    eu = _history_correction(contract, "p123-eu-copy-record")
     receipt = next(
         row for row in eu["source_receipts"] if row["artifact_role"] == artifact_role
     )
@@ -3055,10 +3055,10 @@ def test_history_existence_capture_and_evidence_layers_are_separate() -> None:
 def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None:
     contract = _contract()
     history = contract["history_corrections"]
-    assert history["policy_id"] == "PORT-HISTORY-TRUTH-1"
+    assert history["policy_id"] == "PORT-HISTORY-TRUTH-2"
     assert history["owner_issue"] == 319
     rows = history["corrections"]
-    assert len(rows) == 19
+    assert len(rows) == 21
     segment_identities = history["materialized_segment_identities"]
     assert [row["segment_id"] for row in segment_identities] == sorted(
         row["segment_id"] for row in segment_identities
@@ -3099,7 +3099,9 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         ("robuxio-crypto", "ACCOUNT_LIVE"),
         ("p123-ai-factor", "BACKTEST"),
         ("p123-eu", "BACKTEST"),
-        ("p123-eu", "PROVIDER_LIVE"),
+        ("p123-eu", "COPY_RECORD"),
+        ("p123-eu", "MODEL_LIVE"),
+        ("p123-ai-factor", "MODEL_LIVE"),
         ("p123-eu", "ACCOUNT_LIVE"),
         ("volatis-strategy", "BACKTEST"),
         ("volatis-strategy", "PROVIDER_LIVE"),
@@ -3129,7 +3131,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     assert robux_provider["interval"]["observed_end"] == "2025-12-05"
     assert set(robux_provider["mode_admission"].values()) == {"EXCLUDE_COMPARISON_ONLY"}
 
-    p123_provider = _history_correction(contract, "p123-eu-provider-live")
+    p123_provider = _history_correction(contract, "p123-eu-copy-record")
     assert p123_provider["capture"]["status"] == "CAPTURED_GOVERNED"
     assert p123_provider["strategy_version"]["compatibility"] == "EXACT_MATCH"
     assert p123_provider["interval"]["observed_start"] == "2025-11-13"
@@ -3268,7 +3270,9 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1"
         in p123_provider["disposition_reason"]
     )
-    assert "No provider-live return is admitted" in p123_provider["disposition_reason"]
+    assert (
+        "No copy-record return enters any series" in p123_provider["disposition_reason"]
+    )
 
     reordered = copy.deepcopy(contract)
     reordered["history_corrections"]["materialized_segment_identities"][0:2] = reversed(
@@ -3436,7 +3440,7 @@ def test_history_correction_omission_and_capture_conflation_fail() -> None:
 
 def test_provider_history_cannot_be_relabelled_or_assignment_funded() -> None:
     relabelled = copy.deepcopy(_contract())
-    provider = _history_correction(relabelled, "p123-eu-provider-live")
+    provider = _history_correction(relabelled, "p123-eu-copy-record")
     provider["mode_admission"]["LIVE_ONLY"] = "INCLUDE_SELECTED_LIVE"
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
@@ -3456,6 +3460,92 @@ def test_provider_history_cannot_be_relabelled_or_assignment_funded() -> None:
         _validate(assignment_funded)
 
 
+def test_layer_boundaries_copy_account_and_model_live() -> None:
+    """Kill tests per layer boundary (PORT-HISTORY-TRUTH-2)."""
+
+    # EU: the designer curve is MODEL_LIVE from provider launch, the copy is a
+    # COPY_RECORD, and neither is a provider-live layer any more.
+    layers = contract_tool.HISTORY_CORRECTION_LAYERS["p123-eu"]
+    assert {"MODEL_LIVE", "COPY_RECORD"} <= layers and "PROVIDER_LIVE" not in layers
+    contract = _contract()
+    model = _history_correction(contract, "p123-eu-model-live")
+    assert model["evidence_layer"] == "MODEL_LIVE"
+    assert model["interval"]["observed_start"] == "2024-02-19"
+    assert _history_correction(contract, "p123-eu-copy-record")["evidence_layer"] == (
+        "COPY_RECORD"
+    )
+    # AI: the sim-twin backtest ends strictly before model-live inception.
+    ai_backtest = _history_correction(contract, "p123-ai-backtest-candidate")
+    ai_model = _history_correction(contract, "p123-ai-model-live")
+    assert ai_backtest["interval"]["observed_end"] == "2025-05-09"
+    assert ai_model["interval"]["observed_start"] == "2025-05-12"
+
+    # The copy never enters a series, in any mode.
+    copied = copy.deepcopy(_contract())
+    _history_correction(copied, "p123-eu-copy-record")["mode_admission"][
+        "LIVE_PLUS_BACKTEST"
+    ] = "INCLUDE_MODEL_LIVE_RESEARCH"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError, match="provider history was relabeled"
+    ):
+        _validate(copied)
+
+    # The account is never in the research series of a strategy with model live.
+    spliced = copy.deepcopy(_contract())
+    _history_correction(spliced, "p123-ai-factor-account-live")["mode_admission"][
+        "LIVE_PLUS_BACKTEST"
+    ] = "INCLUDE_SELECTED_LIVE"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="account-live history entered the research series",
+    ):
+        _validate(spliced)
+
+    # Model live is not my live, and cannot be admitted uncaptured.
+    in_live_only = copy.deepcopy(_contract())
+    _history_correction(in_live_only, "p123-eu-model-live")["mode_admission"][
+        "LIVE_ONLY"
+    ] = "INCLUDE_SELECTED_LIVE"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError, match="model-live entered LIVE_ONLY"
+    ):
+        _validate(in_live_only)
+    uncaptured = copy.deepcopy(_contract())
+    _history_correction(uncaptured, "p123-ai-model-live")["mode_admission"][
+        "LIVE_PLUS_BACKTEST"
+    ] = "INCLUDE_MODEL_LIVE_RESEARCH"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="incompatible model-live entered the research series",
+    ):
+        _validate(uncaptured)
+
+    # A backtest that runs into model-live inception is refused, even though it
+    # still ends before the account's own start.
+    overlapping = copy.deepcopy(_contract())
+    _history_correction(overlapping, "p123-ai-backtest-candidate")["interval"][
+        "observed_end"
+    ] = "2025-05-12"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="backtest is not strictly before live inception",
+    ):
+        _validate(overlapping)
+
+    # The strict-before rule cannot be dodged by a different admission string: a
+    # backtest runs into model-live inception under an inclusion the check did not
+    # recognise, and is refused for that admission.
+    relabelled_admission = copy.deepcopy(_contract())
+    backtest = _history_correction(relabelled_admission, "p123-ai-backtest-candidate")
+    backtest["interval"]["observed_end"] = "2025-05-12"
+    backtest["mode_admission"]["LIVE_PLUS_BACKTEST"] = "INCLUDE_MODEL_LIVE_RESEARCH"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="backtest research admission differs",
+    ):
+        _validate(relabelled_admission)
+
+
 def test_history_truth_recurrence_mutations_fail_closed() -> None:
     unbound_echo = copy.deepcopy(_contract())
     echo = _history_correction(
@@ -3469,7 +3559,7 @@ def test_history_truth_recurrence_mutations_fail_closed() -> None:
         _validate(unbound_echo)
 
     p123_wrong_owner = copy.deepcopy(_contract())
-    provider = _history_correction(p123_wrong_owner, "p123-eu-provider-live")
+    provider = _history_correction(p123_wrong_owner, "p123-eu-copy-record")
     provider["blockers"] = [320]
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
@@ -3478,7 +3568,7 @@ def test_history_truth_recurrence_mutations_fail_closed() -> None:
         _validate(p123_wrong_owner)
 
     p123_unbound_transform = copy.deepcopy(_contract())
-    provider = _history_correction(p123_unbound_transform, "p123-eu-provider-live")
+    provider = _history_correction(p123_unbound_transform, "p123-eu-copy-record")
     provider["source_receipts"] = [
         receipt
         for receipt in provider["source_receipts"]
@@ -3491,7 +3581,7 @@ def test_history_truth_recurrence_mutations_fail_closed() -> None:
         _validate(p123_unbound_transform)
 
     p123_rewritten_identity = copy.deepcopy(_contract())
-    provider = _history_correction(p123_rewritten_identity, "p123-eu-provider-live")
+    provider = _history_correction(p123_rewritten_identity, "p123-eu-copy-record")
     provider["derived_evidence_identity"]["return_observations"] = 155
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
@@ -3500,7 +3590,7 @@ def test_history_truth_recurrence_mutations_fail_closed() -> None:
         _validate(p123_rewritten_identity)
 
     p123_impossible_overlap = copy.deepcopy(_contract())
-    provider = _history_correction(p123_impossible_overlap, "p123-eu-provider-live")
+    provider = _history_correction(p123_impossible_overlap, "p123-eu-copy-record")
     provider["derived_evidence_identity"]["equity_overlap_observations"] = 198
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
@@ -3582,7 +3672,7 @@ def test_incompatible_backtest_splice_and_unbound_generation_fail() -> None:
         _validate(spliced)
 
     unbound = copy.deepcopy(_contract())
-    provider = _history_correction(unbound, "p123-eu-provider-live")
+    provider = _history_correction(unbound, "p123-eu-copy-record")
     provider["source_receipts"][0]["sha256"] = "0" * 64
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
@@ -4517,7 +4607,7 @@ def test_generated_views_are_deterministic_and_match_authoritative_bytes(
     assert b"MATRIXPORT:output/20260903T051029.331Z/csv/subscription_details.csv" in (
         first.summary_markdown
     )
-    assert b"p123-eu-provider-live" in first.summary_markdown
+    assert b"p123-eu-copy-record" in first.summary_markdown
     assert b"volatis-backtest-does-not-exist" in first.summary_markdown
     receipts = _outcome(contract, "INVESTED_CAPITAL")["calculation_contract"][
         "owner_decision_receipts"

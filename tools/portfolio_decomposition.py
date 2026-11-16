@@ -3469,6 +3469,7 @@ def _model_result(
     interval_policy: IntervalAssociationPolicy | None,
     *,
     training_cache_root: Path | None = None,
+    freshness_only: bool = False,
 ) -> dict[str, object]:
     if model.as_of_date is not None:
         target_rows = tuple(
@@ -3713,6 +3714,8 @@ def _model_result(
         return _unavailable_result(
             model, target_rows, "UNAVAILABLE_STALE_FACTORS", coverage
         )
+    if freshness_only:
+        return {"status": "FACTORS_FRESH", "series_id": model.series_id}
     if len(train) < model.minimum_train_observations:
         return _unavailable_result(
             model, target_rows, "UNAVAILABLE_INSUFFICIENT_TRAIN_HISTORY", coverage
@@ -4326,6 +4329,42 @@ def _account_basis_coverage(
             "start": rows[0].day.isoformat() if rows else None,
         },
     }
+
+
+FACTOR_UNUSABLE_STATUSES = frozenset(
+    {"UNAVAILABLE_STALE_FACTORS", "UNAVAILABLE_NO_COMPLETE_FACTOR_OBSERVATIONS"}
+)
+
+
+def factor_freshness_findings(spec_path: Path, source_root: Path) -> list[str]:
+    """Models whose factors this build would refuse as stale (or empty), by the build's own check.
+
+    Runs ``_model_result`` up to its staleness verdict and no further, so the limit, the dates and the
+    comparison are the consumer's. Release preflight calls this before the long attended run (R3 refusal 14).
+    """
+
+    spec = _load_spec(spec_path)
+    target_path = _verify_source(source_root, spec.target_source)
+    factor_path = _verify_source(source_root, spec.factor_source)
+    targets = _read_targets(target_path, spec.as_of_date, spec.evidence_mode)
+    factors, _headers = _read_factors(factor_path, spec)
+    definitions = {item.factor_id: item for item in spec.factors}
+    findings = []
+    for model in spec.models:
+        result = _model_result(
+            model,
+            targets.get(model.series_id),
+            factors,
+            definitions,
+            spec.maximum_factor_staleness_days,
+            spec.interval_association.get(
+                model.series_id, spec.default_interval_association
+            ),
+            freshness_only=True,
+        )
+        if result.get("status") in FACTOR_UNUSABLE_STATUSES:
+            findings.append(f"{model.model_id}: {result['status']}")
+    return findings
 
 
 def build_decomposition(

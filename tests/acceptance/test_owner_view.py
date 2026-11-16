@@ -650,3 +650,43 @@ def test_register_seeds_split_the_dead_slot_from_the_real_per_strategy_gap() -> 
     assert by["strategy_summary.cost_evidence_status"] == ov.CHECKER_BUG
     assert by["robuxio-crypto"] == by["volatis-strategy"] == ov.REAL_DATA_GAP
     assert "qsi" not in by  # qsi has costs: only the dead-slot verdict applies to it
+
+
+R3_SHAPE = json.loads((Path(__file__).parent / "owner_view_r3_shape.json").read_bytes())
+# the four section-date rows were closed upstream by the provider-lag rule (the register no
+# longer carries them); every other R3 row must be classified by the shared register
+UPSTREAM_FIXED = {
+    ("dates.section_as_of_vs_cutoff", "C3"),
+}
+
+
+def test_r3_shaped_findings_are_all_classified_by_the_shared_register() -> None:
+    view = ov.build_owner_view(R3_SHAPE, register=REAL_REGISTER, today=TODAY)
+    assert view["registry_errors"] == []
+    unclassified = {
+        (i["ref"]["check_id"], *i["ref"]["defect_ids"])
+        for i in view["items"]
+        if i["class"] == ov.UNCLASSIFIED
+    }
+    assert unclassified == UPSTREAM_FIXED, unclassified
+    assert view["source_findings"] == 34
+
+
+def test_r3_shape_reconciles_and_every_real_item_names_a_fix_owner_and_duration() -> (
+    None
+):
+    view = ov.build_owner_view(R3_SHAPE, register=REAL_REGISTER, today=TODAY)
+    assert {r for i in view["items"] for r in i["finding_refs"]} == set(range(34))
+    for item in view["items"]:
+        assert item["fix"] and item["who"] and item["how_long"], item
+    md = ov.render_markdown(view)
+    assert md.count("\n") < 260  # one generated page, not a dump of 34 rows x entities
+
+
+def test_r3_shape_composer_and_reserve_are_listed_as_real_never_as_not_applicable() -> (
+    None
+):
+    view = ov.build_owner_view(R3_SHAPE, register=REAL_REGISTER, today=TODAY)
+    for item in view["items"]:
+        if "9cb2832ca2366f08" in item["entity"] or "reserve" in item["entity"]:
+            assert item["real_or_checker"] == "real", item["entity"]

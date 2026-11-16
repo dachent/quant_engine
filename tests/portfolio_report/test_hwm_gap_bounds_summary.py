@@ -338,3 +338,66 @@ def test_the_panel_mirrors_the_report_receipt_rules(tmp_path: Path) -> None:
             governed_proof=PROOF,
             gap_bounds_path=bounds,
         )
+
+
+def _e2_findings(summary: dict[str, Any]) -> list[Any]:
+    """Run the validator's completeness check on a report holding only ``summary``."""
+
+    from types import SimpleNamespace
+
+    from acceptance.validate import checks
+
+    ctx = checks.Context(
+        gen=SimpleNamespace(report={"hwm_summary": summary}, panel={}),  # type: ignore[arg-type]
+        cutoff=__import__("datetime").date(2026, 9, 3),
+        cutoff_source="test",
+    )
+    return [
+        f
+        for f in checks.check_completeness(ctx)
+        if "E2" in f.defect_ids and f.entity == "hwm_summary"
+    ]
+
+
+def test_validator_reachability_the_bounded_summary_clears_e2(tmp_path: Path) -> None:
+    """#899/#895 E2: hwm_summary and hwm_governed_proof no longer disagree.
+
+    Builder-class output with every missing point bounded passes the validator's
+    numeric-HWM gate; the same output with a gap that could hide a peak is refused.
+    """
+
+    assert _e2_findings(_report(tmp_path)) == []
+    hidden = _report(tmp_path, range_high="0.95")
+    assert hidden["hwm_numerical_status"] == "UNAVAILABLE"
+    assert len(_e2_findings(hidden)) == 1
+
+
+@pytest.mark.parametrize("compute", [_report, _panel])
+def test_summary_numbers_are_the_governed_proof_numbers(
+    compute: Any, tmp_path: Path
+) -> None:
+    """The unified summary restates the governed proof (index/100, signed drawdowns)."""
+
+    from decimal import Decimal
+
+    result = compute(tmp_path)
+    assert Decimal(result["hwm_index"]) == Decimal(PROOF["current_index"]) / 100
+    assert Decimal(result["hwm_current_drawdown"]) == -Decimal(
+        PROOF["current_drawdown"]
+    )
+    assert Decimal(result["hwm_maximum_drawdown"]) == -Decimal(
+        PROOF["maximum_drawdown"]
+    )
+
+
+def test_the_pinned_bounds_name_every_hashed_evidence_input() -> None:
+    """#899: the derived days are bound to hashed evidence, not asserted bare."""
+
+    document = json.loads(
+        (
+            REPOSITORY_ROOT / "contracts" / "portfolio-hwm-gap-bounds-v1.json"
+        ).read_bytes()
+    )
+    evidence = document["evidence_sha256"]
+    assert len(evidence) == 5
+    assert all(len(v) == 64 and int(v, 16) >= 0 for v in evidence.values())

@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/model-vs-actual-audit-input.schema.json",
+  "title": "model-vs-actual-audit-bridges (schema_version 1), as emitted by the derive tool",
+  "type": "object",
+  "required": [
+    "artifact",
+    "schema_version",
+    "audit_written",
+    "closure_tolerance_pp",
+    "pulls",
+    "strategies"
+  ],
+  "properties": {
+    "artifact": {
+      "const": "model-vs-actual-audit-bridges"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "audit_written": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "extra_pinned_files": {
+      "type": "object"
+    },
+    "source_manifest": {
+      "type": "object"
+    },
+    "terms_csv": {
+      "type": "object"
+    },
+    "pull_list": {
+      "type": "object"
+    },
+    "closure_tolerance_pp": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "pulls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "pull_id"
+        ],
+        "properties": {
+          "pull_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "strategies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "strategy_id",
+          "windows"
+        ],
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "primary_window_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "windows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "window_id",
+                "label",
+                "kind",
+                "start",
+                "end",
+                "account_return_pct",
+                "model_return_pct",
+                "components"
+              ],
+              "properties": {
+                "window_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "kind": {
+                  "enum": [
+                    "ALIGNED",
+                    "EPOCH"
+                  ]
+                },
+                "start": {
+                  "type": "string",
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                },
+                "end": {
+                  "type": "string",
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                },
+                "days": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "account_return_pct": {
+                  "type": "number"
+                },
+                "model_return_pct": {
+                  "type": "number"
+                },
+                "audit_gap_pp": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "components": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "component_id",
+                      "label",
+                      "pp",
+                      "origin_tag",
+                      "source_ref",
+                      "replacing_pull"
+                    ],
+                    "properties": {
+                      "component_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "label": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "pp": {
+                        "type": "number"
+                      },
+                      "usd": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "origin_tag": {
+                        "enum": [
+                          "O",
+                          "D",
+                          "I"
+                        ]
+                      },
+                      "estimated": {
+                        "type": "boolean"
+                      },
+                      "uncertainty_pp_1sigma": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "source_ref": {
+                        "type": "object",
+                        "required": [
+                          "file",
+                          "sha256",
+                          "columns"
+                        ],
+                        "properties": {
+                          "file": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "columns": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          }
+                        }
+                      },
+                      "replacing_pull": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "sub_components": {
+                        "type": "array"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unavailable": {
+            "type": "array"
+          }
+        }
+      }
+    },
+    "as_of": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    }
+  }
+}

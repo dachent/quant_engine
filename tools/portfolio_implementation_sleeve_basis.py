@@ -55,6 +55,7 @@ from quant_engine.core import canonical_json_bytes
 from quant_engine.core import InterpreterRefusal, require_current_interpreter
 
 import portfolio_implementation_reconciliation as reconciliation
+import series_label
 import strategy_basis
 
 SCHEMA: Final = "implementation-sleeve-basis/1"
@@ -891,12 +892,6 @@ _STATUSES: Final = {
 }
 
 
-ADMISSION_RULING: Final = (
-    "accepted as the model source for the sleeve comparison by the product owner "
-    "ruling on issue 624 option B; the label is kept"
-)
-
-
 def exclusion_disclosure(
     receipt: bytes, model_source_sha256: str, model_provider_id: str
 ) -> dict[str, Any]:
@@ -938,14 +933,12 @@ def exclusion_disclosure(
         **fields,
         "receipt_sha256": _sha256(receipt),
         "statement": (
-            f"The governed provider ledger excludes Portfolio123 live returns "
-            f"(disposition {fields['action']} of {fields['data_class']}, policy "
-            f"{fields['policy_id']} owned by {fields['policy_owner']}, effective from "
-            f"{fields['policy_effective_start']}, reason {fields['reason']}, authority "
-            f"{fields['authority_ref']}). This model comparison therefore reads the "
-            f"pinned performance export of the model book (sha256 "
-            f"{model_source_sha256[:12]}), which is not ledger admitted; it is "
-            f"{ADMISSION_RULING}."
+            f"Model leg: {series_label.LABEL_TEXT[series_label.MODEL_LIVE]}, read from "
+            f"the pinned performance export of the model book (sha256 "
+            f"{model_source_sha256[:12]}). Account leg: "
+            f"{series_label.LABEL_TEXT[series_label.ACCOUNT_LIVE]}. "
+            f"{series_label.LABEL_TEXT[series_label.COPY_RECORD]} is a bridge "
+            f"stage, not a series."
         ),
     }
 

@@ -299,3 +299,21 @@ def test_one_account_missing_the_final_day_is_not_verified(tmp_path: Path) -> No
         verify_run(run_dir, tmp_path / "n.json")
     assert refused.value.reason == "coverage-gaps"
     assert "1 account(s) lack 1 requested weekday(s)" in str(refused.value)
+
+
+def test_a_saved_query_without_the_interest_accruals_section_refuses_at_verify(
+    tmp_path: Path,
+) -> None:
+    """Kill test (round-6): the closure relies on an explicit empty InterestAccruals, so
+    a saved query that omits the section must refuse at capture verification, not read
+    as 'empty'.  (The generation parser keeps accepting older statements without it, so
+    historical replay still works.)"""
+
+    body = activity_xml((ACCOUNT_ONE,), DAYS).replace(b"<InterestAccruals />", b"")
+    assert b"InterestAccruals" not in body
+    run_dir, _ = _staged(tmp_path, body, labels=(account_label(ACCOUNT_ONE),))
+    output = tmp_path / "normalized.json"
+    normalize_run(run_dir, output)
+    with pytest.raises(VerificationError, match="InterestAccruals") as error:
+        verify_run(run_dir, output)
+    assert error.value.reason == "statement-sections"

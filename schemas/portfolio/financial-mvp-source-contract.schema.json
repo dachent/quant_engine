@@ -789,11 +789,11 @@
         "splice_policy"
       ],
       "properties": {
-        "policy_id": {"const": "PORT-HISTORY-TRUTH-1"},
-        "policy_version": {"const": 1},
+        "policy_id": {"const": "PORT-HISTORY-TRUTH-2"},
+        "policy_version": {"const": 2},
         "owner_issue": {"const": 319},
         "splice_policy": {
-          "const": "SELECT_ONE_ACCEPTED_LIVE_LAYER; BACKTEST_ONLY_WHEN_EXACT_VERSION_MATCHED_AND_STRICTLY_BEFORE_LIVE_INCEPTION; NEVER_RELABEL_PROVIDER_EVIDENCE_AS_ACCOUNT_LIVE"
+          "const": "RESEARCH_SERIES_IS_BACKTEST_STRICTLY_BEFORE_MODEL_LIVE_INCEPTION_THEN_MODEL_LIVE_NEVER_ACCOUNT_LIVE; MY_LIVE_SERIES_IS_ACCOUNT_LIVE_ONLY; BACKTEST_ONLY_WHEN_EXACT_VERSION_MATCHED; COPY_RECORD_NEVER_IN_A_SERIES; NEVER_RELABEL_PROVIDER_EVIDENCE_AS_ACCOUNT_LIVE"
         },
         "corrections": {
           "type": "array",
@@ -833,12 +833,13 @@
         "calendar": {"$ref": "#/$defs/nonempty_string"},
         "canonicalization": {"const": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1"},
         "evidence_layer": {
-          "enum": ["ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"]
+          "enum": ["ACCOUNT_LIVE", "BACKTEST", "COPY_RECORD", "MODEL_LIVE", "PROVIDER_LIVE"]
         },
         "frequency": {"$ref": "#/$defs/nonempty_string"},
         "mode_admission": {
           "enum": [
             "EXCLUDE_COMPARISON_ONLY",
+            "INCLUDE_MODEL_LIVE_RESEARCH",
             "INCLUDE_SELECTED_LIVE",
             "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
             "REQUIRED_NOT_READY_OVERLAP"
@@ -885,6 +886,8 @@
           "enum": [
             "ACCOUNT_LIVE",
             "BACKTEST",
+            "COPY_RECORD",
+            "MODEL_LIVE",
             "PROVIDER_LIVE",
             "PROVIDER_TRACK_RECORD"
           ]
@@ -965,7 +968,7 @@
               "enum": ["EXCLUDE_COMPARISON_ONLY", "EXCLUDE_EVENT_ONLY_RECONSTRUCTION", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
             },
             "LIVE_PLUS_BACKTEST": {
-              "enum": ["EXCLUDE_COMPARISON_ONLY", "EXCLUDE_EVENT_ONLY_RECONSTRUCTION", "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
+              "enum": ["EXCLUDE_COMPARISON_ONLY", "EXCLUDE_EVENT_ONLY_RECONSTRUCTION", "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY", "INCLUDE_MODEL_LIVE_RESEARCH", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
             }
           }
         },

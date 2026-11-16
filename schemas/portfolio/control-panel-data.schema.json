@@ -3763,7 +3763,7 @@
         "prefixItems": [
           { "type": "integer", "minimum": 0 },
           { "type": "integer", "minimum": 0 },
-          { "enum": ["LIVE", "BACKTEST", "MIXED", "DERIVED", "PROVIDER_MODEL_LIVE"] }
+          { "enum": ["ACCOUNT_LIVE", "BACKTEST", "MIXED", "DERIVED", "MODEL_LIVE"] }
         ]
       }
     },

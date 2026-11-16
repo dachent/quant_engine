@@ -126,8 +126,12 @@ HISTORY_CORRECTION_LAYERS: Final = {
     # separate live track record for them, so ACCOUNT_LIVE and BACKTEST are the
     # only layers that can exist.
     "grizzlybears-vtma": frozenset({"ACCOUNT_LIVE", "BACKTEST"}),
-    "p123-ai-factor": frozenset({"ACCOUNT_LIVE", "BACKTEST"}),
-    "p123-eu": frozenset({"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"}),
+    # The P123 strategies have three owner layers plus the copy P123 keeps of the
+    # owner following the model.  MODEL_LIVE is the model's own live record
+    # (the research series continues on it after the backtest ends); the
+    # COPY_RECORD is a diagnostic and is refused in every mode.
+    "p123-ai-factor": frozenset({"ACCOUNT_LIVE", "BACKTEST", "MODEL_LIVE"}),
+    "p123-eu": frozenset({"ACCOUNT_LIVE", "BACKTEST", "COPY_RECORD", "MODEL_LIVE"}),
     "qsi": frozenset({"ACCOUNT_LIVE", "BACKTEST"}),
     "robuxio-crypto": frozenset(
         {"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"}
@@ -135,9 +139,17 @@ HISTORY_CORRECTION_LAYERS: Final = {
     "tt-portfolio": frozenset({"ACCOUNT_LIVE", "BACKTEST"}),
     "volatis-strategy": frozenset({"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"}),
 }
+HISTORY_POLICY_ID: Final = "PORT-HISTORY-TRUTH-2"
+HISTORY_POLICY_VERSION: Final = 2
+# Two series kinds, never mixed: the research series is BACKTEST strictly before
+# model-live inception then MODEL_LIVE (the account is never in it); the
+# my-live series is ACCOUNT_LIVE only.  Where a strategy has no model-live layer
+# the research series keeps its backtest-then-account splice.
 HISTORY_SPLICE_POLICY: Final = (
-    "SELECT_ONE_ACCEPTED_LIVE_LAYER; BACKTEST_ONLY_WHEN_EXACT_VERSION_MATCHED_AND_"
-    "STRICTLY_BEFORE_LIVE_INCEPTION; NEVER_RELABEL_PROVIDER_EVIDENCE_AS_ACCOUNT_LIVE"
+    "RESEARCH_SERIES_IS_BACKTEST_STRICTLY_BEFORE_MODEL_LIVE_INCEPTION_THEN_MODEL_LIVE_"
+    "NEVER_ACCOUNT_LIVE; MY_LIVE_SERIES_IS_ACCOUNT_LIVE_ONLY; "
+    "BACKTEST_ONLY_WHEN_EXACT_VERSION_MATCHED; COPY_RECORD_NEVER_IN_A_SERIES; "
+    "NEVER_RELABEL_PROVIDER_EVIDENCE_AS_ACCOUNT_LIVE"
 )
 HISTORY_EVIDENCE_ROOTS: Final = frozenset(
     {
@@ -223,12 +235,12 @@ _MATRIXPORT_GAP_SPAN_RECEIPTS: Final = (
         "subscription_events_in_span": 0,
     },
 )
-_HISTORY_AUTHORITY_COMMIT: Final = "9881627d999f3a1535c5e1d7a8b5aa31c9462db4"
+_HISTORY_AUTHORITY_COMMIT: Final = "65d809ec58674668b57f898c58d363be4229f7b1"
 _HISTORY_AUTHORITY_RAW_SHA256: Final = (
-    "51ff0a0cd1c820f4d85e456fff1c9f777aba9e7f0ac4fab72c992dcdf2f43ecd"
+    "ef8f452dc6684e1d1c061b7b339df1fcbb3dc174d4fa810d08b87ea7808b0b09"
 )
 _HISTORY_AUTHORITY_SEMANTIC_SHA256: Final = (
-    "ebc2d2476b7b022684a65d71d6ef3791e1c936daf9edddf5c38b3d3240fd9e1c"
+    "98f35a39b2f000bc49d53ac25470f0eea4ef851140937c5c65aca66371d58d1b"
 )
 _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
     "accepted_generation_id": (
@@ -1282,7 +1294,7 @@ def _verify_strategy_version_history_evidence(
     ) -> dict[str, object]:
         strategy_id = _text(row.get("strategy_id"), "history correction strategy_id")
         correction_id = _text(row.get("correction_id"), "history correction_id")
-        retain_accepted_p123_eu = correction_id == "p123-eu-provider-live"
+        retain_accepted_p123_eu = correction_id == "p123-eu-copy-record"
         semantic_row = (
             current_corrections_by_id.get(correction_id, row)
             if accepted_authority
@@ -3820,9 +3832,11 @@ def _validate_history_corrections(
         },
         "history_corrections",
     )
-    if policy["policy_id"] != "PORT-HISTORY-TRUTH-1":
+    if policy["policy_id"] != HISTORY_POLICY_ID:
         raise FinancialMvpContractError("history correction policy identity differs")
-    if policy["policy_version"] != 1 or policy["owner_issue"] != 319:
+    if policy["policy_version"] != HISTORY_POLICY_VERSION or (
+        policy["owner_issue"] != 319
+    ):
         raise FinancialMvpContractError(
             "history correction policy owner/version differs"
         )
@@ -3945,9 +3959,12 @@ def _validate_history_corrections(
         if layer not in {
             "ACCOUNT_LIVE",
             "BACKTEST",
+            "COPY_RECORD",
+            "MODEL_LIVE",
             "PROVIDER_LIVE",
         } or admission not in {
             "EXCLUDE_COMPARISON_ONLY",
+            "INCLUDE_MODEL_LIVE_RESEARCH",
             "INCLUDE_SELECTED_LIVE",
             "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
             "REQUIRED_NOT_READY_OVERLAP",
@@ -3959,7 +3976,16 @@ def _validate_history_corrections(
             raise FinancialMvpContractError(
                 f"materialized history segment selected-live authority differs: {segment_id}"
             )
-        if layer == "PROVIDER_LIVE" and admission != "EXCLUDE_COMPARISON_ONLY":
+        # Each owner layer has exactly one admission: the account is the selected
+        # live path, the model's own record is the research series' live leg.
+        if (layer == "MODEL_LIVE") != (admission == "INCLUDE_MODEL_LIVE_RESEARCH"):
+            raise FinancialMvpContractError(
+                f"materialized history segment model-live authority differs: {segment_id}"
+            )
+        if (
+            layer in {"PROVIDER_LIVE", "COPY_RECORD"}
+            and admission != "EXCLUDE_COMPARISON_ONLY"
+        ):
             raise FinancialMvpContractError(
                 f"materialized provider history entered an admitted mode: {segment_id}"
             )
@@ -3975,6 +4001,7 @@ def _validate_history_corrections(
         strategy_id: set() for strategy_id in HISTORY_CORRECTION_LAYERS
     }
     account_live_starts: dict[str, date] = {}
+    model_live_starts: dict[str, date] = {}
     funding_dates: dict[str, date] = {}
     rows = _objects(policy["corrections"], "history_corrections.corrections")
     for row in rows:
@@ -3996,7 +4023,7 @@ def _validate_history_corrections(
         }
         if row.get("correction_id") == "echotrade-event-only-account-live-rejected":
             expected_correction_keys.add("rejected_evidence_identity")
-        if row.get("correction_id") == "p123-eu-provider-live":
+        if row.get("correction_id") == "p123-eu-copy-record":
             expected_correction_keys.add("derived_evidence_identity")
         if row.get("correction_id") == "p123-ai-backtest-candidate":
             expected_correction_keys.add("derived_backtest_identity")
@@ -4087,7 +4114,7 @@ def _validate_history_corrections(
                         "deprecated event-only history must retain its legacy receipt: "
                         f"{correction_id}"
                     )
-            elif correction_id != "p123-eu-provider-live" and (
+            elif correction_id != "p123-eu-copy-record" and (
                 source_generation["generation_id"] != generation_id
                 or source_generation["sha256"] != generation_sha
                 or source_generation["as_of"] != capture["as_of"]
@@ -4255,28 +4282,72 @@ def _validate_history_corrections(
         hybrid = _text(
             modes["LIVE_PLUS_BACKTEST"], "history LIVE_PLUS_BACKTEST admission"
         )
-        if layer in {"PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"} and (
+        if layer in {"COPY_RECORD", "PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"} and (
             live_only != "EXCLUDE_COMPARISON_ONLY"
             or hybrid != "EXCLUDE_COMPARISON_ONLY"
         ):
             raise FinancialMvpContractError(
                 f"provider history was relabeled into an accepted mode: {correction_id}"
             )
+        has_model_live_layer = "MODEL_LIVE" in HISTORY_CORRECTION_LAYERS[strategy_id]
         if (
             layer == "ACCOUNT_LIVE"
             and funding_status == "EVIDENCED"
-            and (
-                live_only != "INCLUDE_SELECTED_LIVE"
-                or hybrid != "INCLUDE_SELECTED_LIVE"
-            )
+            and live_only != "INCLUDE_SELECTED_LIVE"
         ):
             raise FinancialMvpContractError(
                 f"evidenced account-live history is not selected live: {correction_id}"
             )
+        if layer == "ACCOUNT_LIVE" and funding_status == "EVIDENCED":
+            # The account is in the research series only where the strategy has
+            # no model-live layer to continue on.
+            expected_hybrid = (
+                "NOT_APPLICABLE" if has_model_live_layer else "INCLUDE_SELECTED_LIVE"
+            )
+            if hybrid != expected_hybrid:
+                raise FinancialMvpContractError(
+                    f"account-live history entered the research series: {correction_id}"
+                    if has_model_live_layer
+                    else f"evidenced account-live history is not selected live: {correction_id}"
+                )
+        if layer == "MODEL_LIVE":
+            if live_only != "NOT_APPLICABLE":
+                raise FinancialMvpContractError(
+                    f"model-live entered LIVE_ONLY: {correction_id}"
+                )
+            if hybrid not in {"INCLUDE_MODEL_LIVE_RESEARCH", "REQUIRED_NOT_READY"}:
+                raise FinancialMvpContractError(
+                    f"model-live research admission differs: {correction_id}"
+                )
+            if hybrid == "INCLUDE_MODEL_LIVE_RESEARCH" and (
+                capture_status != "CAPTURED_GOVERNED"
+                or version_status != "EVIDENCED"
+                or compatibility != "EXACT_MATCH"
+            ):
+                raise FinancialMvpContractError(
+                    f"incompatible model-live entered the research series: {correction_id}"
+                )
+            if compatibility == "ACCOUNT_OWNED":
+                raise FinancialMvpContractError(
+                    f"model-live carries account-owned version: {correction_id}"
+                )
+            if observed_start is None:
+                raise FinancialMvpContractError(
+                    f"model-live lacks an inception date: {correction_id}"
+                )
+            model_live_starts[strategy_id] = observed_start
         if layer == "BACKTEST":
             if live_only != "NOT_APPLICABLE":
                 raise FinancialMvpContractError(
                     f"backtest entered LIVE_ONLY: {correction_id}"
+                )
+            if hybrid.startswith("INCLUDE") and hybrid != (
+                "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
+            ):
+                # Only the exact-version admission is judged against live inception
+                # below; any other inclusion would slip past that check.
+                raise FinancialMvpContractError(
+                    f"backtest research admission differs: {correction_id}"
                 )
             if hybrid == "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY" and (
                 capture_status != "CAPTURED_GOVERNED"
@@ -4428,13 +4499,22 @@ def _validate_history_corrections(
         ):
             continue
         account_start = account_live_starts.get(str(row["strategy_id"]))
+        # Where the strategy has a model-live layer the backtest hands over to it,
+        # not to the account: it must end strictly before MODEL-LIVE inception.
+        model_start = model_live_starts.get(str(row["strategy_id"]))
+        live_start = model_start if model_start is not None else account_start
         backtest_end = _optional_date(
             row["interval"]["observed_end"], "backtest observed_end"
         )
         if (
-            account_start is None
+            live_start is None
             or backtest_end is None
-            or backtest_end >= account_start
+            or backtest_end >= live_start
+            or (
+                model_start is not None
+                and account_start is not None
+                and model_start > account_start
+            )
         ):
             raise FinancialMvpContractError(
                 f"backtest is not strictly before live inception: {row['correction_id']}"
@@ -4532,7 +4612,7 @@ def _validate_history_corrections(
         raise FinancialMvpContractError(
             "P123 AI backtest bypasses its unresolved version disposition"
         )
-    p123_provider = correction_by_id["p123-eu-provider-live"]
+    p123_provider = correction_by_id["p123-eu-copy-record"]
     p123_identity = _object(
         p123_provider["derived_evidence_identity"],
         "P123 EU derived evidence identity",
@@ -4595,10 +4675,10 @@ def _validate_history_corrections(
         or "tables/har_managed_performance.parquet" not in p123_receipts
         or p123_transform_id not in p123_disposition
         or "financial interpretation is not approved" not in p123_disposition
-        or "No provider-live return is admitted" not in p123_disposition
+        or "No copy-record return enters any series" not in p123_disposition
     ):
         raise FinancialMvpContractError(
-            "P123 EU provider history bypasses its unadmitted transform disposition"
+            "P123 EU copy record bypasses its unadmitted transform disposition"
         )
     p123_account = correction_by_id["p123-eu-account-live"]
     p123_funding_authority = _text(
