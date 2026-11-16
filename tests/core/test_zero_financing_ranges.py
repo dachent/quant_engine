@@ -279,6 +279,16 @@ def test_a_closing_cash_ladder_gives_exact_debit_days_and_zero_days() -> None:
         )
 
 
+RAW_DEBT = "\n".join(
+    line
+    for line in RAW.replace(
+        "$100.00 $0.00 ($300.00) $0.00 $250.00 $0.00 $0.00 $50.00",
+        "$100.00 $0.00 ($300.00) $0.00 $0.00 $0.00 $0.00 ($200.00)",
+    ).split("\n")
+    if not line.startswith(("03/05", "(10.0", "Industry"))
+)
+
+
 def test_a_financing_month_without_interest_rows_is_read_from_its_cash_ladder(
     tmp_path: Path,
 ) -> None:
@@ -296,7 +306,7 @@ def test_a_financing_month_without_interest_rows_is_read_from_its_cash_ladder(
         {LABEL: (ACCOUNT, LAST3)},
         provider_id=PROVIDER,
         extract=lambda _p: text,
-        extract_raw=lambda _p: RAW,
+        extract_raw=lambda _p: RAW_DEBT,
     )
     rows = {r["as_of_date"]: r for r in artifact["rows"]}
     assert len(rows) == 31
@@ -306,7 +316,8 @@ def test_a_financing_month_without_interest_rows_is_read_from_its_cash_ladder(
         debit["amount"]["value"] == "200.00"
         and debit["amount_measurement"] == "DAY_BALANCE_DERIVED"
     )
-    assert rows["2026-03-05"]["classification"] == "ZERO_FINANCING_OBSERVED"
+    assert rows["2026-03-02"]["classification"] == "ZERO_FINANCING_OBSERVED"
+    assert rows["2026-03-31"]["amount_measurement"] == "STATEMENT_CLOSING_BALANCE"
     zf.validate_rows(artifact, {ACCOUNT})
     # without a closing ladder the month stays unobserved
     broken = zf.build(
@@ -315,7 +326,7 @@ def test_a_financing_month_without_interest_rows_is_read_from_its_cash_ladder(
         {LABEL: (ACCOUNT, LAST3)},
         provider_id=PROVIDER,
         extract=lambda _p: text,
-        extract_raw=lambda _p: RAW.replace("(300.00)", "(299.00)"),
+        extract_raw=lambda _p: RAW_DEBT.replace("(300.00)", "(299.00)"),
     )
     assert [r["amount_measurement"] for r in broken["rows"]] == [
         "STATEMENT_CLOSING_BALANCE"
@@ -528,3 +539,93 @@ def _build_raw(tmp_path: Path, texts: dict[str, str]) -> Any:
         extract=lambda path: texts[path.name],
         extract_raw=lambda _p: FLAT,
     )
+
+
+def _build_with(tmp_path: Path, texts: dict[str, str], raw: str) -> Any:
+    sums = {}
+    for name in texts:
+        (tmp_path / name).write_bytes(name.encode())
+        sums[name] = hashlib.sha256(name.encode()).hexdigest()
+    return zf.build(
+        tmp_path,
+        sums,
+        {LABEL: (ACCOUNT, LAST3)},
+        provider_id=PROVIDER,
+        extract=lambda path: texts[path.name],
+        extract_raw=lambda _p: raw,
+    )
+
+
+def _plain_march(opening: str, closing: str) -> str:
+    return _with_loan(
+        _statement("March 1-31, 2026", paid=None, rows=(), posting=False),
+        opening,
+        closing,
+    )
+
+
+def test_one_default_refuse_rule_covers_every_ladder_probe(tmp_path: Path) -> None:
+    """Kill tests (Fable N-2/N-3/N-4/N-5/N-6): a ladder day is published only if every
+    printed fact about its month agrees; otherwise the whole month's ladder is discarded."""
+
+    def ladder_reason(artifact: Any) -> str:
+        return str(artifact["interest_reconciliation"][0]["cash_ladder"])
+
+    # N-2: a printed $5,000 loan at either boundary with a ladder that never goes debit
+    for opening, closing, reason in (
+        ("$5,000.00", "$5,000.00", "LADDER_CONTRADICTS_OPENING_LOAN"),
+        ("$0.00", "$5,000.00", "LADDER_CONTRADICTS_CLOSING_LOAN"),
+    ):
+        text = _plain_march(opening, closing)
+        artifact = _build_with(tmp_path, {MARCH: text}, FLAT)
+        assert ladder_reason(artifact) == reason
+        assert {r["as_of_date"] for r in artifact["rows"]} == {"2026-03-31"}
+    # N-4: a printed zero closing loan beats a ladder that ends in debit cash
+    negative = FLAT.replace(
+        "$100.00 $0.00 $0.00 $0.00 $0.00 $0.00 $0.00 $100.00",
+        "($4.27) $0.00 $0.00 $0.00 $0.00 $0.00 $0.00 ($4.27)",
+    )
+    zero_closing = _build_with(
+        tmp_path, {MARCH: _plain_march("$5.00", "$0.00")}, negative
+    )
+    assert ladder_reason(zero_closing) == "LADDER_CONTRADICTS_ZERO_CLOSING_LOAN"
+    assert zero_closing["rows"] == []
+    # N-5: a reconciled month the ladder disagrees with keeps its interest rows only
+    deep = FLAT.replace(
+        "$100.00 $0.00 $0.00 $0.00 $0.00 $0.00 $0.00 $100.00",
+        "($500.00) $0.00 $0.00 $0.00 $0.00 $0.00 $0.00 ($500.00)",
+    )
+    reconciled = _build_with(tmp_path, {MARCH: _statement("March 1-31, 2026")}, deep)
+    assert ladder_reason(reconciled) == "LADDER_DISAGREES_WITH_RECONCILED_INTEREST"
+    assert not [
+        r
+        for r in reconciled["rows"]
+        if r.get("amount_measurement") == "DAY_BALANCE_DERIVED"
+    ]
+    # N-6: a date alone on a line is never attached to a later row
+    bare = RAW_DEBT.replace(
+        "03/03 Withdrawal Wire Sent X", "03/03\nWithdrawal Wire Sent X"
+    )
+    assert (
+        zf.parse_cash_ladder(bare, date(2026, 3, 1), date(2026, 3, 31))[2]
+        == "BARE_DATE_LINE"
+    )
+
+
+def test_a_zero_day_on_a_printed_range_day_is_refused_by_the_artifact_check(
+    tmp_path: Path,
+) -> None:
+    """Kill test (Fable N-3): validate_rows refuses a zero row inside a printed range."""
+
+    artifact = _march(tmp_path)
+    zero = next(
+        r for r in artifact["rows"] if r["classification"] == "ZERO_FINANCING_OBSERVED"
+    )
+    forged = {
+        **artifact,
+        "printed_range_days": [
+            {"account_id": zero["account_id"], "as_of_date": zero["as_of_date"]}
+        ],
+    }
+    with pytest.raises(zf.ZeroFinancingError, match="printed interest range"):
+        zf.validate_rows(forged, {ACCOUNT})
