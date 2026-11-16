@@ -1264,6 +1264,8 @@ def parse_cash_ladder(
             return None, None, "TRANSACTION_LIST_NOT_CLOSED"
         current: date | None = None
         for line in lines[first + 1 : last]:
+            if re.fullmatch(r"\d{2}/\d{2}", line.strip()):
+                return None, None, "BARE_DATE_LINE"
             match = _LADDER_CATEGORY.match(line.strip())
             if match is None and re.match(r"\d{2}/\d{2}[ \t]+\S", line.strip()):
                 return None, None, "UNKNOWN_TRANSACTION_CATEGORY"
@@ -1312,6 +1314,40 @@ def parse_cash_ladder(
     if ladder[end] != end_cash:
         return None, None, "CASH_LADDER_DOES_NOT_CLOSE"
     return ladder, begin, "CASH_LADDER_CLOSES"
+
+
+def _ladder_discard_reason(
+    record: Mapping[str, Any],
+    start: date,
+    end: date,
+    ladder: Mapping[date, Decimal],
+    all_printed: set[date],
+) -> str | None:
+    """Why a cash ladder cannot be published for its month, or None."""
+
+    coverage = record["coverage"]
+    if record["interest_charged"] and coverage is None:
+        return "LADDER_WITH_UNRECONCILED_INTEREST"
+    for day, balance in ladder.items():
+        if balance >= 0 and day in all_printed:
+            return "LADDER_CONTRADICTS_PRINTED_RANGE"
+    if coverage is not None:
+        thru, details = coverage
+        own = {d for first, last, *_r in details for d in _days(first, last)}
+        span = {d for a, b in thru for d in _days(a, b)} & set(ladder)
+        for day in span:
+            deep = ladder[day] <= -_INTEREST_DUST
+            if (deep and day not in own) or (day in own and ladder[day] >= 0):
+                return "LADDER_DISAGREES_WITH_RECONCILED_INTEREST"
+    opening, closing = record["loan_opening"], record["loan_closing"]
+    if opening is not None and abs(opening) >= _INTEREST_DUST and ladder[start] >= 0:
+        return "LADDER_CONTRADICTS_OPENING_LOAN"
+    if closing is not None:
+        if abs(closing) >= _INTEREST_DUST and ladder[end] >= 0:
+            return "LADDER_CONTRADICTS_CLOSING_LOAN"
+        if closing == 0 and ladder[end] < 0:
+            return "LADDER_CONTRADICTS_ZERO_CLOSING_LOAN"
+    return None
 
 
 def _refine_table_from_raw(facts: dict[str, Any], raw_text: str) -> None:
@@ -1445,6 +1481,14 @@ def build(
             "loan_opening": facts["loan_block"][0] if facts["loan_block"] else None,
             "no_interest": not facts["margin_interest_postings"]
             and not facts["interest_table_ranges"],
+            "interest_charged": bool(
+                facts["margin_interest_postings"]
+                or facts["interest_table_ranges"]
+                or facts["interest_paid_period"]
+            ),
+            "table_ranges": list(
+                facts["interest_periods"][len(facts["thru_periods"]) :]
+            ),
             "number": facts["full_number"],
             "details_page": facts["details_page"],
             "coverage": None,
@@ -1469,35 +1513,6 @@ def build(
                     )
                 except ZeroFinancingError:
                     ladder, why_ladder = None, "RAW_TEXT_UNAVAILABLE"
-                if ladder is not None and facts["range_details"]:
-                    # a printed debit range must be a debit stretch of the ladder too
-                    checked = ladder
-                    for first_day, last_day, *_rest in facts["range_details"]:
-                        for printed in _days(first_day, last_day):
-                            if (
-                                facts["period_start"] <= printed <= facts["period_end"]
-                                and checked[printed] >= 0
-                            ):
-                                ladder, why_ladder = (
-                                    None,
-                                    "LADDER_CONTRADICTS_PRINTED_RANGE",
-                                )
-                if ladder is not None and (
-                    facts["margin_interest_postings"] or facts["interest_table_ranges"]
-                ):
-                    # interest was charged: the ladder must show a debit day in the span
-                    charged_span = {
-                        d for a, b in facts["interest_periods"] for d in _days(a, b)
-                    }
-                    if not any(
-                        balance < 0
-                        for day, balance in ladder.items()
-                        if day in charged_span
-                    ):
-                        ladder, why_ladder = (
-                            None,
-                            "LADDER_SHOWS_NO_DEBIT_FOR_CHARGED_INTEREST",
-                        )
                 periods[key]["ladder"] = ladder
                 periods[key]["ladder_reason"] = why_ladder
         for first, last in facts["interest_periods"]:
@@ -1758,6 +1773,26 @@ def build(
         if hit is not None:
             row["amount_measurement"] = RANGE_AVERAGE
         rows.append(row)
+    # Every printed fact about a ladder's days must agree with it, or the month's whole
+    # ladder is discarded (the days stay unobserved): interest charged without a reconciled
+    # table, a printed range over a non-debit day (this statement's or any other's), a
+    # reconciled month the ladder disagrees with, and printed loan balances at the month's
+    # boundaries that the ladder contradicts.
+    printed_range_days: dict[str, set[date]] = {}
+    for (account, _s, _e), record in periods.items():
+        for first_day, last_day in record["table_ranges"]:
+            printed_range_days.setdefault(account, set()).update(
+                _days(first_day, last_day)
+            )
+    for (account, start, end), record in periods.items():
+        ladder = record["ladder"]
+        if ladder is None:
+            continue
+        discard = _ladder_discard_reason(
+            record, start, end, ladder, printed_range_days.get(account, set())
+        )
+        if discard is not None:
+            record["ladder"], record["ladder_reason"] = None, discard
     # Months that did not reconcile on interest but whose cash ladder ties to the printed
     # beginning and ending cash: a day with a debit cash balance is a financing day with
     # that exact end-of-day balance, any other day a zero day.
@@ -1858,6 +1893,29 @@ def build(
         ),
         key=lambda r: (r["account_id"], r["as_of_date"]),
     )
+    # zero rows never sit on a printed range day, and a month whose every day has a row is
+    # not listed as unobserved
+    printed_keys = {
+        (a, d.isoformat()) for a, days in printed_range_days.items() for d in days
+    }
+    for row in rows:
+        if (
+            row["classification"] == CLASSIFICATION
+            and (row["account_id"], row["as_of_date"]) in printed_keys
+        ):
+            raise ZeroFinancingError("a zero day lies inside a printed interest range")
+    row_keys = {(r["account_id"], r["as_of_date"]) for r in rows}
+    unobserved[:] = [
+        u
+        for u in unobserved
+        if not all(
+            (u["account_id"], d.isoformat()) in row_keys
+            for d in _days(
+                date.fromisoformat(u["period_start"]),
+                date.fromisoformat(u["period_end"]),
+            )
+        )
+    ]
     keys = [(r["account_id"], r["as_of_date"]) for r in rows]
     if len(keys) != len(set(keys)):
         raise ZeroFinancingError("two statements cover the same account day")
@@ -1877,6 +1935,14 @@ def build(
         "accounts": sorted(seen_accounts),
         "duplicate_period_files": sorted(duplicate_periods),
         "interest_charged_days": removed,
+        "printed_range_days": sorted(
+            (
+                {"account_id": a, "as_of_date": d.isoformat()}
+                for a, days in printed_range_days.items()
+                for d in days
+            ),
+            key=lambda r: (r["account_id"], r["as_of_date"]),
+        ),
         "interest_reconciliation": reconciliation,
         "coverage_gaps": _gaps(periods),
         "capture_decisions": sorted(capture_notes, key=lambda n: n["account_id"]),
@@ -1951,6 +2017,10 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
         "verdict_reason",
     }
     seen: set[tuple[str, str]] = set()
+    printed = {
+        (str(p["account_id"]), str(p["as_of_date"]))
+        for p in artifact.get("printed_range_days", [])
+    }
     for row in artifact["rows"]:
         if not isinstance(row, dict) or set(row) not in (
             keys,
@@ -1989,6 +2059,8 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
         key = (row["account_id"], row["as_of_date"])
         if key in seen:
             raise ZeroFinancingError("zero-financing rows repeat an account day")
+        if row["classification"] == CLASSIFICATION and key in printed:
+            raise ZeroFinancingError("a zero day lies inside a printed interest range")
         seen.add(key)
     return cast(list[Mapping[str, Any]], artifact["rows"])
 
