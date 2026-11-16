@@ -45,10 +45,6 @@ CLASSIFICATION: Final = "ZERO_FINANCING_OBSERVED"
 # average margin daily balance (an average over the range, never a day balance)
 FINANCING_CLASSIFICATION: Final = "OBSERVED_FINANCING_DAY"
 RANGE_AVERAGE: Final = "RANGE_AVERAGE"
-# the exact margin loan balance printed for a statement's last day
-STATEMENT_CLOSING_BALANCE: Final = "STATEMENT_CLOSING_BALANCE"
-# the exact margin loan balance printed as a statement's opening balance
-STATEMENT_OPENING_BALANCE: Final = "STATEMENT_OPENING_BALANCE"
 # a day's end-of-day cash balance derived from the statement's own transactions, tied
 # to its printed beginning and ending cash
 DAY_BALANCE_DERIVED: Final = "DAY_BALANCE_DERIVED"
@@ -208,8 +204,6 @@ def _margin_interest_postings(lines: list[str]) -> tuple[int, bool]:
 _PAIR_REACH = 25
 # below this loan balance a day's interest rounds to nothing and no range is printed
 _INTEREST_DUST = Decimal(15)
-# a cash debit at least this deep contradicts a zero row published from interest evidence
-_ZERO_ROW_CONFLICT = Decimal(100)
 
 
 def _incomplete(lines: list[str]) -> str | None:
@@ -389,7 +383,7 @@ def reconcile_interest(facts: dict[str, Any]) -> tuple[bool, str]:
     if sum((r[4] for r in ranges), Decimal(0)) != paid:
         return False, "INTEREST_DOES_NOT_RECONCILE"
     block = facts["loan_block"]
-    facts["bridges"] = {}
+    facts["bridges"] = set()
     facts["no_zero"] = set()
     if block is not None:
         # A loan outstanding on a statement's first (last) day, inside a charged period, must
@@ -414,7 +408,7 @@ def reconcile_interest(facts: dict[str, Any]) -> tuple[bool, str]:
             day = first_day
             while start <= day <= end and not _is_business(day) and charged(day):
                 if printed_range(day) is None:
-                    facts["bridges"][day] = (abs(block[0]), STATEMENT_OPENING_BALANCE)
+                    facts["bridges"].add(day)
                 day += timedelta(days=1)
 
         opening, closing = block
@@ -436,10 +430,7 @@ def reconcile_interest(facts: dict[str, Any]) -> tuple[bool, str]:
                     crossed.append(day)
                     day += timedelta(days=1)
                 for crossed_day in crossed:
-                    facts["bridges"][crossed_day] = (
-                        abs(opening),
-                        STATEMENT_OPENING_BALANCE,
-                    )
+                    facts["bridges"].add(crossed_day)
                 if charged(start - timedelta(days=1)):
                     # the day before the period carried the loan but printed no interest:
                     # it is not a zero day
@@ -449,7 +440,7 @@ def reconcile_interest(facts: dict[str, Any]) -> tuple[bool, str]:
             while printed_range(day) is None:
                 if not (start <= day <= end) or _is_business(day) or not charged(day):
                     return False, "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES"
-                facts["bridges"][day] = (abs(closing), STATEMENT_CLOSING_BALANCE)
+                facts["bridges"].add(day)
                 day -= timedelta(days=1)
     return True, "INTEREST_RECONCILED"
 
@@ -1545,7 +1536,7 @@ def build(
             "number": facts["full_number"],
             "details_page": facts["details_page"],
             "coverage": None,
-            "bridges": {},
+            "bridges": set(),
             "no_zero": set(),
             "ladder": None,
             "ladder_begin": None,
@@ -1556,7 +1547,7 @@ def build(
         if state == "FINANCING":
             ok, why = reconcile_interest(facts)
             periods[key]["refine_reason"] = why
-            periods[key]["bridges"] = dict(facts.get("bridges", {})) if ok else {}
+            periods[key]["bridges"] = set(facts.get("bridges", ())) if ok else set()
             periods[key]["no_zero"] = set(facts.get("no_zero", ())) if ok else set()
             if ok:
                 periods[key]["coverage"] = (
@@ -1834,15 +1825,11 @@ def build(
             "verdict_reason": (
                 "INTEREST_RECONCILED_NO_RANGE"
                 if hit is None
-                else (
-                    "INTEREST_RANGE_BRIDGED_OVER_NON_BUSINESS_DAYS"
-                    if len(hit) == 4
-                    else f"INTEREST_RANGE_{hit[0]:%m/%d}-{hit[1]:%m/%d}_RECONCILED"
-                )
+                else f"INTEREST_RANGE_{hit[0]:%m/%d}-{hit[1]:%m/%d}_RECONCILED"
             ),
         }
         if hit is not None:
-            row["amount_measurement"] = RANGE_AVERAGE if len(hit) == 5 else hit[3]
+            row["amount_measurement"] = RANGE_AVERAGE
         rows.append(row)
     # Every printed fact about a ladder's days must agree with it, or the month's whole
     # ladder is discarded (the days stay unobserved): interest charged without a reconciled
@@ -1879,16 +1866,6 @@ def build(
         ladder = record["ladder"]
         if ladder is None:
             continue
-        if any(
-            balance <= -_ZERO_ROW_CONFLICT and (account, day.isoformat()) in zero_keys
-            for day, balance in ladder.items()
-        ):
-            # a deep debit day another source published as zero: the sources disagree
-            record["ladder"], record["ladder_reason"] = (
-                None,
-                "LADDER_DISAGREES_WITH_ZERO_ROW",
-            )
-            continue
         final = not any(sp[0] == end + timedelta(days=1) for sp in by_account[account])
         printed_nonzero = any(
             loan is not None and abs(loan) >= _INTEREST_DUST
@@ -1898,11 +1875,19 @@ def build(
         if record["coverage"] is not None:
             tail_from = max(b for _a, b in record["coverage"][0]) + timedelta(days=1)
         for current, balance in sorted(ladder.items()):
-            if (cutoff is not None and current > cutoff) or (
-                (account, current.isoformat()) in have
-            ):
+            if cutoff is not None and current > cutoff:
                 continue
             debit = balance < 0
+            day_key = (account, current.isoformat())
+            if day_key in have:
+                if not (debit and day_key in zero_keys):
+                    continue
+                # an interest-evidence zero never overrides an observed cash debit (interest
+                # on a sub-cent debit is simply not printed): the debit replaces it
+                rows[:] = [
+                    r for r in rows if (r["account_id"], r["as_of_date"]) != day_key
+                ]
+                zero_keys.discard(day_key)
             if not debit and printed_nonzero:
                 # a printed non-zero margin loan beside a non-debit cash day: the loan is a
                 # trade-date figure that may still bear interest, so no zero is published
@@ -2111,13 +2096,7 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
         financing = row.get("classification") == FINANCING_CLASSIFICATION
         if financing != ("amount_measurement" in row) or (
             financing
-            and row["amount_measurement"]
-            not in (
-                RANGE_AVERAGE,
-                STATEMENT_CLOSING_BALANCE,
-                STATEMENT_OPENING_BALANCE,
-                DAY_BALANCE_DERIVED,
-            )
+            and row["amount_measurement"] not in (RANGE_AVERAGE, DAY_BALANCE_DERIVED)
         ):
             raise ZeroFinancingError("financing-day row must declare RANGE_AVERAGE")
         try:

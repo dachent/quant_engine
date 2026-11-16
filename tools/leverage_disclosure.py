@@ -82,6 +82,15 @@ def _text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+# days the market closed outside the regular calendar (national days of mourning, storms)
+_SPECIAL_CLOSURES: Final = (
+    date(2012, 10, 29),
+    date(2012, 10, 30),
+    date(2018, 12, 5),
+    date(2025, 1, 9),
+)
+
+
 def _easter(year: int) -> date:
     a, b, c = year % 19, year // 100, year % 100
     d, e = b // 4, b % 4
@@ -118,6 +127,7 @@ def market_holidays(year: int) -> set[date]:
         return day
 
     fixed = [date(year, 7, 4), date(year, 12, 25)]
+    fixed.extend(d for d in _SPECIAL_CLOSURES if d.year == year)
     if date(year, 1, 1).weekday() != 5:  # New Year's Day on a Saturday is not observed
         fixed.append(date(year, 1, 1))
     if year >= 2022:
