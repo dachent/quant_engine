@@ -1075,7 +1075,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "98f35a39b2f000bc49d53ac25470f0eea4ef851140937c5c65aca66371d58d1b"
+        "927186caf3124b87faf3e1c28db4eaa889bec31df873ae49fcbdf83b7cf7faad"
     )
 
 
@@ -3511,9 +3511,17 @@ def test_layer_boundaries_copy_account_and_model_live() -> None:
     ):
         _validate(in_live_only)
     uncaptured = copy.deepcopy(_contract())
-    _history_correction(uncaptured, "p123-ai-model-live")["mode_admission"][
-        "LIVE_PLUS_BACKTEST"
-    ] = "INCLUDE_MODEL_LIVE_RESEARCH"
+    _uncaptured_row = _history_correction(uncaptured, "p123-ai-model-live")
+    _uncaptured_row["capture"] = {
+        "status": "NOT_CAPTURED",
+        "capture_defect": "MODEL_LIVE_ROWS_NOT_CAPTURED",
+        "generation_id": None,
+        "generation_sha256": None,
+        "as_of": None,
+    }
+    _uncaptured_row["mode_admission"]["LIVE_PLUS_BACKTEST"] = (
+        "INCLUDE_MODEL_LIVE_RESEARCH"
+    )
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match="incompatible model-live entered the research series",
@@ -4447,11 +4455,13 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # correction removes only that consumer from the historical source rows.
     # Moved again by the 2026-10-16 Matrixport NAV gap declaration (#287 V3).
     # Moved again by the R3 FX re-selection (generation ff77af45, through 2026-11-06).
+    # Moved again by the model-live admission (EU strategy-backtests restaged onto
+    # the EU model-live seed; AI and EU model-live corrections READY).
     # The affected product-data-class pins are then rederived from those changed
     # source identities, including the four verified source-class bindings;
     # financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "0e52172b1ce1829e3773530a0d26611582259d4dae62fb314cf30b23a96154c0"
+        "a42b41e22e9da8dacb79a03669626ad78b05f47b9b3738a9278c9a22b6df38d2"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4488,7 +4498,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "0e52172b1ce1829e3773530a0d26611582259d4dae62fb314cf30b23a96154c0"
+        "a42b41e22e9da8dacb79a03669626ad78b05f47b9b3738a9278c9a22b6df38d2"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
