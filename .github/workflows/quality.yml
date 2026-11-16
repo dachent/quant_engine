@@ -271,6 +271,7 @@ jobs:
           tools/portfolio_model_vs_actual_derive.py
           tools/portfolio_cash_drag.py
           tools/portfolio_cash_drag_spec.py
+          tools/zero_financing_statements.py
       - name: Resolve controller graph change range
         id: controller_graph_range
         shell: bash
