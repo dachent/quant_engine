@@ -754,3 +754,27 @@ def test_a_carried_loan_is_never_a_zero_day_on_non_business_days_or_in_a_last_ta
         if r["verdict_reason"] == "CASH_LADDER_CLOSES"
     }
     assert "2026-03-30" not in tail and "2026-03-31" not in tail
+
+
+def test_a_bridged_day_carries_the_printed_balance_not_a_range_average(
+    tmp_path: Path,
+) -> None:
+    """Kill test (Opus X1/X2/Y): nothing settles on a holiday, so a bridged day's balance is
+    the printed opening loan, whatever the following range averages."""
+
+    jan = "schwab-stmt-" + LABEL + "-2026-01-31.pdf"
+    text = _with_loan(
+        _statement(
+            "January 1-31, 2026",
+            paid="19.71",
+            rows=("01/02-01/04   (20,000.00) 11.825   19.71",),
+            thru="12/27THRU 01/26",
+        ),
+        "$50,000.00",
+        "$0.00",
+    )
+    artifact = _build(tmp_path, {jan: text})
+    holiday = {r["as_of_date"]: r for r in artifact["rows"]}["2026-01-01"]
+    assert holiday["amount"]["value"] == "50000.00"
+    assert holiday["amount_measurement"] == "STATEMENT_OPENING_BALANCE"
+    zf.validate_rows(artifact, {ACCOUNT})
