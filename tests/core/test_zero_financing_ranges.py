@@ -778,3 +778,27 @@ def test_a_bridged_day_carries_the_printed_balance_not_a_range_average(
     assert holiday["amount"]["value"] == "50000.00"
     assert holiday["amount_measurement"] == "STATEMENT_OPENING_BALANCE"
     zf.validate_rows(artifact, {ACCOUNT})
+
+
+def test_the_first_business_day_after_a_carried_loan_is_a_financing_day_not_zero(
+    tmp_path: Path,
+) -> None:
+    """Control ruling (691 Dec 2025): a repayment on the first day need not clear the whole
+    loan ($5,176.06 against $6,723.56), so that day carries the printed opening loan."""
+
+    dec = "schwab-stmt-" + LABEL + "-2025-12-31.pdf"
+    text = _with_loan(
+        _statement(
+            "December 1-31, 2025",
+            paid="8.21",
+            rows=("11/26-11/30   (5,000.00) 11.825   8.21",),
+            thru="11/26THRU 12/29",
+        ),
+        "$5,000.00",
+        "$0.00",
+    )
+    artifact = _build(tmp_path, {dec: text})
+    first = {r["as_of_date"]: r for r in artifact["rows"]}["2025-12-01"]
+    assert first["classification"] == "OBSERVED_FINANCING_DAY"
+    assert first["amount"]["value"] == "5000.00"
+    assert first["amount_measurement"] == "STATEMENT_OPENING_BALANCE"

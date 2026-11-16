@@ -411,11 +411,16 @@ def reconcile_interest(facts: dict[str, Any]) -> tuple[bool, str]:
             return any(a <= day <= b for a, b in periods)
 
         def bridge(first_day: date) -> None:
-            """Non-business days after the period's carried-in loan: nothing settles on
-            them, so each carries the printed opening loan exactly."""
+            """The period's first day (a repayment need not clear the whole loan) and the
+            non-business days after the carried-in loan: each carries the printed opening
+            loan exactly, never zero."""
 
             day = first_day
-            while start <= day <= end and not _is_business(day) and charged(day):
+            while (
+                start <= day <= end
+                and (day == first_day or not _is_business(day))
+                and charged(day)
+            ):
                 if printed_range(day) is None:
                     facts["bridges"][day] = (abs(block[0]), STATEMENT_OPENING_BALANCE)
                 day += timedelta(days=1)
