@@ -45,6 +45,10 @@ FINANCING_CLASSIFICATION: Final = "OBSERVED_FINANCING_DAY"
 RANGE_AVERAGE: Final = "RANGE_AVERAGE"
 # the exact margin loan balance printed for a statement's last day
 STATEMENT_CLOSING_BALANCE: Final = "STATEMENT_CLOSING_BALANCE"
+# a day's end-of-day cash balance derived from the statement's own transactions, tied
+# to its printed beginning and ending cash
+DAY_BALANCE_DERIVED: Final = "DAY_BALANCE_DERIVED"
+# the only provider whose statement layout this reader knows
 
 _MONTHS: Final = {name: i for i, name in enumerate(calendar.month_name) if name}
 _PERIOD = re.compile(
@@ -65,6 +69,8 @@ _TITLES = (
         "retirement",
     ),
 )
+# the layout is the one of the provider whose name opens its titles
+LAYOUT_PROVIDER_ID: Final = _TITLES[0][0].pattern.split()[0].lower()
 # identifiers printed on statements that are not the account's own number
 _NON_ACCOUNT_IDS = frozenset({"2101-0500", "0616-1160"})
 _LOAN_MOVE = re.compile(
@@ -1120,6 +1126,135 @@ def evaluate_capture(
     return True, "BRACKET_PROVEN_BY_CAPTURE"
 
 
+_SUMMARY_ROW_AMOUNT = re.compile(r"\(?-?\$[\d,]+\.\d\d\)?")
+_LADDER_CATEGORY = re.compile(
+    r"^(?:(\d{2})/(\d{2})[ \t]+)?(Purchase|Sale|Dividend|Interest|Withdrawal|Deposit|"
+    r"Expense|Other)\b(?![(/])"
+)
+_LADDER_COLUMN = {
+    "Deposit": 1,
+    "Withdrawal": 2,
+    "Purchase": 3,
+    "Sale": 4,
+    "Dividend": 5,
+    "Interest": 5,
+    "Expense": 6,
+}
+_REALIZED = re.compile(r"\(?[\d,]+\.\d\d\)?,?\((?:ST|LT)\)")
+_ROW_AMOUNT = re.compile(r"(?<![\d$.,/\-])\(?-?[\d,]+\.\d\d\)?(?![\d.,%])")
+
+
+def _pdftotext_raw(path: Path) -> str:
+    """The statement text in content-stream order (one transaction per run of lines, the
+    amounts beside their own rows), where the physical layout interleaves columns."""
+
+    try:
+        result = subprocess.run(
+            ["pdftotext", "-raw", str(path), "-"], check=True, capture_output=True
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        raise ZeroFinancingError(
+            f"statement text cannot be extracted: {path.name}"
+        ) from exc
+    return result.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
+
+
+def parse_cash_ladder(
+    raw_text: str, start: date, end: date
+) -> tuple[dict[date, Decimal] | None, Decimal | None, str]:
+    """(end-of-day cash balance for every day of the statement period, beginning cash, reason).
+
+    The balance of a day is the printed beginning cash plus every transaction amount dated
+    on or before it.  It is returned only when the statement ties out: the eight printed
+    cash summary amounts add up, each summary column equals the sum of its category of
+    transaction rows to the cent, every row has a date inside the period and a readable
+    amount, and the ladder ends on the printed ending cash.  Anything else is None with the
+    reason (the days stay unobserved), never a guess."""
+
+    lines = raw_text.replace("\r\n", "\n").split("\n")
+    try:
+        head = next(
+            n
+            for n, x in enumerate(lines)
+            if x.strip().startswith("Transactions - Summary")
+        )
+    except StopIteration:
+        return None, None, "CASH_SUMMARY_ABSENT"
+    summary: list[Decimal] | None = None
+    for line in lines[head + 1 : head + 16]:
+        found = _SUMMARY_ROW_AMOUNT.findall(line)
+        if len(found) == 8:
+            summary = [_parse_money(x) for x in found]
+            break
+    if summary is None:
+        return None, None, "CASH_SUMMARY_ROW_NOT_FOUND"
+    begin, end_cash = summary[0], summary[7]
+    if begin + sum(summary[1:7], Decimal(0)) != end_cash:
+        return None, None, "CASH_SUMMARY_DOES_NOT_ADD_UP"
+    first = next(
+        (n for n, x in enumerate(lines) if x.strip().startswith("Transaction Details")),
+        None,
+    )
+    last = next(
+        (n for n, x in enumerate(lines) if x.strip().startswith("Total Transactions")),
+        None,
+    )
+    records: list[list[str]] = []
+    dates: list[date | None] = []
+    categories: list[str] = []
+    if first is not None:
+        if last is None or last < first:
+            return None, None, "TRANSACTION_LIST_NOT_CLOSED"
+        current: date | None = None
+        for line in lines[first + 1 : last]:
+            match = _LADDER_CATEGORY.match(line.strip())
+            if match:
+                if match.group(1):
+                    try:
+                        current = date(
+                            end.year, int(match.group(1)), int(match.group(2))
+                        )
+                    except ValueError:
+                        return None, None, "TRANSACTION_DATE_INVALID"
+                    if not start <= current <= end:
+                        return None, None, "TRANSACTION_DATE_OUTSIDE_PERIOD"
+                records.append([line])
+                dates.append(current)
+                categories.append(match.group(3))
+            elif records:
+                records[-1].append(line)
+    column_totals = [Decimal(0)] * 7
+    by_day: dict[date, Decimal] = {}
+    for record, when, category in zip(records, dates, categories, strict=True):
+        if category == "Other":
+            continue  # activity that does not move cash (transfers of securities, ...)
+        if when is None:
+            return None, None, "TRANSACTION_WITHOUT_DATE"
+        text = _REALIZED.sub(" ", " ".join(record))
+        text = re.sub(r"\$[\d,]+\.\d\d", " ", text)
+        amounts = _ROW_AMOUNT.findall(text)
+        if not amounts:
+            return None, None, "TRANSACTION_AMOUNT_ABSENT"
+        try:
+            amount = _parse_money(amounts[-1])
+        except ZeroFinancingError:
+            return None, None, "TRANSACTION_AMOUNT_UNREADABLE"
+        column_totals[_LADDER_COLUMN[category]] += amount
+        by_day[when] = by_day.get(when, Decimal(0)) + amount
+    if column_totals[1:] != list(summary[1:7]):
+        return None, None, "CASH_CATEGORY_TOTALS_DIFFER"
+    ladder: dict[date, Decimal] = {}
+    cash = begin
+    day = start
+    while day <= end:
+        cash += by_day.get(day, Decimal(0))
+        ladder[day] = cash
+        day += timedelta(days=1)
+    if ladder[end] != end_cash:
+        return None, None, "CASH_LADDER_DOES_NOT_CLOSE"
+    return ladder, begin, "CASH_LADDER_CLOSES"
+
+
 def build(
     pdf_dir: Path,
     sums: Mapping[str, str],
@@ -1133,7 +1268,11 @@ def build(
     cutoff: date | None = None,
     history_start: Mapping[str, date] | None = None,
     capture_names: Mapping[str, str] | None = None,
+    extract_raw: Callable[[Path], str] | None = None,
 ) -> dict[str, Any]:
+    if provider_id != LAYOUT_PROVIDER_ID:
+        raise ZeroFinancingError("the statement layout reader is bound to one provider")
+    raw_extract = extract_raw or (_pdftotext_raw if extract is None else None)
     extract = extract or _pdftotext  # resolved at call time
     names = sorted(sums)
     if not names:
@@ -1215,6 +1354,8 @@ def build(
             "loan_closing": facts["loan_block"][1] if facts["loan_block"] else None,
             "number": facts["full_number"],
             "coverage": None,
+            "ladder": None,
+            "ladder_reason": None,
             "refine_reason": None,
             "table_page": facts["table_page"] or facts["header_page"],
         }
@@ -1226,6 +1367,29 @@ def build(
                     list(facts["thru_periods"]),
                     list(facts["range_details"]),
                 )
+            if raw_extract is not None and facts["loan_block"] is not None:
+                periods[key]["ladder_reason"] = "CASH_LADDER_NOT_TRIED"
+                try:
+                    ladder, _begin, why_ladder = parse_cash_ladder(
+                        raw_extract(path), facts["period_start"], facts["period_end"]
+                    )
+                except ZeroFinancingError:
+                    ladder, why_ladder = None, "RAW_TEXT_UNAVAILABLE"
+                if ladder is not None and facts["range_details"]:
+                    # a printed debit range must be a debit stretch of the ladder too
+                    checked = ladder
+                    for first_day, last_day, *_rest in facts["range_details"]:
+                        for printed in _days(first_day, last_day):
+                            if (
+                                facts["period_start"] <= printed <= facts["period_end"]
+                                and checked[printed] >= 0
+                            ):
+                                ladder, why_ladder = (
+                                    None,
+                                    "LADDER_CONTRADICTS_PRINTED_RANGE",
+                                )
+                periods[key]["ladder"] = ladder
+                periods[key]["ladder_reason"] = why_ladder
         for first, last in facts["interest_periods"]:
             interest_days.setdefault(account, set()).update(_days(first, last))
     rows: list[dict[str, Any]] = []
@@ -1461,6 +1625,50 @@ def build(
         if hit is not None:
             row["amount_measurement"] = RANGE_AVERAGE
         rows.append(row)
+    # Months that did not reconcile on interest but whose cash ladder ties to the printed
+    # beginning and ending cash: a day with a debit cash balance is a financing day with
+    # that exact end-of-day balance, any other day a zero day.
+    # A closing ladder is exact where interest ranges are averages: it takes the days of
+    # its own statement period over any coarser row.
+    ladder_days = {
+        (account, day.isoformat())
+        for (account, _s, _e), record in periods.items()
+        if record["ladder"] is not None
+        for day in record["ladder"]
+    }
+    rows[:] = [r for r in rows if (r["account_id"], r["as_of_date"]) not in ladder_days]
+    have = {(r["account_id"], r["as_of_date"]) for r in rows}
+    for (account, start, end), record in sorted(periods.items()):
+        ladder = record["ladder"]
+        if ladder is None:
+            continue
+        for current, balance in sorted(ladder.items()):
+            if (cutoff is not None and current > cutoff) or (
+                (account, current.isoformat()) in have
+            ):
+                continue
+            have.add((account, current.isoformat()))
+            debit = balance < 0
+            ladder_row: dict[str, Any] = {
+                "account_id": account,
+                "as_of_date": current.isoformat(),
+                "amount": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": str(-balance) if debit else "0",
+                },
+                "classification": FINANCING_CLASSIFICATION if debit else CLASSIFICATION,
+                "measurement_basis": BASIS,
+                "provider_id": provider_id,
+                "source_artifact_id": f"{prefix}/{record['name']}",
+                "source_artifact_sha256": record["digest"],
+                "source_field": "Transaction Details: end-of-day cash tied to printed cash",
+                "source_page": record["page"],
+                "verdict_reason": "CASH_LADDER_CLOSES",
+            }
+            if debit:
+                ladder_row["amount_measurement"] = DAY_BALANCE_DERIVED
+            rows.append(ladder_row)
     # A statement that prints a non-zero closing margin loan balance carries an exact
     # borrowing fact for its last day, whatever the rest of the month proves.
     have = {(r["account_id"], r["as_of_date"]) for r in rows}
@@ -1498,6 +1706,7 @@ def build(
                 "period_end": end.isoformat(),
                 "reconciled": record["coverage"] is not None,
                 "reason": record["refine_reason"],
+                "cash_ladder": record["ladder_reason"],
             }
             for (account, start, end), record in periods.items()
             if record["refine_reason"] is not None
@@ -1615,7 +1824,7 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
         if financing != ("amount_measurement" in row) or (
             financing
             and row["amount_measurement"]
-            not in (RANGE_AVERAGE, STATEMENT_CLOSING_BALANCE)
+            not in (RANGE_AVERAGE, STATEMENT_CLOSING_BALANCE, DAY_BALANCE_DERIVED)
         ):
             raise ZeroFinancingError("financing-day row must declare RANGE_AVERAGE")
         try:
