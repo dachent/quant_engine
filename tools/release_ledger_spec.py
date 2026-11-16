@@ -49,6 +49,16 @@ OBSERVATION_NAME = "run-observation.json"
 SPEC_NAME = "ledger-spec.json"
 LEDGER_OUTPUT = "ledger"
 PROVENANCE_CATALOG = "portfolio-provenance.json"
+ZERO_FINANCING_PIN_KEYS = frozenset(
+    {
+        "mapping_path",
+        "mapping_sha256",
+        "provider_id",
+        "statements_dir",
+        "sums_path",
+        "sums_sha256",
+    }
+)
 CARRIED = (
     "strategy_inputs",
     "strategy_provider_map",
@@ -237,8 +247,9 @@ def build(
     ``account_roles`` (the governed declaration file, #900) and ``quantbase_fill_closes``
     (a JSON list of {symbol, path, sha256, size_bytes}, #909) are optional per-cycle pins
     written into the spec; absent, the spec is what it was.  ``zero_financing_observations``
-    is the hash-pinned artifact of provider-observed zero-financing days (see
-    ``zero_financing_statements``); it is pinned by path, sha256 and size.
+    is a pin file (``ZERO_FINANCING_PIN_KEYS``, plus an optional capture trio) naming the
+    retained statements directory, statement sums, account mapping and capture sums, each
+    by path and sha256; the ledger recomputes the zero-financing rows from those bytes.
     """
 
     if resolved.get("schema_version") != release_cycle_manifest.RESOLVED_VERSION:
@@ -328,12 +339,20 @@ def build(
             "zero_financing_observations"
         ]
     if zero_financing_observations is not None:
-        zero_raw = zero_financing_observations.resolve().read_bytes()
-        spec["zero_financing_observations"] = {
-            "path": str(zero_financing_observations.resolve()),
-            "sha256": _sha256(zero_raw),
-            "size_bytes": len(zero_raw),
-        }
+        # a pin file of the six keys the ledger needs to recompute the rows from the
+        # retained statements (provider, statements dir, sums and mapping with hashes)
+        pin = json.loads(zero_financing_observations.read_bytes())
+        capture_keys = {"captures_dir", "captures_sums_path", "captures_sums_sha256"}
+        if not isinstance(pin, dict) or set(pin) not in (
+            ZERO_FINANCING_PIN_KEYS,
+            ZERO_FINANCING_PIN_KEYS | capture_keys,
+        ):
+            raise LedgerSpecError(
+                "INPUT",
+                "zero financing pin file must carry exactly "
+                + ", ".join(sorted(ZERO_FINANCING_PIN_KEYS)),
+            )
+        spec["zero_financing_observations"] = pin
     if quantbase_fill_closes is not None:
         pins = json.loads(quantbase_fill_closes.read_bytes())
         if not isinstance(pins, list) or not pins:
