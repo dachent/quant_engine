@@ -4042,6 +4042,7 @@ def _zero_financing_rows(
     if not directory.is_dir() or directory.is_symlink():
         raise ProviderLedgerError("zero_financing_observations statements_dir differs")
     captures: dict[str, bytes] = {}
+    capture_names: dict[str, str] = {}
     capture_artifacts: list[SourceArtifact] = []
     capture_dir: Path | None = None
     capture_sums_raw: bytes | None = None
@@ -4079,6 +4080,7 @@ def _zero_financing_rows(
                 label = name[len(prefix) : -len(".json")]
                 if label in mapping:
                     captures[mapping[label][0]] = content
+                    capture_names[mapping[label][0]] = name
                 # a capture of an account that is not mapped (a bank checking account that
                 # has no ledger account) is pinned in the manifest and read by nothing
         capture_artifacts.append(
@@ -4101,6 +4103,7 @@ def _zero_financing_rows(
             capture_dir=capture_dir,
             cutoff=as_of,
             history_start=history_start,
+            capture_names=capture_names,
         )
         rows = zero_financing_statements.validate_rows(artifact, accounts)
     except (
@@ -4152,6 +4155,12 @@ def _zero_financing_rows(
             schema_version="1",
         )
     )
+    manifest_ids = {a.artifact_id for a in artifacts}
+    for row in rows:
+        if row["source_artifact_id"] not in manifest_ids:
+            raise ProviderLedgerError(
+                "zero_financing_observations: a row names a source the manifest lacks"
+            )
     # every input that can change a row is part of the generation id
     identity = "\n".join(
         [
@@ -4159,6 +4168,10 @@ def _zero_financing_rows(
             hashlib.sha256(mapping_raw).hexdigest(),
             hashlib.sha256(capture_sums_raw or b"").hexdigest(),
             hashlib.sha256(extractor).hexdigest(),
+            as_of.isoformat(),
+            json.dumps(
+                sorted((a, d.isoformat()) for a, d in (history_start or {}).items())
+            ),
         ]
     )
     generation = f"zero-financing-{hashlib.sha256(identity.encode()).hexdigest()[:24]}"

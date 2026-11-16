@@ -33,16 +33,16 @@ def _statement_text(period: str = "January 1-31, 2026") -> str:
         [
             "\n".join(
                 [
-                    "   CUST ROTH IRA",
-                    "   Account Number   Statement Period",
+                    "Roth Contributory IRA of   Account Number   Statement Period",
                     f"   ****-*{LAST3}   {period}",
                     "Transactions - Summary",
                     "",
                     "   row",
                     "   $1.00  $0.00  $0.00  $0.00  $0.00  $0.00  $1.00",
+                    "1 of 2",
                 ]
             ),
-            "page two",
+            "page two\n2 of 2",
         ]
     )
 
@@ -230,11 +230,23 @@ def _with_captures(pins: "_Pins", tmp_path: Path, **over: Any) -> dict[str, Any]
     directory = tmp_path / "captures"
     directory.mkdir()
     label = zf.statement_label(PROVIDER, LAST3)
+    stamp = (
+        "Updated:\n3:14:06 AM Eastern Time, X\n03:14:06 AM ET, 02/03/2026\n"
+        f"Account Selector: Joint Account ending in {' '.join(LAST3)} Selected\n"
+    )
     raw = {
         "history.json": (
-            json.dumps({"brokerageTransactions": [], "bookmark": None}).encode(),
+            json.dumps(
+                {
+                    "fromDate": "01/01/2026",
+                    "toDate": "02/03/2026",
+                    "brokerageTransactions": [],
+                    "bookmark": None,
+                }
+            ).encode(),
             "history",
         ),
+        "history-page.txt": (stamp.encode(), "history"),
         "balances.json": (
             json.dumps(
                 {
@@ -248,7 +260,10 @@ def _with_captures(pins: "_Pins", tmp_path: Path, **over: Any) -> dict[str, Any]
             ).encode(),
             "balances",
         ),
-        "balances-page.txt": (b"Balance Subject to Interest   $0.00 ", "balances"),
+        "balances-page.txt": (
+            stamp.encode() + b"Balance Subject to Interest   $0.00 ",
+            "balances",
+        ),
     }
     for raw_name, (content, _kind) in raw.items():
         (directory / raw_name).write_bytes(content)
@@ -359,8 +374,7 @@ def test_financing_days_from_a_reconciled_interest_table_enter_the_ledger_rows(
         [
             "\n".join(
                 [
-                    "   CUST",
-                    "   Account Number   Statement Period",
+                    "Schwab One Account of   Account Number   Statement Period",
                     f"   ****-*{LAST3}   January 1-31, 2026",
                     "Transactions - Summary",
                     "",
@@ -382,9 +396,10 @@ def test_financing_days_from_a_reconciled_interest_table_enter_the_ledger_rows(
                     "   Daily Balance($) Int Rate(%)  Paid($)",
                     "",
                     "01/02-01/04   (54,206.22) 10.375   46.88   01/16-01/26   (164.90) 11.825   0.59",
+                    "1 of 2",
                 ]
             ),
-            "page two",
+            "page two\n2 of 2",
         ]
     )
     monkeypatch.setattr(zf, "_pdftotext", lambda path: text)
@@ -428,3 +443,26 @@ def test_a_capture_of_an_unmapped_account_is_pinned_but_never_read(
     )
     assert len(rows) == 31
     assert any(a.artifact_id.endswith(stray.name) for a in artifacts)
+
+
+def test_the_generation_id_binds_the_horizon_and_every_row_names_a_manifest_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill tests (Astra P2-15/16, Opus F2): history_start and as_of are part of the id,
+    and every row's source id resolves against the generation manifest."""
+
+    pins = _Pins(tmp_path, monkeypatch)
+    account = "account-" + "a" * 16
+    spec = pins.spec()
+
+    def run(as_of: date, history: dict[str, date] | None) -> tuple[str, Any, Any]:
+        _provider, rows, artifacts = ledger._zero_financing_rows(
+            spec, {account}, {PROVIDER}, as_of, history
+        )
+        return str(rows[0]["generation_id"]), rows, artifacts
+
+    base, rows, artifacts = run(AS_OF, None)
+    ids = {a.artifact_id for a in artifacts}
+    assert all(r["source_artifact_id"] in ids for r in rows)
+    assert run(AS_OF, {account: date(2025, 1, 1)})[0] != base
+    assert run(date(2026, 2, 5), None)[0] != base

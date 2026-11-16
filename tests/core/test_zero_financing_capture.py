@@ -26,8 +26,8 @@ DIVIDEND = {
 
 def _statement(period: str, *, margin: bool) -> str:
     lines = [
-        "   CUST" + ("" if margin else " ROTH IRA"),
-        "   Account Number   Statement Period",
+        ("Schwab One Account of" if margin else "Roth Contributory IRA of")
+        + "   Account Number   Statement Period",
         f"   ****-*{LAST3}   {period}",
         "Transactions - Summary",
         "",
@@ -42,7 +42,7 @@ def _statement(period: str, *, margin: bool) -> str:
             "",
             "   $0.00               $0.00               $10.00              $20.00",
         ]
-    return "\f".join(["\n".join(lines), "p2"])
+    return "\f".join(["\n".join([*lines, "1 of 2"]), "p2\n2 of 2"])
 
 
 def _raw_date(iso: str) -> str:
@@ -65,6 +65,11 @@ def _capture(
     raw_loan: float = 0.0,
     with_info: bool = True,
     cash_line: str | None = None,
+    page_date: str = "04/08/2026",
+    page_account: str = " ".join(LAST3),
+    history_from: str = "02/01/2026",
+    omit_bookmark: bool = False,
+    is_margin: bool | None = None,
     **over: Any,
 ) -> bytes:
     """A capture JSON plus raw files that agree with its claims (unless overridden)."""
@@ -76,24 +81,32 @@ def _capture(
                 "transactionDate": _raw_date(r["date"]),
                 "action": r["action"],
                 "description": r["description"],
+                "symbol": r.get("symbol", ""),
                 "amount": r["amount"],
             }
             for r in (rows if raw_rows is None else raw_rows)
         ]
         + [
             {  # a row before the window: in the raw response, not in the capture
-                "transactionDate": "03/01/2026",
+                "transactionDate": "02/20/2026",
                 "action": "Buy",
                 "description": "old",
                 "amount": "-1.00",
             }
         ],
+        "fromDate": history_from,
+        "toDate": "04/08/2026",
         "bookmark": None,
     }
+    if omit_bookmark:
+        del history["bookmark"]
+    stamp = f"Updated:\n3:14:06 AM Eastern Time, X\n03:14:06 AM ET, {page_date}\n"
+    stamp += f"Account Selector: Joint Account ending in {page_account} Selected\n"
     balances = {
         "brokerageAccountList": [
             {
                 "accountId": f"****{account_in_raw}",
+                **({} if is_margin is None else {"info": {"isMargin": is_margin}}),
                 "cashInvestments": {
                     "marginBalance": float(margin) if raw_margin is None else raw_margin
                 },
@@ -110,7 +123,10 @@ def _capture(
             }
         ]
     }
-    page = f"Margin Details\nBalance Subject to Interest   ${raw_subject or subject}\n"
+    page = (
+        stamp
+        + f"Margin Details\nBalance Subject to Interest   ${raw_subject or subject}\n"
+    )
     if cash_line is not None:
         page += f"Cash & Cash Investments Total\n\t\n${cash_line}\n"
     page += page_extra
@@ -118,6 +134,7 @@ def _capture(
         "history.json": (json.dumps(history).encode(), raw_kind),
         "balances.json": (json.dumps(balances).encode(), "balances"),
         "balances-page.txt": (page.encode(), "balances"),
+        "history-page.txt": (stamp.encode(), "history"),
     }
     for name, (content, _kind) in files.items():
         (directory / name).write_bytes(content)
@@ -188,7 +205,7 @@ def test_a_retirement_type_runs_through_the_cutoff_on_a_capture(
     assert days[0] == "2026-03-01" and days[-1] == "2026-04-06" and len(days) == 37
     last = artifact["rows"][-1]
     assert last["verdict_reason"] == "RETIREMENT_TYPE_THROUGH_CUTOFF"
-    assert last["source_artifact_id"].endswith(f"capture/{ACCOUNT}")
+    assert last["source_artifact_id"].endswith(f"captures/{ACCOUNT}")
     assert _days(_build(tmp_path, False, None))[-1] == "2026-03-31"
 
 
@@ -336,7 +353,10 @@ def test_a_last_statement_that_is_not_zero_is_not_bridged(tmp_path: Path) -> Non
         capture_dir=tmp_path,
         cutoff=CUTOFF,
     )
-    assert artifact["rows"] == []
+    # no zero day; the statement's own printed closing loan is carried as an exact fact
+    assert [r["classification"] for r in artifact["rows"]] == ["OBSERVED_FINANCING_DAY"]
+    assert artifact["rows"][0]["amount"]["value"] == "5.00"
+    assert artifact["rows"][0]["amount_measurement"] == "STATEMENT_CLOSING_BALANCE"
     assert artifact["capture_decisions"][0]["reason"] == "LAST_STATEMENT_NOT_ZERO"
 
 
@@ -374,26 +394,38 @@ def _history(tmp_path: Path, start: date, margin_first: bool = False) -> dict[st
     )
 
 
-def test_the_type_rule_reaches_back_to_the_first_nav_day(tmp_path: Path) -> None:
-    artifact = _history(tmp_path, date(2025, 11, 1))
+def test_there_is_no_backfill_before_the_first_pinned_statement(tmp_path: Path) -> None:
+    """Kill test (Opus F1, Astra P1-4): days before an account's first pinned statement get
+    no row, however early its ledger history starts."""
+
+    artifact = _history(tmp_path, date(2024, 1, 1))
     days = _days(artifact)
-    assert days[0] == "2025-11-01" and "2025-12-31" in days and days[-1] == "2026-04-06"
-    early = artifact["rows"][0]
-    assert early["verdict_reason"] == "RETIREMENT_TYPE_WHOLE_HISTORY"
-    assert early["source_field"] == "Statement account type (type rule)"
-    note = artifact["capture_decisions"][0]
-    assert note["whole_history_reason"] == "RETIREMENT_TYPE_WHOLE_HISTORY"
-    assert note["whole_history_days"] == (date(2026, 1, 1) - date(2025, 11, 1)).days
-    inside = _history(tmp_path, date(2026, 1, 15))["capture_decisions"][0]
-    assert "whole_history_days" not in inside
+    assert days[0] == "2026-01-01" and days[-1] == "2026-04-06"
+    assert "whole_history_days" not in artifact["capture_decisions"][0]
 
 
-def test_the_type_rule_refuses_an_account_with_a_margin_period_pinned(
+def test_charged_days_are_never_also_observed_zero_by_a_retirement_capture(
     tmp_path: Path,
 ) -> None:
-    artifact = _history(tmp_path, date(2025, 11, 1), margin_first=True)
-    assert "2025-12-31" not in _days(artifact)
-    assert "whole_history_days" not in artifact["capture_decisions"][0]
+    """Kill test (Astra P1-4): days inside an interest charged period are not zero days."""
+
+    march = (
+        _statement("March 1-31, 2026", margin=False)
+        + "\n03/20 Expense   Margin Interest   INTEREST 02/19THRU 03/19"
+    )
+    directory, sums, _extract = _world(tmp_path, False)
+    artifact = zf.build(
+        directory,
+        sums,
+        {LABEL: (ACCOUNT, LAST3)},
+        provider_id=PROVIDER,
+        extract=lambda _p: march,
+        captures={ACCOUNT: _capture(tmp_path)},
+        capture_dir=tmp_path,
+        cutoff=CUTOFF,
+    )
+    charged = {d["as_of_date"] for d in artifact["interest_charged_days"]}
+    assert not charged & set(_days(artifact))
 
 
 def test_the_proving_next_statement_must_itself_be_verified(tmp_path: Path) -> None:
@@ -449,13 +481,20 @@ def test_column_anchoring_a_promo_line_and_one_account_per_last3() -> None:
     ).encode()
     with pytest.raises(zf.ZeroFinancingError, match="twice"):
         zf.load_mapping(mapping, PROVIDER)
-    promo = (
-        _statement("March 1-31, 2026", margin=False).replace(
-            "   CUST ROTH IRA", "   CUST"
-        )
-        + "\nOpen a Roth IRA today"
-    )
+    # the type is the exact title line, never retirement words elsewhere (Astra P1-3)
+    promo = _statement("March 1-31, 2026", margin=True) + "\nOpen a Roth IRA today"
     assert not zf.parse_statement(promo, None)["retirement"]
+    for title in (
+        "Schwab One Account of RETIREMENT TRUST",
+        "Plan your retirement with Schwab",
+        "IRA GOLDSTEIN",
+    ):
+        text = _statement("March 1-31, 2026", margin=True).replace(
+            "Schwab One Account of", title
+        )
+        facts = zf.parse_statement(text, None)
+        assert facts["account_type"] is None and not facts["retirement"]
+        assert zf.verdict(facts) == ("UNVERIFIED", "LAYOUT_TITLE_NOT_RECOGNISED")
 
 
 def test_a_cash_credit_in_the_margin_field_is_not_a_loan_only_when_the_page_says_so(
@@ -547,8 +586,121 @@ def test_path_names_second_blocks_and_pdftotext_failures_refuse(
     )
     one = ["Margin Loan Information", header, row]
     assert zf._loan_block(one) == (0, 0)
-    with pytest.raises(zf.ZeroFinancingError, match="more than one"):
-        zf._loan_block(one + one)
+    assert zf._loan_block(one + one) is None  # the strict layout refuses the statement
     missing = tmp_path / "absent.pdf"
     with pytest.raises(zf.ZeroFinancingError, match="cannot be extracted"):
         zf._pdftotext(missing)
+
+
+def test_the_account_date_range_and_type_come_from_the_raw_files(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (Astra P1-6/7, Opus F4, Fable X1/X2): the pinned raw pages and bodies,
+    never the JSON's own claims, decide whose capture it is and when it was taken."""
+
+    differ = "CAPTURE_CLAIMS_DIFFER_FROM_RAW"
+    cases = (
+        {"page_account": "9 8 7"},  # the pages show another account
+        {"page_date": "01/05/2025"},  # the pages are dated otherwise than the claim
+        {"is_margin": False},  # the raw body says the account is not a margin account
+    )
+    for case in cases:
+        artifact = _build(tmp_path, True, _capture(tmp_path, **case))
+        assert artifact["rows"] == []
+        assert artifact["capture_decisions"][0]["reason"] == differ, case
+    with pytest.raises(zf.ZeroFinancingError, match="unreadable"):
+        _build(tmp_path, True, _capture(tmp_path, omit_bookmark=True))
+    with pytest.raises(zf.ZeroFinancingError, match="range does not cover"):
+        _build(tmp_path, True, _capture(tmp_path, history_from="03/05/2026"))
+    # a retirement page that shows a loan, a claimed loan, an interest row: never extended
+    for case in (
+        {"raw_subject": "120.00"},
+        {"margin": "5000.00", "raw_margin": 0.0},
+        {
+            "transactions": [
+                {
+                    "date": "2026-04-02",
+                    "action": "Margin Interest",
+                    "description": "x",
+                    "amount": "-12.00",
+                }
+            ]
+        },
+    ):
+        shows = _build(tmp_path, False, _capture(tmp_path, **case))
+        assert shows["capture_decisions"][0]["reason"].startswith(
+            "RETIREMENT_ACCOUNT_SHOWS"
+        ), case
+        assert _days(shows)[-1] == "2026-03-31"
+
+
+def test_a_debit_in_the_final_period_voids_the_bracket_and_pairs_are_structural(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (Opus F3, Astra P1-2): the whole final period is scanned from the raw
+    history; a reinvest pair needs the same real symbol, and a paired outgoing description
+    still voids the bracket."""
+
+    march_buy = {
+        "date": "2026-03-15",
+        "action": "Buy",
+        "description": "SPY",
+        "amount": "-50000.00",
+    }
+    inside = _build(
+        tmp_path,
+        True,
+        _capture(tmp_path, transactions=[DIVIDEND], raw_rows=[DIVIDEND, march_buy]),
+    )
+    assert (
+        inside["capture_decisions"][0]["reason"]
+        == "CAPTURE_TRANSACTION_CAN_CREATE_A_DEBIT"
+    )
+
+    def pair(
+        symbol_a: str, symbol_b: str, text: str = "MONEY FUND"
+    ) -> list[dict[str, str]]:
+        return [
+            {
+                "date": "2026-04-02",
+                "action": "Reinvest Dividend",
+                "description": text,
+                "amount": "$5.00",
+                "symbol": symbol_a,
+            },
+            {
+                "date": "2026-04-02",
+                "action": "Reinvest Shares",
+                "description": text,
+                "amount": "-$5.00",
+                "symbol": symbol_b,
+            },
+        ]
+
+    ok = _build(tmp_path, True, _capture(tmp_path, transactions=pair("SWVXX", "SWVXX")))
+    assert ok["capture_decisions"][0]["reason"] == "BRACKET_PROVEN_BY_CAPTURE"
+    # raw symbols differ from the claimed pair: the claim is not what the raw shows
+    forged = _build(
+        tmp_path,
+        True,
+        _capture(
+            tmp_path, transactions=pair("SPY", "SPY"), raw_rows=pair("SPY", "QQQ")
+        ),
+    )
+    assert forged["capture_decisions"][0]["reason"] == "CAPTURE_CLAIMS_DIFFER_FROM_RAW"
+    empty = _build(tmp_path, True, _capture(tmp_path, transactions=pair("", "")))
+    assert (
+        empty["capture_decisions"][0]["reason"]
+        == "CAPTURE_TRANSACTION_CAN_CREATE_A_DEBIT"
+    )
+    outgoing = _build(
+        tmp_path,
+        True,
+        _capture(
+            tmp_path, transactions=pair("SWVXX", "SWVXX", "withdrawal from margin loan")
+        ),
+    )
+    assert (
+        outgoing["capture_decisions"][0]["reason"]
+        == "CAPTURE_TRANSACTION_CAN_CREATE_A_DEBIT"
+    )

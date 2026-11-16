@@ -39,8 +39,7 @@ def _statement(
     thru: str = "02/26THRU 03/29",
 ) -> str:
     lines = [
-        "   CUST",
-        "   Account Number   Statement Period",
+        "Schwab One Account of   Account Number   Statement Period",
         f"   ****-*{LAST3}   {period}",
         "Transactions - Summary",
         "",
@@ -62,7 +61,7 @@ def _statement(
     if posting:
         lines += [f"03/30 Expense     Margin Interest           INTEREST {thru}"]
     lines += TABLE_HEAD + list(rows) + ["", "Pending / Open Activity"]
-    return "\f".join(["\n".join(lines), "p2"])
+    return "\f".join(["\n".join([*lines, "1 of 2"]), "p2\n2 of 2"])
 
 
 def _build(tmp_path: Path, texts: dict[str, str], cutoff: date | None = None) -> Any:
@@ -169,8 +168,7 @@ def test_the_days_after_the_last_charged_period_need_the_next_statement(
 
     clean_april = "\n".join(
         [
-            "   CUST",
-            "   Account Number   Statement Period",
+            "Schwab One Account of   Account Number   Statement Period",
             f"   ****-*{LAST3}   April 1-30, 2026",
             "Transactions - Summary",
             "",
@@ -181,6 +179,7 @@ def test_the_days_after_the_last_charged_period_need_the_next_statement(
             "   Loan Balance        Loan Balance",
             "",
             "   $0.00               $0.00               $10.00              $20.00",
+            "1 of 1",
         ]
     )
     march = _statement("March 1-31, 2026")
