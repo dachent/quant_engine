@@ -308,14 +308,14 @@ def test_a_financing_month_without_interest_rows_is_read_from_its_cash_ladder(
         extract_raw=lambda _p: RAW_DEBT,
     )
     rows = {r["as_of_date"]: r for r in artifact["rows"]}
-    assert len(rows) == 31
+    assert len(rows) == 29  # the last statement's zero days need a next statement
     debit = rows["2026-03-03"]
     assert debit["classification"] == "OBSERVED_FINANCING_DAY"
     assert (
         debit["amount"]["value"] == "200.00"
         and debit["amount_measurement"] == "DAY_BALANCE_DERIVED"
     )
-    assert rows["2026-03-02"]["classification"] == "ZERO_FINANCING_OBSERVED"
+    assert "2026-03-02" not in rows
     assert rows["2026-03-31"]["amount_measurement"] == "STATEMENT_CLOSING_BALANCE"
     zf.validate_rows(artifact, {ACCOUNT})
     # without a closing ladder the month stays unobserved
@@ -696,3 +696,61 @@ def test_interest_paid_without_a_posting_and_disagreeing_ladders_are_refused(
         reconciled["interest_reconciliation"][0]["cash_ladder"]
         == "LADDER_MEAN_DISAGREES_WITH_PRINTED_AVERAGE"
     )
+
+
+def test_a_carried_loan_is_never_a_zero_day_on_non_business_days_or_in_a_last_tail(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (Opus F18-1/F18-3): over a holiday or a weekend a loan is still
+    outstanding; a last statement's trade-date-cash zero days need the next statement."""
+
+    # Jan opens with $5,000; charged 12/27THRU 01/26; the first printed range starts 01/02
+    jan = "schwab-stmt-" + LABEL + "-2026-01-31.pdf"
+    text = _with_loan(
+        _statement(
+            "January 1-31, 2026",
+            paid="16.42",
+            rows=("01/02-01/11   (5,000.00) 11.825   16.42",),
+            thru="12/27THRU 01/26",
+        ),
+        "$5,000.00",
+        "$0.00",
+    )
+    artifact = _build(tmp_path, {jan: text})
+    rows = {r["as_of_date"]: r for r in artifact["rows"]}
+    assert (
+        rows["2026-01-01"]["classification"] == "OBSERVED_FINANCING_DAY"
+    )  # the holiday
+    assert (
+        rows["2026-01-01"]["verdict_reason"]
+        == "INTEREST_RANGE_BRIDGED_OVER_NON_BUSINESS_DAYS"
+    )
+    assert "2025-12-31" not in rows  # carried the loan unprinted: not a zero day
+    # March starts on a Sunday: the Sunday carries the loan of the Saturday's printed range
+    march = _with_loan(
+        _statement(
+            "March 1-31, 2026",
+            paid="0.99",
+            rows=("02/27-02/28   (5,000.00) 11.825   3.28",),
+            thru="02/26THRU 03/29",
+        ),
+        "$5,000.00",
+        "$0.00",
+    )
+    sunday = _build(tmp_path, {MARCH: march})
+    by_day = {r["as_of_date"]: r for r in sunday["rows"]}
+    assert (
+        by_day.get("2026-03-01", {}).get("classification") != "ZERO_FINANCING_OBSERVED"
+    )
+    # Probe D: the last statement's ladder zero days in its tail are not published
+    last = _build_with(
+        tmp_path,
+        {MARCH: _statement("March 1-31, 2026")},
+        FLAT,
+    )
+    tail = {
+        r["as_of_date"]
+        for r in last["rows"]
+        if r["verdict_reason"] == "CASH_LADDER_CLOSES"
+    }
+    assert "2026-03-30" not in tail and "2026-03-31" not in tail
