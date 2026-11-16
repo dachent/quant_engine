@@ -82,7 +82,51 @@ def _text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-_LONG_WEEKEND_DAYS = 4
+def _easter(year: int) -> date:
+    a, b, c = year % 19, year // 100, year % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    m = (32 + 2 * e + 2 * i - h - k) % 7
+    n = (a + 11 * h + 22 * m) // 451
+    month, day = divmod(h + m - 7 * n + 114, 31)
+    return date(year, month, day + 1)
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
+    first = date(year, month, 1)
+    day = first + timedelta(days=(weekday - first.weekday()) % 7)
+    return day + timedelta(weeks=n - 1)
+
+
+def _last_monday_of_may(year: int) -> date:
+    day = date(year, 5, 31)
+    return day - timedelta(days=day.weekday())
+
+
+def _market_holidays(year: int) -> set[date]:
+    """US equity market holidays of a year (a Saturday holiday is observed the Friday
+    before, a Sunday holiday the Monday after)."""
+
+    def observed(day: date) -> date:
+        if day.weekday() == 5:
+            return day - timedelta(days=1)
+        if day.weekday() == 6:
+            return day + timedelta(days=1)
+        return day
+
+    fixed = [date(year, 1, 1), date(year, 6, 19), date(year, 7, 4), date(year, 12, 25)]
+    return {
+        *(observed(d) for d in fixed),
+        _nth_weekday(year, 1, 0, 3),  # Martin Luther King Jr. Day
+        _nth_weekday(year, 2, 0, 3),  # Presidents Day
+        _easter(year) - timedelta(days=2),  # Good Friday
+        _last_monday_of_may(year),  # Memorial Day
+        _nth_weekday(year, 9, 0, 1),  # Labor Day
+        _nth_weekday(year, 11, 3, 4),  # Thanksgiving
+    }
 
 
 def _unobserved_days(
@@ -93,20 +137,24 @@ def _unobserved_days(
     """How many required days lack an observation of the financing balance, or None when
     the requirement cannot be known (no NAV days).
 
-    Every NAV day is required.  So is every calendar day of a stretch longer than a long
-    weekend between two NAV days or between the last NAV day and the cutoff, so a sparse
-    NAV series never narrows the requirement to its own dates.  A day inside a short gap
-    that is not a NAV day (a weekend, a market holiday) is not required."""
+    Every NAV day is required, and so is every weekday between two NAV days or between the
+    last NAV day and the cutoff: a sparse NAV series never narrows the requirement to its
+    own dates.  Only weekend days and US market holidays inside such a stretch are not
+    required."""
 
     days = sorted(d for d in (_iso_day(x) for x in (nav_days or ())) if d is not None)
     if not days:
         return None
     required = {d for d in days}
     stops = days + ([cutoff] if cutoff is not None and cutoff > days[-1] else [])
+    holidays: dict[int, set[date]] = {}
     for before, after in zip(stops, stops[1:], strict=False):
-        if (after - before).days > _LONG_WEEKEND_DAYS:
-            for offset in range(1, (after - before).days + 1):
-                required.add(before + timedelta(days=offset))
+        for offset in range(1, (after - before).days + 1):
+            day = before + timedelta(days=offset)
+            if day.weekday() >= 5:
+                continue
+            if day not in holidays.setdefault(day.year, _market_holidays(day.year)):
+                required.add(day)
     known = {d for d in (_iso_day(x) for x in known_days) if d is not None}
     return len(required - known)
 

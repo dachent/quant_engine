@@ -202,6 +202,8 @@ def _margin_interest_postings(lines: list[str]) -> tuple[int, bool]:
 
 
 _PAIR_REACH = 25
+# below this loan balance a day's interest rounds to nothing and no range is printed
+_INTEREST_DUST = Decimal(15)
 
 
 def _incomplete(lines: list[str]) -> str | None:
@@ -253,7 +255,7 @@ _RANGE_DETAIL = re.compile(_ENTRY)
 _ROW_ONLY = re.compile(r"(?:" + _ENTRY + r"[ \t]*)+")
 
 
-def _table_rows(lines: list[str]) -> list[str]:
+def _table_rows(lines: list[str], window: int = 13) -> list[str]:
     """The data rows of every "Margin Interest" table: lines under the heading that hold
     only dates, ranges, amounts and rates (the pending-activity lines below carry words)."""
 
@@ -263,7 +265,7 @@ def _table_rows(lines: list[str]) -> list[str]:
             _MONEY_AMOUNT.search(line)
         ):
             continue
-        for follow in lines[number + 1 : number + 14]:
+        for follow in lines[number + 1 : number + 1 + window]:
             text = follow.strip()
             if re.fullmatch(r"[\d/\-\s,.$()%]+", text) and re.match(
                 r"\d{2}/\d{2}", text
@@ -285,26 +287,26 @@ def _range_dates(match: "re.Match[str]", period_end: date) -> tuple[date, date]:
 
 
 def _interest_table_ranges(
-    lines: list[str], period_end: date
+    lines: list[str], period_end: date, window: int = 13
 ) -> list[tuple[date, date]]:
     """The day ranges (a single day counts as a range of one day) of the statement's
     "Margin Interest" table: each is a stretch of days with a margin debit."""
 
     return [
         _range_dates(match, period_end)
-        for row in _table_rows(lines)
+        for row in _table_rows(lines, window)
         for match in _TABLE_RANGE.finditer(row)
     ]
 
 
 def _interest_range_details(
-    lines: list[str], period_end: date
+    lines: list[str], period_end: date, window: int = 13
 ) -> list[tuple[date, date, Decimal, Decimal, Decimal]] | None:
     """Every range of the Margin Interest table with its average margin daily balance,
     rate and interest paid, or None when any row holds something else."""
 
     out: list[tuple[date, date, Decimal, Decimal, Decimal]] = []
-    for row in _table_rows(lines):
+    for row in _table_rows(lines, window):
         if _ROW_ONLY.fullmatch(row.strip()) is None:
             return None
         for match in _RANGE_DETAIL.finditer(row):
@@ -335,6 +337,18 @@ def _interest_paid_period(lines: list[str]) -> Decimal | None:
                 return abs(_parse_money(found[-2]))
         return None
     return None
+
+
+_FIXED_HOLIDAYS = frozenset({(1, 1), (7, 4), (12, 25)})
+
+
+def _business_day(day: date, step: int) -> date:
+    """The nearest business day at or beyond ``day`` in the direction of ``step``
+    (weekends and the fixed-date holidays are skipped)."""
+
+    while day.weekday() >= 5 or (day.month, day.day) in _FIXED_HOLIDAYS:
+        day += timedelta(days=step)
+    return day
 
 
 def reconcile_interest(facts: Mapping[str, Any]) -> tuple[bool, str]:
@@ -374,15 +388,25 @@ def reconcile_interest(facts: Mapping[str, Any]) -> tuple[bool, str]:
         return False, "INTEREST_DOES_NOT_RECONCILE"
     block = facts["loan_block"]
     if block is not None:
-        # a loan outstanding on a statement's first (last) day, inside a charged period,
-        # must be inside a printed range: interest accrues every day it is outstanding
-        for balance, day in (
-            (block[0], facts["period_start"]),
-            (block[1], facts["period_end"]),
-        ):
-            charged = any(a <= day <= b for a, b in periods)
-            printed = any(first <= day <= last for first, last, *_rest in ranges)
-            if balance != 0 and charged and not printed:
+        # A loan outstanding on a statement's first (last) day, inside a charged period, must
+        # be inside a printed range: interest accrues every day it is outstanding.  The
+        # balance carried in may show on the day before the period or on its first business
+        # day (a holiday accrues nothing), and the closing balance on the last business day.
+        start, end = facts["period_start"], facts["period_end"]
+
+        def printed(day: date) -> bool:
+            return any(first <= day <= last for first, last, *_rest in ranges)
+
+        def charged(day: date) -> bool:
+            return any(a <= day <= b for a, b in periods)
+
+        opening_days = (start - timedelta(days=1), _business_day(start, 1))
+        closing_days = (end, _business_day(end, -1))
+        if abs(block[0]) >= _INTEREST_DUST and any(map(charged, opening_days)):
+            if not any(printed(d) for d in opening_days):
+                return False, "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES"
+        if abs(block[1]) >= _INTEREST_DUST and any(map(charged, closing_days)):
+            if not any(printed(d) for d in closing_days):
                 return False, "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES"
     return True, "INTEREST_RECONCILED"
 
@@ -1290,6 +1314,22 @@ def parse_cash_ladder(
     return ladder, begin, "CASH_LADDER_CLOSES"
 
 
+def _refine_table_from_raw(facts: dict[str, Any], raw_text: str) -> None:
+    """The Margin Interest table read from the content-stream text, where a wrapped cell of
+    the physical layout is one line: used only when it contains every range the layout read
+    (the layout may drop trailing cells, never invent them)."""
+
+    lines = raw_text.replace("\r\n", "\n").splitlines()
+    end = facts["period_end"]
+    plain = _interest_table_ranges(lines, end, 40)
+    layout_plain = facts["interest_periods"][len(facts["thru_periods"]) :]
+    if not set(layout_plain) <= set(plain) or len(plain) < len(layout_plain):
+        return
+    facts["interest_periods"] = list(facts["thru_periods"]) + plain
+    facts["interest_table_ranges"] = len(plain)
+    facts["range_details"] = _interest_range_details(lines, end, 40)
+
+
 def build(
     pdf_dir: Path,
     sums: Mapping[str, str],
@@ -1362,6 +1402,14 @@ def build(
             raise ZeroFinancingError(
                 f"a margin-interest posting names no charged period: {name}"
             )
+        raw_text: str | None = None
+        if raw_extract is not None:
+            try:
+                raw_text = raw_extract(path)
+            except ZeroFinancingError:
+                raw_text = None
+        if raw_text is not None:
+            _refine_table_from_raw(facts, raw_text)
         state, reason = verdict(facts)
         fingerprint = (
             facts["last3"],
@@ -1395,6 +1443,8 @@ def build(
             "type_only": retirement_type,
             "loan_closing": facts["loan_block"][1] if facts["loan_block"] else None,
             "loan_opening": facts["loan_block"][0] if facts["loan_block"] else None,
+            "no_interest": not facts["margin_interest_postings"]
+            and not facts["interest_table_ranges"],
             "number": facts["full_number"],
             "details_page": facts["details_page"],
             "coverage": None,
@@ -1411,11 +1461,11 @@ def build(
                     list(facts["thru_periods"]),
                     list(facts["range_details"]),
                 )
-            if raw_extract is not None and facts["loan_block"] is not None:
+            if raw_text is not None and facts["loan_block"] is not None:
                 periods[key]["ladder_reason"] = "CASH_LADDER_NOT_TRIED"
                 try:
                     ladder, _begin, why_ladder = parse_cash_ladder(
-                        raw_extract(path), facts["period_start"], facts["period_end"]
+                        raw_text, facts["period_start"], facts["period_end"]
                     )
                 except ZeroFinancingError:
                     ladder, why_ladder = None, "RAW_TEXT_UNAVAILABLE"
@@ -1432,6 +1482,22 @@ def build(
                                     None,
                                     "LADDER_CONTRADICTS_PRINTED_RANGE",
                                 )
+                if ladder is not None and (
+                    facts["margin_interest_postings"] or facts["interest_table_ranges"]
+                ):
+                    # interest was charged: the ladder must show a debit day in the span
+                    charged_span = {
+                        d for a, b in facts["interest_periods"] for d in _days(a, b)
+                    }
+                    if not any(
+                        balance < 0
+                        for day, balance in ladder.items()
+                        if day in charged_span
+                    ):
+                        ladder, why_ladder = (
+                            None,
+                            "LADDER_SHOWS_NO_DEBIT_FOR_CHARGED_INTEREST",
+                        )
                 periods[key]["ladder"] = ladder
                 periods[key]["ladder_reason"] = why_ladder
         for first, last in facts["interest_periods"]:
@@ -1629,7 +1695,14 @@ def build(
         if following is None:
             continue
         proof = periods[(account, *following)]
-        if proof["state"] != "ZERO" or proof["type_only"]:
+        interest_free = proof["state"] == "ZERO" or (
+            # a month whose loan balance appears later still proves the days before it: it
+            # opens at zero (the chain agrees with this closing) and charges no interest
+            proof["state"] == "FINANCING"
+            and proof["no_interest"]
+            and proof["loan_opening"] == 0
+        )
+        if not interest_free or proof["type_only"]:
             continue
         for current in _days(tail_start, end):
             if (account, current) not in charged and (
@@ -1700,8 +1773,13 @@ def build(
                 (account, current.isoformat()) in have
             ):
                 continue
-            have.add((account, current.isoformat()))
             debit = balance < 0
+            if not debit and current in interest_days.get(account, ()):
+                # trade-date cash >= 0 does not prove a zero loan on a day interest was
+                # charged for (by any statement of the account): only a reconciled table
+                # proves such a day zero, and that path has already run
+                continue
+            have.add((account, current.isoformat()))
             ladder_row: dict[str, Any] = {
                 "account_id": account,
                 "as_of_date": current.isoformat(),
