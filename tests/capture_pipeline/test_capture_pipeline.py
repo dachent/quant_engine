@@ -1840,3 +1840,77 @@ def test_vault_and_http_probes_are_bounded_and_value_free(monkeypatch):
     assert cr.http_ok(p) is True  # an HTTP answer is reachability, not content
     monkeypatch.setattr(cr, "_NO_PROXY", Opener(OSError("down")))
     assert cr.http_ok(p) is False
+
+
+def _same_source_race(tmp_path):
+    """Four threads admit the SAME source and cutoff: one wins, three are CREATE_ONLY_EXISTS."""
+
+    s = src(source_id="s0")
+    pins, ev, errors, args = tmp_path / "pins.json", tmp_path / "ev", [], []
+    for i in range(4):
+        run = tmp_path / f"same_{i}"
+        run.mkdir()
+        (run / "f.csv").write_bytes(b"same")
+        mp = tmp_path / f"same_{i}.json"
+        m = cp.hash_files(run, mp, source_id="s0", captured_on="2026-11-12", tool="t")
+        v = cp.verify(s, manifest=m, as_of=CUT, cutoff=CUT, checks=good_check())
+        args.append((v, run, mp))
+
+    def go(item):
+        v, run, mp = item
+        try:
+            cp.admit_input(
+                s, v, run_dir=run, manifest_path=mp, evidence_root=ev, pin_path=pins
+            )
+            errors.append("ADMITTED")
+        except cp.CaptureRefused as exc:
+            errors.append(exc.code)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=go, args=(a,)) for a in args]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return sorted(errors)
+
+
+def test_the_same_source_race_survives_a_windows_sharing_violation_20_times(
+    tmp_path, monkeypatch
+):
+    """A Windows rename/replace/create under contention raises PermissionError(13). The
+    losing racers must still end CREATE_ONLY_EXISTS: each iteration injects one
+    PermissionError into the lock create, the pin replace and the destination rename."""
+
+    import pathlib
+
+    real_open, real_replace, real_rename = (
+        pathlib.Path.open,
+        pathlib.Path.replace,
+        pathlib.Path.rename,
+    )
+    for i in range(20):
+        fired: set[str] = set()
+
+        def once(kind, real):
+            def wrapper(self, *a, **k):
+                hit = (
+                    (kind == "lock" and self.name.endswith(".lock") and a[:1] == ("x",))
+                    or (kind == "pin" and self.name.startswith(".pins.json."))
+                    or (kind == "dest" and self.name.startswith(".staging-"))
+                )
+                if hit and kind not in fired:
+                    fired.add(kind)
+                    raise PermissionError(13, "Permission denied")
+                return real(self, *a, **k)
+
+            return wrapper
+
+        with monkeypatch.context() as m:
+            m.setattr(pathlib.Path, "open", once("lock", real_open))
+            m.setattr(pathlib.Path, "replace", once("pin", real_replace))
+            m.setattr(pathlib.Path, "rename", once("dest", real_rename))
+            (tmp_path / f"it{i}").mkdir()
+            got = _same_source_race(tmp_path / f"it{i}")
+        assert got == ["ADMITTED"] + ["CREATE_ONLY_EXISTS"] * 3, (i, got)
