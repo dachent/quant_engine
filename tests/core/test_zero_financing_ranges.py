@@ -425,3 +425,56 @@ def test_an_opening_loan_must_sit_inside_a_printed_range(tmp_path: Path) -> None
         artifact["interest_reconciliation"][0]["reason"]
         == "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES"
     )
+
+
+def test_the_ladder_never_overrides_a_printed_balance_or_interest_evidence(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (Opus L-F1/L-F2/L-F3): the printed closing loan beats a ladder that ends
+    in positive cash; a reconciled month keeps its interest-proven rows whatever the ladder
+    says; a dated row with an unknown category refuses the ladder."""
+
+    text = _statement("March 1-31, 2026", paid=None, rows=(), posting=False).replace(
+        "$0.00               $0.00               $10.00",
+        "$0.00               $200.00             $10.00",
+    )
+    sums = {MARCH: hashlib.sha256(MARCH.encode()).hexdigest()}
+    (tmp_path / MARCH).write_bytes(MARCH.encode())
+    one = zf.build(
+        tmp_path,
+        sums,
+        {LABEL: (ACCOUNT, LAST3)},
+        provider_id=PROVIDER,
+        extract=lambda _p: text,
+        extract_raw=lambda _p: RAW,  # ends in +$50 cash
+    )
+    last = {r["as_of_date"]: r for r in one["rows"]}["2026-03-31"]
+    assert last["classification"] == "OBSERVED_FINANCING_DAY"
+    assert last["amount"]["value"] == "200.00"
+    assert last["amount_measurement"] == "STATEMENT_CLOSING_BALANCE"
+    # reconciled month: a ladder at -$500 all month changes nothing inside the charged period
+    deep = RAW.replace(
+        "$100.00 $0.00 ($300.00) $0.00 $250.00 $0.00 $0.00 $50.00",
+        "($500.00) $0.00 $0.00 $0.00 $0.00 $0.00 $0.00 ($500.00)",
+    )
+    deep = "\n".join(
+        x
+        for x in deep.split("\n")
+        if not x.startswith(("03/", "WIRED", "(300", "(10.0", "Industry"))
+    )
+    sums2 = {MARCH: hashlib.sha256(MARCH.encode()).hexdigest()}
+    reconciled = zf.build(
+        tmp_path,
+        sums2,
+        {LABEL: (ACCOUNT, LAST3)},
+        provider_id=PROVIDER,
+        extract=lambda _p: _statement("March 1-31, 2026"),
+        extract_raw=lambda _p: deep,
+    )
+    by_day = {r["as_of_date"]: r for r in reconciled["rows"]}
+    assert by_day["2026-03-12"]["classification"] == "ZERO_FINANCING_OBSERVED"
+    assert by_day["2026-03-18"]["amount"]["value"] == "160.23"
+    unknown = RAW.replace("03/03 Withdrawal Wire Sent X", "03/03 Journal Funds X")
+    assert zf.parse_cash_ladder(unknown, date(2026, 3, 1), date(2026, 3, 31))[2] == (
+        "UNKNOWN_TRANSACTION_CATEGORY"
+    )
