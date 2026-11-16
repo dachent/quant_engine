@@ -543,3 +543,23 @@ def test_range_average_financing_days_make_the_account_levered_not_not_levered()
     state = _quiet_state(catalog)
     assert state["classification"] == "LEVERED"
     assert "OBSERVED_FINANCING_DAYS_RANGE_AVERAGE" in state["coverage_reason"]
+
+
+def test_the_required_span_is_the_accounts_own_calendar_not_its_nav_dates() -> None:
+    """Kill tests (Astra P1-5, Fable X4): weekdays between observations are required, a
+    weekend or a lone holiday is carried, nothing is required after the last NAV day, and
+    unknown NAV days are unknown (never zero)."""
+
+    count = ld._unobserved_days
+    fri_wed = frozenset({"2026-01-30", "2026-02-04"})
+    assert count(fri_wed, set(fri_wed)) == 2  # Mon 2 and Tue 3 February
+    holiday = frozenset({"2026-04-02", "2026-04-06"})  # Thu .. Mon, Good Friday between
+    assert count(holiday, set(holiday)) == 0
+    two_days = frozenset(
+        {"2026-04-01", "2026-04-06"}
+    )  # Wed .. Mon: Thu and Fri missing
+    assert count(two_days, set(two_days)) == 2
+    assert (
+        count(frozenset({"2026-01-30"}), {"2026-01-30"}) == 0
+    )  # nothing after the last
+    assert count(None, set()) is None and count(frozenset(), set()) is None

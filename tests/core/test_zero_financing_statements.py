@@ -32,9 +32,8 @@ def _text(
     block_row: str | None = None,
 ) -> str:
     lines = [
-        "                CHARLES SCHWAB & CO INC CUST"
-        + (" ROTH IRA" if retirement else ""),
-        "        Account Number        Statement Period",
+        ("Roth Contributory IRA of" if retirement else "Schwab One Account of")
+        + "        Account Number        Statement Period",
         f"        {number}        {period}",
         "",
     ]
@@ -57,7 +56,7 @@ def _text(
         lines.append("03/10 Journal   Margin Loan Advance       500.00")
     if disclosure:
         lines += ["", disclosure]
-    return "\f".join(["\n".join(lines), "page two"])
+    return "\f".join(["\n".join([*lines, "1 of 2"]), "page two\n2 of 2"])
 
 
 def _aligned(*amounts: str, left: str = "") -> str:
@@ -103,11 +102,17 @@ def test_a_clean_margin_month_is_a_zero_month_provisionally() -> None:
         ({"interest": POSTING}, "MARGIN_INTEREST_POSTED_IN_PERIOD"),
         # posting detection is case-, date-format- and wrap-tolerant (F5)
         (
-            {"interest": "03/20/26 Interest   MARGIN INTEREST   12.00"},
+            {
+                "interest": "03/20/26 Interest   MARGIN INTEREST   12.00 "
+                "INTEREST 02/19THRU 03/19"
+            },
             "MARGIN_INTEREST_POSTED_IN_PERIOD",
         ),
         (
-            {"interest": "03/20 Expense\n          Margin Interest   12.00"},
+            {
+                "interest": "03/20 Expense\n          Margin Interest   12.00\n"
+                "          INTEREST 02/19THRU 03/19"
+            },
             "MARGIN_INTEREST_POSTED_IN_PERIOD",
         ),
         ({"movement": True}, "MARGIN_LOAN_MOVEMENT_IN_PERIOD"),
@@ -129,10 +134,21 @@ def test_unparsed_loan_amounts_and_ambiguous_interest_lines_refuse() -> None:
     ambiguous = _facts(disclosure="Margin interest was accrued on the balance   45.10")
     assert zf.verdict(ambiguous) == ("UNVERIFIED", "AMBIGUOUS_MARGIN_INTEREST_LINE")
     # a disclosure that names margin interest without an amount is just disclosure text
-    prose = _facts(
-        disclosure="Margin interest is charged as described in the schedule."
-    )
-    assert zf.verdict(prose)[0] == "ZERO"
+    # default-refuse: any interest-like line that is not a posting, a table heading or a
+    # known label/disclosure is unaccounted for, whatever it says (Astra P1-11/P1-12)
+    for line in (
+        "Margin interest is charged as described in the schedule.",
+        "03/20 Expense   Margin Int   12.00",
+        "03/20 Expense   Interest on Debit Balance   12.00",
+        "03/20 Debit Interest   12.00",
+        "03/20 Expense   Margin Interest   INTEREST 02/19THRU 03/19\n"
+        "03/21 Expense   Margin Interest   INTEREST 02/19THRU 03/19",  # one period twice
+    ):
+        assert zf.verdict(_facts(disclosure=line)) == (
+            "UNVERIFIED",
+            "AMBIGUOUS_MARGIN_INTEREST_LINE",
+        ), line
+    assert zf.verdict(_facts(disclosure="No margin interest was charged."))[0] == "ZERO"
 
 
 def test_an_absent_block_refuses_unless_the_header_is_a_retirement_one() -> None:
@@ -153,7 +169,9 @@ def test_an_absent_block_refuses_unless_the_header_is_a_retirement_one() -> None
 
 
 def test_an_incomplete_statement_never_reads_as_zero() -> None:
-    assert zf.verdict(_facts(summary=None))[1] == "TRANSACTIONS_SUMMARY_ABSENT"
+    assert (
+        zf.verdict(_facts(summary=None))[1] == "LAYOUT_TRANSACTIONS_SUMMARY_NOT_UNIQUE"
+    )
     assert (
         zf.verdict(_facts(details=True, totals=0))[1]
         == "TRANSACTION_DETAILS_WITHOUT_ONE_TOTAL"
@@ -335,8 +353,11 @@ def test_overlaps_mislabels_unparsed_postings_and_long_periods_refuse(
         _build(directory, sums, mapping, overlap)
     unparsed = {first: _text(interest="03/20 Expense Margin Interest   12.00")}
     directory, sums, mapping = _world(tmp_path, unparsed)
-    with pytest.raises(zf.ZeroFinancingError, match="names no charged period"):
-        _build(directory, sums, mapping, unparsed)
+    artifact = _build(directory, sums, mapping, unparsed)
+    assert artifact["rows"] == []
+    assert (
+        artifact["unobserved_periods"][0]["reason"] == "AMBIGUOUS_MARGIN_INTEREST_LINE"
+    )
     year = {
         _name("2026-12-31"): _text(
             block=None, retirement=True, period="January 1 - December 31, 2026"
@@ -460,3 +481,65 @@ def test_a_margin_interest_table_is_financing_and_the_loan_block_is_the_right_co
         )
     )
     assert left["loan_block"] == (0, 0)
+
+
+def test_a_statement_counts_only_when_it_parses_against_the_one_strict_layout() -> None:
+    """Kill tests (Astra P1-1/8/9/10, P2-13/14): default-refuse.  Anything that is not the
+    expected layout is UNVERIFIED with a LAYOUT reason, never a guess."""
+
+    def reason(text: str) -> str:
+        return zf.verdict(zf.parse_statement(text, None))[1]
+
+    # P1-8: split loan headings, on either account type, and a second block
+    split_retirement = _text(
+        retirement=True, block=None, disclosure="Closing Margin\n$5,000.00"
+    )
+    assert reason(split_retirement) == "LAYOUT_MARGIN_BLOCK_ON_RETIREMENT_STATEMENT"
+    split_margin = _text(
+        block=None,
+        disclosure="Margin Loan Information\nOpening Margin   Loan Balance\n"
+        "Closing Margin\n$0.00   $5,000.00",
+    )
+    assert reason(split_margin) == "LAYOUT_LOAN_BLOCK_NOT_UNIQUE"
+    header = "                                                Opening Margin      Closing Margin     Funds Available"
+    two_blocks = _text(disclosure=f"{header}\n{_aligned('$0.00', '$5,000.00')}")
+    assert reason(two_blocks) == "LAYOUT_LOAN_BLOCK_NOT_UNIQUE"
+    # P1-9: a page of another account is not read; the full number must agree
+    foreign = _text(number="7218-4123", disclosure="Account 9876-5123 loan page")
+    assert reason(foreign) == "LAYOUT_FOREIGN_ACCOUNT_NUMBER"
+    assert reason(_text(number="7218-4123")) == "LOAN_ZERO_NO_INTEREST_NO_MOVEMENT"
+    # P1-10: pages removed from a statement that still says how long it is
+    truncated = _text().replace("1 of 2", "1 of 4").replace("2 of 2", "4 of 4")
+    assert reason(truncated) == "LAYOUT_PAGE_MARKER_INCONSISTENT"
+    assert reason(_text().replace("1 of 2", "")) == "LAYOUT_PAGE_ONE_MARKER_ABSENT"
+    # P2-13/14: strict decimals and a calendar month at most
+    for bad in ("$0.00x", "0.00x", "1,2.00"):
+        with pytest.raises(zf.ZeroFinancingError):
+            zf._parse_money(bad)
+    assert not zf._zero_amount("0.00x")
+    with pytest.raises(zf.ZeroFinancingError, match="longer than a month"):
+        zf.parse_statement(_text(period="March 1 - April 1, 2026"), None)
+
+
+def test_loan_block_amounts_need_distinct_columns_under_both_labels() -> None:
+    """Kill test (Astra P1-1): one amount cannot answer both labels."""
+
+    header = " " * 48 + "Opening Margin" + " " * 6 + "Closing Margin"
+    row = (
+        "$500.00".rjust(40)
+        + " " * 18
+        + "$0.00"
+        + " " * 25
+        + "$1.00"
+        + " " * 10
+        + "$2.00"
+    )
+    # $500 at column 34, $0.00 at 60: both labels would pick $0.00
+    shifted = " " * 34 + "$500.00" + " " * 19 + "$0.00" + " " * 20 + "$1.00   $2.00"
+    with pytest.raises(zf.ZeroFinancingError, match="share a column|ambiguous"):
+        zf._block_amounts(header, shifted)
+    assert zf._block_amounts(header, _aligned("$0.00", "$7.00", "$1.00", "$2.00")) == (
+        0,
+        7,
+    )
+    del row
