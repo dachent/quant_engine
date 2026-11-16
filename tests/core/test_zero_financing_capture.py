@@ -70,6 +70,8 @@ def _capture(
     history_from: str = "02/01/2026",
     omit_bookmark: bool = False,
     is_margin: bool | None = None,
+    bookmark: str | None = None,
+    old_row: bool = True,
     **over: Any,
 ) -> bytes:
     """A capture JSON plus raw files that agree with its claims (unless overridden)."""
@@ -96,8 +98,10 @@ def _capture(
         ],
         "fromDate": history_from,
         "toDate": "04/08/2026",
-        "bookmark": None,
+        "bookmark": bookmark,
     }
+    if not old_row:
+        history["brokerageTransactions"] = history["brokerageTransactions"][:-1]
     if omit_bookmark:
         del history["bookmark"]
     stamp = f"Updated:\n3:14:06 AM Eastern Time, X\n03:14:06 AM ET, {page_date}\n"
@@ -704,3 +708,42 @@ def test_a_debit_in_the_final_period_voids_the_bracket_and_pairs_are_structural(
         outgoing["capture_decisions"][0]["reason"]
         == "CAPTURE_TRANSACTION_CAN_CREATE_A_DEBIT"
     )
+
+
+def test_a_paged_history_must_reach_strictly_before_the_final_period_and_labels_repeat_never(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (Opus F-2, Fable F-F/F-G): rows of the period's first day can continue on
+    the next page, so a bookmarked history needs an earlier row; a repeated or prefixed page
+    label is no amount."""
+
+    first_day_buy = {
+        "date": "2026-03-01",
+        "action": "Buy",
+        "description": "SPY",
+        "amount": "-50000.00",
+    }
+    with pytest.raises(zf.ZeroFinancingError, match="does not reach"):
+        _build(
+            tmp_path,
+            True,
+            _capture(
+                tmp_path,
+                transactions=[DIVIDEND],
+                raw_rows=[DIVIDEND, first_day_buy],
+                bookmark="next-page",
+                old_row=False,
+            ),
+        )
+    complete = _build(
+        tmp_path, True, _capture(tmp_path, bookmark="next-page", old_row=True)
+    )
+    assert complete["capture_decisions"][0]["reason"] == "BRACKET_PROVEN_BY_CAPTURE"
+    for extra in (
+        "Total Balance Subject to Interest   $5,000.00\n",
+        "Balance Subject to Interest   $5,000.00\n",
+    ):
+        shows = _build(tmp_path, False, _capture(tmp_path, page_extra=extra))
+        assert (
+            shows["capture_decisions"][0]["reason"] == "CAPTURE_CLAIMS_DIFFER_FROM_RAW"
+        )

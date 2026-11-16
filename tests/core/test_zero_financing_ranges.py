@@ -332,3 +332,96 @@ def test_the_layout_reader_is_bound_to_its_provider(tmp_path: Path) -> None:
             provider_id="other",
             extract=lambda _p: "",
         )
+
+
+def _with_loan(text: str, opening: str, closing: str) -> str:
+    return text.replace(
+        "$0.00               $0.00               $10.00",
+        f"{opening.ljust(20)}{closing.ljust(20)}$10.00",
+    )
+
+
+def test_a_printed_loan_balance_is_never_published_as_a_zero_day(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (Opus F-4, Fable F-B): March prints a $5,000 closing loan and April's
+    reconciled table charges 03/26-04/25 with one short range: 03/31 stays a financing day
+    with the printed balance; opening and closing balances must chain."""
+
+    march = _with_loan(
+        _statement("March 1-31, 2026", paid=None, rows=(), posting=False),
+        "$0.00",
+        "$5,000.00",
+    )
+    april = _with_loan(
+        _statement(
+            "April 1-30, 2026",
+            paid="3.28",
+            rows=("04/02-04/03   (5,000.00) 11.825   3.28",),
+            thru="03/26THRU 04/25",
+        ),
+        "$5,000.00",
+        "$0.00",
+    )
+    artifact = _build(tmp_path, {MARCH: march, APRIL: april})
+    rows = {r["as_of_date"]: r for r in artifact["rows"]}
+    closing = rows["2026-03-31"]
+    assert closing["classification"] == "OBSERVED_FINANCING_DAY"
+    assert closing["amount"]["value"] == "5000.00"
+    assert closing["amount_measurement"] == "STATEMENT_CLOSING_BALANCE"
+    # April opens with $5,000 but its range starts 04/02: April is not reconciled, so no
+    # day around the printed balance is a zero day
+    assert set(rows) == {"2026-03-31"}
+    reasons = {x["reason"] for x in artifact["interest_reconciliation"]}
+    assert "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES" in reasons
+    broken = _with_loan(april, "$5,000.00", "$4,000.00")  # still reads; chain differs
+    broken = _with_loan(
+        _statement(
+            "April 1-30, 2026",
+            paid="3.28",
+            rows=("04/02-04/03   (5,000.00) 11.825   3.28",),
+            thru="03/26THRU 04/25",
+        ),
+        "$4,000.00",
+        "$0.00",
+    )
+    chained = _build(tmp_path, {MARCH: march, APRIL: broken})
+    assert chained["rows"] == []
+    reasons = {u["reason"] for u in chained["unobserved_periods"]}
+    assert reasons == {"LOAN_BALANCE_CHAIN_BREAKS"}
+
+
+def test_a_posting_needs_interest_and_a_range_to_reconcile(tmp_path: Path) -> None:
+    """Kill test (Fable F-C): a posting with no interest paid and no ranges proves
+    nothing."""
+
+    for paid in ("0.00", "12.34"):
+        artifact = _march(tmp_path, paid=paid, rows=())
+        assert artifact["rows"] == []
+        assert (
+            artifact["interest_reconciliation"][0]["reason"]
+            == "POSTING_WITHOUT_INTEREST_RANGES"
+        )
+
+
+def test_an_opening_loan_must_sit_inside_a_printed_range(tmp_path: Path) -> None:
+    """Kill test (Fable F-B): May opens with a $5,000 loan but its table charges only
+    05/05-05/14: days 05/01-05/04 are not zero days."""
+
+    may = "schwab-stmt-" + LABEL + "-2026-05-31.pdf"
+    text = _with_loan(
+        _statement(
+            "May 1-31, 2026",
+            paid="16.42",
+            rows=("05/05-05/14   (5,000.00) 11.825   16.42",),
+            thru="04/26THRU 05/25",
+        ),
+        "$5,000.00",
+        "$0.00",
+    )
+    artifact = _build(tmp_path, {may: text})
+    assert artifact["rows"] == []
+    assert (
+        artifact["interest_reconciliation"][0]["reason"]
+        == "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES"
+    )

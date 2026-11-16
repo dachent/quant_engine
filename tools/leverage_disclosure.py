@@ -82,36 +82,33 @@ def _text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _unobserved_days(
-    nav_days: frozenset[str] | None, known_days: set[str] | frozenset[str]
-) -> int | None:
-    """How many days of the account's own span lack an observation of the financing
-    balance, or None when the span cannot be known (no NAV days).
+_LONG_WEEKEND_DAYS = 4
 
-    The span is every calendar day from the first to the last NAV day, so a sparse NAV
-    series never narrows it to its own dates.  A weekend day is covered by its neighbours
-    (a base cash balance carries over it), and so is a single weekday between two covered
-    or weekend days (a market holiday); two weekdays in a row without an observation are
-    a gap.  Nothing is required after the last NAV day: an account that ended has no
-    later days."""
+
+def _unobserved_days(
+    nav_days: frozenset[str] | None,
+    known_days: set[str] | frozenset[str],
+    cutoff: date | None = None,
+) -> int | None:
+    """How many required days lack an observation of the financing balance, or None when
+    the requirement cannot be known (no NAV days).
+
+    Every NAV day is required.  So is every calendar day of a stretch longer than a long
+    weekend between two NAV days or between the last NAV day and the cutoff, so a sparse
+    NAV series never narrows the requirement to its own dates.  A day inside a short gap
+    that is not a NAV day (a weekend, a market holiday) is not required."""
 
     days = sorted(d for d in (_iso_day(x) for x in (nav_days or ())) if d is not None)
     if not days:
         return None
+    required = {d for d in days}
+    stops = days + ([cutoff] if cutoff is not None and cutoff > days[-1] else [])
+    for before, after in zip(stops, stops[1:], strict=False):
+        if (after - before).days > _LONG_WEEKEND_DAYS:
+            for offset in range(1, (after - before).days + 1):
+                required.add(before + timedelta(days=offset))
     known = {d for d in (_iso_day(x) for x in known_days) if d is not None}
-
-    def covered(day: date) -> bool:
-        return day in known or day.weekday() >= 5
-
-    missing = 0
-    day = days[0]
-    while day <= days[-1]:
-        if day not in known and day.weekday() < 5:
-            before, after = day - timedelta(days=1), day + timedelta(days=1)
-            if not (covered(before) and covered(after)):
-                missing += 1
-        day += timedelta(days=1)
-    return missing
+    return len(required - known)
 
 
 def _debit_evidence(
@@ -197,7 +194,7 @@ def _debit_evidence(
         | base_days
     )
     return account_financing.DebitEvidence(
-        unobserved_days=_unobserved_days(nav_days, known_days),
+        unobserved_days=_unobserved_days(nav_days, known_days, cutoff),
         net_base_debit_days=len(base_days),
         range_average_debit_days=len(range_days & base_days),
         debit_interest_postings=postings,

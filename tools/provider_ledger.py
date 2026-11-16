@@ -4169,9 +4169,6 @@ def _zero_financing_rows(
             hashlib.sha256(capture_sums_raw or b"").hexdigest(),
             hashlib.sha256(extractor).hexdigest(),
             as_of.isoformat(),
-            json.dumps(
-                sorted((a, d.isoformat()) for a, d in (history_start or {}).items())
-            ),
         ]
     )
     generation = f"zero-financing-{hashlib.sha256(identity.encode()).hexdigest()[:24]}"

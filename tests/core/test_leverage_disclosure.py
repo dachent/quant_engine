@@ -545,21 +545,23 @@ def test_range_average_financing_days_make_the_account_levered_not_not_levered()
     assert "OBSERVED_FINANCING_DAYS_RANGE_AVERAGE" in state["coverage_reason"]
 
 
-def test_the_required_span_is_the_accounts_own_calendar_not_its_nav_dates() -> None:
-    """Kill tests (Astra P1-5, Fable X4): weekdays between observations are required, a
-    weekend or a lone holiday is carried, nothing is required after the last NAV day, and
-    unknown NAV days are unknown (never zero)."""
+def test_every_nav_day_and_every_day_of_a_long_gap_is_required() -> None:
+    """Kill tests (Opus F-1, Astra P1-5): each NAV day needs an observation (no weekday
+    carried over by a neighbour), a stretch longer than a long weekend between NAV days or
+    up to the cutoff is required day by day, unknown NAV days are unknown (never zero)."""
+
+    from datetime import date
 
     count = ld._unobserved_days
+    week = frozenset(f"2026-04-{d:02d}" for d in range(6, 11))  # Mon .. Fri
+    assert count(week, {"2026-04-07", "2026-04-09"}) == 3  # Mon, Wed, Fri unobserved
+    assert count(week, set(week)) == 0
     fri_wed = frozenset({"2026-01-30", "2026-02-04"})
-    assert count(fri_wed, set(fri_wed)) == 2  # Mon 2 and Tue 3 February
+    assert count(fri_wed, set(fri_wed)) == 4  # the days between are required
     holiday = frozenset({"2026-04-02", "2026-04-06"})  # Thu .. Mon, Good Friday between
-    assert count(holiday, set(holiday)) == 0
-    two_days = frozenset(
-        {"2026-04-01", "2026-04-06"}
-    )  # Wed .. Mon: Thu and Fri missing
-    assert count(two_days, set(two_days)) == 2
-    assert (
-        count(frozenset({"2026-01-30"}), {"2026-01-30"}) == 0
-    )  # nothing after the last
+    assert count(holiday, set(holiday)) == 0  # a short gap: non-NAV days not required
+    last = frozenset({"2026-01-30"})
+    assert count(last, set(last)) == 0
+    assert count(last, set(last), date(2026, 2, 2)) == 0  # a weekend tail is carried
+    assert count(last, set(last), date(2026, 2, 6)) == 7  # a longer tail is required
     assert count(None, set()) is None and count(frozenset(), set()) is None
