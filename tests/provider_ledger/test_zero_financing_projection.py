@@ -23,7 +23,7 @@ _SPEC.loader.exec_module(admit)
 ledger = admit.ledger
 
 ACCOUNT = "synthetic-ibkr"
-PROVIDER = "ibkr"
+PROVIDER = "schwab"
 LAST3 = "123"
 AS_OF = date(2026, 1, 31)
 

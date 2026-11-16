@@ -232,3 +232,103 @@ def _march_artifact() -> Any:
 
     with tempfile.TemporaryDirectory() as raw:
         return _march(Path(raw))
+
+
+RAW = "\n".join(
+    [
+        "Transactions - Summary",
+        "Beginning Cash* as of 03/01",
+        "+ Deposits",
+        "+ Expenses = Ending Cash* as of 03/31",
+        "$100.00 $0.00 ($300.00) $0.00 $250.00 $0.00 $0.00 $50.00",
+        "Transaction Details",
+        "Date Category Action",
+        "Interest($) Amount($)",
+        "03/03 Withdrawal Wire Sent X",
+        "WIRED FUNDS",
+        "(300.00)",
+        "03/05 Sale ABC SOME DESCRIPTION",
+        "(10.0000) 25.0000 250.00 (3.00),(ST)",
+        "Industry Fee $0.01",
+        "Total Transactions $0.00",
+    ]
+)
+
+
+def test_a_closing_cash_ladder_gives_exact_debit_days_and_zero_days() -> None:
+    """Kill tests (control B): the end-of-day cash ladder is used only when it ties to the
+    printed cash; a debit-cash day is a financing day with that exact balance."""
+
+    ladder, begin, why = zf.parse_cash_ladder(RAW, date(2026, 3, 1), date(2026, 3, 31))
+    assert why == "CASH_LADDER_CLOSES" and begin == 100
+    assert ladder is not None
+    assert ladder[date(2026, 3, 2)] == 100
+    assert ladder[date(2026, 3, 3)] == ladder[date(2026, 3, 4)] == -200
+    assert ladder[date(2026, 3, 5)] == ladder[date(2026, 3, 31)] == 50
+    bad = {
+        "CASH_CATEGORY_TOTALS_DIFFER": RAW.replace("(300.00)", "(299.00)"),
+        "CASH_SUMMARY_DOES_NOT_ADD_UP": RAW.replace("$50.00", "$51.00"),
+        "CASH_SUMMARY_ROW_NOT_FOUND": RAW.replace("$250.00 ", ""),
+        "TRANSACTION_DATE_OUTSIDE_PERIOD": RAW.replace("03/05", "04/05"),
+        "TRANSACTION_WITHOUT_DATE": RAW.replace("03/03 ", ""),
+        "TRANSACTION_LIST_NOT_CLOSED": RAW.replace("Total Transactions $0.00", ""),
+    }
+    for reason, text in bad.items():
+        assert (
+            zf.parse_cash_ladder(text, date(2026, 3, 1), date(2026, 3, 31))[2] == reason
+        )
+
+
+def test_a_financing_month_without_interest_rows_is_read_from_its_cash_ladder(
+    tmp_path: Path,
+) -> None:
+    text = _statement("March 1-31, 2026", paid=None, rows=(), posting=False).replace(
+        "$0.00               $0.00               $10.00",
+        "$0.00               $200.00             $10.00",
+    )
+    sums = {}
+    for name in (MARCH,):
+        (tmp_path / name).write_bytes(name.encode())
+        sums[name] = hashlib.sha256(name.encode()).hexdigest()
+    artifact = zf.build(
+        tmp_path,
+        sums,
+        {LABEL: (ACCOUNT, LAST3)},
+        provider_id=PROVIDER,
+        extract=lambda _p: text,
+        extract_raw=lambda _p: RAW,
+    )
+    rows = {r["as_of_date"]: r for r in artifact["rows"]}
+    assert len(rows) == 31
+    debit = rows["2026-03-03"]
+    assert debit["classification"] == "OBSERVED_FINANCING_DAY"
+    assert (
+        debit["amount"]["value"] == "200.00"
+        and debit["amount_measurement"] == "DAY_BALANCE_DERIVED"
+    )
+    assert rows["2026-03-05"]["classification"] == "ZERO_FINANCING_OBSERVED"
+    zf.validate_rows(artifact, {ACCOUNT})
+    # without a closing ladder the month stays unobserved
+    broken = zf.build(
+        tmp_path,
+        sums,
+        {LABEL: (ACCOUNT, LAST3)},
+        provider_id=PROVIDER,
+        extract=lambda _p: text,
+        extract_raw=lambda _p: RAW.replace("(300.00)", "(299.00)"),
+    )
+    assert [r["amount_measurement"] for r in broken["rows"]] == [
+        "STATEMENT_CLOSING_BALANCE"
+    ]
+
+
+def test_the_layout_reader_is_bound_to_its_provider(tmp_path: Path) -> None:
+    (tmp_path / MARCH).write_bytes(MARCH.encode())
+    with pytest.raises(zf.ZeroFinancingError, match="bound to one provider"):
+        zf.build(
+            tmp_path,
+            {MARCH: hashlib.sha256(MARCH.encode()).hexdigest()},
+            {LABEL: (ACCOUNT, LAST3)},
+            provider_id="other",
+            extract=lambda _p: "",
+        )
