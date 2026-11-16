@@ -48,7 +48,6 @@ STATEMENT_CLOSING_BALANCE: Final = "STATEMENT_CLOSING_BALANCE"
 # a day's end-of-day cash balance derived from the statement's own transactions, tied
 # to its printed beginning and ending cash
 DAY_BALANCE_DERIVED: Final = "DAY_BALANCE_DERIVED"
-# the only provider whose statement layout this reader knows
 
 _MONTHS: Final = {name: i for i, name in enumerate(calendar.month_name) if name}
 _PERIOD = re.compile(
@@ -561,6 +560,7 @@ def parse_statement(text: str, file_period_end: date | None = None) -> dict[str,
         "range_details": _interest_range_details(lines, end),
         "interest_paid_period": _interest_paid_period(lines),
         "table_page": _page_of(text, "Average Margin"),
+        "details_page": _page_of(text, "Transaction Details"),
         "block_page": _page_of(text, "Margin Loan Information"),
         "header_page": _page_of(text, "Statement Period"),
     }
@@ -1241,6 +1241,8 @@ def parse_cash_ladder(
         current: date | None = None
         for line in lines[first + 1 : last]:
             match = _LADDER_CATEGORY.match(line.strip())
+            if match is None and re.match(r"\d{2}/\d{2}[ \t]+\S", line.strip()):
+                return None, None, "UNKNOWN_TRANSACTION_CATEGORY"
             if match:
                 if match.group(1):
                     try:
@@ -1394,6 +1396,7 @@ def build(
             "loan_closing": facts["loan_block"][1] if facts["loan_block"] else None,
             "loan_opening": facts["loan_block"][0] if facts["loan_block"] else None,
             "number": facts["full_number"],
+            "details_page": facts["details_page"],
             "coverage": None,
             "ladder": None,
             "ladder_reason": None,
@@ -1685,15 +1688,8 @@ def build(
     # Months that did not reconcile on interest but whose cash ladder ties to the printed
     # beginning and ending cash: a day with a debit cash balance is a financing day with
     # that exact end-of-day balance, any other day a zero day.
-    # A closing ladder is exact where interest ranges are averages: it takes the days of
-    # its own statement period over any coarser row.
-    ladder_days = {
-        (account, day.isoformat())
-        for (account, _s, _e), record in periods.items()
-        if record["ladder"] is not None
-        for day in record["ladder"]
-    }
-    rows[:] = [r for r in rows if (r["account_id"], r["as_of_date"]) not in ladder_days]
+    # A closing ladder never overrides interest evidence (reconciled ranges, proven zero
+    # days): it fills only the days nothing else covers.
     have = {(r["account_id"], r["as_of_date"]) for r in rows}
     for (account, start, end), record in sorted(periods.items()):
         ladder = record["ladder"]
@@ -1720,7 +1716,7 @@ def build(
                 "source_artifact_id": f"{prefix}/{record['name']}",
                 "source_artifact_sha256": record["digest"],
                 "source_field": "Transaction Details: end-of-day cash tied to printed cash",
-                "source_page": record["page"],
+                "source_page": record["details_page"] or record["page"],
                 "verdict_reason": "CASH_LADDER_CLOSES",
             }
             if debit:
@@ -1740,8 +1736,6 @@ def build(
             for r in rows
             if r["account_id"] == account and r["as_of_date"] == end.isoformat()
         ]
-        if any(r["classification"] == FINANCING_CLASSIFICATION for r in clash):
-            continue
         rows[:] = [r for r in rows if r not in clash]  # the printed balance wins
         rows.append(
             {
