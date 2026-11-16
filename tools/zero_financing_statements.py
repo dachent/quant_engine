@@ -100,7 +100,7 @@ def statement_label(provider_id: str, last3: str) -> str:
     return hashlib.sha256(f"acct-{provider_id}-{last3}".encode()).hexdigest()[:8]
 
 
-_MONEY_AMOUNT = re.compile(r"\(?-?\$[\d,]+\.\d\d\)?")
+_MONEY_AMOUNT = re.compile(r"\(?-?\$[\d,]+\.\d\d(?!\d)\)?")
 _MARGIN_INTEREST_WORDS = re.compile(r"margin\s+interest", re.I)
 _DATED_LINE = re.compile(r"^[ \t]*\d{1,2}/\d{1,2}(/\d{2,4})?[ \t]")
 _AMOUNT_AT_END = re.compile(r"\(?-?[\d,]+\.\d\d\)?[ \t]*$")
@@ -170,22 +170,39 @@ def _margin_interest_postings(lines: list[str]) -> tuple[int, bool]:
 
     Every line that names margin interest (any case, any variant such as "Margin Int" or
     "Interest on Debit Balance") must be accounted for: a table heading, a known label or
-    disclosure, or a posting.  Postings and printed charged periods ("INTEREST a THRU b")
-    must pair one to one, with no period printed twice; anything else is ambiguous and the
-    caller refuses the statement."""
+    disclosure covering the matched words themselves, or a posting.  A dated line with an
+    amount is always a posting.  Postings and printed charged periods ("INTEREST a THRU
+    b") pair one to one by position, each within a page's reach of its pair, with no period
+    printed twice; anything else is ambiguous and the caller refuses the statement."""
 
-    labels = 0
-    for line in lines:
-        if not _INT_LABEL.search(line) or _INT_EXEMPT.search(line):
+    labels: list[int] = []
+    for number, line in enumerate(lines):
+        spans = list(_INT_LABEL.finditer(line))
+        if not spans:
             continue
-        if re.match(r"[ \t]*Margin Interest([ \t]{2,}\S.*)?$", line) and not (
+        heading = re.match(r"[ \t]*Margin Interest([ \t]{2,}\S.*)?$", line) and not (
             re.search(r"\d", line)
-        ):
-            continue  # a table heading (possibly beside another column)
-        labels += 1
-    periods = [m for line in lines for m in _THRU.findall(line)]
-    ambiguous = labels != len(periods) or len(set(periods)) != len(periods)
+        )
+        exempt = [m.span() for m in _INT_EXEMPT.finditer(line)]
+        dated = bool(_DATED_LINE.match(line)) and bool(re.search(r"\d\.\d\d", line))
+        for match in spans:
+            covered = any(a <= match.start() < b for a, b in exempt)
+            if heading or (covered and not dated):
+                continue
+            labels.append(number)
+            break
+    thru = [(n, p) for n, line in enumerate(lines) for p in _THRU.findall(line)]
+    periods = [p for _n, p in thru]
+    ambiguous = len(labels) != len(thru) or len(set(periods)) != len(periods)
+    if not ambiguous:
+        ambiguous = any(
+            abs(label - n) > _PAIR_REACH
+            for label, (n, _p) in zip(sorted(labels), sorted(thru), strict=True)
+        )
     return len(periods), ambiguous
+
+
+_PAIR_REACH = 25
 
 
 def _incomplete(lines: list[str]) -> str | None:
@@ -249,7 +266,7 @@ def _table_rows(lines: list[str]) -> list[str]:
             continue
         for follow in lines[number + 1 : number + 14]:
             text = follow.strip()
-            if re.fullmatch(r"[\d/\-\s,.$()]+", text) and re.match(
+            if re.fullmatch(r"[\d/\-\s,.$()%]+", text) and re.match(
                 r"\d{2}/\d{2}", text
             ):
                 out.append(follow)
@@ -342,6 +359,8 @@ def reconcile_interest(facts: Mapping[str, Any]) -> tuple[bool, str]:
     paid = facts["interest_paid_period"]
     if paid is None:
         return False, "INTEREST_PAID_NOT_PRINTED"
+    if paid <= 0 or not details:
+        return False, "POSTING_WITHOUT_INTEREST_RANGES"
     ranges = sorted(details)
     for (_a1, b1, *_x), (a2, _b2, *_y) in zip(ranges, ranges[1:], strict=False):
         if a2 <= b1:
@@ -354,6 +373,18 @@ def reconcile_interest(facts: Mapping[str, Any]) -> tuple[bool, str]:
             return False, "RANGE_INTEREST_NOT_PLAUSIBLE"
     if sum((r[4] for r in ranges), Decimal(0)) != paid:
         return False, "INTEREST_DOES_NOT_RECONCILE"
+    block = facts["loan_block"]
+    if block is not None:
+        # a loan outstanding on a statement's first (last) day, inside a charged period,
+        # must be inside a printed range: interest accrues every day it is outstanding
+        for balance, day in (
+            (block[0], facts["period_start"]),
+            (block[1], facts["period_end"]),
+        ):
+            charged = any(a <= day <= b for a, b in periods)
+            printed = any(first <= day <= last for first, last, *_rest in ranges)
+            if balance != 0 and charged and not printed:
+                return False, "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES"
     return True, "INTEREST_RECONCILED"
 
 
@@ -784,26 +815,28 @@ def _page_facts(text: str, last3: str) -> date:
 
 def _page_amount(text: str, label: str) -> Decimal | None:
     """The amount printed for ``label``: on the label's own line after it, or alone on
-    the next non-blank line; any other content in between means no amount."""
+    the next non-blank line; any other content in between means no amount.  The label must
+    appear exactly once and open its line: a repeated or prefixed label refuses."""
 
     lines = text.replace("\r\n", "\n").split("\n")
-    for number, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped.startswith(label):
-            continue
-        rest = stripped[len(label) :].strip()
-        candidates = [rest] if rest else []
-        if not rest:
-            for follow in lines[number + 1 :]:
-                if follow.strip():
-                    candidates = [follow.strip()]
-                    break
-        if candidates and _PAGE_AMOUNT.fullmatch(candidates[0].replace("−", "-")):
-            try:
-                return _parse_money(candidates[0])
-            except ZeroFinancingError:
-                return None
+    where = [n for n, line in enumerate(lines) if label in line]
+    if not where:
         return None
+    if len(where) != 1 or not lines[where[0]].strip().startswith(label):
+        raise CaptureClaimsDiffer("capture page repeats or prefixes a label")
+    number = where[0]
+    rest = lines[number].strip()[len(label) :].strip()
+    candidates = [rest] if rest else []
+    if not rest:
+        for follow in lines[number + 1 :]:
+            if follow.strip():
+                candidates = [follow.strip()]
+                break
+    if candidates and _PAGE_AMOUNT.fullmatch(candidates[0].replace("\u2212", "-")):
+        try:
+            return _parse_money(candidates[0])
+        except ZeroFinancingError:
+            return None
     return None
 
 
@@ -870,7 +903,7 @@ def _recompute_capture(
         )
     if history["bookmark"]:
         # more pages exist: the rows held must reach back past the requested start
-        if not raw_all or min(r["date"] for r in raw_all) > last_start.isoformat():
+        if not raw_all or min(r["date"] for r in raw_all) >= last_start.isoformat():
             raise ZeroFinancingError(
                 "capture raw history does not reach its window start"
             )
@@ -1126,7 +1159,7 @@ def evaluate_capture(
     return True, "BRACKET_PROVEN_BY_CAPTURE"
 
 
-_SUMMARY_ROW_AMOUNT = re.compile(r"\(?-?\$[\d,]+\.\d\d\)?")
+_SUMMARY_ROW_AMOUNT = re.compile(r"\(?-?\$[\d,]+\.\d\d(?!\d)\)?")
 _LADDER_CATEGORY = re.compile(
     r"^(?:(\d{2})/(\d{2})[ \t]+)?(Purchase|Sale|Dividend|Interest|Withdrawal|Deposit|"
     r"Expense|Other)\b(?![(/])"
@@ -1284,6 +1317,7 @@ def build(
     # (account, start, end) -> record of the first statement that carries the period
     periods: dict[tuple[str, date, date], dict[str, Any]] = {}
     seen_accounts: set[str] = set()
+    full_numbers: dict[str, str] = {}
     sizes: dict[str, int] = {}
     for name in names:
         match = re.fullmatch(
@@ -1315,6 +1349,12 @@ def build(
                 f"file name differs from the printed period: {name}"
             )
         seen_accounts.add(account)
+        if facts["full_number"] is not None:
+            known = full_numbers.setdefault(account, facts["full_number"])
+            if known != facts["full_number"]:
+                raise ZeroFinancingError(
+                    f"statements of one account print different account numbers: {label}"
+                )
         key = (account, facts["period_start"], facts["period_end"])
         if facts["margin_interest_postings"] > len(facts["interest_periods"]):
             raise ZeroFinancingError(
@@ -1352,6 +1392,7 @@ def build(
             "page": page,
             "type_only": retirement_type,
             "loan_closing": facts["loan_block"][1] if facts["loan_block"] else None,
+            "loan_opening": facts["loan_block"][0] if facts["loan_block"] else None,
             "number": facts["full_number"],
             "coverage": None,
             "ladder": None,
@@ -1398,9 +1439,25 @@ def build(
         by_account.setdefault(account, []).append((start, end))
     for account, spans in by_account.items():
         spans.sort()
-        for (_s1, e1), (s2, _e2) in zip(spans, spans[1:], strict=False):
+        for (s1, e1), (s2, e2) in zip(spans, spans[1:], strict=False):
             if s2 <= e1:
                 raise ZeroFinancingError("two statement periods of one account overlap")
+            earlier, later = periods[(account, s1, e1)], periods[(account, s2, e2)]
+            if (
+                s2 == e1 + timedelta(days=1)
+                and earlier["loan_closing"] is not None
+                and later["loan_opening"] is not None
+                and abs(earlier["loan_closing"]) != abs(later["loan_opening"])
+            ):
+                # the margin loan balance printed at one statement's end is the next
+                # one's start: a chain that breaks leaves both months unproven
+                for broken in (earlier, later):
+                    broken.update(
+                        state="UNVERIFIED",
+                        reason="LOAN_BALANCE_CHAIN_BREAKS",
+                        coverage=None,
+                        ladder=None,
+                    )
         for index, (start, end) in enumerate(spans):
             record = periods[(account, start, end)]
             state, reason = record["state"], record["reason"]
@@ -1676,8 +1733,16 @@ def build(
         closing = record["loan_closing"]
         if record["state"] != "FINANCING" or not closing:
             continue
-        if (account, end.isoformat()) in have or (cutoff is not None and end > cutoff):
+        if cutoff is not None and end > cutoff:
             continue
+        clash = [
+            r
+            for r in rows
+            if r["account_id"] == account and r["as_of_date"] == end.isoformat()
+        ]
+        if any(r["classification"] == FINANCING_CLASSIFICATION for r in clash):
+            continue
+        rows[:] = [r for r in rows if r not in clash]  # the printed balance wins
         rows.append(
             {
                 "account_id": account,

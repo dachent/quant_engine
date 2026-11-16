@@ -543,3 +543,43 @@ def test_loan_block_amounts_need_distinct_columns_under_both_labels() -> None:
         7,
     )
     del row
+
+
+def test_interest_label_spans_pairing_and_table_rows_with_percent_refuse() -> None:
+    """Kill tests (Opus F-3/F-5, Fable F-E/F-H/F-I): the exemption covers only the words it
+    matched, a dated amount line is a posting, a posting needs a period within reach, a
+    $0.001 closing is not $0.00, and a table row with a percent sign still counts."""
+
+    ambiguous = ("UNVERIFIED", "AMBIGUOUS_MARGIN_INTEREST_LINE")
+    for line in (
+        "03/31 Margin Int  (4.12)        Average margin daily balance is shown below",
+        "03/31 MARGIN INTEREST daily balance adj (4.12)",
+    ):
+        assert zf.verdict(_facts(disclosure=line)) == ambiguous, line
+    far = "\n".join(
+        ["03/20 Expense   Margin Interest   12.00", *[""] * 40]
+        + ["INTEREST 02/19THRU 03/19"]
+    )
+    assert zf.verdict(_facts(disclosure=far)) == ambiguous
+    with pytest.raises(zf.ZeroFinancingError, match="four amounts|unparsed amount"):
+        _facts(block_row=_aligned("$0.00", "$0.001", "$1.00", "$2.00"))
+    percent = _facts(
+        disclosure="Margin Interest\n02/27-03/09   (428.09)   11.825%   1.55"
+    )
+    assert zf.verdict(percent) == ("FINANCING", "MARGIN_DEBIT_DAYS_IN_PERIOD")
+    assert percent["range_details"] is None  # unreadable detail: never reconciled
+
+
+def test_two_statements_of_one_account_must_print_the_same_account_number(
+    tmp_path: Path,
+) -> None:
+    """Kill test (Fable F-D): a last-3 collision is not an identity."""
+
+    first, second = _name("2026-03-31"), _name("2026-04-30")
+    texts = {
+        first: _text(number="1111-1123"),
+        second: _text(number="9999-9123", period="April 1-30, 2026"),
+    }
+    directory, sums, mapping = _world(tmp_path, texts)
+    with pytest.raises(zf.ZeroFinancingError, match="different account numbers"):
+        _build(directory, sums, mapping, texts)

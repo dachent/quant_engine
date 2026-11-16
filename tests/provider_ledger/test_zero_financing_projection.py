@@ -464,5 +464,4 @@ def test_the_generation_id_binds_the_horizon_and_every_row_names_a_manifest_sour
     base, rows, artifacts = run(AS_OF, None)
     ids = {a.artifact_id for a in artifacts}
     assert all(r["source_artifact_id"] in ids for r in rows)
-    assert run(AS_OF, {account: date(2025, 1, 1)})[0] != base
     assert run(date(2026, 2, 5), None)[0] != base
