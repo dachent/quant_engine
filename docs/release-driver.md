@@ -446,6 +446,18 @@ run used, so a sleeve row is checked against the declaration it was restated fro
 optional flags and adds them to the validator only when given. Without them the declaration-dependent items
 (`returns.sleeve_basis` and its invariants) are not evaluated and the ceremony reports different findings than the run.
 
+Every `validate_generation.py` call (the six stage groups `g2`, `validate-panel`, `lane-replica`, `lane-real`, the ceremony
+group and `post-commit`, and `release_replica.py`'s own findings and post-commit calls) also carries `--admission-receipt
+{ledger_receipt}`: the provider ledger generation's `admit-or-declare-receipt.json` (`{run}/stages/ledger/generations/{ledger_id}/`),
+the file the ledger stage writes beside `provider-ledger.json`. It lets the C5 source-clock check treat a finite provider the
+crosswalk never names (Fidelity) as out of scope, and only when every receipt disposition for that provider is
+`EXCLUDE` / `NO_CURRENT_PRODUCT_CONSUMER` / `NO_CURRENT_PRODUCT_EFFECT`. The validator binds it before use and exits 2 if it
+is unusable: the receipt type and schema version, its `disposition_sha256` and `inventory_sha256` recomputed, a
+`run_observation.financial_cutoff` equal to the run's cutoff, and a VERIFIED `generation.json` beside it that records the
+receipt's and the `--provider-ledger` file's SHA-256 (the ledger must be that same generation's). Without the flag the
+Fidelity `dates.source_clock` row stays NOT_READY. `tests/portfolio_operations/test_release_admission_receipt_wiring.py`
+fails if any validator call omits it.
+
 ## Re-running a pass on a fresh world
 
 Cold-operator checklist (R3), with the numbered recipe below as the detail: (a) the release-inputs root and its manifest
