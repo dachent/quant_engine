@@ -810,3 +810,53 @@ def test_the_first_business_day_after_a_carried_loan_stays_zero_when_interest_ti
     artifact = _build(tmp_path, {dec: text})
     first = {r["as_of_date"]: r for r in artifact["rows"]}["2025-12-01"]
     assert first["classification"] == "ZERO_FINANCING_OBSERVED"
+
+
+RAW_SMALL_DEBITS = "\n".join(
+    [
+        "Transactions - Summary",
+        "$0.00 $99.05 ($103.32) $0.00 $0.00 $0.00 $0.00 ($4.27)",
+        "Transaction Details",
+        "03/05 Withdrawal Wire X",
+        "(100.00)",
+        "03/07 Deposit Wire Y",
+        "99.05",
+        "03/25 Withdrawal Wire Z",
+        "(3.32)",
+        "Total Transactions $0.00",
+    ]
+)
+
+
+def test_an_observed_cash_debit_of_any_size_replaces_an_interest_zero(
+    tmp_path: Path,
+) -> None:
+    """Control ruling A (054 Apr 14-20 = 0.95, 691 Dec 30 = 19.66, 691 Jul 30-31 = 4.27):
+    a zero published from interest evidence never overrides a cash debit the closing ladder
+    observed, however small; the debit publishes at -cash (DAY_BALANCE_DERIVED)."""
+
+    statement = _statement(
+        "March 1-31, 2026",
+        paid="0.07",
+        rows=("03/05-03/06   (100.00) 11.825   0.07",),
+    )
+    artifact = _build_with(tmp_path, {MARCH: statement}, RAW_SMALL_DEBITS)
+    by_day = {r["as_of_date"]: r for r in artifact["rows"]}
+    for day, amount in (
+        ("2026-03-07", "0.95"),
+        ("2026-03-20", "0.95"),
+        ("2026-03-25", "4.27"),
+        ("2026-03-29", "4.27"),
+    ):
+        row = by_day[day]
+        assert row["classification"] == "OBSERVED_FINANCING_DAY", day
+        assert row["amount"]["value"] == amount
+        assert row["amount_measurement"] == "DAY_BALANCE_DERIVED"
+    assert by_day["2026-03-05"]["amount_measurement"] == "RANGE_AVERAGE"
+    assert not [
+        r
+        for r in artifact["rows"]
+        if r["as_of_date"] >= "2026-03-07"
+        and r["classification"] == "ZERO_FINANCING_OBSERVED"
+    ]
+    zf.validate_rows(artifact, {ACCOUNT})
