@@ -1017,6 +1017,11 @@
       "validate_release_targets",
       "validate_generation",
       1
+    ],
+    [
+      "zero_financing_statements",
+      "leverage_disclosure",
+      1
     ]
   ]
 }

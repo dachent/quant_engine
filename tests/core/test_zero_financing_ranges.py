@@ -316,7 +316,9 @@ def test_a_financing_month_without_interest_rows_is_read_from_its_cash_ladder(
         and debit["amount_measurement"] == "DAY_BALANCE_DERIVED"
     )
     assert "2026-03-02" not in rows
-    assert rows["2026-03-31"]["amount_measurement"] == "STATEMENT_CLOSING_BALANCE"
+    last_day = rows["2026-03-31"]  # the exact day balance, the printed loan beside it
+    assert last_day["amount_measurement"] == "DAY_BALANCE_DERIVED"
+    assert last_day["printed_margin_loan_trade_date"] == "200.00"
     zf.validate_rows(artifact, {ACCOUNT})
     # without a closing ladder the month stays unobserved
     broken = zf.build(
@@ -327,9 +329,7 @@ def test_a_financing_month_without_interest_rows_is_read_from_its_cash_ladder(
         extract=lambda _p: text,
         extract_raw=lambda _p: RAW_DEBT.replace("(300.00)", "(299.00)"),
     )
-    assert [r["amount_measurement"] for r in broken["rows"]] == [
-        "STATEMENT_CLOSING_BALANCE"
-    ]
+    assert broken["rows"] == []
 
 
 def test_the_layout_reader_is_bound_to_its_provider(tmp_path: Path) -> None:
@@ -375,13 +375,10 @@ def test_a_printed_loan_balance_is_never_published_as_a_zero_day(
     )
     artifact = _build(tmp_path, {MARCH: march, APRIL: april})
     rows = {r["as_of_date"]: r for r in artifact["rows"]}
-    closing = rows["2026-03-31"]
-    assert closing["classification"] == "OBSERVED_FINANCING_DAY"
-    assert closing["amount"]["value"] == "5000.00"
-    assert closing["amount_measurement"] == "STATEMENT_CLOSING_BALANCE"
     # April opens with $5,000 but its range starts 04/02: April is not reconciled, so no
-    # day around the printed balance is a zero day
-    assert set(rows) == {"2026-03-31"}
+    # day around the printed balance is a zero day (and the printed trade-date loan is
+    # never itself published as a financing amount)
+    assert set(rows) == set()
     reasons = {x["reason"] for x in artifact["interest_reconciliation"]}
     assert "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES" in reasons
     broken = _with_loan(april, "$5,000.00", "$4,000.00")  # still reads; chain differs
@@ -458,10 +455,12 @@ def test_the_ladder_never_overrides_a_printed_balance_or_interest_evidence(
         extract=lambda _p: text,
         extract_raw=lambda _p: RAW,  # ends in +$50 cash
     )
-    last = {r["as_of_date"]: r for r in one["rows"]}["2026-03-31"]
-    assert last["classification"] == "OBSERVED_FINANCING_DAY"
-    assert last["amount"]["value"] == "200.00"
-    assert last["amount_measurement"] == "STATEMENT_CLOSING_BALANCE"
+    # the ladder's debit days are published at cash, no zero day beside the printed loan
+    assert one["rows"] and all(
+        r["classification"] == "OBSERVED_FINANCING_DAY"
+        and r["amount_measurement"] == "DAY_BALANCE_DERIVED"
+        for r in one["rows"]
+    )
     # reconciled month: a ladder at -$500 all month changes nothing inside the charged period
     deep = RAW.replace(
         "$100.00 $0.00 ($300.00) $0.00 $250.00 $0.00 $0.00 $50.00",
@@ -571,14 +570,11 @@ def test_one_default_refuse_rule_covers_every_ladder_probe(tmp_path: Path) -> No
         return str(artifact["interest_reconciliation"][0]["cash_ladder"])
 
     # N-2: a printed $5,000 loan at either boundary with a ladder that never goes debit
-    for opening, closing, reason in (
-        ("$5,000.00", "$5,000.00", "LADDER_BEGINNING_CASH_DISAGREES_WITH_OPENING_LOAN"),
-        ("$0.00", "$5,000.00", "LADDER_ENDING_CASH_DISAGREES_WITH_CLOSING_LOAN"),
-    ):
+    for opening, closing in (("$5,000.00", "$5,000.00"), ("$0.00", "$5,000.00")):
         text = _plain_march(opening, closing)
         artifact = _build_with(tmp_path, {MARCH: text}, FLAT)
-        assert ladder_reason(artifact) == reason
-        assert {r["as_of_date"] for r in artifact["rows"]} == {"2026-03-31"}
+        # the ladder closes but a printed non-zero loan forbids every zero day
+        assert {r["as_of_date"] for r in artifact["rows"]} == set()
     # N-4: a printed zero closing loan beats a ladder that ends in debit cash
     negative = FLAT.replace(
         "$100.00 $0.00 $0.00 $0.00 $0.00 $0.00 $0.00 $100.00",
@@ -587,8 +583,14 @@ def test_one_default_refuse_rule_covers_every_ladder_probe(tmp_path: Path) -> No
     zero_closing = _build_with(
         tmp_path, {MARCH: _plain_march("$5.00", "$0.00")}, negative
     )
-    assert ladder_reason(zero_closing) == "LADDER_CONTRADICTS_ZERO_CLOSING_LOAN"
-    assert zero_closing["rows"] == []
+    # cash is the interest-bearing evidence: the debit days are published at the ladder
+    # balance, the printed trade-date loan only beside the last day
+    debit_rows = [
+        r
+        for r in zero_closing["rows"]
+        if r["classification"] != "ZERO_FINANCING_OBSERVED"
+    ]
+    assert debit_rows and all(r["amount"]["value"] == "4.27" for r in debit_rows)
     # N-5: a reconciled month the ladder disagrees with keeps its interest rows only
     deep = FLAT.replace(
         "$100.00 $0.00 $0.00 $0.00 $0.00 $0.00 $0.00 $100.00",
@@ -660,17 +662,20 @@ def test_interest_paid_without_a_posting_and_disagreeing_ladders_are_refused(
         "$100.00 $0.00 $0.00 $0.00 $0.00 $0.00 $0.00 $100.00",
         "($20.00) $0.00 $0.00 $0.00 $0.00 $0.00 $0.00 ($20.00)",
     )
-    for opening, closing, reason in (
-        ("$5,000.00", "$0.00", "LADDER_BEGINNING_CASH_DISAGREES_WITH_OPENING_LOAN"),
-        ("$0.00", "$5,000.00", "LADDER_ENDING_CASH_DISAGREES_WITH_CLOSING_LOAN"),
-    ):
+    for opening, closing in (("$5,000.00", "$0.00"), ("$0.00", "$5,000.00")):
         raw = flat20 if opening != "$0.00" else RAW_END20
         artifact = _build_with(tmp_path, {MARCH: _plain_march(opening, closing)}, raw)
-        assert artifact["interest_reconciliation"][0]["cash_ladder"] == reason
-        assert not [
+        # the printed loan is a disclosed field, never the amount: cash (20.00) is
+        derived = [
             r
             for r in artifact["rows"]
             if r.get("amount_measurement") == "DAY_BALANCE_DERIVED"
+        ]
+        assert derived and {r["amount"]["value"] for r in derived} == {"20.00"}
+        assert not [
+            r
+            for r in artifact["rows"]
+            if r["classification"] == "ZERO_FINANCING_OBSERVED"
         ]
     # M1: the ladder's mean over a printed range must match the printed average
     avg = "\n".join(
@@ -718,13 +723,8 @@ def test_a_carried_loan_is_never_a_zero_day_on_non_business_days_or_in_a_last_ta
     )
     artifact = _build(tmp_path, {jan: text})
     rows = {r["as_of_date"]: r for r in artifact["rows"]}
-    assert (
-        rows["2026-01-01"]["classification"] == "OBSERVED_FINANCING_DAY"
-    )  # the holiday
-    assert (
-        rows["2026-01-01"]["verdict_reason"]
-        == "INTEREST_RANGE_BRIDGED_OVER_NON_BUSINESS_DAYS"
-    )
+    # the holiday carries the loan: no zero, and with no closing ladder no row at all
+    assert "2026-01-01" not in rows
     assert "2025-12-31" not in rows  # carried the loan unprinted: not a zero day
     # March starts on a Sunday: the Sunday carries the loan of the Saturday's printed range
     march = _with_loan(
@@ -756,35 +756,45 @@ def test_a_carried_loan_is_never_a_zero_day_on_non_business_days_or_in_a_last_ta
     assert "2026-03-30" not in tail and "2026-03-31" not in tail
 
 
-def test_a_bridged_day_carries_the_printed_balance_not_a_range_average(
+def test_a_bridged_day_takes_its_balance_from_the_closing_ladder(
     tmp_path: Path,
 ) -> None:
-    """Kill test (Opus X1/X2/Y): nothing settles on a holiday, so a bridged day's balance is
-    the printed opening loan, whatever the following range averages."""
+    """Control ruling: a holiday/weekend day carrying a loan publishes the cash ladder's
+    day balance when the month's ladder closes (never a range average, never the printed
+    trade-date loan), else it stays unobserved."""
 
     jan = "schwab-stmt-" + LABEL + "-2026-01-31.pdf"
     text = _with_loan(
         _statement(
             "January 1-31, 2026",
-            paid="19.71",
-            rows=("01/02-01/04   (20,000.00) 11.825   19.71",),
-            thru="12/27THRU 01/26",
+            paid="0.20",
+            rows=("01/02-01/31   (20.00) 11.825   0.20",),
+            thru="12/27THRU 01/31",
         ),
-        "$50,000.00",
-        "$0.00",
+        "$20.00",
+        "$20.00",
     )
-    artifact = _build(tmp_path, {jan: text})
+    cash = "\n".join(
+        [
+            "Transactions - Summary",
+            "($19.66) $0.00 $0.00 $0.00 $0.00 $0.00 $0.00 ($19.66)",
+            "Transaction Details",
+            "Total Transactions $0.00",
+        ]
+    )
+    artifact = _build_with(tmp_path, {jan: text}, cash)
     holiday = {r["as_of_date"]: r for r in artifact["rows"]}["2026-01-01"]
-    assert holiday["amount"]["value"] == "50000.00"
-    assert holiday["amount_measurement"] == "STATEMENT_OPENING_BALANCE"
+    assert holiday["classification"] == "OBSERVED_FINANCING_DAY"
+    assert holiday["amount"]["value"] == "19.66"
+    assert holiday["amount_measurement"] == "DAY_BALANCE_DERIVED"
     zf.validate_rows(artifact, {ACCOUNT})
 
 
-def test_the_first_business_day_after_a_carried_loan_is_a_financing_day_not_zero(
+def test_the_first_business_day_after_a_carried_loan_stays_zero_when_interest_ties(
     tmp_path: Path,
 ) -> None:
-    """Control ruling (691 Dec 2025): a repayment on the first day need not clear the whole
-    loan ($5,176.06 against $6,723.56), so that day carries the printed opening loan."""
+    """691 Dec 2025 (real): the printed loan is a trade-date figure, the interest basis ends
+    with the printed range and Dec 1 is a business day: it stays zero."""
 
     dec = "schwab-stmt-" + LABEL + "-2025-12-31.pdf"
     text = _with_loan(
@@ -799,6 +809,4 @@ def test_the_first_business_day_after_a_carried_loan_is_a_financing_day_not_zero
     )
     artifact = _build(tmp_path, {dec: text})
     first = {r["as_of_date"]: r for r in artifact["rows"]}["2025-12-01"]
-    assert first["classification"] == "OBSERVED_FINANCING_DAY"
-    assert first["amount"]["value"] == "5000.00"
-    assert first["amount_measurement"] == "STATEMENT_OPENING_BALANCE"
+    assert first["classification"] == "ZERO_FINANCING_OBSERVED"

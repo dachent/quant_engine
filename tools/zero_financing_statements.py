@@ -35,6 +35,8 @@ import subprocess
 import sys
 from typing import Any, Callable, Final, Mapping, Sequence, cast
 
+import leverage_disclosure
+
 ARTIFACT_ID: Final = "zero-financing-observations"
 SCHEMA_VERSION: Final = 1
 BASIS: Final = "OBSERVED_ZERO_FINANCING_DAY"
@@ -206,6 +208,8 @@ def _margin_interest_postings(lines: list[str]) -> tuple[int, bool]:
 _PAIR_REACH = 25
 # below this loan balance a day's interest rounds to nothing and no range is printed
 _INTEREST_DUST = Decimal(15)
+# a cash debit at least this deep contradicts a zero row published from interest evidence
+_ZERO_ROW_CONFLICT = Decimal(100)
 
 
 def _incomplete(lines: list[str]) -> str | None:
@@ -341,20 +345,12 @@ def _interest_paid_period(lines: list[str]) -> Decimal | None:
     return None
 
 
-_FIXED_HOLIDAYS = frozenset({(1, 1), (7, 4), (12, 25)})
-
-
 def _is_business(day: date) -> bool:
-    return day.weekday() < 5 and (day.month, day.day) not in _FIXED_HOLIDAYS
+    """A US equity market trading day (weekends and NYSE holidays are not)."""
 
-
-def _business_day(day: date, step: int) -> date:
-    """The nearest business day at or beyond ``day`` in the direction of ``step``
-    (weekends and the fixed-date holidays are skipped)."""
-
-    while day.weekday() >= 5 or (day.month, day.day) in _FIXED_HOLIDAYS:
-        day += timedelta(days=step)
-    return day
+    return day.weekday() < 5 and day not in leverage_disclosure.market_holidays(
+        day.year
+    )
 
 
 def reconcile_interest(facts: dict[str, Any]) -> tuple[bool, str]:
@@ -411,16 +407,12 @@ def reconcile_interest(facts: dict[str, Any]) -> tuple[bool, str]:
             return any(a <= day <= b for a, b in periods)
 
         def bridge(first_day: date) -> None:
-            """The period's first day (a repayment need not clear the whole loan) and the
-            non-business days after the carried-in loan: each carries the printed opening
-            loan exactly, never zero."""
+            """Non-business days after the carried-in loan: nothing settles on them, so they
+            are not zero days; the day balance comes from the closing cash ladder, else
+            the day stays unobserved (never a range average, never the printed loan)."""
 
             day = first_day
-            while (
-                start <= day <= end
-                and (day == first_day or not _is_business(day))
-                and charged(day)
-            ):
+            while start <= day <= end and not _is_business(day) and charged(day):
                 if printed_range(day) is None:
                     facts["bridges"][day] = (abs(block[0]), STATEMENT_OPENING_BALANCE)
                 day += timedelta(days=1)
@@ -435,7 +427,11 @@ def reconcile_interest(facts: dict[str, Any]) -> tuple[bool, str]:
             else:
                 day, crossed = start, []
                 while printed_range(day) is None:
-                    if not (start <= day <= end) or _is_business(day):
+                    if (
+                        not (start <= day <= end)
+                        or _is_business(day)
+                        or not charged(day)
+                    ):
                         return False, "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES"
                     crossed.append(day)
                     day += timedelta(days=1)
@@ -451,7 +447,7 @@ def reconcile_interest(facts: dict[str, Any]) -> tuple[bool, str]:
         if abs(closing) >= _INTEREST_DUST and charged(end):
             day = end
             while printed_range(day) is None:
-                if not (start <= day <= end) or _is_business(day):
+                if not (start <= day <= end) or _is_business(day) or not charged(day):
                     return False, "LOAN_BALANCE_OUTSIDE_PRINTED_RANGES"
                 facts["bridges"][day] = (abs(closing), STATEMENT_CLOSING_BALANCE)
                 day -= timedelta(days=1)
@@ -1388,21 +1384,11 @@ def _ladder_discard_reason(
         span = {d for a, b in thru for d in _days(a, b)} & set(ladder)
         for day in span:
             deep = ladder[day] <= -_INTEREST_DUST
-            if (deep and day not in own) or (day in own and ladder[day] >= 0):
+            carried = day in record["bridges"] or day in record["no_zero"]
+            if (deep and day not in own and not carried) or (
+                day in own and ladder[day] >= 0
+            ):
                 return "LADDER_DISAGREES_WITH_RECONCILED_INTEREST"
-    opening, closing = record["loan_opening"], record["loan_closing"]
-    begin = record["ladder_begin"]
-    if (
-        opening is not None
-        and begin is not None
-        and abs(max(Decimal(0), -begin) - abs(opening)) > _INTEREST_DUST
-    ):
-        return "LADDER_BEGINNING_CASH_DISAGREES_WITH_OPENING_LOAN"
-    if (
-        closing is not None
-        and abs(max(Decimal(0), -ladder[end]) - abs(closing)) > _INTEREST_DUST
-    ):
-        return "LADDER_ENDING_CASH_DISAGREES_WITH_CLOSING_LOAN"
     if coverage is not None:
         for first, last, average, *_r in coverage[1]:
             inside = [d for d in _days(first, last) if d in ladder]
@@ -1411,13 +1397,6 @@ def _ladder_discard_reason(
             mean = sum((-ladder[d] for d in inside), Decimal(0)) / len(inside)
             if abs(mean - average) > max(_INTEREST_DUST, average * Decimal("0.05")):
                 return "LADDER_MEAN_DISAGREES_WITH_PRINTED_AVERAGE"
-    if opening is not None and abs(opening) >= _INTEREST_DUST and ladder[start] >= 0:
-        return "LADDER_CONTRADICTS_OPENING_LOAN"
-    if closing is not None:
-        if abs(closing) >= _INTEREST_DUST and ladder[end] >= 0:
-            return "LADDER_CONTRADICTS_CLOSING_LOAN"
-        if closing == 0 and ladder[end] < 0:
-            return "LADDER_CONTRADICTS_ZERO_CLOSING_LOAN"
     return None
 
 
@@ -1762,6 +1741,7 @@ def build(
     # a financing day inside a printed range (amount = the range average) and a zero day
     # outside every range (the statement's interest paid is fully accounted for by them).
     charged: dict[tuple[str, date], tuple[dict[str, Any], Any]] = {}
+    bridge_keys: set[tuple[str, date]] = set()
     for (account, _start, _end), record in periods.items():
         if record["coverage"] is None:
             continue
@@ -1778,9 +1758,10 @@ def build(
                 if hit is None and current in record["no_zero"]:
                     continue  # a day that carried a printed loan without interest
                 if hit is None and current in record["bridges"]:
-                    # a non-business day between a carried loan and its first printed range
-                    amount, measurement = record["bridges"][current]
-                    hit = (current, current, amount, measurement)
+                    # a non-business day carrying a loan: its balance is the cash ladder's
+                    # when that closes, otherwise the day stays unobserved
+                    bridge_keys.add((account, current))
+                    continue
                 charged[(account, current)] = (record, hit)
     tail_rows: list[tuple[str, date, dict[str, Any]]] = []
     for (account, start, end), record in periods.items():
@@ -1899,7 +1880,7 @@ def build(
         if ladder is None:
             continue
         if any(
-            balance <= -_INTEREST_DUST and (account, day.isoformat()) in zero_keys
+            balance <= -_ZERO_ROW_CONFLICT and (account, day.isoformat()) in zero_keys
             for day, balance in ladder.items()
         ):
             # a deep debit day another source published as zero: the sources disagree
@@ -1909,6 +1890,10 @@ def build(
             )
             continue
         final = not any(sp[0] == end + timedelta(days=1) for sp in by_account[account])
+        printed_nonzero = any(
+            loan is not None and abs(loan) >= _INTEREST_DUST
+            for loan in (record["loan_opening"], record["loan_closing"])
+        )
         tail_from = start
         if record["coverage"] is not None:
             tail_from = max(b for _a, b in record["coverage"][0]) + timedelta(days=1)
@@ -1918,11 +1903,19 @@ def build(
             ):
                 continue
             debit = balance < 0
+            if not debit and printed_nonzero:
+                # a printed non-zero margin loan beside a non-debit cash day: the loan is a
+                # trade-date figure that may still bear interest, so no zero is published
+                continue
             if not debit and final and current >= tail_from:
                 # the last statement's tail needs the next statement (or the capture)
                 # to prove a zero; trade-date cash >= 0 does not
                 continue
-            if not debit and current in interest_days.get(account, ()):
+            if (
+                not debit
+                and current in interest_days.get(account, ())
+                and (account, current) not in bridge_keys
+            ):
                 # trade-date cash >= 0 does not prove a zero loan on a day interest was
                 # charged for (by any statement of the account): only a reconciled table
                 # proves such a day zero, and that path has already run
@@ -1948,41 +1941,18 @@ def build(
             if debit:
                 ladder_row["amount_measurement"] = DAY_BALANCE_DERIVED
             rows.append(ladder_row)
-    # A statement that prints a non-zero closing margin loan balance carries an exact
-    # borrowing fact for its last day, whatever the rest of the month proves.
-    have = {(r["account_id"], r["as_of_date"]) for r in rows}
-    for (account, _start, end), record in periods.items():
-        closing = record["loan_closing"]
-        if record["state"] != "FINANCING" or not closing:
-            continue
-        if cutoff is not None and end > cutoff:
-            continue
-        clash = [
-            r
-            for r in rows
-            if r["account_id"] == account and r["as_of_date"] == end.isoformat()
-        ]
-        rows[:] = [r for r in rows if r not in clash]  # the printed balance wins
-        rows.append(
-            {
-                "account_id": account,
-                "as_of_date": end.isoformat(),
-                "amount": {
-                    "currency": "USD",
-                    "status": "AVAILABLE",
-                    "value": str(abs(closing)),
-                },
-                "classification": FINANCING_CLASSIFICATION,
-                "measurement_basis": BASIS,
-                "provider_id": provider_id,
-                "source_artifact_id": f"{prefix}/{record['name']}",
-                "source_artifact_sha256": record["digest"],
-                "source_field": "Margin Loan Information: closing margin loan balance",
-                "source_page": record["page"],
-                "verdict_reason": "STATEMENT_CLOSING_LOAN_BALANCE",
-                "amount_measurement": STATEMENT_CLOSING_BALANCE,
-            }
-        )
+    # A statement's printed closing margin loan is a trade-date figure (it includes unsettled
+    # purchases and can differ from the interest-bearing debit): it is disclosed beside the
+    # day's own row, never published as the financing amount.
+    closing_loans = {
+        (account, end.isoformat()): abs(record["loan_closing"])
+        for (account, _start, end), record in periods.items()
+        if record["state"] == "FINANCING" and record["loan_closing"]
+    }
+    for row in rows:
+        printed_loan = closing_loans.get((row["account_id"], row["as_of_date"]))
+        if printed_loan is not None:
+            row["printed_margin_loan_trade_date"] = str(printed_loan)
     reconciliation = sorted(
         (
             {
@@ -2135,10 +2105,8 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
         for p in artifact.get("printed_range_days", [])
     }
     for row in artifact["rows"]:
-        if not isinstance(row, dict) or set(row) not in (
-            keys,
-            keys | {"amount_measurement"},
-        ):
+        optional = {"amount_measurement", "printed_margin_loan_trade_date"}
+        if not isinstance(row, dict) or not (keys <= set(row) <= keys | optional):
             raise ZeroFinancingError("zero-financing row keys differ")
         financing = row.get("classification") == FINANCING_CLASSIFICATION
         if financing != ("amount_measurement" in row) or (
