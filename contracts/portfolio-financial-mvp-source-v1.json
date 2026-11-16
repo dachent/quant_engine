@@ -1934,11 +1934,11 @@
      "authority": "HASH_BOUND_PROVIDER_MODEL_BOOK_PERFORMANCE_RECORD"
     },
     "capture": {
-     "status": "NOT_CAPTURED",
-     "capture_defect": "MODEL_LIVE_ROWS_NOT_IN_THE_COMMITTED_GENERATION_ADMITTED_AT_THE_NEXT_REAL_DATA_REBUILD",
-     "generation_id": null,
-     "generation_sha256": null,
-     "as_of": null
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+     "as_of": "2026-09-04"
     },
     "strategy_version": {
      "status": "EVIDENCED",
@@ -1961,7 +1961,7 @@
     },
     "mode_admission": {
      "LIVE_ONLY": "NOT_APPLICABLE",
-     "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"
+     "LIVE_PLUS_BACKTEST": "INCLUDE_MODEL_LIVE_RESEARCH"
     },
     "source_receipts": [
      {
@@ -1975,10 +1975,8 @@
      }
     ],
     "disposition_reason": "The model book own live record from its inception. It continues the research series after the sim-twin backtest ends strictly before it, is never part of the my-live series, and is admitted when the rebuilt provider-ledger generation carries its rows and the release carrier binds that generation here.",
-    "readiness": "REQUIRED_NOT_READY",
-    "blockers": [
-     898
-    ]
+    "readiness": "READY",
+    "blockers": []
    },
    {
     "correction_id": "p123-eu-account-live",
@@ -2218,11 +2216,11 @@
      "authority": "HASH_BOUND_PROVIDER_PUBLISHED_DESIGNER_MODEL_EQUITY_CURVE_AFTER_PROVIDER_LAUNCH"
     },
     "capture": {
-     "status": "NOT_CAPTURED",
-     "capture_defect": "MODEL_LIVE_ROWS_NOT_IN_THE_COMMITTED_GENERATION_ADMITTED_AT_THE_NEXT_REAL_DATA_REBUILD",
-     "generation_id": null,
-     "generation_sha256": null,
-     "as_of": null
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+     "generation_sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+     "as_of": "2026-09-04"
     },
     "strategy_version": {
      "status": "EVIDENCED",
@@ -2245,7 +2243,7 @@
     },
     "mode_admission": {
      "LIVE_ONLY": "NOT_APPLICABLE",
-     "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"
+     "LIVE_PLUS_BACKTEST": "INCLUDE_MODEL_LIVE_RESEARCH"
     },
     "source_receipts": [
      {
@@ -2277,10 +2275,8 @@
      }
     ],
     "disposition_reason": "The designer model own live record after its provider launch, carried by the same governed designer-model generation as the backtest before it. It continues the research series, is never part of the my-live series, and is admitted when the rebuilt strategy-backtests generation carries its rows and the release carrier binds that generation here.",
-    "readiness": "REQUIRED_NOT_READY",
-    "blockers": [
-     898
-    ]
+    "readiness": "READY",
+    "blockers": []
    },
    {
     "blockers": [],
