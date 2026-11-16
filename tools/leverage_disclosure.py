@@ -106,7 +106,7 @@ def _last_monday_of_may(year: int) -> date:
     return day - timedelta(days=day.weekday())
 
 
-def _market_holidays(year: int) -> set[date]:
+def market_holidays(year: int) -> set[date]:
     """US equity market holidays of a year (a Saturday holiday is observed the Friday
     before, a Sunday holiday the Monday after)."""
 
@@ -117,7 +117,9 @@ def _market_holidays(year: int) -> set[date]:
             return day + timedelta(days=1)
         return day
 
-    fixed = [date(year, 1, 1), date(year, 7, 4), date(year, 12, 25)]
+    fixed = [date(year, 7, 4), date(year, 12, 25)]
+    if date(year, 1, 1).weekday() != 5:  # New Year's Day on a Saturday is not observed
+        fixed.append(date(year, 1, 1))
     if year >= 2022:
         fixed.append(date(year, 6, 19))  # Juneteenth, observed by the market from 2022
     return {
@@ -155,7 +157,7 @@ def _unobserved_days(
             day = before + timedelta(days=offset)
             if day.weekday() >= 5:
                 continue
-            if day not in holidays.setdefault(day.year, _market_holidays(day.year)):
+            if day not in holidays.setdefault(day.year, market_holidays(day.year)):
                 required.add(day)
     known = {d for d in (_iso_day(x) for x in known_days) if d is not None}
     return len(required - known)

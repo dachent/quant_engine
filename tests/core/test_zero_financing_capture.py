@@ -357,10 +357,8 @@ def test_a_last_statement_that_is_not_zero_is_not_bridged(tmp_path: Path) -> Non
         capture_dir=tmp_path,
         cutoff=CUTOFF,
     )
-    # no zero day; the statement's own printed closing loan is carried as an exact fact
-    assert [r["classification"] for r in artifact["rows"]] == ["OBSERVED_FINANCING_DAY"]
-    assert artifact["rows"][0]["amount"]["value"] == "5.00"
-    assert artifact["rows"][0]["amount_measurement"] == "STATEMENT_CLOSING_BALANCE"
+    # no zero day, and the printed trade-date loan is never published as a financing amount
+    assert artifact["rows"] == []
     assert artifact["capture_decisions"][0]["reason"] == "LAST_STATEMENT_NOT_ZERO"
 
 

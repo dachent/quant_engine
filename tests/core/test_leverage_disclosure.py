@@ -569,4 +569,16 @@ def test_every_nav_day_and_every_weekday_of_a_gap_is_required() -> None:
     assert count(last, set(last), date(2026, 3, 6)) == 4  # four weekdays at the tail
     assert count(last, set(last), date(2026, 3, 8)) == 4  # a weekend tail adds nothing
     assert count(None, set()) is None and count(frozenset(), set()) is None
-    assert ld._market_holidays(2026) >= {date(2026, 4, 3), date(2026, 11, 26)}
+    assert ld.market_holidays(2026) >= {date(2026, 4, 3), date(2026, 11, 26)}
+
+
+def test_the_market_holiday_list_matches_the_nyse_calendar() -> None:
+    """Kill tests (Opus follow-ons): Labor Day is a holiday, a Saturday New Year is not
+    observed (2021-12-31 traded), Juneteenth only from 2022."""
+
+    from datetime import date
+
+    assert date(2025, 9, 1) in ld.market_holidays(2025)  # Labor Day
+    assert date(2021, 12, 31) not in ld.market_holidays(2022)
+    assert date(2021, 6, 18) not in ld.market_holidays(2021)
+    assert date(2022, 6, 20) in ld.market_holidays(2022)  # Juneteenth observed Monday
