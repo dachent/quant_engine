@@ -598,6 +598,10 @@ def verdict(facts: Mapping[str, Any]) -> tuple[str, str]:
 
     if facts["layout_issue"]:
         return "UNVERIFIED", f"LAYOUT_{facts['layout_issue']}"
+    paid = facts["interest_paid_period"]
+    if paid is not None and paid > 0 and not facts["margin_interest_postings"]:
+        # interest was paid but no posting line was read: something is missing
+        return "UNVERIFIED", "INTEREST_PAID_WITHOUT_POSTING"
     no_margin_feature = facts["retirement"] and facts["loan_block"] is None
     if facts["incomplete"] and not no_margin_feature:
         # a retirement account has no margin feature: its transaction listing is not
@@ -1340,6 +1344,26 @@ def _ladder_discard_reason(
             if (deep and day not in own) or (day in own and ladder[day] >= 0):
                 return "LADDER_DISAGREES_WITH_RECONCILED_INTEREST"
     opening, closing = record["loan_opening"], record["loan_closing"]
+    begin = record["ladder_begin"]
+    if (
+        opening is not None
+        and begin is not None
+        and abs(max(Decimal(0), -begin) - abs(opening)) > _INTEREST_DUST
+    ):
+        return "LADDER_BEGINNING_CASH_DISAGREES_WITH_OPENING_LOAN"
+    if (
+        closing is not None
+        and abs(max(Decimal(0), -ladder[end]) - abs(closing)) > _INTEREST_DUST
+    ):
+        return "LADDER_ENDING_CASH_DISAGREES_WITH_CLOSING_LOAN"
+    if coverage is not None:
+        for first, last, average, *_r in coverage[1]:
+            inside = [d for d in _days(first, last) if d in ladder]
+            if not inside:
+                continue
+            mean = sum((-ladder[d] for d in inside), Decimal(0)) / len(inside)
+            if abs(mean - average) > max(_INTEREST_DUST, average * Decimal("0.05")):
+                return "LADDER_MEAN_DISAGREES_WITH_PRINTED_AVERAGE"
     if opening is not None and abs(opening) >= _INTEREST_DUST and ladder[start] >= 0:
         return "LADDER_CONTRADICTS_OPENING_LOAN"
     if closing is not None:
@@ -1360,6 +1384,8 @@ def _refine_table_from_raw(facts: dict[str, Any], raw_text: str) -> None:
     plain = _interest_table_ranges(lines, end, 40)
     layout_plain = facts["interest_periods"][len(facts["thru_periods"]) :]
     if not set(layout_plain) <= set(plain) or len(plain) < len(layout_plain):
+        if plain and set(plain) != set(layout_plain):
+            facts["layout_issue"] = "TABLE_READS_DISAGREE"
         return
     facts["interest_periods"] = list(facts["thru_periods"]) + plain
     facts["interest_table_ranges"] = len(plain)
@@ -1480,7 +1506,8 @@ def build(
             "loan_closing": facts["loan_block"][1] if facts["loan_block"] else None,
             "loan_opening": facts["loan_block"][0] if facts["loan_block"] else None,
             "no_interest": not facts["margin_interest_postings"]
-            and not facts["interest_table_ranges"],
+            and not facts["interest_table_ranges"]
+            and not facts["interest_paid_period"],
             "interest_charged": bool(
                 facts["margin_interest_postings"]
                 or facts["interest_table_ranges"]
@@ -1493,6 +1520,7 @@ def build(
             "details_page": facts["details_page"],
             "coverage": None,
             "ladder": None,
+            "ladder_begin": None,
             "ladder_reason": None,
             "refine_reason": None,
             "table_page": facts["table_page"] or facts["header_page"],
@@ -1508,12 +1536,13 @@ def build(
             if raw_text is not None and facts["loan_block"] is not None:
                 periods[key]["ladder_reason"] = "CASH_LADDER_NOT_TRIED"
                 try:
-                    ladder, _begin, why_ladder = parse_cash_ladder(
+                    ladder, begin_cash, why_ladder = parse_cash_ladder(
                         raw_text, facts["period_start"], facts["period_end"]
                     )
                 except ZeroFinancingError:
-                    ladder, why_ladder = None, "RAW_TEXT_UNAVAILABLE"
+                    ladder, begin_cash, why_ladder = None, None, "RAW_TEXT_UNAVAILABLE"
                 periods[key]["ladder"] = ladder
+                periods[key]["ladder_begin"] = begin_cash
                 periods[key]["ladder_reason"] = why_ladder
         for first, last in facts["interest_periods"]:
             interest_days.setdefault(account, set()).update(_days(first, last))
@@ -1799,9 +1828,24 @@ def build(
     # A closing ladder never overrides interest evidence (reconciled ranges, proven zero
     # days): it fills only the days nothing else covers.
     have = {(r["account_id"], r["as_of_date"]) for r in rows}
+    zero_keys = {
+        (r["account_id"], r["as_of_date"])
+        for r in rows
+        if r["classification"] == CLASSIFICATION
+    }
     for (account, start, end), record in sorted(periods.items()):
         ladder = record["ladder"]
         if ladder is None:
+            continue
+        if any(
+            balance <= -_INTEREST_DUST and (account, day.isoformat()) in zero_keys
+            for day, balance in ladder.items()
+        ):
+            # a deep debit day another source published as zero: the sources disagree
+            record["ladder"], record["ladder_reason"] = (
+                None,
+                "LADDER_DISAGREES_WITH_ZERO_ROW",
+            )
             continue
         for current, balance in sorted(ladder.items()):
             if (cutoff is not None and current > cutoff) or (
