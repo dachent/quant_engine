@@ -478,3 +478,53 @@ def test_the_ladder_never_overrides_a_printed_balance_or_interest_evidence(
     assert zf.parse_cash_ladder(unknown, date(2026, 3, 1), date(2026, 3, 31))[2] == (
         "UNKNOWN_TRANSACTION_CATEGORY"
     )
+
+
+FLAT = "\n".join(
+    [
+        "Transactions - Summary",
+        "$100.00 $0.00 $0.00 $0.00 $0.00 $0.00 $0.00 $100.00",
+        "Transaction Details",
+        "Total Transactions $0.00",
+    ]
+)
+
+
+def test_a_ladder_never_publishes_a_zero_inside_a_charged_interest_period(
+    tmp_path: Path,
+) -> None:
+    """Kill tests (Opus O-1/O-2): positive trade-date cash does not prove a zero loan on a
+    day interest was charged for, by this statement or by any other of the account."""
+
+    # O-1: a posting and $12.34 interest paid, no readable range: nothing is zero
+    no_range = _build_raw(
+        tmp_path, {MARCH: _statement("March 1-31, 2026", paid="12.34", rows=())}
+    )
+    assert [r for r in no_range["rows"] if r["as_of_date"] <= "2026-03-29"] == []
+    # O-2: April prints a range for 03/30-03/31 but does not reconcile: March's ladder
+    # must not publish those two days as zero
+    april = _statement(
+        "April 1-30, 2026",
+        paid="9.99",
+        rows=("03/30-03/31   (428.09) 11.825   0.30",),
+        thru="03/30THRU 04/28",
+    )
+    both = _build_raw(tmp_path, {MARCH: _statement("March 1-31, 2026"), APRIL: april})
+    days = {r["as_of_date"] for r in both["rows"]}
+    assert "2026-03-30" not in days and "2026-03-31" not in days
+    assert "2026-03-12" in days  # the reconciled March keeps its interest-proven zeros
+
+
+def _build_raw(tmp_path: Path, texts: dict[str, str]) -> Any:
+    sums = {}
+    for name in texts:
+        (tmp_path / name).write_bytes(name.encode())
+        sums[name] = hashlib.sha256(name.encode()).hexdigest()
+    return zf.build(
+        tmp_path,
+        sums,
+        {LABEL: (ACCOUNT, LAST3)},
+        provider_id=PROVIDER,
+        extract=lambda path: texts[path.name],
+        extract_raw=lambda _p: FLAT,
+    )
