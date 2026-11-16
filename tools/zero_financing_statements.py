@@ -39,6 +39,10 @@ ARTIFACT_ID: Final = "zero-financing-observations"
 SCHEMA_VERSION: Final = 1
 BASIS: Final = "OBSERVED_ZERO_FINANCING_DAY"
 CLASSIFICATION: Final = "ZERO_FINANCING_OBSERVED"
+# a day inside a printed Margin Interest range: borrowing observed, amount = the range's
+# average margin daily balance (an average over the range, never a day balance)
+FINANCING_CLASSIFICATION: Final = "OBSERVED_FINANCING_DAY"
+RANGE_AVERAGE: Final = "RANGE_AVERAGE"
 
 _MONTHS: Final = {name: i for i, name in enumerate(calendar.month_name) if name}
 _PERIOD = re.compile(
@@ -148,13 +152,24 @@ def _margin_interest_postings(lines: list[str]) -> tuple[int, bool]:
             if _MARGIN_INTEREST_WORDS.search(" ".join(lines[i] for i in window)):
                 postings += 1
                 consumed.update(window)
+    thru_lines = [n for n, x in enumerate(lines) if _INTEREST_PERIOD.search(x)]
+    claimed: set[int] = set()
     for number, line in enumerate(lines):
         if (
             number not in consumed
             and _MARGIN_INTEREST_WORDS.search(line)
             and _AMOUNT_AT_END.search(line)
         ):
-            ambiguous = True
+            # a posting whose date sits on another line of the layout: it is one when a
+            # charged period is printed right beside it (each period claimed once)
+            near = sorted(
+                (abs(n - number), n) for n in thru_lines if abs(n - number) <= 3
+            )
+            if near:
+                claimed.add(near[0][1])
+            else:
+                ambiguous = True
+    postings += len(claimed - consumed)
     return postings, ambiguous
 
 
@@ -198,35 +213,133 @@ def _interest_periods(text: str, period_end: date) -> list[tuple[date, date]]:
     return out
 
 
-_TABLE_RANGE = re.compile(r"(\d{2})/(\d{2})-(\d{2})/(\d{2})")
+_TABLE_RANGE = re.compile(r"(?<![\d/])(\d{2})/(\d{2})(?:-(\d{2})/(\d{2}))?(?![\d/])")
+_ENTRY = (
+    r"(\d{2})/(\d{2})(?:-(\d{2})/(\d{2}))?[ \t]+\(?\$?([\d,]+\.\d\d)\)?[ \t]+"
+    r"(\d+\.\d+)[ \t]+([\d,]+\.\d\d)"
+)
+_RANGE_DETAIL = re.compile(_ENTRY)
+_ROW_ONLY = re.compile(r"(?:" + _ENTRY + r"[ \t]*)+")
 
 
-def _interest_table_ranges(
-    lines: list[str], period_end: date
-) -> list[tuple[date, date]]:
-    """The day ranges of the statement's "Margin Interest" table (average daily balance,
-    rate and interest per range): each range is a stretch of days with a margin debit."""
+def _table_rows(lines: list[str]) -> list[str]:
+    """The data rows of every "Margin Interest" table: lines under the heading that hold
+    only dates, ranges, amounts and rates (the pending-activity lines below carry words)."""
 
-    out: list[tuple[date, date]] = []
+    out: list[str] = []
     for number, line in enumerate(lines):
         if not re.match(r"[ \t]*Margin Interest([ \t]{2,}\S.*)?$", line) or (
             _MONEY_AMOUNT.search(line)
         ):
             continue
         for follow in lines[number + 1 : number + 14]:
-            for match in _TABLE_RANGE.finditer(follow):
-                m1, d1, m2, d2 = (int(g) for g in match.groups())
-                year2 = (
-                    period_end.year if m2 <= period_end.month else period_end.year - 1
-                )
-                year1 = year2 if m1 <= m2 else year2 - 1
-                try:
-                    out.append((date(year1, m1, d1), date(year2, m2, d2)))
-                except ValueError:
-                    raise ZeroFinancingError(
-                        "margin interest range is not a date"
-                    ) from None
+            text = follow.strip()
+            if re.fullmatch(r"[\d/\-\s,.$()]+", text) and re.match(
+                r"\d{2}/\d{2}", text
+            ):
+                out.append(follow)
     return out
+
+
+def _range_dates(match: "re.Match[str]", period_end: date) -> tuple[date, date]:
+    m1, d1 = int(match.group(1)), int(match.group(2))
+    m2 = int(match.group(3)) if match.group(3) else m1
+    d2 = int(match.group(4)) if match.group(4) else d1
+    year2 = period_end.year if m2 <= period_end.month else period_end.year - 1
+    year1 = year2 if m1 <= m2 else year2 - 1
+    try:
+        return date(year1, m1, d1), date(year2, m2, d2)
+    except ValueError:
+        raise ZeroFinancingError("margin interest range is not a date") from None
+
+
+def _interest_table_ranges(
+    lines: list[str], period_end: date
+) -> list[tuple[date, date]]:
+    """The day ranges (a single day counts as a range of one day) of the statement's
+    "Margin Interest" table: each is a stretch of days with a margin debit."""
+
+    return [
+        _range_dates(match, period_end)
+        for row in _table_rows(lines)
+        for match in _TABLE_RANGE.finditer(row)
+    ]
+
+
+def _interest_range_details(
+    lines: list[str], period_end: date
+) -> list[tuple[date, date, Decimal, Decimal, Decimal]] | None:
+    """Every range of the Margin Interest table with its average margin daily balance,
+    rate and interest paid, or None when any row holds something else."""
+
+    out: list[tuple[date, date, Decimal, Decimal, Decimal]] = []
+    for row in _table_rows(lines):
+        if _ROW_ONLY.fullmatch(row.strip()) is None:
+            return None
+        for match in _RANGE_DETAIL.finditer(row):
+            first, last = _range_dates(match, period_end)
+            out.append(
+                (
+                    first,
+                    last,
+                    Decimal(match.group(5).replace(",", "")),
+                    Decimal(match.group(6)),
+                    Decimal(match.group(7).replace(",", "")),
+                )
+            )
+    return out
+
+
+def _interest_paid_period(lines: list[str]) -> Decimal | None:
+    """The "Interest Paid on Margin Loan - This Period" amount of the loan block."""
+
+    for number, line in enumerate(lines):
+        if "Interest Paid on Margin" not in line:
+            continue
+        if not any("This Period" in x for x in lines[number : number + 4]):
+            continue
+        for row in lines[number + 1 : number + 6]:
+            found = re.findall(r"\(?\$[\d,]+\.\d\d\)?", row)
+            if len(found) >= 2:
+                return abs(_parse_money(found[-2]))
+        return None
+    return None
+
+
+def reconcile_interest(facts: Mapping[str, Any]) -> tuple[bool, str]:
+    """(reconciled, reason): the statement's charged periods, printed ranges and the
+    interest paid agree, so the days of a charged period outside every printed range carry
+    no interest.  Anything that does not agree refuses the refinement (the month stays
+    unobserved with the reason)."""
+
+    postings = facts["margin_interest_postings"]
+    if postings < 1:
+        return False, "NO_INTEREST_POSTING"
+    periods = sorted(set(facts["thru_periods"]))
+    if not periods:
+        return False, "NO_CHARGED_PERIOD"
+    for (_a1, b1), (a2, _b2) in zip(periods, periods[1:], strict=False):
+        if a2 <= b1:
+            return False, "CHARGED_PERIODS_OVERLAP"
+    details = facts["range_details"]
+    if details is None or facts["interest_table_ranges"] != len(details):
+        return False, "RANGE_DETAIL_MISSING"
+    paid = facts["interest_paid_period"]
+    if paid is None:
+        return False, "INTEREST_PAID_NOT_PRINTED"
+    ranges = sorted(details)
+    for (_a1, b1, *_x), (a2, _b2, *_y) in zip(ranges, ranges[1:], strict=False):
+        if a2 <= b1:
+            return False, "RANGES_OVERLAP"
+    for first, last, average, rate, interest in ranges:
+        if not any(a <= first and last <= b for a, b in periods):
+            return False, "RANGE_OUTSIDE_CHARGED_PERIOD"
+        expected = average * rate / Decimal(100) * ((last - first).days + 1) / 360
+        if abs(expected - interest) > max(Decimal("0.03"), interest * Decimal("0.03")):
+            return False, "RANGE_INTEREST_NOT_PLAUSIBLE"
+    if sum((r[4] for r in ranges), Decimal(0)) != paid:
+        return False, "INTEREST_DOES_NOT_RECONCILE"
+    return True, "INTEREST_RECONCILED"
 
 
 def _labelled(lines: list[str], label: str, window: int = 3) -> list[str]:
@@ -333,6 +446,10 @@ def parse_statement(text: str, file_period_end: date | None = None) -> dict[str,
         "interest_periods": _interest_periods(text, end)
         + _interest_table_ranges(lines, end),
         "interest_table_ranges": len(_interest_table_ranges(lines, end)),
+        "thru_periods": _interest_periods(text, end),
+        "range_details": _interest_range_details(lines, end),
+        "interest_paid_period": _interest_paid_period(lines),
+        "table_page": _page_of(text, "Average Margin"),
         "block_page": _page_of(text, "Margin Loan Information"),
         "header_page": _page_of(text, "Statement Period"),
     }
@@ -344,7 +461,10 @@ def verdict(facts: Mapping[str, Any]) -> tuple[str, str]:
     A margin account's ZERO is provisional: its days are zero only once the NEXT statement
     is pinned and shows no interest for them (``build`` decides)."""
 
-    if facts["incomplete"]:
+    no_margin_feature = facts["retirement"] and facts["loan_block"] is None
+    if facts["incomplete"] and not no_margin_feature:
+        # a retirement account has no margin feature: its transaction listing is not
+        # evidence of anything here
         return "UNVERIFIED", str(facts["incomplete"])
     if facts["margin_interest_ambiguous"]:
         return "UNVERIFIED", "AMBIGUOUS_MARGIN_INTEREST_LINE"
@@ -618,10 +738,23 @@ def _recompute_capture(
             if len(entries) == 1
             else None
         )
+        raw_loan: list[Decimal] | None = None
+        if len(entries) == 1 and isinstance(entries[0].get("marginsInfo"), dict):
+            info = entries[0]["marginsInfo"]
+            raw_loan = [
+                Decimal(str(info[key]))
+                for key in ("balanceSubjectInterest", "tradeDateBalance")
+            ]
     except (KeyError, TypeError, ArithmeticError, ValueError) as exc:
         raise ZeroFinancingError("capture raw balances are unreadable") from exc
     if raw_margin is None:
         raise ZeroFinancingError("capture raw balances do not name the account once")
+    if margin_account and raw_loan is None:
+        raise CaptureClaimsDiffer("capture raw loan fields are absent")
+    if raw_loan is not None and any(v != 0 for v in raw_loan):
+        if margin_account:
+            raise CaptureClaimsDiffer("capture raw loan fields are not zero")
+        return max(raw_loan)  # a retirement-type account showing a loan
     claimed_balances = top["balances"]
     page = None
     if len(balances_text) == 1:
@@ -898,7 +1031,18 @@ def build(
             "page": page,
             "type_only": retirement_type,
             "loan_closing": facts["loan_block"][1] if facts["loan_block"] else None,
+            "coverage": None,
+            "refine_reason": None,
+            "table_page": facts["table_page"] or facts["header_page"],
         }
+        if state == "FINANCING":
+            ok, why = reconcile_interest(facts)
+            periods[key]["refine_reason"] = why
+            if ok:
+                periods[key]["coverage"] = (
+                    list(facts["thru_periods"]),
+                    list(facts["range_details"]),
+                )
         for first, last in facts["interest_periods"]:
             interest_days.setdefault(account, set()).update(_days(first, last))
     rows: list[dict[str, Any]] = []
@@ -1075,6 +1219,108 @@ def build(
                         "verdict_reason": why,
                     }
                 )
+    # Charged periods of reconciled statements: every day of a charged period is observed,
+    # a financing day inside a printed range (amount = the range average) and a zero day
+    # outside every range (the statement's interest paid is fully accounted for by them).
+    charged: dict[tuple[str, date], tuple[dict[str, Any], Any]] = {}
+    for (account, _start, _end), record in periods.items():
+        if record["coverage"] is None:
+            continue
+        thru, details = record["coverage"]
+        for first, last in thru:
+            for current in _days(first, last):
+                if cutoff is not None and current > cutoff:
+                    continue
+                if (account, current) in charged:
+                    raise ZeroFinancingError(
+                        "two statements charge the same account day"
+                    )
+                hit = next((d for d in details if d[0] <= current <= d[1]), None)
+                charged[(account, current)] = (record, hit)
+    tail_rows: list[tuple[str, date, dict[str, Any]]] = []
+    for (account, start, end), record in periods.items():
+        if record["coverage"] is None:
+            continue
+        thru, _details = record["coverage"]
+        tail_start = max(b for _a, b in thru) + timedelta(days=1)
+        if tail_start > end:
+            continue
+        following = next(
+            (sp for sp in by_account[account] if sp[0] == end + timedelta(days=1)), None
+        )
+        if following is None:
+            continue
+        proof = periods[(account, *following)]
+        if proof["state"] != "ZERO" or proof["type_only"]:
+            continue
+        for current in _days(tail_start, end):
+            if (account, current) not in charged and (
+                cutoff is None or current <= cutoff
+            ):
+                tail_rows.append((account, current, proof))
+    for account, current, proof in tail_rows:
+        rows.append(
+            {
+                "account_id": account,
+                "as_of_date": current.isoformat(),
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "0"},
+                "classification": CLASSIFICATION,
+                "measurement_basis": BASIS,
+                "provider_id": provider_id,
+                "source_artifact_id": f"{prefix}/{proof['name']}",
+                "source_artifact_sha256": proof["digest"],
+                "source_field": "Margin Loan Information: next statement, no interest",
+                "source_page": proof["page"],
+                "verdict_reason": "TAIL_PROVEN_BY_NEXT_STATEMENT_NO_INTEREST",
+            }
+        )
+    for (account, current), (record, hit) in sorted(charged.items()):
+        if record["table_page"] is None:
+            raise ZeroFinancingError("interest table page is absent")
+        row: dict[str, Any] = {
+            "account_id": account,
+            "as_of_date": current.isoformat(),
+            "amount": {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": "0" if hit is None else str(hit[2]),
+            },
+            "classification": CLASSIFICATION
+            if hit is None
+            else FINANCING_CLASSIFICATION,
+            "measurement_basis": BASIS,
+            "provider_id": provider_id,
+            "source_artifact_id": f"{prefix}/{record['name']}",
+            "source_artifact_sha256": record["digest"],
+            "source_field": (
+                "Margin Interest table: no range printed, interest reconciled"
+                if hit is None
+                else "Margin Interest table: range average margin daily balance"
+            ),
+            "source_page": record["table_page"],
+            "verdict_reason": (
+                "INTEREST_RECONCILED_NO_RANGE"
+                if hit is None
+                else f"INTEREST_RANGE_{hit[0]:%m/%d}-{hit[1]:%m/%d}_RECONCILED"
+            ),
+        }
+        if hit is not None:
+            row["amount_measurement"] = RANGE_AVERAGE
+        rows.append(row)
+    reconciliation = sorted(
+        (
+            {
+                "account_id": account,
+                "period_start": start.isoformat(),
+                "period_end": end.isoformat(),
+                "reconciled": record["coverage"] is not None,
+                "reason": record["refine_reason"],
+            }
+            for (account, start, end), record in periods.items()
+            if record["refine_reason"] is not None
+        ),
+        key=lambda r: (r["account_id"], r["period_start"]),
+    )
     removed = sorted(
         (
             {"account_id": a, "as_of_date": d.isoformat()}
@@ -1102,6 +1348,7 @@ def build(
         "accounts": sorted(seen_accounts),
         "duplicate_period_files": sorted(duplicate_periods),
         "interest_charged_days": removed,
+        "interest_reconciliation": reconciliation,
         "coverage_gaps": _gaps(periods),
         "capture_decisions": sorted(capture_notes, key=lambda n: n["account_id"]),
     }
@@ -1134,6 +1381,21 @@ def canonical(artifact: Mapping[str, Any]) -> bytes:
     return (json.dumps(artifact, indent=1, sort_keys=True) + "\n").encode("utf-8")
 
 
+def _amount_fits(classification: str, amount: object) -> bool:
+    """A zero day carries exactly zero; a financing day a positive range average."""
+
+    if not isinstance(amount, dict) or set(amount) != {"currency", "status", "value"}:
+        return False
+    if amount["currency"] != "USD" or amount["status"] != "AVAILABLE":
+        return False
+    if classification == CLASSIFICATION:
+        return bool(amount["value"] == "0")
+    try:
+        return Decimal(str(amount["value"])) > 0
+    except ArithmeticError:
+        return False
+
+
 def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any]]:
     """The rows of an artifact the ledger may use, or a refusal."""
 
@@ -1161,8 +1423,16 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
     }
     seen: set[tuple[str, str]] = set()
     for row in artifact["rows"]:
-        if not isinstance(row, dict) or set(row) != keys:
+        if not isinstance(row, dict) or set(row) not in (
+            keys,
+            keys | {"amount_measurement"},
+        ):
             raise ZeroFinancingError("zero-financing row keys differ")
+        financing = row.get("classification") == FINANCING_CLASSIFICATION
+        if financing != ("amount_measurement" in row) or (
+            financing and row["amount_measurement"] != RANGE_AVERAGE
+        ):
+            raise ZeroFinancingError("financing-day row must declare RANGE_AVERAGE")
         try:
             date.fromisoformat(row["as_of_date"])
         except (TypeError, ValueError) as exc:
@@ -1171,9 +1441,9 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
         if (
             row["account_id"] not in accounts
             or row["measurement_basis"] != BASIS
-            or row["classification"] != CLASSIFICATION
+            or row["classification"] not in (CLASSIFICATION, FINANCING_CLASSIFICATION)
             or row["provider_id"] != artifact.get("provider_id")
-            or amount != {"currency": "USD", "status": "AVAILABLE", "value": "0"}
+            or not _amount_fits(row["classification"], amount)
             or not isinstance(row["source_artifact_id"], str)
             or not row["source_artifact_id"].strip()
             or not isinstance(row["source_field"], str)

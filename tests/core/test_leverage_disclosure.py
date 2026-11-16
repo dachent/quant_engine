@@ -510,3 +510,36 @@ def test_a_sparse_nav_series_never_narrows_the_required_days() -> None:
         ],
     }
     assert "NOT_LEVERED_COVERAGE_UNMEASURED" in _quiet_state(nothing)["coverage_reason"]
+
+
+def test_range_average_financing_days_make_the_account_levered_not_not_levered() -> (
+    None
+):
+    """Statement range-average financing days are borrowing evidence (a disclosed
+    estimate): the account is LEVERED with the observed-financing reason, never
+    NOT_LEVERED, and the rows are not read as day balances."""
+
+    catalog = _catalog(base_cash=True)
+    row = {
+        "account_id": QUIET,
+        "provider_id": "ibkr",
+        "measurement_basis": "OBSERVED_ZERO_FINANCING_DAY",
+        "classification": "OBSERVED_FINANCING_DAY",
+        "amount": _amt("428.09"),
+        "amount_measurement": "RANGE_AVERAGE",
+        "as_of_date": DAYS[0],
+        "source_artifact_id": "pins/s.txt",
+        "source_field": "Margin Interest table: range average margin daily balance",
+        "source_artifact_sha256": "a" * 64,
+    }
+    catalog["financing_liability_observations"] = [
+        *[
+            r
+            for r in catalog["financing_liability_observations"]
+            if r["account_id"] != QUIET
+        ],
+        row,
+    ]
+    state = _quiet_state(catalog)
+    assert state["classification"] == "LEVERED"
+    assert "OBSERVED_FINANCING_DAYS_RANGE_AVERAGE" in state["coverage_reason"]
