@@ -39,3 +39,19 @@ def test_an_implausible_daily_risk_free_value_is_refused(bad: float) -> None:
 def test_the_refusal_names_the_first_bad_date() -> None:
     with pytest.raises(decomposition.DecompositionError, match="2026-10-02"):
         decomposition._check_risk_free(_rows(0.0001, -0.003, -0.003))
+
+
+def test_old_history_beyond_three_years_is_not_checked_but_the_recent_tail_is() -> None:
+    """The style file's BIL has 79 out-of-range values in 2007-2010 and one on 2026-11-02."""
+
+    old = {
+        date(2008, 10, 13): decomposition.FactorRow(date(2008, 10, 13), -0.0039, {}),
+        date(2026, 11, 3): decomposition.FactorRow(date(2026, 11, 3), 0.0001, {}),
+    }
+    decomposition._check_risk_free(old)  # 2008 is outside the window: accepted legacy
+    recent = {
+        **old,
+        date(2026, 11, 2): decomposition.FactorRow(date(2026, 11, 2), -0.00316, {}),
+    }
+    with pytest.raises(decomposition.DecompositionError, match="2026-11-02"):
+        decomposition._check_risk_free(recent)

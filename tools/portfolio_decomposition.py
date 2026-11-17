@@ -1149,11 +1149,21 @@ RISK_FREE_DAILY_MAX = 0.005
 RISK_FREE_DAILY_MIN = -0.0005
 
 
+# Only the recent window is checked.  The 2007-2010 BIL price returns of the retained
+# style/base files carry tick noise and crisis-day moves beyond the bound (80 values in
+# the style file); those rows were accepted in the released history and are not what
+# this guard is for: an unposted distribution at the end of a capture.
+RISK_FREE_CHECK_WINDOW_DAYS = 1095
+
+
 def _check_risk_free(rows: Mapping[date, FactorRow]) -> None:
+    last_day = max(rows) if rows else None
     bad = sorted(
         (row.day, row.risk_free)
         for row in rows.values()
-        if not RISK_FREE_DAILY_MIN <= row.risk_free <= RISK_FREE_DAILY_MAX
+        if last_day is not None
+        and (last_day - row.day).days <= RISK_FREE_CHECK_WINDOW_DAYS
+        and not RISK_FREE_DAILY_MIN <= row.risk_free <= RISK_FREE_DAILY_MAX
     )
     if bad:
         raise DecompositionError(
