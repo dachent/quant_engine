@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
+import dataclasses
 from datetime import date, timedelta
 from decimal import Decimal
 import hashlib
@@ -11,7 +12,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-from typing import Any
+from typing import Any, Final
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -239,6 +240,322 @@ def _parse_general_exclusions(value: object) -> dict[str, str]:
     return parsed
 
 
+_OVERLAP_FAMILY_CASH: Final = "CASH_REPORT_PERIOD_AGGREGATES"
+_OVERLAP_FAMILY_ACCRUAL: Final = "INTEREST_ACCRUAL_DAY"
+# a currency row the accepted history carries only for its month/year-to-date broker interest
+# (every other figure zero or absent): a one-day pull does not list it at all
+_OVERLAP_FAMILY_AGGREGATES_ROW: Final = "CASH_REPORT_AGGREGATES_ONLY_ROW"
+_CASH_REPORT_VALUE_FIELDS: Final = (
+    "starting_cash",
+    "ending_cash",
+    "ending_settled_cash",
+    "ending_cash_sec",
+    "ending_cash_com",
+    "ending_settled_cash_sec",
+    "ending_settled_cash_com",
+    "broker_interest",
+    "broker_interest_sec",
+    "broker_interest_com",
+)
+_OVERLAP_KEYS: Final = {
+    "raw_account_id",
+    "report_date",
+    "family",
+    "currency",
+    "level_of_detail",
+    "history",
+    "refresh",
+    "reason",
+}
+
+
+def _overlap_decimal(value: object, name: str) -> Decimal | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise IbkrGenerationError(f"{name} must be decimal text or null")
+    try:
+        parsed = Decimal(value)
+    except ArithmeticError as exc:
+        raise IbkrGenerationError(f"{name} is not a decimal") from exc
+    if not parsed.is_finite():
+        raise IbkrGenerationError(f"{name} is not finite")
+    return parsed
+
+
+def _overlap_values(family: str, value: object, name: str) -> Any:
+    """The comparable value of one side of an equivalence (decimals, never text)."""
+
+    if family == _OVERLAP_FAMILY_AGGREGATES_ROW and name.endswith(".refresh"):
+        if value is not None:
+            raise IbkrGenerationError("an aggregates-only row has no refresh value")
+        return None
+    if family in {_OVERLAP_FAMILY_CASH, _OVERLAP_FAMILY_AGGREGATES_ROW}:
+        item = _object(value, name)
+        _strict(item, {"broker_interest_mtd", "broker_interest_ytd"}, name)
+        return (
+            _overlap_decimal(item["broker_interest_mtd"], f"{name}.mtd"),
+            _overlap_decimal(item["broker_interest_ytd"], f"{name}.ytd"),
+        )
+    rows = []
+    for row in _objects(value, name):
+        _strict(row, {"currency", "interest_accrued", "accrual_reversal"}, name)
+        rows.append(
+            (
+                _text(row["currency"], f"{name}.currency"),
+                _overlap_decimal(row["interest_accrued"], f"{name}.accrued"),
+                _overlap_decimal(row["accrual_reversal"], f"{name}.reversal"),
+            )
+        )
+    return tuple(sorted(rows, key=lambda item: item[0]))
+
+
+def _parse_overlap_equivalences(
+    value: object,
+) -> dict[tuple[str, date], list[dict[str, Any]]]:
+    """Governed, exact overlap equivalences: (account, day, family, row) with both sides' values.
+
+    A Flex refresh that overlaps accepted history must be identical, except where this list names
+    the exact difference (and the accepted history wins).  Nothing here relaxes the rule for any
+    unlisted difference; an interest-accrual entry must have an identical net on both sides.
+    """
+
+    if value is None:
+        return {}
+    index: dict[tuple[str, date], list[dict[str, Any]]] = {}
+    seen: set[tuple[str, date, str, str, str]] = set()
+    for item in _objects(value, "declared_overlap_equivalences"):
+        _strict(item, _OVERLAP_KEYS, "declared_overlap_equivalence")
+        family = _text(item["family"], "overlap.family")
+        if family not in {
+            _OVERLAP_FAMILY_CASH,
+            _OVERLAP_FAMILY_ACCRUAL,
+            _OVERLAP_FAMILY_AGGREGATES_ROW,
+        }:
+            raise IbkrGenerationError("overlap equivalence family is unsupported")
+        account = _text(item["raw_account_id"], "overlap.raw_account_id")
+        day = _date(item["report_date"], "overlap.report_date")
+        currency = str(item["currency"])
+        level = str(item["level_of_detail"])
+        identity = (account, day, family, currency, level)
+        if identity in seen:
+            raise IbkrGenerationError("overlap equivalence is listed twice")
+        seen.add(identity)
+        history = _overlap_values(family, item["history"], "overlap.history")
+        refresh = _overlap_values(family, item["refresh"], "overlap.refresh")
+        if family == _OVERLAP_FAMILY_ACCRUAL:
+            net = {
+                (row[0], (row[1] or Decimal(0)) + (row[2] or Decimal(0)))
+                for row in history
+            }
+            if net != {
+                (row[0], (row[1] or Decimal(0)) + (row[2] or Decimal(0)))
+                for row in refresh
+            } or any(None in row[1:] for row in (*history, *refresh)):
+                raise IbkrGenerationError(
+                    "an interest accrual equivalence needs an identical net on both sides"
+                )
+        _text(item["reason"], "overlap.reason")
+        index.setdefault((account, day), []).append(
+            {
+                "family": family,
+                "currency": currency,
+                "level": level,
+                "history": history,
+                "refresh": refresh,
+                "used": False,
+            }
+        )
+    return index
+
+
+def _overlap_differences(
+    prior: FlexDailyStatement, statement: FlexDailyStatement
+) -> list[dict[str, Any]]:
+    """Every difference between an accepted statement and an overlapping refresh, or a refusal.
+
+    Only two difference families are derivable (everything else refuses): period-to-date broker
+    interest on cash-report rows, and interest-accrual rows whose gross split differs while the
+    net (accrued plus reversal) is identical.
+    """
+
+    def cash_key(row: Any) -> tuple[str, str, date, date]:
+        return (row.currency, row.level_of_detail, row.from_date, row.to_date)
+
+    def aggregates_only(row: Any) -> bool:
+        return all(
+            getattr(row, name) in (None, Decimal(0))
+            for name in _CASH_REPORT_VALUE_FIELDS
+        )
+
+    new_cash_keys = {cash_key(row) for row in statement.cash_reports}
+    dropped = {
+        cash_key(row)
+        for row in prior.cash_reports
+        if cash_key(row) not in new_cash_keys and aggregates_only(row)
+    }
+
+    def neutral(item: FlexDailyStatement) -> FlexDailyStatement:
+        return dataclasses.replace(
+            item,
+            cash_reports=tuple(
+                sorted(
+                    (
+                        dataclasses.replace(
+                            row, broker_interest_mtd=None, broker_interest_ytd=None
+                        )
+                        for row in item.cash_reports
+                        if cash_key(row) not in dropped
+                    ),
+                    key=cash_key,
+                )
+            ),
+            interest_accruals=(),
+        )
+
+    conflict = IbkrGenerationError(
+        "Flex refresh conflicts with accepted overlapping history"
+    )
+    if not _statements_equal(neutral(prior), neutral(statement)):
+        raise conflict
+    differences: list[dict[str, Any]] = []
+    for key in sorted(dropped):
+        row = next(r for r in prior.cash_reports if cash_key(r) == key)
+        differences.append(
+            {
+                "family": _OVERLAP_FAMILY_AGGREGATES_ROW,
+                "currency": key[0],
+                "level": key[1],
+                "history": (row.broker_interest_mtd, row.broker_interest_ytd),
+                "refresh": None,
+            }
+        )
+    cash_prior = {
+        cash_key(r): r for r in prior.cash_reports if cash_key(r) not in dropped
+    }
+    cash_new = {cash_key(r): r for r in statement.cash_reports}
+    if (
+        len(cash_prior) != len(prior.cash_reports) - len(dropped)
+        or len(cash_new) != len(statement.cash_reports)
+        or cash_prior.keys() != cash_new.keys()
+    ):
+        raise conflict
+    for key in sorted(cash_prior, key=lambda k: (k[0], k[1], k[2], k[3])):
+        left, right = cash_prior[key], cash_new[key]
+        sides = (
+            (left.broker_interest_mtd, left.broker_interest_ytd),
+            (right.broker_interest_mtd, right.broker_interest_ytd),
+        )
+        if sides[0] != sides[1]:
+            differences.append(
+                {
+                    "family": _OVERLAP_FAMILY_CASH,
+                    "currency": key[0],
+                    "level": key[1],
+                    "history": sides[0],
+                    "refresh": sides[1],
+                }
+            )
+    if Counter(prior.interest_accruals) != Counter(statement.interest_accruals):
+        accrual_prior = {
+            (r.currency, r.from_date, r.to_date): r for r in prior.interest_accruals
+        }
+        accrual_new = {
+            (r.currency, r.from_date, r.to_date): r for r in statement.interest_accruals
+        }
+        if (
+            len(accrual_prior) != len(prior.interest_accruals)
+            or len(accrual_new) != len(statement.interest_accruals)
+            or accrual_prior.keys() != accrual_new.keys()
+        ):
+            raise conflict
+        history_rows: list[tuple[str, Decimal | None, Decimal | None]] = []
+        refresh_rows: list[tuple[str, Decimal | None, Decimal | None]] = []
+        for accrual_key in sorted(accrual_prior):
+            old_row, new_row = accrual_prior[accrual_key], accrual_new[accrual_key]
+            if old_row == new_row:
+                continue
+            others_equal = all(
+                getattr(old_row, field.name) == getattr(new_row, field.name)
+                for field in dataclasses.fields(old_row)
+                if field.name not in {"interest_accrued", "accrual_reversal"}
+            )
+            values = (
+                old_row.interest_accrued,
+                old_row.accrual_reversal,
+                new_row.interest_accrued,
+                new_row.accrual_reversal,
+            )
+            if not others_equal or any(value is None for value in values):
+                raise conflict
+            assert values[0] is not None and values[1] is not None
+            assert values[2] is not None and values[3] is not None
+            if values[0] + values[1] != values[2] + values[3]:
+                raise conflict  # the net differs: a real difference, never an equivalence
+            history_rows.append((accrual_key[0], values[0], values[1]))
+            refresh_rows.append((accrual_key[0], values[2], values[3]))
+        differences.append(
+            {
+                "family": _OVERLAP_FAMILY_ACCRUAL,
+                "currency": "",
+                "level": "",
+                "history": tuple(history_rows),
+                "refresh": tuple(refresh_rows),
+            }
+        )
+    return differences
+
+
+def _overlap_entry(
+    account: str, day: date, difference: Mapping[str, Any], reason: str
+) -> dict[str, Any]:
+    """The canonical spec entry for one derived difference (the generator's output form)."""
+
+    def decimal_text(value: Decimal | None) -> str | None:
+        return None if value is None else format(value, "f")
+
+    if difference["family"] in {_OVERLAP_FAMILY_CASH, _OVERLAP_FAMILY_AGGREGATES_ROW}:
+        history: Any = {
+            "broker_interest_mtd": decimal_text(difference["history"][0]),
+            "broker_interest_ytd": decimal_text(difference["history"][1]),
+        }
+        refresh: Any = (
+            None
+            if difference["refresh"] is None
+            else {
+                "broker_interest_mtd": decimal_text(difference["refresh"][0]),
+                "broker_interest_ytd": decimal_text(difference["refresh"][1]),
+            }
+        )
+    else:
+        history = [
+            {
+                "currency": row[0],
+                "interest_accrued": decimal_text(row[1]),
+                "accrual_reversal": decimal_text(row[2]),
+            }
+            for row in difference["history"]
+        ]
+        refresh = [
+            {
+                "currency": row[0],
+                "interest_accrued": decimal_text(row[1]),
+                "accrual_reversal": decimal_text(row[2]),
+            }
+            for row in difference["refresh"]
+        ]
+    return {
+        "raw_account_id": account,
+        "report_date": day.isoformat(),
+        "family": difference["family"],
+        "currency": difference["currency"],
+        "level_of_detail": difference["level"],
+        "history": history,
+        "refresh": refresh,
+        "reason": reason,
+    }
+
+
 def _load_spec(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -260,6 +577,8 @@ def _load_spec(path: Path) -> dict[str, Any]:
         expected_keys.add("declared_zero_activity_accounts")
         if "declared_general_exclusions" in spec:
             expected_keys.add("declared_general_exclusions")
+        if "declared_overlap_equivalences" in spec:
+            expected_keys.add("declared_overlap_equivalences")
     _strict(spec, expected_keys, "spec")
     minimum = _integer(spec["minimum_crosswalk_overlap"], "minimum_crosswalk_overlap")
     if minimum < 2:
@@ -267,6 +586,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
     if schema_version in _DECLARING_SPEC_VERSIONS:
         _parse_zero_activity(spec.get("declared_zero_activity_accounts"))
         _parse_general_exclusions(spec.get("declared_general_exclusions"))
+        _parse_overlap_equivalences(spec.get("declared_overlap_equivalences"))
     return spec
 
 
@@ -481,12 +801,26 @@ def _statements_equal(left: FlexDailyStatement, right: FlexDailyStatement) -> bo
     )
 
 
+_OVERLAP_REASON: Final = "one-day Flex pull omits month/year-to-date broker interest"
+
+
 def _statements(
     sources: Sequence[tuple[str, str, Path]],
+    equivalences: Mapping[tuple[str, date], list[dict[str, Any]]] | None = None,
+    collect: list[dict[str, Any]] | None = None,
 ) -> tuple[list[FlexDailyStatement], frozenset[str], int]:
+    """Merge the Flex statements; an overlapping refresh must equal the accepted history.
+
+    ``equivalences`` (governed, exact) names the only differences an overlap may carry; the
+    accepted history wins.  ``collect`` (the generator) records the derivable differences instead
+    of requiring them to be listed.
+    """
+
+    equivalences = equivalences or {}
     statements: dict[tuple[str, date], FlexDailyStatement] = {}
     refresh_accounts: set[str] = set()
     overlap_count = 0
+    overlapped: set[tuple[str, date]] = set()
     ordered_roles = ("PRIMARY_FLEX_ACTIVITY", "REFRESH_FLEX_ACTIVITY")
     for accepted_role in ordered_roles:
         for artifact_id, role, path in sources:
@@ -504,14 +838,48 @@ def _statements(
                         raise IbkrGenerationError(
                             "duplicate account/date FlexStatement"
                         )
-                    if not _statements_equal(prior, statement):
-                        raise IbkrGenerationError(
-                            "Flex refresh conflicts with accepted overlapping history"
-                        )
-                    overlap_count += 1
+                    overlapped.add(key)
+                    if _statements_equal(prior, statement):
+                        overlap_count += 1
+                        statements[key] = statement
+                    else:
+                        differences = _overlap_differences(prior, statement)
+                        if collect is not None:
+                            for difference in differences:
+                                collect.append({"key": key, "difference": difference})
+                        else:
+                            listed = equivalences.get(key, [])
+                            for difference in differences:
+                                match = next(
+                                    (
+                                        entry
+                                        for entry in listed
+                                        if not entry["used"]
+                                        and entry["family"] == difference["family"]
+                                        and entry["currency"] == difference["currency"]
+                                        and entry["level"] == difference["level"]
+                                        and entry["history"] == difference["history"]
+                                        and entry["refresh"] == difference["refresh"]
+                                    ),
+                                    None,
+                                )
+                                if match is None:
+                                    raise IbkrGenerationError(
+                                        "Flex refresh differs from accepted overlapping history "
+                                        "in a way no declared overlap equivalence names"
+                                    )
+                                match["used"] = True
+                        overlap_count += 1
+                        continue  # the accepted history wins over an equivalent refresh
                 statements[key] = statement
                 if accepted_role == "REFRESH_FLEX_ACTIVITY":
                     refresh_accounts.add(statement.raw_account_id)
+    if collect is None:
+        for key, entries in equivalences.items():
+            if key not in overlapped or any(not entry["used"] for entry in entries):
+                raise IbkrGenerationError(
+                    "a declared overlap equivalence matches no difference of the overlap"
+                )
     if not statements:
         raise IbkrGenerationError("no primary Flex statements were parsed")
     return (
@@ -858,6 +1226,7 @@ def _normalize(
     flex_overlap_count: int,
     tws_source: tuple[TwsSnapshot, str] | None,
     *,
+    overlap_equivalence_count: int = 0,
     flex_only: bool = False,
     declared_zero_activity_raw_ids: frozenset[str] = frozenset(),
     flex_history_coverage: Mapping[str, Any] | None = None,
@@ -1938,6 +2307,17 @@ def _normalize(
                 "record_count": flex_overlap_count,
                 "status": "PASS" if refresh_raw_account_ids else "UNAVAILABLE",
             },
+            *(
+                [
+                    {
+                        "check_id": "flex-overlap-declared-equivalences",
+                        "record_count": overlap_equivalence_count,
+                        "status": "PASS",
+                    }
+                ]
+                if overlap_equivalence_count
+                else []
+            ),
             {
                 "check_id": "activity-account-scope",
                 "exception_count": account_scope_mismatches,
@@ -1993,7 +2373,12 @@ def build_generation(
         spec["sources"], roots, generation_as_of, spec_schema_version
     )
     baseline, baseline_artifact = _baseline(spec["baseline"])
-    statements, refresh_accounts, flex_overlap_count = _statements(sources)
+    equivalences = _parse_overlap_equivalences(
+        spec.get("declared_overlap_equivalences")
+    )
+    statements, refresh_accounts, flex_overlap_count = _statements(
+        sources, equivalences
+    )
     tws_source = _tws_source(sources)
     declared_zero_activity = spec.get("declared_zero_activity_accounts") or []
     declared_zero_activity_raw_ids = frozenset(
@@ -2018,6 +2403,7 @@ def build_generation(
         refresh_accounts,
         flex_overlap_count,
         tws_source,
+        overlap_equivalence_count=sum(len(v) for v in equivalences.values()),
         flex_only=spec_schema_version == FLEX_ONLY_SPEC_SCHEMA_VERSION,
         declared_zero_activity_raw_ids=declared_zero_activity_raw_ids,
         flex_history_coverage=flex_history_coverage,

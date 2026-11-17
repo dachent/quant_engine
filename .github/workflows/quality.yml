@@ -278,6 +278,7 @@ jobs:
           tools/portfolio_cash_drag.py
           tools/portfolio_cash_drag_spec.py
           tools/zero_financing_statements.py
+          tools/ibkr_overlap_equivalences.py
       - name: Resolve controller graph change range
         id: controller_graph_range
         shell: bash
