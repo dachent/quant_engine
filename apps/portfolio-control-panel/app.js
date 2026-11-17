@@ -652,6 +652,7 @@
     weekly: "Weekly returns",
     performance: "Performance charts",
     modelvsactual: "Model vs actual",
+    concepts: "Strategy concepts",
     candidates: "Frozen candidate appendix",
     data: "Data health",
   };
@@ -3977,6 +3978,62 @@
   }
   // ===== END model-vs-actual =====
 
+  // ===== BEGIN strategy concepts =====
+  // One card per current strategy: what it is, why it should earn a return, why it should persist, the alternative
+  // explanation, what would falsify it, the design evidence and where it is implemented.  The concept text is the
+  // governed contract's own words (`strategy_concepts`); the design, weight and accounts come from the strategy and
+  // underwriting rows.  An inferred archetype or an unestablished mechanism is labelled as such and never
+  // shown as authoritative; a missing record or field says so.
+  function conceptEvidenceLabel(concept, design) {
+    const hypothesis = !concept || concept.source_status === "NO_IDENTIFIED_SOURCE" || String(concept.confidence).toLowerCase() === "none";
+    return {
+      mechanism: hypothesis ? "Hypothesis, not established" : `Evidenced source · confidence ${humanStatus(concept.confidence).toLowerCase()}`,
+      hypothesis,
+      authoritativeDesign: design?.status === "AUTHORITATIVE_DESIGN_AVAILABLE",
+    };
+  }
+  function conceptCardMarkup(record, strategy, underwritingRow) {
+    const concept = record.concept;
+    const design = underwritingRow?.design_fit || null;
+    const label = conceptEvidenceLabel(concept, design);
+    const id = `concept-${domToken(record.strategy_id)}`;
+    const designStatus = design?.status ? humanStatus(design.status) : humanStatus(strategy?.design_status || "UNAVAILABLE");
+    const designTone = label.authoritativeDesign ? "positive" : "warning";
+    const accounts = Array.isArray(strategy?.mwr_member_account_ids) ? strategy.mwr_member_account_ids : [];
+    const field = (term, body) => `<div class="concept-field"><dt>${safe(term)}</dt><dd>${body}</dd></div>`;
+    const text = (value) => (value ? safe(value) : '<span class="cell-secondary">Not published</span>');
+    const falsification = Array.isArray(concept?.falsification) && concept.falsification.length ? `<ul>${concept.falsification.map((item) => `<li>${safe(item)}</li>`).join("")}</ul>` : '<span class="cell-secondary">Not published</span>';
+    return `<article class="panel concept-card" aria-labelledby="${id}-title">
+      <header class="concept-head"><h3 id="${id}-title">${safe(record.strategy_name)}</h3>
+        <span class="badge badge-${designTone}">${label.authoritativeDesign ? "Authoritative design" : "Design not authoritative"}</span>
+        <span class="badge ${label.hypothesis ? "badge-warning" : "badge-positive"}">${safe(label.mechanism)}</span></header>
+      <dl class="concept-fields">
+        ${field("What it is", `${text(strategy?.economic_family)}${design?.portfolio_role ? `<span class="cell-secondary">Role in the portfolio: ${safe(design.portfolio_role)}</span>` : ""}`)}
+        ${field("Why it should earn a return", concept ? text(concept.mechanism) : '<span class="cell-secondary">No concept record in the governed contract for this strategy</span>')}
+        ${field("Why it should persist", concept ? text(concept.persistence) : '<span class="cell-secondary">Not published</span>')}
+        ${field("Alternative explanation", concept ? text(concept.alternative_explanation) : '<span class="cell-secondary">Not published</span>')}
+        ${field("What would falsify it", falsification)}
+        ${field("Design evidence", `<span class="status-text ${designTone}">${safe(designStatus)}</span>${strategy?.design_version_ref ? `<span class="cell-secondary">Version ${safe(strategy.design_version_ref)}</span>` : '<span class="cell-secondary">No design version reference</span>'}${design?.conformance_status ? `<span class="cell-secondary">${safe(humanStatus(design.conformance_status))}</span>` : ""}`)}
+        ${field("Implemented by", accounts.length ? accounts.map((accountId) => safe(accountLabel(accountId))).join(", ") : '<span class="cell-secondary">No member accounts published</span>')}
+        ${field("Current weight", `${number(strategy?.systematic_weight) == null ? "—" : pct(strategy.systematic_weight, 1)}${strategy?.weight_basis ? `<span class="cell-secondary">${safe(humanStatus(strategy.weight_basis))}</span>` : ""}${number(strategy?.current_value_usd) == null ? "" : `<span class="cell-secondary">${currency(strategy.current_value_usd)}</span>`}`)}
+        ${strategy?.composition ? field("Composition", safe(strategy.composition.description || humanStatus(strategy.composition.status || "UNAVAILABLE"))) : ""}
+      </dl></article>`;
+  }
+  function renderConcepts() {
+    const block = data.strategy_concepts;
+    const host = $("#concepts-root");
+    if (!host) return;
+    if (!block || !Number.isInteger(block.schema_version) || !Array.isArray(block.rows) || !block.rows.length) {
+      host.innerHTML = `<div class="callout callout-neutral"><strong>Strategy concepts are not in this snapshot.</strong> ${block && Array.isArray(block.rows) ? "The producer published the strategy_concepts block with no strategy rows." : "The producer has not published the strategy_concepts block for this generation."}</div>`;
+      return;
+    }
+    const strategies = new Map((data.strategies || []).map((row) => [row.strategy_id, row]));
+    const underwriting = new Map((data.strategy_underwriting?.rows || []).map((row) => [row.strategy_id, row]));
+    const cards = block.rows.map((record) => conceptCardMarkup(record, strategies.get(record.strategy_id), underwriting.get(record.strategy_id)));
+    host.innerHTML = `<p class="cell-secondary">Concept text is the governed contract (${safe(block.source_artifact)}, sha256 ${safe(block.source_sha256.slice(0, 12))}…). Hypotheses and inferred archetypes carry their own labels.</p><div class="concept-grid">${cards.join("")}</div>`;
+  }
+  // ===== END strategy concepts =====
+
   const viewRenderers = {
     command: renderCommand,
     capital: renderCapital,
@@ -3987,6 +4044,7 @@
     weekly: renderWeekly,
     performance: renderPerformance,
     modelvsactual: renderModelVsActual,
+    concepts: renderConcepts,
     candidates: renderCandidates,
     data: renderData,
   };

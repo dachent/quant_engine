@@ -268,6 +268,11 @@ STRATEGY_UNDERWRITING_POLICY = (
     / "contracts"
     / "portfolio-strategy-underwriting-v1.json"
 )
+STRATEGY_RETURN_SOURCES_CONTRACT = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "strategy-return-sources-v1.json"
+)
 DEFAULT_TEMPLATE_ROOT = (
     Path(__file__).resolve().parents[1] / "apps" / "portfolio-control-panel"
 )
@@ -9748,6 +9753,80 @@ def _regime_underwriting(
     }
 
 
+def _text_list(value: object, field_name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ControlPanelValidationError(f"{field_name} must be a list")
+    return [_text(item, field_name) for item in value]
+
+
+def _strategy_concepts(
+    underwriting_rows: Sequence[Mapping[str, Any]],
+    contract_snapshot: bytes | None = None,
+) -> dict[str, Any]:
+    """One concept record per current strategy, read from the governed return-sources contract.
+
+    The record carries the contract's own words (mechanism, persistence, alternative
+    explanation, falsification tests, confidence); nothing is composed here.  A strategy the
+    contract does not describe gets `concept: null`, never an invented archetype.  Design
+    evidence, weight and accounts stay on the strategy and underwriting rows the renderer
+    already holds.
+    """
+
+    if contract_snapshot is None:
+        contract, _content, contract_hash = _json_snapshot(
+            STRATEGY_RETURN_SOURCES_CONTRACT, "strategy return sources"
+        )
+    else:
+        contract = _json_from_bytes(contract_snapshot, "strategy return sources")
+        contract_hash = hashlib.sha256(contract_snapshot).hexdigest()
+    entries = {
+        str(item.get("strategy_id")): item
+        for item in _objects(contract.get("strategies"), "strategy return sources")
+    }
+    rows: list[dict[str, Any]] = []
+    for underwriting in underwriting_rows:
+        strategy_id = _text(underwriting.get("strategy_id"), "concept strategy_id")
+        entry = entries.get(strategy_id)
+        concept: dict[str, Any] | None = None
+        if entry is not None:
+            concept = {
+                "mechanism": _text(entry.get("mechanism"), f"{strategy_id} mechanism"),
+                "persistence": _text(
+                    entry.get("persistence"), f"{strategy_id} persistence"
+                ),
+                "alternative_explanation": _text(
+                    entry.get("alternative_explanation"),
+                    f"{strategy_id} alternative explanation",
+                ),
+                "falsification": _text_list(
+                    entry.get("falsification"), f"{strategy_id} falsification"
+                ),
+                "confidence": _text(
+                    entry.get("confidence"), f"{strategy_id} confidence"
+                ),
+                "source_status": (
+                    "NO_IDENTIFIED_SOURCE"
+                    if entry.get("no_identified_source") is True
+                    else "IDENTIFIED_SOURCE"
+                ),
+            }
+        rows.append(
+            {
+                "strategy_id": strategy_id,
+                "strategy_name": _text(
+                    underwriting.get("strategy_name"), f"{strategy_id} name"
+                ),
+                "concept": concept,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "source_artifact": "contracts/strategy-return-sources-v1.json",
+        "source_sha256": contract_hash,
+        "rows": rows,
+    }
+
+
 def _strategy_underwriting(
     strategies: Sequence[Mapping[str, Any]],
     decomposition_lenses: Mapping[str, Any],
@@ -10819,6 +10898,7 @@ def _panel_data(
     portable_hwm_performance_policy_snapshot: bytes | None = None,
     economic_driver_snapshot: bytes | None = None,
     underwriting_policy_snapshot: bytes | None = None,
+    strategy_return_sources_snapshot: bytes | None = None,
     correlation_strategy_names: Mapping[str, str] | None = None,
     epoch_hpr_receipts: Sequence[Mapping[str, Any]] | None = None,
     hwm_basis: tuple[Mapping[str, Any], Mapping[str, date], frozenset[str]]
@@ -12244,6 +12324,9 @@ def _panel_data(
         "replication_analysis": accepted_replication,
         "strategies": strategies,
         "strategy_underwriting": strategy_underwriting,
+        "strategy_concepts": _strategy_concepts(
+            strategy_underwriting["rows"], strategy_return_sources_snapshot
+        ),
         "hwm_summary": hwm_summary,
         "hybrid_mode_gate": hybrid_mode_gate,
         "leverage_disclosures": list(report["leverage_disclosures"]),
@@ -13532,6 +13615,7 @@ def _rendered_files(
         (_PORTABLE_HWM_PERFORMANCE_POLICY, "portable HWM performance policy"),
         (ECONOMIC_DRIVER_CLUSTERS, "economic driver cluster contract"),
         (STRATEGY_UNDERWRITING_POLICY, "underwriting policy"),
+        (STRATEGY_RETURN_SOURCES_CONTRACT, "strategy return sources"),
         (PANEL_DATA_SCHEMA, "control-panel data schema"),
         (ACCOUNT_MANIFEST_SCHEMA, "account-strategy manifest schema"),
     ):
@@ -13578,6 +13662,9 @@ def _rendered_files(
         underwriting_policy_snapshot=authority_snapshots[STRATEGY_UNDERWRITING_POLICY][
             0
         ],
+        strategy_return_sources_snapshot=authority_snapshots[
+            STRATEGY_RETURN_SOURCES_CONTRACT
+        ][0],
         correlation_strategy_names=plan_strategy_names or baseline_strategy_names,
         epoch_hpr_receipts=(
             verified_strategy_history["epoch_hpr_receipts"]
@@ -13735,6 +13822,10 @@ def _rendered_files(
         "underwriting_policy": (
             STRATEGY_UNDERWRITING_POLICY,
             authority_snapshots[STRATEGY_UNDERWRITING_POLICY][1],
+        ),
+        "strategy_return_sources": (
+            STRATEGY_RETURN_SOURCES_CONTRACT,
+            authority_snapshots[STRATEGY_RETURN_SOURCES_CONTRACT][1],
         ),
         "panel_data_schema": (
             PANEL_DATA_SCHEMA,
@@ -16385,6 +16476,13 @@ def publish_panel(
             artifact_id="input/portfolio-strategy-underwriting-policy.json",
             as_of_date=publication_as_of,
             schema_name="portfolio-strategy-underwriting-policy",
+            schema_version="1",
+        ),
+        snapshot_artifact(
+            "strategy_return_sources",
+            artifact_id="input/portfolio-strategy-return-sources.json",
+            as_of_date=publication_as_of,
+            schema_name="portfolio-strategy-return-sources",
             schema_version="1",
         ),
     ]

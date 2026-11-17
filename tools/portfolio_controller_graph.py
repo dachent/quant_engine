@@ -347,7 +347,9 @@ _PATH_STAGES = {
         "report",
         "panel",
     ],
-    "contracts/strategy-return-sources-v1.json": [],
+    # The panel reads the governed mechanism / persistence / alternative-explanation text per strategy
+    # (Strategy concepts view); the contract's sha256 rides in the payload block.
+    "contracts/strategy-return-sources-v1.json": ["panel"],
     # #899: the pinned bounds of the missing Matrixport NAV points; the report and the
     # panel both read it to decide whether the numeric HWM can publish.
     "contracts/portfolio-hwm-gap-bounds-v1.json": ["report", "panel"],

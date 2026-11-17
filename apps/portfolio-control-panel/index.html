@@ -24,7 +24,8 @@
           <button class="nav-item" type="button" data-nav="weekly"><span class="nav-index">07</span><span>Weekly returns</span></button>
           <button class="nav-item" type="button" data-nav="performance"><span class="nav-index">08</span><span>Performance charts</span></button>
           <button class="nav-item" type="button" data-nav="modelvsactual"><span class="nav-index">09</span><span>Model vs actual</span></button>
-          <button class="nav-item" type="button" data-nav="data"><span class="nav-index">10</span><span>Data health</span></button>
+          <button class="nav-item" type="button" data-nav="concepts"><span class="nav-index">10</span><span>Strategy concepts</span></button>
+          <button class="nav-item" type="button" data-nav="data"><span class="nav-index">11</span><span>Data health</span></button>
         </nav>
       </aside>
 
@@ -150,6 +151,11 @@
           <section class="view" data-view="modelvsactual" aria-labelledby="modelvsactual-heading" hidden>
             <div class="section-intro"><div><div class="eyebrow">Model vs actual</div><h2 id="modelvsactual-heading">Why did the account earn less than the model?</h2></div><p>Each strategy with an aligned window: its account return against its comparator model over that window, split into signed components. Every strategy row and every component line carries an evidence tag; the portfolio gap and the residual are totals computed from them and carry none; terms the producer cannot yet publish are named with their reason, and a replacing pull is shown only where the audit input names one.</p></div>
             <div class="grid grid-12"><article class="panel span-12"><div id="mva-root"></div></article></div>
+          </section>
+
+          <section class="view" data-view="concepts" aria-labelledby="concepts-heading" hidden>
+            <div class="section-intro"><div><div class="eyebrow">Strategy concepts</div><h2 id="concepts-heading">What each strategy is, why it should earn a return, and how well that is evidenced</h2></div><p>One card per current strategy. The mechanism, persistence and alternative explanation are the governed return-sources contract; the design evidence, weight and accounts come from the strategy rows. Labels mark a hypothesis and an inferred archetype.</p></div>
+            <div id="concepts-root"></div>
           </section>
 
           <section class="view" data-view="candidates" aria-labelledby="candidates-heading" hidden>

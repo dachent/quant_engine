@@ -6511,8 +6511,8 @@ def test_real_qa_harness_output_validates_and_publishes_without_locators(
 
     manifests = sorted(qa.glob("*/manifest.json"))
     lints = sorted(qa.glob("*/visual-lint.json"))
-    assert len(manifests) == 34
-    assert len(lints) == 33
+    assert len(manifests) == 37
+    assert len(lints) == 36
     for path in (*manifests, *lints):
         record = json.loads(path.read_text(encoding="utf-8"))
         assert record["qa_manifest_version"] == 2
@@ -7714,7 +7714,7 @@ def test_mvp_exposes_all_nine_accepted_views() -> None:
     # appendix link: interaction_qa.mjs:878 requires zero [data-nav="candidates"]
     # elements anywhere in the document, and the last published generation
     # (41f41362) shipped none.
-    assert template.count('class="nav-item') == 10
+    assert template.count('class="nav-item') == 11
     for view in (
         "command",
         "capital",
@@ -7725,6 +7725,7 @@ def test_mvp_exposes_all_nine_accepted_views() -> None:
         "weekly",
         "performance",
         "modelvsactual",
+        "concepts",
         "data",
     ):
         assert f'data-nav="{view}"' in template
@@ -14387,6 +14388,7 @@ def test_g2_lazy_view_renders_only_direct_hash_and_refreshes_hidden_context(
         "renderWeekly",
         "renderPerformance",
         "renderModelVsActual",
+        "renderConcepts",
         "renderCandidates",
         "renderData",
     )
@@ -14481,7 +14483,7 @@ def test_g2_lazy_view_keeps_source_clock_visible_to_native_browser_qa(
     )
     assert result.returncode == 0, f"native browser QA failed: {result.stderr}"
     manifests = list(output.glob("*/manifest.json"))
-    assert len(manifests) == 34
+    assert len(manifests) == 37
     assert all(
         json.loads(path.read_text(encoding="utf-8"))["source_clock_display"]["valid"]
         for path in manifests

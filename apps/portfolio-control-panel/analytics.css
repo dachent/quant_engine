@@ -1411,3 +1411,16 @@ details.orthogonal-data { margin-top: 12px; }
 @media (max-width: 760px) {
   .perf-tooltip { position: static; max-width: none; width: 100%; max-height: 200px; margin-top: 6px; }
 }
+
+/* ===== BEGIN strategy concepts ===== */
+.concept-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 14px; margin-top: 10px; }
+.concept-card { margin: 0; min-width: 0; }
+.concept-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-bottom: 8px; }
+.concept-head h3 { margin: 0; flex: 1 1 100%; font-size: 17px; }
+.concept-fields { margin: 0; display: grid; gap: 10px; }
+.concept-field dt { color: var(--text-soft); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+.concept-field dd { margin: 0; overflow-wrap: anywhere; line-height: 1.45; }
+.concept-field ul { margin: 0; padding-left: 18px; }
+.concept-field .cell-secondary { display: block; }
+@media (max-width: 760px) { .concept-grid { grid-template-columns: 1fr; } }
+/* ===== END strategy concepts ===== */
