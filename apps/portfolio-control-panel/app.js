@@ -1839,7 +1839,7 @@
     const gapOther = [...currentStrategies().filter((row) => row.implementation_gap_status !== "tested").reduce((map, row) => map.set(row.implementation_gap_status || "UNAVAILABLE", (map.get(row.implementation_gap_status || "UNAVAILABLE") || 0) + 1), new Map())];
     const knownCost = currentStrategies().filter((row) => String(row.cost_status).startsWith("known")).length;
     renderKpis("#signal-kpis", [
-      ["Implementation gap tested", `${gapTested}/${data.counts.strategies}`, gapOther.length ? `Provider versus account evidence; not tested: ${gapOther.map(([status, count]) => `${humanStatus(status).toLowerCase()} ${integer.format(count)}`).join(", ")}` : "Provider versus account evidence"],
+      ["Implementation gap tested", `${gapTested}/${data.counts.strategies}`, gapOther.length ? `Account versus model or provider evidence; not tested: ${gapOther.map(([status, count]) => `${humanStatus(status).toLowerCase()} ${integer.format(count)}`).join(", ")}` : "Account versus model or provider evidence"],
       ["Known cost status", `${knownCost}/${data.counts.strategies}`, "Unknown stays disclosed", "warning"],
       ["Reconciliations passed", `${data.counts.reconciliation_passed}/${data.counts.reconciliation_checks}`, "Accepted report checks"],
       ["Automated action", advisoryExecutionEffect(), advisoryExecutionEffectNote(), "reserve"],

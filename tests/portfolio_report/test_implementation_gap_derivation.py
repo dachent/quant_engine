@@ -126,7 +126,8 @@ def test_a_verified_contract_with_an_unavailable_return_reconciliation_is_not_te
     unavailable = {"return_reconciliation": {"status": "UNAVAILABLE_NO_COMMON_DATES"}}
     for implementation in (
         unavailable,
-        {"return_reconciliation": {"status": "X"}},
+        {"return_reconciliation": {"status": "X", "observations": 12}},
+        {"return_reconciliation": {"status": "PARTIAL", "observations": 12}},
         None,
     ):
         row = _merge(
@@ -159,3 +160,22 @@ def test_a_verified_contract_is_tested_from_a_usable_return_reconciliation() -> 
             None,
         )
         assert row["implementation_gap_status"] == "tested", implementation
+
+
+def test_only_the_emitted_verified_statuses_count_as_verified() -> None:
+    usable = {"status": "TESTED_EXACT_COMMON_DATES", "observations": 12}
+    for status, expected in (
+        ("VERIFIED_CAUSAL_RETURN_ATTRIBUTION", "tested"),
+        ("VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION", "tested"),
+        ("VERIFIED_SOMETHING_ELSE", "not_testable"),
+        ("VERIFIED", "not_testable"),
+    ):
+        row = _merge(
+            {
+                "implementation_reconciliation_status": status,
+                "implementation_reconciliation": {"return_reconciliation": usable},
+            },
+            {"status": "UNAVAILABLE"},
+            None,
+        )
+        assert row["implementation_gap_status"] == expected, status

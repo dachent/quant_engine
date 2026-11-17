@@ -2815,6 +2815,17 @@ def _window_limit(
 
 
 IMPLEMENTATION_GAP_TESTED = "tested"
+# The two statuses the implementation producer emits for a verified contract, and the two
+# return-reconciliation statuses that carry a real account-versus-model comparison.
+VERIFIED_IMPLEMENTATION_STATUSES = frozenset(
+    {
+        "VERIFIED_CAUSAL_RETURN_ATTRIBUTION",
+        "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION",
+    }
+)
+USABLE_RETURN_RECONCILIATION_STATUSES = frozenset(
+    {"DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV", "TESTED_EXACT_COMMON_DATES"}
+)
 IMPLEMENTATION_GAP_NOT_TESTABLE = "not_testable"
 IMPLEMENTATION_GAP_BASIS_VERIFIED = "VERIFIED_IMPLEMENTATION_RECONCILIATION"
 IMPLEMENTATION_GAP_BASIS_PROVIDER = "EXACT_DATE_PROVIDER_COMPARISON"
@@ -2838,8 +2849,7 @@ def _usable_return_reconciliation(implementation: object) -> bool:
         status = str(candidate.get("status") or "")
         observations = candidate.get("observations")
         if (
-            status
-            and not status.startswith("UNAVAILABLE")
+            status in USABLE_RETURN_RECONCILIATION_STATUSES
             and isinstance(observations, int)
             and not isinstance(observations, bool)
             and observations > 0
@@ -2865,8 +2875,9 @@ def _implementation_gap_fields(
     reconciliation_status = str(item.get("implementation_reconciliation_status") or "")
     comparison_status = str(comparison.get("status") or "")
     observations = metrics.get("observations")
-    if reconciliation_status.startswith("VERIFIED") and _usable_return_reconciliation(
-        item.get("implementation_reconciliation")
+    if (
+        reconciliation_status in VERIFIED_IMPLEMENTATION_STATUSES
+        and _usable_return_reconciliation(item.get("implementation_reconciliation"))
     ):
         status, basis = IMPLEMENTATION_GAP_TESTED, IMPLEMENTATION_GAP_BASIS_VERIFIED
     elif (
