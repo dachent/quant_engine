@@ -289,6 +289,15 @@ def closed_since(
     return settled, last
 
 
+def _amount_text(amount: Any) -> str | None:
+    """A canonical decimal text of an AVAILABLE amount (1.0, 1.00 and 1E0 compare equal)."""
+
+    if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
+        return None
+    value = _decimal(amount.get("value"), "amount")
+    return format(value.normalize(), "f") if value != 0 else "0"
+
+
 def _evaluate_schwab_empty(
     declaration: Declaration,
     nav_values: Mapping[date, Decimal | None],
@@ -576,6 +585,7 @@ def evaluate(
                 as_of_date,
             )
         passed = all(item["status"] == "PASS" for item in checks)
+        by_id = {str(f.get("record_id")): f for f in flows}
         rows.append(
             {
                 "account_id": declaration.account_id,
@@ -591,6 +601,15 @@ def evaluate(
                 "provider_id": provider,
                 "citation": declaration.citation,
                 "proven_record_ids": proven_ids,
+                "proven_records": [
+                    {
+                        "record_id": rid,
+                        "event_date": str(by_id[rid].get("event_date")),
+                        "amount": _amount_text(by_id[rid].get("amount")),
+                    }
+                    for rid in proven_ids
+                    if rid in by_id
+                ],
                 "status": DECLARED_COMPLETE if passed else CLOSURE_FAILED,
             }
         )

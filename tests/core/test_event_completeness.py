@@ -656,3 +656,19 @@ def test_flows_before_any_statement_coverage_are_disclosed_not_refused() -> None
     )
     # the earlier flow is not among the records the closure proved
     assert row["proven_record_ids"] == []
+
+
+def test_a_complete_flow_closure_names_each_proven_record_with_date_and_canonical_amount() -> (
+    None
+):
+    early = _days()[0]
+    flows = [_flow(A, early, "300.0")]
+    row = _run([_entry()], flows, _cin(A, {early: "300"}))[0]
+    assert row["status"] == ec.DECLARED_COMPLETE
+    assert row["proven_records"] == [
+        {
+            "record_id": flows[0]["record_id"],
+            "event_date": early.isoformat(),
+            "amount": "300",
+        }
+    ]

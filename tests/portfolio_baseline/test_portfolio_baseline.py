@@ -6085,6 +6085,7 @@ def _closure_row(
     status: str,
     failed: list[tuple[str, int]] | None = None,
     proven: list[str] | None = None,
+    records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     checks = [
         {
@@ -6105,6 +6106,7 @@ def _closure_row(
         "declared_end": "2026-07-30",
         "checks": checks,
         "proven_record_ids": proven or [],
+        **({"proven_records": records} if records is not None else {}),
     }
 
 
@@ -6305,3 +6307,53 @@ def test_a_complete_row_states_the_accepted_records_outside_its_declaration() ->
     )
     plain = _matrix_row(None, [_accepted("t-1")], proof)
     assert "outside the declaration" not in plain["missing_interval_reason"]
+
+
+def _proof_with_records(*records: tuple[str, str, str]) -> dict[Any, Any]:
+    return {
+        ("account-reserve", "transactions"): _closure_row(
+            "DECLARED_COMPLETE",
+            proven=[r[0] for r in records],
+            records=[
+                {"record_id": r[0], "event_date": r[1], "amount": r[2]} for r in records
+            ],
+        )
+    }
+
+
+def test_the_proven_and_accepted_flows_compare_as_a_multiset_of_id_date_amount() -> (
+    None
+):
+    proof = _proof_with_records(("t-1", "2026-02-01", "1"), ("t-2", "2026-02-01", "1"))
+    same = _matrix_row(None, [_accepted("t-1"), _accepted("t-2")], proof)
+    assert same["status"] == "DECLARED_COMPLETE"
+    # an accepted duplicate of one id
+    dup = _matrix_row(
+        None, [_accepted("t-1"), _accepted("t-1"), _accepted("t-2")], proof
+    )
+    assert dup["status"] != "DECLARED_COMPLETE"
+    assert "accepted records are not proven" in dup["missing_interval_reason"]
+    # the same id with another amount
+    other = _accepted("t-2")
+    other["amount"] = {"currency": "USD", "status": "AVAILABLE", "value": "1001"}
+    moved = _matrix_row(None, [_accepted("t-1"), other], proof)
+    assert moved["status"] != "DECLARED_COMPLETE"
+    # the same id on another date
+    later = _matrix_row(None, [_accepted("t-1"), _accepted("t-2", "2026-02-02")], proof)
+    assert later["status"] != "DECLARED_COMPLETE"
+    # 1.0 and 1E0 are the same amount
+    spelled = _accepted("t-2")
+    spelled["amount"] = {"currency": "USD", "status": "AVAILABLE", "value": "1.00"}
+    assert (
+        _matrix_row(None, [_accepted("t-1"), spelled], proof)["status"]
+        == "DECLARED_COMPLETE"
+    )
+
+
+def test_an_accepted_record_without_a_date_cannot_sit_inside_a_complete_row() -> None:
+    proof = _proof_with_records(("t-1", "2026-02-01", "1"))
+    undated = _accepted("t-9")
+    undated.pop("event_date")
+    row = _matrix_row(None, [_accepted("t-1"), undated], proof)
+    assert row["status"] != "DECLARED_COMPLETE"
+    assert "1 accepted records carry no date" in row["missing_interval_reason"]
