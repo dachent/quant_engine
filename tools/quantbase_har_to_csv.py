@@ -153,6 +153,7 @@ HEADERS: Final[dict[str, tuple[str, ...]]] = {
         "backtest_end_date",
     ),
     "key_value": ("column", "value"),
+    "public_fund_pricehistory": ("fund_title", "fund_id", "value", "time"),
     "ssg_pricehistory": ("fund_title", "fund_id", "value", "time"),
     "volatis_rebalance": ("date", "symbol", "proportion"),
 }
@@ -944,6 +945,10 @@ def _invest(
         account = _object(funds, "dashboard.funds_data").get(VOLATIS_TITLE)
         if account is None:
             raise QuantbaseCsvError("dashboard lacks the Volatis account series")
+        # The provider's own fund-level series is kept beside the account series
+        # that replaces it in the ssg file, so the public fund path is a governed
+        # dataset of its own and never inferred from the owner's account.
+        public_volatis = list(series[VOLATIS_TITLE])
         series[VOLATIS_TITLE] = [
             [VOLATIS_TITLE, identifiers[VOLATIS_TITLE], row[1], row[0]]
             for row in _price_rows(
@@ -953,6 +958,10 @@ def _invest(
             )
         ]
     files: dict[str, bytes] = {}
+    if mode == "account-level":
+        files[f"public_fund_{_safe_name(VOLATIS_TITLE)}_pricehistory.csv"] = _csv_bytes(
+            HEADERS["public_fund_pricehistory"], public_volatis
+        )
     for title in sorted(series):
         name = f"ssg_{_safe_name(title)}_pricehistory.csv"
         if name in files:
