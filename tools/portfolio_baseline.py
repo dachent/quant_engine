@@ -4016,6 +4016,31 @@ def _build_current_capital(
             list(_AGGREGATE_COMPONENTS),
             None,
         )
+        # never a mixed-date sum labelled at one day: the oldest component date is the
+        # aggregate's date, and every contributing part's own date is listed
+        total_liquid["part_dates"] = sorted(
+            [
+                {"as_of_date": systematic["as_of_date"], "part": "systematic"},
+                *(
+                    {
+                        "as_of_date": row["as_of_date"],
+                        "part": f"retained_excluded:{row['strategy_id']}",
+                    }
+                    for row in excluded
+                ),
+                *(
+                    {
+                        "as_of_date": member["as_of_date"],
+                        "part": (
+                            f"reserve:{member.get('provider') or ''}:"
+                            f"{member['account_id']}"
+                        ),
+                    }
+                    for member in reserve.get("members", [])
+                ),
+            ],
+            key=lambda item: (str(item["as_of_date"]), item["part"]),
+        )
 
     return {
         **({"custody_authority": dict(custody_authority)} if custody_authority else {}),
@@ -6427,7 +6452,18 @@ def _statement_reserve_facts(
         except (OSError, statement_reserve_nav.StatementReserveError) as exc:
             raise BaselineValidationError(f"statement reserve input: {exc}") from exc
         for key in merged:
-            merged[key].extend(facts[key])
+            rows = facts[key]
+            if key == "nav":
+                # lineage: the pinned statement catalog every point was read from
+                rows = [
+                    {
+                        **row,
+                        "statement_catalog_sha256": pin["sha256"],
+                        "statement_catalog_size_bytes": pin["size_bytes"],
+                    }
+                    for row in rows
+                ]
+            merged[key].extend(rows)
     return merged
 
 

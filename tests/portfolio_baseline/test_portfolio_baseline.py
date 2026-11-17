@@ -5985,6 +5985,13 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
         "PINNED_STATEMENT_POINTS",
         "STATEMENT_PERIODIC",
     )
+    jh_points = [
+        r for r in catalog["nav_observations"] if r["account_id"] == "account-jh"
+    ]
+    assert jh_points and all(
+        r["statement_catalog_sha256"] == spec["statement_reserves"][0]["sha256"]
+        for r in jh_points
+    )
     assert members["account-jh"]["authority"] == "AUTHORITATIVE"
     assert members["account-jh"]["as_of_date"] == "2026-06-30"
 
@@ -6027,3 +6034,30 @@ def test_statement_excluded_point_binds_to_the_retained_member_and_counts_once(
     assert {r["check_id"]: r for r in rows}["capital-identity-at-cutoff"][
         "status"
     ] == "PASS"
+
+
+def test_total_liquid_lists_every_parts_own_date_and_is_dated_at_the_oldest() -> None:
+    """Ruling F2: never a mixed-date sum labelled at one day."""
+
+    case = _cc_case()
+    case["provider_admissions"] = [
+        row for row in case["provider_admissions"] if row["account_id"] != "acct-r1"
+    ] + [
+        _cc_admission("acct-r1", "AUTHORITATIVE"),
+        _cc_admission("acct-r2", "AUTHORITATIVE"),
+    ]
+    case["nav"].append(_cc_nav("acct-r2", "2026-09-17", "10"))
+    case["nav"].append(_cc_nav("acct-z1", "2026-09-01", "2.5", source_key="manual"))
+
+    total = baseline._build_current_capital(**case)["total_liquid"]
+
+    assert total["status"] == "AVAILABLE"
+    parts = total["part_dates"]
+    assert {p["part"] for p in parts} >= {
+        "systematic",
+        "retained_excluded:echo-x",
+        "retained_excluded:zulu-x",
+    }
+    assert any(p["part"].startswith("reserve:JOHN HANCOCK:acct-r2") for p in parts)
+    dates = [p["as_of_date"] for p in parts if p["as_of_date"] is not None]
+    assert total["as_of_date"] == min(dates)

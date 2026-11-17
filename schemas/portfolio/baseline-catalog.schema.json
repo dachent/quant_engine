@@ -769,6 +769,18 @@
         "components": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "current_value": {"$ref": "#/$defs/usd_amount"},
         "members": {"type": "array", "items": {"$ref": "#/$defs/reserve_member"}},
+        "part_dates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["as_of_date", "part"],
+            "properties": {
+              "as_of_date": {"$ref": "#/$defs/nullable_date"},
+              "part": {"type": "string", "minLength": 1}
+            }
+          }
+        },
         "reason": {"type": ["string", "null"], "minLength": 1},
         "status": {"$ref": "#/$defs/capital_status"}
       },
