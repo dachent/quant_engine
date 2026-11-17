@@ -31,13 +31,14 @@ def _row(status="AVAILABLE", observed_end="2026-11-06"):
         "coverage": {
             "observed_start": "2025-01-02",
             "observed_end": observed_end,
-            "canonical_live_observed_end": "2026-11-06",
+            "canonical_live_observed_end": observed_end,
             "aligned_observations": 200,
         },
         "series_composition": {
             "backtest_observations_used": 0,
             "live_observations": 200,
             "calculation_observations_used": 200,
+            "accepted_history_complete_through": "2026-11-06",
         },
     }
 

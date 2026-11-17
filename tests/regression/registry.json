@@ -139,7 +139,7 @@
     "factor_window_ends_before_live_series": {
       "defect": "The default ECONOMIC_FACTOR lens fitted to 2026-08-31 and was shown beside 2026-11-06 figures.",
       "status": "covered",
-      "kill": "Pre-fix _alpha_context has no window_lag_days and returns HEADLINE_ALLOWED for a 67-day-stale window.",
+      "kill": "Pre-fix _alpha_context has no window_lag_days and returns HEADLINE_ALLOWED for a 67-day-stale window; the fixture has the real row shape (the builder truncates the live end to the fit window, so only series_composition.accepted_history_complete_through shows the lag).",
       "test": "tests/regression/test_factor_window_ends_before_live_series.py::test_factor_window_ends_before_live_series"
     },
     "risk_free_distribution_drop": {

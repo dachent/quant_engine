@@ -5631,12 +5631,12 @@ def _train_window(row: Mapping[str, Any], start: Any, end: Any) -> tuple[Any, An
     buckets = association.get("buckets")
     if not isinstance(buckets, list):
         return start, end
-    anchors = [
+    candidates = [
         item.get("factor_anchor")
         for item in buckets
         if isinstance(item, Mapping) and item.get("partition") == "TRAIN"
     ]
-    anchors = [item for item in anchors if isinstance(item, str)]
+    anchors: list[str] = [item for item in candidates if isinstance(item, str)]
     if not anchors:
         return start, end
     return min(anchors), max(anchors)
