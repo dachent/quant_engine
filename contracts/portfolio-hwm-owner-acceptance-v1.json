@@ -17,7 +17,8 @@
         "date": "2026-10-16",
         "strategy_id": "robuxio-crypto"
       }
-    ]
+    ],
+    "receipt_note": "The receipt sha256 is informational and is not compared: the receipt carries evaluated_on (the build day) and so changes on every rebuild even when the data and the index are identical. What is compared is complete_through, the index point count, the index to 4 decimals and the exact missing daily dates."
   },
   "change_rule": "A proof whose complete_through, point count, index (4 decimals) or missing points differ from this record is not covered by it: it reads PENDING_OWNER_ACCEPTANCE until the owner reviews the change.",
   "decided_on": "2026-11-17",
