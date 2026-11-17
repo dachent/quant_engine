@@ -8,6 +8,7 @@ to accept the adapter's output. No test reaches a network or a credential.
 from __future__ import annotations
 
 import copy
+from decimal import Decimal
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
@@ -1888,3 +1889,85 @@ def test_a_yahoo_dry_run_is_refused_by_mode_id_and_directory(tmp_path: Path) -> 
     )
     with pytest.raises(ingest.IngestError, match="Yahoo dry-run rehearsal"):
         _ingest(tmp_path, run_dir, closes_dir=renamed)
+
+
+# --------------------------------------------------------------------------- #
+# Liquidation value: the holdings at the official closes plus cash, closed
+# against the provider's own native balance of the cutoff day
+# --------------------------------------------------------------------------- #
+
+
+def _official_value() -> float:
+    return float(Decimal(4) * Decimal(OFFICIAL_CLOSE) + Decimal("12.5"))
+
+
+def _liquidation(tmp_path: Path) -> dict[str, dict[str, Any]]:
+    snapshot = _json(tmp_path / "ingest/current/current-snapshot.json")
+    return {
+        item["account_id"]: item["liquidation_value"] for item in snapshot["accounts"]
+    }
+
+
+def test_a_liquidation_value_that_closes_to_the_native_balance_is_published(
+    tmp_path: Path,
+) -> None:
+    balances = _balances()
+    balances["histories"]["6/13/2031"]["AccountValue"] = _official_value()
+    binding = _ingest(tmp_path, _run(tmp_path, FakeTransport(balances=balances)))
+    values = _liquidation(tmp_path)
+    assert {v["status"] for v in values.values()} == {"AVAILABLE"}
+    assert {Decimal(v["value"]) for v in values.values()} == {
+        Decimal(str(_official_value()))
+    }
+    verdicts = binding["liquidation_value"]
+    assert isinstance(verdicts, dict)
+    assert {v["closure"] for v in verdicts.values()} == {"CLOSED"}
+
+
+def test_a_liquidation_value_that_does_not_close_stays_unavailable(
+    tmp_path: Path,
+) -> None:
+    # the default native balance (1000.50) is not what the holdings are worth at the closes
+    binding = _ingest(tmp_path, _run(tmp_path))
+    assert {v["status"] for v in _liquidation(tmp_path).values()} == {"UNAVAILABLE"}
+    verdicts = binding["liquidation_value"]
+    assert isinstance(verdicts, dict)
+    assert {v["closure"] for v in verdicts.values()} == {"NOT_CLOSED"}
+
+
+def test_the_closure_tolerance_and_the_native_row_rules(tmp_path: Path) -> None:
+    holdings = _holdings()
+    official = Decimal(4) * Decimal(OFFICIAL_CLOSE) + Decimal("12.5")
+    run_dir = tmp_path / "run"
+    account = "account-0000000000000001"
+
+    def verdict(histories: dict[str, Any]) -> str:
+        (run_dir / "raw/balances.historical").mkdir(parents=True, exist_ok=True)
+        (run_dir / f"raw/balances.historical/{account}.json").write_text(
+            json.dumps({"histories": histories}), encoding="utf-8"
+        )
+        out = ingest._liquidation_values(
+            run_dir,
+            CUTOFF,
+            holdings,
+            _crosswalk(),
+            {"SYN1": Decimal(OFFICIAL_CLOSE)},
+            [account],
+        )
+        assert out[account]["value"] == official
+        return str(out[account]["closure"])
+
+    def row(value: Decimal) -> dict[str, Any]:
+        return {"AccountValue": float(value)}
+
+    prior = {"6/12/2031": row(Decimal("500"))}
+    assert verdict({**prior, "6/13/2031": row(official + Decimal("0.05"))}) == "CLOSED"
+    assert (
+        verdict({**prior, "6/13/2031": row(official + Decimal("0.06"))}) == "NOT_CLOSED"
+    )
+    # a repeat of the prior day is a carry, not an observation of the cutoff day
+    assert (
+        verdict({"6/12/2031": row(official), "6/13/2031": row(official)})
+        == "NATIVE_CUTOFF_ROW_REPEATS_PRIOR_DAY"
+    )
+    assert verdict(prior) == "NO_NATIVE_CUTOFF_ROW"

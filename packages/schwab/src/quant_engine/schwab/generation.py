@@ -2019,6 +2019,21 @@ def build_generation(
         if _integer(baseline.get(key), f"baseline.{key}") != actual:
             raise SchwabGenerationError(f"{key} differs from accepted baseline")
     observed_dates = [_date(item["as_of_date"], "nav.as_of_date") for item in nav]
+    # An account with a proved liquidation value (its holdings at the official closes plus
+    # cash, closed against its native balance) and no non-cash position row holds cash only:
+    # that is the account's structure, not a missing observation.
+    positioned_accounts = {str(item["account_id"]) for item in positions}
+    cash_only_count = (
+        sum(
+            1
+            for item in current_accounts
+            if _object(item["liquidation_value"], "liquidation_value")["status"]
+            == "AVAILABLE"
+            and str(item["account_id"]) not in positioned_accounts
+        )
+        if current_accounts is not None
+        else 0
+    )
     known_gaps = (
         *(
             ("current account and position snapshot is not present",)
@@ -2038,10 +2053,10 @@ def build_generation(
         ),
         *(
             (
-                f"{len(crosswalk) - current_position_account_count} accepted accounts have no reported non-cash position row",
+                f"{len(crosswalk) - current_position_account_count - cash_only_count} accepted accounts have no reported non-cash position row",
             )
             if current_accounts is not None
-            and current_position_account_count < len(crosswalk)
+            and current_position_account_count + cash_only_count < len(crosswalk)
             else ()
         ),
         *(
@@ -2050,7 +2065,6 @@ def build_generation(
             else ()
         ),
         "two account histories contain documented intraday restatements",
-        "Investor Checking is outside the accepted brokerage boundary",
         *(
             (
                 f"manual_export_partial:"
@@ -2079,6 +2093,18 @@ def build_generation(
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
         "coverage": {
             "known_gaps": list(known_gaps),
+            "out_of_boundary": [
+                "Investor Checking is outside the accepted brokerage boundary",
+                *(
+                    (
+                        f"{cash_only_count} accepted accounts hold cash only: no "
+                        "non-cash position row exists for them (liquidation value "
+                        "proved against the native balance)",
+                    )
+                    if cash_only_count
+                    else ()
+                ),
+            ],
             "status": "PARTIAL",
             **(
                 {"transaction_history": transaction_history_coverage}
