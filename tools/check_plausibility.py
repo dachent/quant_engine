@@ -30,6 +30,24 @@ def _load(args: argparse.Namespace) -> dict[str, Any]:
     return loaded
 
 
+def _consumer_hits(args: argparse.Namespace) -> list[plausibility.Hit]:
+    root: Path = args.repo_root
+    contracts = {
+        f"contracts/{p.name}": json.loads(p.read_bytes())
+        for p in sorted((root / "contracts").glob("*.json"))
+    }
+    path = args.payload or (args.panel_dir / "data" / "dashboard_data.json")
+    declared = root / "ops" / "contract-consumers.json"
+    internal = (
+        json.loads(declared.read_bytes()).get("internal", {})
+        if declared.is_file()
+        else {}
+    )
+    return plausibility.contract_consumer_hits(
+        contracts, Path(path).read_text(encoding="utf-8"), internal
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -39,6 +57,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--cutoff")
     parser.add_argument("--json", type=Path, help="write hits and the rule table here")
     parser.add_argument("--list", action="store_true")
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        help="also run the contract-consumer check (PL51) against this checkout",
+    )
     args = parser.parse_args(argv)
     if args.list:
         for row in plausibility.rule_table():
@@ -56,6 +79,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_ERROR
     hits = plausibility.evaluate(data, cutoff)
     klass = {r.rule_id: r.klass for r in plausibility.RULES}
+    klass[plausibility.CONSUMER_RULE] = "BLOCKER"
+    if args.repo_root:
+        hits.extend(_consumer_hits(args))
     for h in hits:
         print(
             f"{h.rule} [{klass[h.rule]}] finds={list(h.finds)} {h.path}: {h.message} (observed {h.observed}; expected {h.expected})"

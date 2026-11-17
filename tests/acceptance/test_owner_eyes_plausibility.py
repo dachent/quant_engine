@@ -738,3 +738,59 @@ def test_a_cagr_beside_an_under_a_year_status_is_a_hit():
         {"account_live_cagr": None, "account_live_cagr_status": "SUPPRESSED_UNDER_365D"}
     ]
     assert "PL06" not in {h.rule for h in hits_of(payload)}
+
+
+CONTRACTS = {
+    "contracts/rubric-v1.json": {"rubric_id": "PORT-RUBRIC-1", "gates": []},
+    "contracts/policy-v1.json": {"policy_id": "PORT-POLICY-1"},
+}
+
+
+def test_a_contract_no_block_carries_is_a_find_eight_hit():
+    hits = plausibility.contract_consumer_hits(
+        CONTRACTS, '{"policy": "PORT-POLICY-1"}', {}
+    )
+    assert [h.path for h in hits] == ["contracts/rubric-v1.json"]
+    assert hits[0].finds == (8,) and hits[0].rule == plausibility.CONSUMER_RULE
+
+
+def test_a_contract_carried_by_an_id_or_declared_internal_passes():
+    carried = '{"a": "PORT-POLICY-1", "b": "PORT-RUBRIC-1"}'
+    assert plausibility.contract_consumer_hits(CONTRACTS, carried, {}) == []
+    declared = {"contracts/rubric-v1.json": "read by the builder only"}
+    assert (
+        plausibility.contract_consumer_hits(
+            CONTRACTS, '{"x": "PORT-POLICY-1"}', declared
+        )
+        == []
+    )
+    blank = {"contracts/rubric-v1.json": "  "}
+    assert plausibility.contract_consumer_hits(
+        CONTRACTS, '{"x": "PORT-POLICY-1"}', blank
+    )
+
+
+def test_the_command_runs_the_consumer_check_against_a_checkout(tmp_path):
+    import check_plausibility
+
+    root = tmp_path / "repo"
+    (root / "contracts").mkdir(parents=True)
+    (root / "contracts" / "rubric-v1.json").write_text(
+        json.dumps(CONTRACTS["contracts/rubric-v1.json"])
+    )
+    payload = tmp_path / "p.json"
+    payload.write_text(json.dumps(clean_payload()))
+    args = [
+        "--payload",
+        str(payload),
+        "--cutoff",
+        "2026-11-06",
+        "--repo-root",
+        str(root),
+    ]
+    assert check_plausibility.main(args) == 1
+    (root / "ops").mkdir()
+    (root / "ops" / "contract-consumers.json").write_text(
+        json.dumps({"internal": {"contracts/rubric-v1.json": "builder input only"}})
+    )
+    assert check_plausibility.main(args) == 0

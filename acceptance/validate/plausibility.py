@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 import math
 import re
 from typing import Any
@@ -1869,3 +1870,56 @@ def rule_table() -> list[dict[str, Any]]:
 
 
 __all__ = ["Hit", "Panel", "RULES", "evaluate", "rule_table"]
+
+
+# ============================================================================================
+# Consumer check (find 8): a contract that no output carries (repository-level)
+# ============================================================================================
+
+CONSUMER_RULE = "PL51"
+CONSUMER_TEXT = (
+    "every contract file reaches the panel payload by one of its ids, or is declared internal "
+    "with a reason in ops/contract-consumers.json"
+)
+
+
+def contract_ids(document: Mapping[str, Any]) -> list[str]:
+    """The identifying strings of a contract: its top-level ``*_id`` values and its ``schema``."""
+
+    ids = [
+        value
+        for key, value in document.items()
+        if isinstance(value, str)
+        and (key.endswith("_id") or key == "schema")
+        and len(value) >= 6
+    ]
+    return sorted(set(ids))
+
+
+def contract_consumer_hits(
+    contracts: Mapping[str, Mapping[str, Any]],
+    payload_text: str,
+    internal: Mapping[str, str],
+) -> list[Hit]:
+    """One hit per contract file with no id in the payload and no declared-internal entry.
+
+    ``contracts`` maps a repository path to the decoded file; ``payload_text`` is the raw
+    ``dashboard_data.json``; ``internal`` maps a path to the reason it is not rendered."""
+
+    hits = []
+    for path, document in sorted(contracts.items()):
+        ids = contract_ids(document)
+        carried = any(i in payload_text for i in ids) or Path(path).stem in payload_text
+        reason = str(internal.get(path) or "").strip()
+        if not carried and not reason:
+            hits.append(
+                Hit(
+                    CONSUMER_RULE,
+                    (F8_UNCONSUMED_CONTRACT,),
+                    path,
+                    {"ids": ids},
+                    CONSUMER_TEXT,
+                    "a contract exists but no panel block carries it and nothing says it is internal",
+                )
+            )
+    return hits
