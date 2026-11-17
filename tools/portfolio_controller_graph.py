@@ -305,6 +305,7 @@ _PATH_STAGES = {
     # and pinned manifests it is handed, never these tools.
     "tools/base_proxy_factors.py": [],
     "tools/style_capture_assemble.py": [],
+    "tools/base_bundle_builder.py": [],
     # Assembles the pinned attribution return-source CSV; the attribution stage reads
     # only the file and manifest the spec pins, never this tool.
     "tools/portfolio_attribution_returns.py": [],

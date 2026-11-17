@@ -74,6 +74,16 @@
   ],
   "tools_edges": [
     [
+      "base_bundle_builder",
+      "base_proxy_factors",
+      1
+    ],
+    [
+      "base_bundle_builder",
+      "portfolio_target_series",
+      1
+    ],
+    [
       "build_quantbase_fund_facts",
       "nested_strategy_tag_map",
       1
