@@ -242,3 +242,42 @@ def test_the_uplift_applies_below_the_live_observation_minimum() -> None:
     assert _loss(full, "robuxio-crypto") == Decimal("0.44")
     # Volatis stays platform-only whatever its observation count
     assert _loss(full, "volatis-strategy") == Decimal("0.535")
+
+
+def test_overlapping_model_and_account_live_rows_are_one_live_path() -> None:
+    """int14: AI Factor / EU carry MODEL_LIVE and ACCOUNT_LIVE rows on the same dates.
+
+    The published live drawdown compounded both (0.160951, 0.255236) instead of the
+    one governed live path (0.085878, 0.153272).
+    """
+
+    series = "p123-ai-factor"
+    rows = []
+    for index in range(40):
+        day = f"2026-01-{index + 1:02d}" if index < 31 else f"2026-02-{index - 30:02d}"
+        loss = "-0.01" if index == 20 else "0"
+        rows.append(
+            {
+                "series_id": series,
+                "date": day,
+                "return": loss,
+                "evidence_layer": "MODEL_LIVE",
+            }
+        )
+        if index >= 10:  # the account starts later and overlaps the model record
+            rows.append(
+                {
+                    "series_id": series,
+                    "date": day,
+                    "return": loss,
+                    "evidence_layer": "ACCOUNT_LIVE",
+                }
+            )
+    _backtest, live = rule._series_returns(rows, series)
+    assert len(live) == 40  # one return per date, not 70
+    # one -1% day, not two: the drawdown is 1%, not 1.99%
+    assert rule.max_drawdown(live) == Decimal("0.01")
+    # where only the model has a row it is used; on shared dates the account row wins
+    rows[-1] = {**rows[-1], "return": "-0.05"}
+    _backtest, live = rule._series_returns(rows, series)
+    assert rule.max_drawdown(live) > Decimal("0.05")
