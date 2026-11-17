@@ -33,6 +33,12 @@ DECLARED_COMPLETE: Final = "DECLARED_COMPLETE"
 CLOSURE_FAILED: Final = "CLOSURE_FAILED"
 CLOSURE_IBKR_FLOWS: Final = "IBKR_CHANGE_IN_NAV_FLOW_TIE_OUT"
 _CLOSURES: Final = {CLOSURE_IBKR_FLOWS: ("ibkr", "flows")}
+# Typed outcomes that are NOT completeness: the evidence files are cited by hash and the ledger
+# verifies each file, but nothing is proved about the events themselves.
+OUTCOME_CAPTURED_NOT_ADMITTED: Final = "CAPTURED_NOT_ADMITTED"
+OUTCOME_EXCLUDED_BY_RULING: Final = "EXCLUDED_BY_RULING"
+OUTCOMES: Final = frozenset({OUTCOME_CAPTURED_NOT_ADMITTED, OUTCOME_EXCLUDED_BY_RULING})
+_FACT_TYPES: Final = frozenset({"flows", "nav", "positions", "transactions"})
 _FLOW_TYPES: Final = frozenset(
     {
         "DEPOSIT_OR_WITHDRAWAL",
@@ -104,7 +110,10 @@ def load_declaration(raw: bytes) -> tuple[Declaration, ...]:
         closure = entry["closure"]
         if not isinstance(account, str) or not account:
             raise EventCompletenessError("declaration account_id is invalid")
-        if closure not in _CLOSURES or fact != _CLOSURES[closure][1]:
+        if closure in OUTCOMES:
+            if fact not in _FACT_TYPES:
+                raise EventCompletenessError("declaration fact type is unknown")
+        elif closure not in _CLOSURES or fact != _CLOSURES[closure][1]:
             raise EventCompletenessError("declaration closure does not fit its fact")
         if (account, fact) in seen:
             raise EventCompletenessError("declaration repeats an account and fact")
@@ -385,6 +394,25 @@ def evaluate(
 
     rows: list[dict[str, Any]] = []
     for declaration in sorted(declarations, key=lambda d: (d.account_id, d.fact_type)):
+        if declaration.closure in OUTCOMES:
+            rows.append(
+                {
+                    "account_id": declaration.account_id,
+                    "checks": [],
+                    "closure": declaration.closure,
+                    "declared_end": declaration.declared_end.isoformat(),
+                    "declared_start": declaration.declared_start.isoformat(),
+                    "evidence_refs": [
+                        {"path": path, "sha256": digest}
+                        for path, digest in declaration.evidence_refs
+                    ],
+                    "fact_type": declaration.fact_type,
+                    "provider_id": account_provider.get(declaration.account_id),
+                    "ruling": declaration.ruling,
+                    "status": declaration.closure,
+                }
+            )
+            continue
         provider, fact = _CLOSURES[declaration.closure]
         if account_provider.get(declaration.account_id) != provider:
             checks = [

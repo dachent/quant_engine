@@ -6168,3 +6168,35 @@ def test_ledger_completeness_reads_only_the_ledgers_event_completeness_rows() ->
     }
     assert baseline._ledger_completeness({}) == {}
     assert baseline._ledger_completeness(None) == {}
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status", "disposition"),
+    [
+        (
+            "CAPTURED_NOT_ADMITTED",
+            "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF",
+            "RETAINED_CAPTURED_NOT_ADMITTED",
+        ),
+        (
+            "EXCLUDED_BY_RULING",
+            "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF",
+            "RETAINED_EXCLUDED_BY_RULING",
+        ),
+    ],
+)
+def test_a_governed_outcome_types_the_row_and_never_declares_it_complete(
+    outcome: str, status: str, disposition: str
+) -> None:
+    proof = {
+        "account_id": "account-reserve",
+        "fact_type": "transactions",
+        "status": outcome,
+        "ruling": "owner ruling 2026-11-17",
+    }
+    row = _matrix_row(None, [], {("account-reserve", "transactions"): proof})
+    assert row["status"] == status and row["disposition"] == disposition
+    assert row["authority"] == "GOVERNED_DECLARATION"
+    assert "owner ruling 2026-11-17" in row["missing_interval_reason"]
+    assert row["declared_start"] is None and row["declared_end"] is None
+    assert not baseline._declares_complete(row, date(2026, 7, 30))

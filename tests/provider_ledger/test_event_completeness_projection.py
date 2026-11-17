@@ -25,13 +25,20 @@ PROVIDER = "ibkr"
 
 
 def _pin(tmp_path: Path, account: str, **over: Any) -> dict[str, Any]:
+    evidence = tmp_path / "evidence.bin"
+    evidence.write_bytes(b"cited evidence bytes")
     entry = {
         "account_id": account,
         "fact_type": "flows",
         "declared_start": "2026-01-05",
         "declared_end": "2026-01-09",
         "closure": "IBKR_CHANGE_IN_NAV_FLOW_TIE_OUT",
-        "evidence_refs": [{"path": "C:/evidence/flex.xml", "sha256": "a" * 64}],
+        "evidence_refs": [
+            {
+                "path": str(evidence),
+                "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+            }
+        ],
         "ruling": "owner ruling 2026-11-17",
     }
     entry.update(over)
@@ -96,3 +103,36 @@ def test_a_tampered_or_malformed_declaration_is_refused(
         admit._stage_world(
             malformed, monkeypatch, {"event_completeness_declaration": bad}
         )
+
+
+def test_a_cited_evidence_file_must_exist_with_the_cited_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account = f"private-account-{sorted(ledger._PROVIDER_CATALOGS).index(PROVIDER) + 1}"
+    wrong = tmp_path / "wrong"
+    wrong.mkdir()
+    pin = _pin(wrong, account)
+    (wrong / "evidence.bin").write_bytes(b"other bytes")
+    with pytest.raises(ledger.ProviderLedgerError, match="evidence differs"):
+        admit._stage_world(wrong, monkeypatch, {"event_completeness_declaration": pin})
+    absent = tmp_path / "absent"
+    absent.mkdir()
+    pin = _pin(absent, account)
+    (absent / "evidence.bin").unlink()
+    with pytest.raises(ledger.ProviderLedgerError):
+        admit._stage_world(absent, monkeypatch, {"event_completeness_declaration": pin})
+
+
+def test_a_typed_outcome_reaches_the_catalog_with_its_verified_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account = f"private-account-{sorted(ledger._PROVIDER_CATALOGS).index(PROVIDER) + 1}"
+    pin = _pin(
+        tmp_path, account, fact_type="positions", closure="CAPTURED_NOT_ADMITTED"
+    )
+    _a, _b, staged, spec_path, _c = admit._stage_world(
+        tmp_path, monkeypatch, {"event_completeness_declaration": pin}
+    )
+    row = _catalog(staged, tmp_path)["event_completeness"][0]
+    assert row["status"] == "CAPTURED_NOT_ADMITTED" and row["fact_type"] == "positions"
+    ledger.verify_candidate(spec_path, str(staged["generation_id"]))

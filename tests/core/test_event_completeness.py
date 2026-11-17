@@ -390,3 +390,32 @@ def test_activity_on_the_settling_day_itself_is_allowed() -> None:
     world = _closed_world()
     world["flows"] = [_flow(A, date(2026, 2, 2), "0", "DEPOSIT_OR_WITHDRAWAL")]
     assert _closed_run(world)["status"] == ec.DECLARED_COMPLETE
+
+
+# --- typed outcomes that prove nothing ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("outcome", sorted(ec.OUTCOMES))
+def test_a_typed_outcome_is_recorded_but_never_complete(outcome: str) -> None:
+    entry = _entry(
+        account_id="account-statements", fact_type="positions", closure=outcome
+    )
+    rows = _run([entry], [], [])
+    assert [(r["account_id"], r["fact_type"], r["status"]) for r in rows] == [
+        ("account-statements", "positions", outcome)
+    ]
+    assert rows[0]["status"] != ec.DECLARED_COMPLETE
+    assert rows[0]["checks"] == [] and rows[0]["ruling"]
+    assert rows[0]["evidence_refs"] == [{"path": "C:/evidence/flex.xml", "sha256": SHA}]
+
+
+def test_a_typed_outcome_still_needs_evidence_a_ruling_and_a_known_fact() -> None:
+    good = _entry(fact_type="positions", closure="EXCLUDED_BY_RULING")
+    assert ec.load_declaration(_doc(good))[0].closure == "EXCLUDED_BY_RULING"
+    for bad, message in [
+        ({**good, "evidence_refs": []}, "evidence refs"),
+        ({**good, "ruling": ""}, "ruling"),
+        ({**good, "fact_type": "dividends"}, "fact type is unknown"),
+    ]:
+        with pytest.raises(ec.EventCompletenessError, match=message):
+            ec.load_declaration(_doc(bad))

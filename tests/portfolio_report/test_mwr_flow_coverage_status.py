@@ -155,6 +155,8 @@ def test_report_schema_keeps_the_receipt_enum_and_adds_the_flow_path_field() -> 
         "NO_ACCEPTED_FACT_PATH",
         "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF",
         "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF",
+        "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF",
+        "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF",
     }
 
 

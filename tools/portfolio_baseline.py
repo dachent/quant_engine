@@ -5290,6 +5290,18 @@ def _fact_coverage(
     return claims, exceptions
 
 
+_TYPED_OUTCOME_STATUS: Final = {
+    "CAPTURED_NOT_ADMITTED": (
+        "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF",
+        "RETAINED_CAPTURED_NOT_ADMITTED",
+    ),
+    "EXCLUDED_BY_RULING": (
+        "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF",
+        "RETAINED_EXCLUDED_BY_RULING",
+    ),
+}
+
+
 def _ledger_completeness(
     provider_catalog: Mapping[str, Any] | None,
 ) -> dict[tuple[str, str], Mapping[str, Any]]:
@@ -5513,6 +5525,13 @@ def _coverage_evidence(
                 declared_end = str(proof["declared_end"])
                 missing_reason = (
                     f"completeness proved by ledger closure {proof['closure']}"
+                )
+            elif proof is not None and proof.get("status") in _TYPED_OUTCOME_STATUS:
+                # governed, evidence-cited outcome that proves nothing about completeness
+                status, disposition = _TYPED_OUTCOME_STATUS[str(proof["status"])]
+                authority = "GOVERNED_DECLARATION"
+                missing_reason = (
+                    f"governed declaration {proof['status']}: {proof['ruling']}"
                 )
             elif proof is not None:
                 failed = ", ".join(

@@ -4244,6 +4244,14 @@ def _event_completeness_declaration(
         raise ProviderLedgerError(
             f"event_completeness_declaration is invalid: {exc}"
         ) from exc
+    for declaration in declarations:
+        # every cited evidence file must exist with exactly the cited bytes
+        for evidence_path, evidence_sha in declaration.evidence_refs:
+            cited = _absolute_regular_path(evidence_path, "declaration evidence")
+            if hashlib.sha256(cited.read_bytes()).hexdigest() != evidence_sha:
+                raise ProviderLedgerError(
+                    "event_completeness_declaration evidence differs from its cited bytes"
+                )
     return declarations, SourceArtifact(
         artifact_id="event-completeness/declaration",
         sha256=hashlib.sha256(raw).hexdigest(),

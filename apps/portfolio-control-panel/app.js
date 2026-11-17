@@ -204,6 +204,8 @@
     OBSERVED_NOT_COMPLETENESS_PROOF: "Observed; not a completeness proof",
     NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF: "No reported events; not a completeness proof",
     PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF: "Provider events exist but lack a strategy attribution; not a completeness proof",
+    CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF: "Statements captured, not admitted; not a completeness proof",
+    EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF: "Excluded by governed ruling; not a completeness proof",
     NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF: "No reported fact; not a completeness proof",
   };
   const ACCOUNT_MANIFEST_AUTHORITY_LABELS = Object.freeze({
@@ -1613,7 +1615,7 @@
       const observedStart = row.observed_start || row.effective_start || "—";
       const observedEnd = row.observed_end || row.effective_end || "—";
       const evidence = row.nav_observations != null ? `${integer.format(row.nav_observations)} account NAV observations` : "—";
-      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}${sleeveEpochRowNote(row)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}${ownWindowNote(row.return_window_start || row.observed_start, row.return_close_date || row.observed_end)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(mwrShortWindow(row) ? mwrShortWindow(row).windowReturn : row.mwr_xirr)}${mwrBasisNote(row)}${ownWindowNote(row.mwr_opening_date, row.mwr_terminal_date)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF", "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}${sleeveEpochRowNote(row)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}${ownWindowNote(row.return_window_start || row.observed_start, row.return_close_date || row.observed_end)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(mwrShortWindow(row) ? mwrShortWindow(row).windowReturn : row.mwr_xirr)}${mwrBasisNote(row)}${ownWindowNote(row.mwr_opening_date, row.mwr_terminal_date)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF", "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF", "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF", "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
     });
     const performanceHeaders = performanceLineageMismatch
       ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
