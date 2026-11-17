@@ -730,7 +730,9 @@ def p_concept_source(payload: Payload) -> Result:
         return bad("strategy_concepts carries no source sha256")
     if not str(block.get("source_artifact") or "").endswith(".json"):
         return bad("strategy_concepts names no source artifact")
-    return ok(f"concept text is bound to {block['source_artifact']} sha256 {digest[:12]}")
+    return ok(
+        f"concept text is bound to {block['source_artifact']} sha256 {digest[:12]}"
+    )
 
 
 def b_concept_source(payload: Payload) -> None:
