@@ -1,0 +1,150 @@
+"""Copy a predecessor release world into a new one and repoint its JSON files, as a committed command (refs #418).
+
+A release pass runs in a *world* directory: ``cm`` (cycle manifests and seeds), ``in`` (bundles), ``l0``, ``finality``,
+``frozen-inputs``, ``matrixport``, ``repo``. A new pass starts from a copy of the previous world with every absolute path
+that names the old world repointed. Hand scripts did that with ``sed`` on a name token; the provenance seed stores paths
+JSON-escaped (``C:\\\\Dev\\\\...``), the mixed result named a directory that did not exist and the failure surfaced two
+stages later (``portfolio_provenance``: ``root design-intake is not a directory``).
+
+``copy`` rewrites the **whole old world root** in each of its spellings (forward slash, JSON-escaped backslash, single
+backslash) inside ``*.json`` files only, then **refuses** if any copied JSON still contains the old world's directory name,
+so an unknown spelling is a named refusal instead of a late stage failure. It never touches the old world, refuses an
+existing destination, and prints the plan unless ``--apply`` is given. ``--roots-file`` writes the roots file the cycle
+manifest commands read.
+
+    python tools/release_world.py copy --from C:/Dev/scratch/qe-r3/world-B2 --to C:/Dev/scratch/qe-r3/world-X \\
+        [--dirs cm,in,l0,finality,frozen-inputs,matrixport,repo] [--roots-file roots.json --data-root D] [--apply]
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections.abc import Sequence
+import json
+from pathlib import Path
+import shutil
+import sys
+
+DEFAULT_DIRS = ("cm", "in", "l0", "finality", "frozen-inputs", "matrixport", "repo")
+
+
+class WorldError(ValueError):
+    """The copy cannot be made safely."""
+
+
+def spellings(root: Path) -> list[str]:
+    """The ways an absolute world path appears in JSON text: ``/``, ``\\`` and JSON-escaped ``\\\\``."""
+
+    text = str(root)
+    forward = text.replace("\\", "/")
+    backslash = forward.replace("/", "\\")
+    return [forward, backslash.replace("\\", "\\\\"), backslash]
+
+
+def rewrite_text(text: str, old: Path, new: Path) -> str:
+    """Longest spelling first so the escaped form is never half-replaced by the single-backslash one."""
+
+    pairs = list(zip(spellings(old), spellings(new), strict=True))
+    for before, after in sorted(pairs, key=lambda pair: -len(pair[0])):
+        text = text.replace(before, after)
+    return text
+
+
+def plan(src: Path, dst: Path, dirs: Sequence[str]) -> list[str]:
+    if not src.is_dir():
+        raise WorldError(f"source world is not a directory: {src}")
+    if dst.exists():
+        raise WorldError(f"destination world exists (create-only): {dst}")
+    if src.resolve() == dst.resolve() or src.resolve() in dst.resolve().parents:
+        raise WorldError("destination must not be the source or inside it")
+    missing = [name for name in dirs if not (src / name).is_dir()]
+    if missing:
+        raise WorldError(f"source world lacks {missing}")
+    return [f"copy {src / name} -> {dst / name}" for name in dirs]
+
+
+def copy_world(src: Path, dst: Path, dirs: Sequence[str]) -> dict[str, int]:
+    """Copy ``dirs``, repoint the JSON files, refuse on a leftover old-world name."""
+
+    plan(src, dst, dirs)
+    leaf = src.name
+    rewritten = scanned = 0
+    try:
+        dst.mkdir(parents=True)
+        for name in dirs:
+            shutil.copytree(src / name, dst / name)
+        for path in sorted(dst.rglob("*.json")):
+            scanned += 1
+            try:
+                text = path.read_bytes().decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            changed = rewrite_text(text, src, dst)
+            if changed != text:
+                path.write_bytes(
+                    changed.encode("utf-8")
+                )  # bytes: no newline translation
+                rewritten += 1
+            if leaf in changed:
+                raise WorldError(
+                    f"{path.relative_to(dst).as_posix()} still names the old world {leaf!r} "
+                    "in a spelling this tool does not rewrite"
+                )
+    except Exception:
+        shutil.rmtree(
+            dst, ignore_errors=True
+        )  # a refused copy leaves no half world behind
+        raise
+    return {"dirs": len(dirs), "json_scanned": scanned, "json_rewritten": rewritten}
+
+
+def write_roots(path: Path, data_root: Path, world: Path) -> None:
+    if path.exists():
+        raise WorldError(f"roots file exists (create-only): {path}")
+    path.write_bytes(
+        (
+            json.dumps(
+                {"data": data_root.as_posix(), "world": world.as_posix()},
+                indent=1,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+    )
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    copy = commands.add_parser("copy")
+    copy.add_argument("--from", dest="src", type=Path, required=True)
+    copy.add_argument("--to", dest="dst", type=Path, required=True)
+    copy.add_argument("--dirs", default=",".join(DEFAULT_DIRS))
+    copy.add_argument("--roots-file", type=Path)
+    copy.add_argument("--data-root", type=Path)
+    copy.add_argument("--apply", action="store_true")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    dirs = [name for name in args.dirs.split(",") if name]
+    try:
+        steps = plan(args.src, args.dst, dirs)
+        if args.roots_file is not None and args.data_root is None:
+            raise WorldError("--roots-file needs --data-root")
+        if not args.apply:
+            print("\n".join(steps) + "\n(dry run: pass --apply)")
+            return 0
+        result = copy_world(args.src, args.dst, dirs)
+        if args.roots_file is not None:
+            write_roots(args.roots_file, args.data_root, args.dst)
+    except (WorldError, OSError) as exc:
+        print(f"release-world: FAIL: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
