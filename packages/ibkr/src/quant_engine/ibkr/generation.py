@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 import dataclasses
 from datetime import date, timedelta
@@ -1230,6 +1230,46 @@ def _proven_position_transfer_pairs(
     return frozenset(proven)
 
 
+def _closed_accounts(
+    statements: Sequence[FlexDailyStatement], crosswalk: Mapping[str, str]
+) -> list[dict[str, str]]:
+    """The accounts the broker's own AccountInformation states as closed, with the closure date.
+
+    One date per account; a statement dated after the first one that states a closure date
+    must state it too (an account does not reopen inside the accepted statements).
+    """
+
+    by_raw: dict[str, list[FlexDailyStatement]] = defaultdict(list)
+    for statement in statements:
+        by_raw[statement.raw_account_id].append(statement)
+    rows: list[dict[str, str]] = []
+    for raw_id, items in sorted(by_raw.items()):
+        ordered = sorted(items, key=lambda item: item.report_date)
+        dates = {item.account_date_closed for item in ordered} - {None}
+        if not dates:
+            continue
+        if len(dates) != 1:
+            raise IbkrGenerationError(
+                "statements state different account closure dates"
+            )
+        first = next(item for item in ordered if item.account_date_closed is not None)
+        if any(
+            item.report_date > first.report_date and item.account_date_closed is None
+            for item in ordered
+        ):
+            raise IbkrGenerationError(
+                "an account closure date disappears from a later statement"
+            )
+        if raw_id not in crosswalk:
+            continue
+        closed = next(iter(dates))
+        assert closed is not None
+        rows.append(
+            {"account_id": crosswalk[raw_id], "closed_date": closed.isoformat()}
+        )
+    return sorted(rows, key=lambda row: row["account_id"])
+
+
 def _normalize(
     statements: Sequence[FlexDailyStatement],
     baseline: Mapping[str, Any],
@@ -2258,6 +2298,11 @@ def _normalize(
         ),
         "corporate_actions": _dedupe(corporate_actions, "corporate action"),
         "crosswalk_proof": list(proof),
+        **(
+            {"closed_accounts": closed}
+            if (closed := _closed_accounts(statements, crosswalk))
+            else {}
+        ),
         "change_in_nav_observations": sorted(
             change_in_nav_observations,
             key=lambda item: (item["account_id"], item["accounting_date"]),

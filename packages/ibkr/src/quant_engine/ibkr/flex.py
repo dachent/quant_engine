@@ -468,6 +468,8 @@ class FlexDailyStatement:
     # InterestAccruals is the broker's "no accruals", a missing one is "not captured".
     interest_accruals_section_present: bool = False
     open_positions_section_present: bool = False
+    # AccountInformation dateClosed (the broker's own closure date), None while it is empty
+    account_date_closed: date | None = None
     # Every child element of the OpenPositions section (any tag, any levelOfDetail), and
     # the suspect ones: a tag other than OpenPosition, a levelOfDetail other than
     # SUMMARY/LOT, or a row (any level) whose accountId is absent or another account's.
@@ -971,6 +973,9 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         nav_margin_financing_charge_accruals=_optional_decimal(
             nav.attrib.get("marginFinancingChargeAccruals"),
             "nav.marginFinancingChargeAccruals",
+        ),
+        account_date_closed=_optional_day(
+            account.attrib.get("dateClosed"), "account.dateClosed"
         ),
     )
 
