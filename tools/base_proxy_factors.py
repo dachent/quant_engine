@@ -103,7 +103,9 @@ def _check_dividend_record(
         if (right - left).days > MONTHLY_MAX_GAP_DAYS
     ]
     # every calendar month between the window's first and the capture's last month
-    # carries a distribution; January alone may not (the year-end one goes ex in Dec)
+    # carries a distribution; January alone may not (the year-end one goes ex in Dec).
+    # Limit: a payer that starts going ex in January in a new rate regime would hide a
+    # missed January ex-date here; only the 52-day gap check covers that, partly.
     paid_months = {(day.year, day.month) for day in paid}
     year, month = window_start.year, window_start.month
     missing_months: list[tuple[int, int]] = []
