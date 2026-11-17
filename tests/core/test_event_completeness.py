@@ -419,3 +419,138 @@ def test_a_typed_outcome_still_needs_evidence_a_citation_and_a_known_fact() -> N
     ]:
         with pytest.raises(ec.EventCompletenessError, match=message):
             ec.load_declaration(_doc(bad))
+
+
+# --- Schwab empty position set -------------------------------------------------------------
+
+
+SCH = "account-schwab"
+S_START = date(2026, 1, 5)
+S_FREEZE = date(2026, 2, 2)
+S_END = date(2026, 3, 31)
+
+
+def _schwab_world(**over: Any) -> dict[str, Any]:
+    nav: dict[date, Decimal | None] = {}
+    for day in _market(S_START, S_END):
+        nav[day] = Decimal("3.81") if day >= S_FREEZE else Decimal(1000) + len(nav)
+    world: dict[str, Any] = {
+        "nav": nav,
+        "transactions": [
+            {
+                "account_id": SCH,
+                "event_date": S_FREEZE.isoformat(),
+                "security_id": "sec-1",
+            },
+            {"account_id": SCH, "event_date": "2026-01-20", "security_id": "sec-1"},
+            {
+                "account_id": SCH,
+                "event_date": "2026-03-10",
+                "security_id": None,
+            },  # cash only
+        ],
+        "positions": [],
+        "start": S_FREEZE,
+        "end": S_END,
+    }
+    world.update(over)
+    return world
+
+
+def _schwab_run(world: dict[str, Any]) -> dict[str, Any]:
+    entry = _entry(
+        account_id=SCH,
+        fact_type="positions",
+        closure=ec.CLOSURE_SCHWAB_EMPTY,
+        declared_start=world["start"].isoformat(),
+        declared_end=world["end"].isoformat(),
+    )
+    return ec.evaluate(
+        ec.load_declaration(_doc(entry)),
+        flows=[],
+        change_in_nav_by_provider={},
+        nav_values_by_account={SCH: world["nav"]},
+        account_provider={SCH: "schwab", A: "ibkr"},
+        as_of_date=S_END,
+        positions=world["positions"],
+        transactions=world["transactions"],
+    )[0]
+
+
+def test_a_frozen_nav_with_no_later_security_activity_proves_an_empty_position_set() -> (
+    None
+):
+    row = _schwab_run(_schwab_world())
+    assert row["status"] == ec.DECLARED_COMPLETE and _failed(row) == []
+    frozen = next(c for c in row["checks"] if c["check"] == "NAV_FROZEN_UNBROKEN")
+    assert frozen["frozen_since"] == "2026-02-02"
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected"),
+    [
+        ("security_activity_after_freeze", "NO_SECURITY_ACTIVITY_AFTER_NAV_FROZE"),
+        ("nav_moves_inside_the_run", "NAV_FROZEN_UNBROKEN"),
+        ("run_too_short", "NAV_FROZEN_UNBROKEN"),
+        ("missing_day_in_run", "NAV_FROZEN_UNBROKEN"),
+        (
+            "position_row_since_last_activity",
+            "NO_POSITION_ROWS_SINCE_LAST_SECURITY_ACTIVITY",
+        ),
+        ("starts_before_freeze", "INTERVAL_STARTS_AT_OR_AFTER_FREEZE"),
+        ("nav_stops_before_declared_end", "NAV_OBSERVED_TO_DECLARED_END"),
+        ("unavailable_nav", "NAV_FROZEN_UNBROKEN"),
+    ],
+)
+def test_each_way_an_empty_position_set_could_pass_vacuously_is_refused(
+    variant: str, expected: str
+) -> None:
+    world = _schwab_world()
+    if variant == "security_activity_after_freeze":
+        world["transactions"].append(
+            {"account_id": SCH, "event_date": "2026-03-02", "security_id": "sec-2"}
+        )
+    elif variant == "nav_moves_inside_the_run":
+        world["nav"][date(2026, 3, 9)] = Decimal("3.82")
+    elif variant == "run_too_short":
+        world = _schwab_world()
+        world["nav"] = {
+            day: (Decimal("3.81") if day >= date(2026, 3, 20) else Decimal(1000) + i)
+            for i, day in enumerate(_market(S_START, S_END))
+        }
+        world["start"] = date(2026, 3, 20)
+        world["transactions"] = [
+            {"account_id": SCH, "event_date": "2026-03-20", "security_id": "sec-1"}
+        ]
+    elif variant == "missing_day_in_run":
+        world["nav"].pop(date(2026, 2, 18))
+    elif variant == "position_row_since_last_activity":
+        world["positions"] = [{"account_id": SCH, "as_of_date": "2026-02-02"}]
+    elif variant == "starts_before_freeze":
+        world["start"] = date(2026, 1, 20)
+    elif variant == "nav_stops_before_declared_end":
+        world["nav"] = {d: v for d, v in world["nav"].items() if d <= date(2026, 3, 20)}
+    elif variant == "unavailable_nav":
+        world["nav"][date(2026, 3, 9)] = None
+    row = _schwab_run(world)
+    assert row["status"] == ec.CLOSURE_FAILED
+    assert expected in _failed(row)
+
+
+def test_the_schwab_closure_only_covers_a_schwab_account() -> None:
+    entry = _entry(
+        fact_type="positions",
+        closure=ec.CLOSURE_SCHWAB_EMPTY,
+        declared_start=S_FREEZE.isoformat(),
+        declared_end=S_END.isoformat(),
+    )
+    row = ec.evaluate(
+        ec.load_declaration(_doc(entry)),
+        flows=[],
+        change_in_nav_by_provider={},
+        nav_values_by_account={A: {}},
+        account_provider={A: "ibkr"},
+        as_of_date=S_END,
+    )[0]
+    assert row["status"] == ec.CLOSURE_FAILED
+    assert _failed(row) == ["ACCOUNT_BELONGS_TO_CLOSURE_PROVIDER"]

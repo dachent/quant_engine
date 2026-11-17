@@ -32,7 +32,11 @@ SCHEMA_VERSION: Final = 1
 DECLARED_COMPLETE: Final = "DECLARED_COMPLETE"
 CLOSURE_FAILED: Final = "CLOSURE_FAILED"
 CLOSURE_IBKR_FLOWS: Final = "IBKR_CHANGE_IN_NAV_FLOW_TIE_OUT"
-_CLOSURES: Final = {CLOSURE_IBKR_FLOWS: ("ibkr", "flows")}
+CLOSURE_SCHWAB_EMPTY: Final = "SCHWAB_EMPTY_POSITION_SET"
+_CLOSURES: Final = {
+    CLOSURE_IBKR_FLOWS: ("ibkr", "flows"),
+    CLOSURE_SCHWAB_EMPTY: ("schwab", "positions"),
+}
 # Typed outcomes that are NOT completeness: the evidence files are cited by hash and the ledger
 # verifies each file, but nothing is proved about the events themselves.
 OUTCOME_CAPTURED_NOT_ADMITTED: Final = "CAPTURED_NOT_ADMITTED"
@@ -281,6 +285,98 @@ def closed_since(
     return settled, last
 
 
+def _evaluate_schwab_empty(
+    declaration: Declaration,
+    nav_values: Mapping[date, Decimal | None],
+    positions: Sequence[Mapping[str, Any]],
+    transactions: Sequence[Mapping[str, Any]],
+    as_of_date: date,
+) -> list[dict[str, Any]]:
+    """The position set is empty from the settled day to the cutoff.
+
+    Derived from the ledger rows alone: the account's last security activity (any transaction
+    that names a security) is not after the day its NAV froze; the NAV is one unchanged
+    observed value on every market day from that day to the last observation, for at least
+    ``CLOSED_MIN_ZERO_MARKET_DAYS`` market days (a held position would move it); and the ledger
+    holds no position row of the account on or after the last security activity.  The cited
+    evidence files (for example a live balances capture) are hash-verified by the ledger but are
+    not read here.
+    """
+
+    start, end = declaration.declared_start, declaration.declared_end
+    account = declaration.account_id
+    checks: list[dict[str, Any]] = []
+
+    def record(name: str, failures: int, detail: dict[str, Any] | None = None) -> None:
+        checks.append(
+            {
+                "check": name,
+                "status": "PASS" if failures == 0 else "FAIL",
+                "failures": failures,
+                **(detail or {}),
+            }
+        )
+
+    record("INTERVAL_REACHES_CUTOFF", 0 if end >= as_of_date else 1)
+    own_tx = [
+        _day(t["event_date"], "transaction event_date")
+        for t in transactions
+        if t.get("account_id") == account
+        and t.get("security_id") is not None
+        and t.get("event_date") is not None
+    ]
+    last_security = max(own_tx) if own_tx else None
+    days = sorted(nav_values)
+    run: list[date] = []
+    for day in reversed(days):
+        value = nav_values[day]
+        if value is None or (run and value != nav_values[run[-1]]):
+            break
+        run.append(day)
+    run.reverse()
+    settled = run[0] if run else None
+    last_observed = run[-1] if run else None
+    market = _market_days(settled, last_observed) if settled and last_observed else []
+    unbroken = bool(run) and all(day in set(run) for day in market)
+    record(
+        "NAV_FROZEN_UNBROKEN",
+        0 if run and unbroken and len(market) >= CLOSED_MIN_ZERO_MARKET_DAYS else 1,
+        {
+            "frozen_since": settled.isoformat() if settled else None,
+            "market_days": len(market),
+        },
+    )
+    record(
+        "NAV_OBSERVED_TO_DECLARED_END",
+        0 if last_observed is not None and last_observed >= end else 1,
+    )
+    record(
+        "NO_SECURITY_ACTIVITY_AFTER_NAV_FROZE",
+        0
+        if settled is not None and (last_security is None or last_security <= settled)
+        else 1,
+        {
+            "last_security_activity": last_security.isoformat()
+            if last_security
+            else None
+        },
+    )
+    record(
+        "INTERVAL_STARTS_AT_OR_AFTER_FREEZE",
+        0 if settled is not None and start >= settled else 1,
+    )
+    floor = last_security or start
+    stale_positions = [
+        p
+        for p in positions
+        if p.get("account_id") == account
+        and p.get("as_of_date") is not None
+        and _day(p["as_of_date"], "position as_of_date") >= floor
+    ]
+    record("NO_POSITION_ROWS_SINCE_LAST_SECURITY_ACTIVITY", len(stale_positions))
+    return checks
+
+
 def _evaluate_ibkr_flows(
     declaration: Declaration,
     flows: Sequence[Mapping[str, Any]],
@@ -424,6 +520,14 @@ def evaluate(
                     "failures": 1,
                 }
             ]
+        elif declaration.closure == CLOSURE_SCHWAB_EMPTY:
+            checks = _evaluate_schwab_empty(
+                declaration,
+                nav_values_by_account.get(declaration.account_id, {}),
+                positions,
+                transactions,
+                as_of_date,
+            )
         else:
             checks = _evaluate_ibkr_flows(
                 declaration,
