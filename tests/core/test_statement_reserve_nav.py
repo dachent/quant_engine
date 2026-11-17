@@ -40,7 +40,7 @@ def test_a_statement_point_after_the_cutoff_is_never_used() -> None:
     windows = [(a["effective_start"], a["effective_end"]) for a in facts["admissions"]]
     # authoritative from its period end to the day before the next point; last to cutoff
     assert windows == [("2026-06-30", "2026-09-29"), ("2026-09-30", "2026-11-06")]
-    assert facts["assignments"][0]["pool_id"] == srn.RESERVE_POOL_ID
+    assert facts["assignments"] == []  # the census owns the account and its assignment
 
 
 def test_a_catalog_that_differs_from_its_pin_is_refused() -> None:
@@ -64,6 +64,14 @@ def test_the_reserve_and_total_liquid_inputs_become_available_with_the_statement
 
     facts = srn.statement_reserve_facts(_catalog(), date(2026, 11, 6))
     latest = baseline._latest_usd_navs(facts["nav"], date(2026, 11, 6))
+    # the census owns the open reserve-pool assignment of the account
+    census_assignment = {
+        "account_id": facts["accounts"][0]["account_id"],
+        "effective_end": None,
+        "effective_start": "2025-01-01",
+        "pool_id": srn.RESERVE_POOL_ID,
+    }
+    facts["assignments"] = [census_assignment]
     reserve = baseline._current_reserve(
         valuation_date=date(2026, 11, 6),
         accounts=facts["accounts"],

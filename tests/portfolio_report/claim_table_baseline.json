@@ -279,7 +279,7 @@
    "kinds": [
     "universal"
    ],
-   "text": "Exploratory hybrid view: only version-matched backtest observations before live inception are included."
+   "text": "Exploratory hybrid view: only version-matched backtest observations before live inception (model-live inception where a strategy has an admitted model-live layer) are included."
   },
   {
    "file": "apps/portfolio-control-panel/app.js",
@@ -805,13 +805,6 @@
   {
    "file": "apps/portfolio-control-panel/app.js",
    "kinds": [
-    "universal"
-   ],
-   "text": "this result therefore equals the live-only history and is not described as a long-history result."
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
     "count"
    ],
    "text": "{} factor {} excluded from this fit ({});"
@@ -959,7 +952,7 @@
    "kinds": [
     "universal"
    ],
-   "text": "Live + backtest changes strategy rows only and uses version-matched backtest history strictly before live inception by date;"
+   "text": "Backtest + live changes strategy rows only and uses version-matched backtest history strictly before live inception by date, where the live end is the model's own live record for a strategy with an admitted model-live layer and the owner's account otherwise;"
   },
   {
    "file": "apps/portfolio-control-panel/index.html",
@@ -2056,6 +2049,20 @@
     "epoch"
    ],
    "text": "report_epochs are the governed epochs the report's totals use;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "model-live observations remain authoritative from inception forward."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "this result therefore equals the live-only history and is not described as a long-history result."
   }
  ]
 }
