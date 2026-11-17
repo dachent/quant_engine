@@ -637,7 +637,11 @@ def test_the_readout_states_where_the_value_change_and_the_return_each_start(
     dom = _run(tmp_path, payload, ['perfValueZoom = "Max"'])
     readout = _text(dom, "#perf-value-readout")
     assert "2025-07-01 to 2025-11-17; includes deposits and withdrawals" in readout
-    assert "from Jan 1, 2025 (not the start of the value change beside it)" in readout
+    # the return tile covers the same dates as the value change beside it
+    assert "from Jul 1, 2025;" in readout and "not the start" not in readout
+    assert (
+        "10.0%" in readout
+    )  # index 100 on 2025-01-01 (the last point at or before the start) to 110
 
 
 def test_linear_ticks_always_give_at_least_four_gridlines(tmp_path: Path) -> None:
@@ -649,13 +653,61 @@ def test_linear_ticks_always_give_at_least_four_gridlines(tmp_path: Path) -> Non
         )
 
 
-def test_a_ytd_start_after_the_last_week_clamps_to_the_last_week(
+def test_a_ytd_start_after_the_last_week_is_unavailable_not_clamped(
     tmp_path: Path,
 ) -> None:
-    index = _eval(
+    unavailable = _eval(
         tmp_path,
         "perfWindows({ starts: [Date.UTC(2025,11,22), Date.UTC(2025,11,29)], "
         "ends: [Date.UTC(2025,11,28), Date.UTC(2026,0,4)], anchorIndex: 0 })"
-        ".find((item) => item.label === 'YTD').baseIndex",
+        ".find((item) => item.label === 'YTD').unavailable",
     )
-    assert index == 1
+    assert unavailable is True
+
+
+def test_early_january_ytd_says_no_week_has_started_instead_of_showing_december(
+    tmp_path: Path,
+) -> None:
+    # Shift the grid so the last week is 2025-12-29..2026-01-04: no week starts on or after Jan 1.
+    payload = _payload()
+    shift = (date(2025, 12, 29) - (FIRST_MONDAY + timedelta(days=7 * (WEEKS - 1)))).days
+    # both evidence modes share one object in the fixture: shift it once
+    for mode in {
+        id(m): m for m in payload["performance_tab"]["modes"].values()
+    }.values():
+        for key in ("dates", "week_end_dates"):
+            mode[key] = [
+                (date.fromisoformat(item) + timedelta(days=shift)).isoformat()
+                for item in mode[key]
+            ]
+    dom = _run(tmp_path, payload, ['perfZoom = "YTD"'])
+    assert "YTD has no full week yet" in _text(dom, "#perf-returns-chart")
+    assert "<polyline" not in dom["#perf-returns-chart"]["innerHTML"]
+    assert (
+        _text(dom, "#perf-window-note")
+        == "YTD: no week starts on or after 2026-01-01 yet."
+    )
+
+
+def test_origin_names_from_before_the_producer_rename_still_read_as_live(
+    tmp_path: Path,
+) -> None:
+    payload = _payload(anchor=100)
+    for mode in payload["performance_tab"]["modes"].values():
+        for line in mode["lines"]:
+            line["origin"] = [
+                [start, end, "LIVE" if flag == "ACCOUNT_LIVE" else flag]
+                for start, end, flag in line.get("origin", [])
+            ]
+    dom = _run(tmp_path, payload, ['perfZoom = "Max"'])
+    html = dom["#perf-returns-chart"]["innerHTML"]
+    assert html.count("live evidence starts") == 2
+    assert f"live evidence starts {_week_start(260)}" in html
+    assert "dashed = live" not in _text(dom, "#perf-returns-note")
+
+
+def test_gridline_labels_print_every_tick_exactly(tmp_path: Path) -> None:
+    assert _eval(tmp_path, "perfTickDecimals([0.975, 1, 1.025, 1.05])") == 3
+    assert _eval(tmp_path, "perfTickDecimals([0.8, 1, 1.2])") == 2
+    assert _eval(tmp_path, "perfTickDecimals([10, 12.5, 15, 17.5])") == 1
+    assert _eval(tmp_path, "perfTickDecimals([10, 20, 30])") == 0

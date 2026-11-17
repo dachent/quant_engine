@@ -3213,9 +3213,16 @@
     }
     return [low, high];
   }
-  const perfTickLabel = (tick) => (tick < 10 ? tick.toFixed(2) : tick >= 10000 ? perfCompact.format(tick) : integer.format(tick));
+  // Decimals for a set of gridlines: the fewest (at least two while every tick is under 10) that print every tick exactly,
+  // so a 0.025 step is never shown as repeated or misplaced two-decimal labels.
+  function perfTickDecimals(ticks) {
+    const floor = ticks.every((tick) => tick < 10) ? 2 : 0;
+    for (let digits = floor; digits <= 4; digits += 1) if (ticks.every((tick) => Math.abs(tick - Number(tick.toFixed(digits))) < 1e-9 * Math.max(1, Math.abs(tick)))) return digits;
+    return 4;
+  }
+  const perfTickLabel = (tick, digits = null) => (tick >= 10000 ? perfCompact.format(tick) : digits != null ? tick.toFixed(digits) : tick < 10 ? tick.toFixed(2) : integer.format(tick));
   const perfPercent = (value) => { const percent = (value - 1) * 100; const text = Math.abs(percent) >= 100000 ? perfCompact.format(percent) : percent.toFixed(1); return `${percent > 0 ? "+" : ""}${text}%`; };
-  const perfIsLive = (origin) => origin == null || origin === "ACCOUNT_LIVE";
+  const perfIsLive = (origin) => origin == null || origin === "ACCOUNT_LIVE" || origin === "LIVE";
   // First live week of a line that has earlier non-live weeks (backtest or model); null when it is live throughout.
   function perfLiveStart(line, startByEnd) {
     const pts = line.points.filter((point) => point.value != null);
@@ -3231,9 +3238,11 @@
     const anchor = anchorIndex ?? 0;
     return PERF_ZOOMS.map(([label, days]) => {
       const requestedTime = days == null ? null : days === "ytd" ? Date.UTC(new Date(lastTime).getUTCFullYear(), 0, 1) : lastTime - days * PERF_DAY;
-      const requested = requestedTime == null ? 0 : (starts.findIndex((time) => time >= requestedTime) < 0 ? starts.length - 1 : starts.findIndex((time) => time >= requestedTime));
+      const found = requestedTime == null ? 0 : starts.findIndex((time) => time >= requestedTime);
+      const unavailable = requestedTime != null && found < 0;
+      const requested = unavailable ? starts.length - 1 : found;
       const baseIndex = Math.max(requested, anchor);
-      return { label, days, baseIndex, start: starts[baseIndex], limited: requestedTime != null && anchor > requested, requestedDays: requestedTime == null ? null : Math.round((lastTime - requestedTime) / PERF_DAY), spanDays: Math.round((lastTime - starts[baseIndex]) / PERF_DAY) };
+      return { label, days, requestedTime, unavailable, baseIndex, start: starts[baseIndex], limited: requestedTime != null && anchor > requested, requestedDays: requestedTime == null ? null : Math.round((lastTime - requestedTime) / PERF_DAY), spanDays: Math.round((lastTime - starts[baseIndex]) / PERF_DAY) };
     });
   }
 
@@ -3252,6 +3261,9 @@
     MIXED: { name: "dashed", dash: "5 4" },
     DERIVED: { name: "dotted", dash: "2 3" },
     MODEL_LIVE: { name: "dash-dot", dash: "9 3 2 3" },
+    // Origin names of generations built before the producer renamed them; they keep their stroke.
+    LIVE: { name: "solid", dash: null },
+    PROVIDER_MODEL_LIVE: { name: "dash-dot", dash: "9 3 2 3" },
   });
   const perfOriginStyle = (origin) => (origin == null ? PERF_ORIGIN_STYLES.ACCOUNT_LIVE : (PERF_ORIGIN_STYLES[origin] || { name: "dashed", dash: "5 4" }));
   const perfSeriesName = (line) => line.display_name || String(line.series_id || "").replace(/^(strategy|market|portfolio):/, "");
@@ -3340,6 +3352,16 @@
     return { ...line, points };
   }
 
+  function perfSyncZoomButtons(windows) {
+    $$("[data-perf-zoom]").forEach((button) => {
+      const win = windows.find((item) => item.label === button.dataset.perfZoom);
+      const active = button.dataset.perfZoom === perfZoom;
+      button.classList.toggle("is-active", active); button.classList.toggle("is-limited", Boolean(win?.limited)); button.setAttribute("aria-pressed", String(active));
+      button.title = !win ? "" : win.unavailable ? `No week starts on or after ${perfDate(win.requestedTime)} yet` : win.label === "Max" ? `Common window from the group anchor, ${perfDate(win.start)}` : win.limited ? `Limited by group anchor: starts ${perfDate(win.start)} (${integer.format(win.spanDays)} of ${integer.format(win.requestedDays)} days)` : `Starts ${perfDate(win.start)}`;
+      if (win?.limited) button.setAttribute("aria-label", `${win.label}, limited by group anchor: starts ${perfDate(win.start)}`); else button.removeAttribute("aria-label");
+    });
+  }
+
   function renderPerformanceReturns() {
     const host = $("#perf-returns-chart");
     if (!host) return;
@@ -3354,6 +3376,15 @@
     const startByEnd = new Map(ends.map((end, index) => [end, starts[index]]));
     const windows = perfWindows(built);
     const current = windows.find((item) => item.label === perfZoom) || windows[windows.length - 1];
+    if (current.unavailable) {
+      host.innerHTML = `<div class="callout callout-neutral">${safe(current.label)} has no full week yet: no week of the weekly grid starts on or after ${safe(perfDate(current.requestedTime))}. Choose another zoom.</div>`;
+      $("#perf-returns-legend").innerHTML = "";
+      $("#perf-returns-note").innerHTML = "";
+      const unavailableNote = $("#perf-window-note");
+      if (unavailableNote) unavailableNote.textContent = `${current.label}: no week starts on or after ${perfDate(current.requestedTime)} yet.`;
+      perfSyncZoomButtons(windows);
+      return;
+    }
     const maxView = current.label === "Max";
     // Max is the common window (every line rebased at the published group anchor); "Own start" is the old per-line view on a log axis.
     const own = maxView && perfBasis === "own";
@@ -3383,10 +3414,11 @@
     const yCount = Math.max(4, Math.floor((height - top - bottom) / 48));
     const yTicks = (logScale ? (high / low < 12 ? perfTicksMin(low * 0.98, high * 1.02, yCount) : perfLogAxisTicks(low * 0.98, high * 1.02)) : perfTicksMin(Math.max(0, yLow), yHigh, yCount)).filter((tick) => tick > 0);
     const xTicks = perfTimeTicks(from, lastTime, width - left - right);
+    const tickDecimals = perfTickDecimals(yTicks);
     // The 1.00 rebase line is always drawn when 1.00 is inside the plot, whether or not a gridline falls on it.
     const baselineInside = logScale ? yLow <= 0 && yHigh >= 0 : yLow <= 1 && yHigh >= 1;
     const baseline = baselineInside ? `<line x1="${left}" x2="${width - right}" y1="${y(1).toFixed(1)}" y2="${y(1).toFixed(1)}" stroke="currentColor" stroke-opacity="0.4" stroke-dasharray="4 3"></line>` : "";
-    const grid = baseline + yTicks.map((tick) => `<line x1="${left}" x2="${width - right}" y1="${y(tick).toFixed(1)}" y2="${y(tick).toFixed(1)}" stroke="currentColor" stroke-opacity="${tick === 1 ? 0.4 : 0.14}"${tick === 1 ? ' stroke-dasharray="4 3"' : ""}></line><text class="chart-label axis-label" x="2" y="${(y(tick) + 4).toFixed(1)}">${perfTickLabel(tick)}</text>`).join("")
+    const grid = baseline + yTicks.map((tick) => `<line x1="${left}" x2="${width - right}" y1="${y(tick).toFixed(1)}" y2="${y(tick).toFixed(1)}" stroke="currentColor" stroke-opacity="${tick === 1 ? 0.4 : 0.14}"${tick === 1 ? ' stroke-dasharray="4 3"' : ""}></line><text class="chart-label axis-label" x="2" y="${(y(tick) + 4).toFixed(1)}">${perfTickLabel(tick, tickDecimals)}</text>`).join("")
       + xTicks.map((tick) => `<text class="chart-label axis-label" text-anchor="${tick.anchor}" x="${x(tick.time).toFixed(1)}" y="${height - 8}">${safe(tick.label)}</text>`).join("");
     const paths = visibleLines.map((line) => perfSegments(line.points).map((segment) => `<polyline fill="none" stroke="${line.color}" stroke-width="${line.kind === "portfolio" ? 2.6 : 1.8}"${segment.style.dash ? ` stroke-dasharray="${segment.style.dash}"` : ""}${line.kind === "benchmark" ? ' stroke-opacity=".85"' : ""} points="${segment.points.map((point) => `${x(point.time).toFixed(1)},${y(point.value).toFixed(1)}`).join(" ")}"></polyline>`).join("")).join("");
     // A dot where a line's live evidence begins, after backtest or model weeks.
@@ -3473,13 +3505,7 @@
           ? `${current.label} is limited by the group anchor: the window starts ${perfDate(current.start)} (${integer.format(current.spanDays)} days of the ${integer.format(current.requestedDays)} requested).`
           : `${current.label}: ${perfDate(current.start)} to ${perfDate(lastTime)} (${integer.format(current.spanDays)} days).`;
     }
-    $$("[data-perf-zoom]").forEach((button) => {
-      const win = windows.find((item) => item.label === button.dataset.perfZoom);
-      const active = button.dataset.perfZoom === perfZoom;
-      button.classList.toggle("is-active", active); button.classList.toggle("is-limited", Boolean(win?.limited)); button.setAttribute("aria-pressed", String(active));
-      button.title = !win ? "" : win.label === "Max" ? `Common window from the group anchor, ${perfDate(win.start)}` : win.limited ? `Limited by group anchor: starts ${perfDate(win.start)} (${integer.format(win.spanDays)} of ${integer.format(win.requestedDays)} days)` : `Starts ${perfDate(win.start)}`;
-      if (win?.limited) button.setAttribute("aria-label", `${win.label}, limited by group anchor: starts ${perfDate(win.start)}`); else button.removeAttribute("aria-label");
-    });
+    perfSyncZoomButtons(windows);
     $$("[data-perf-axis]").forEach((button) => { const active = button.dataset.perfAxis === effectiveAxis; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); button.disabled = own; button.title = own ? "The own-start view spans each line's full history and always uses a log axis" : ""; });
     $$("[data-perf-mode]").forEach((button) => { const active = button.dataset.perfMode === built.mode; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); });
     $$("[data-perf-basis]").forEach((button) => { const active = button.dataset.perfBasis === perfBasis; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); button.disabled = !maxView; button.title = maxView ? "" : "The basis applies to the Max view only"; });
@@ -3657,9 +3683,9 @@
       basesParts.push(`Time-weighted index: ${pct(twrBlock.value)} over ${integer.format(twrBlock.window_days)} days${number(twrBlock.annualised_act_365) != null ? `, ${pct(twrBlock.annualised_act_365)} a year (ACT/365)` : ""}${number(twrBlock.trailing_12_months) != null ? `; last 12 months ${pct(twrBlock.trailing_12_months)}` : ""}${number(twrBlock.year_to_date) != null ? `; year to date ${pct(twrBlock.year_to_date)}` : ""}`);
     }
     const basesText = basesParts.join(" · ");
-    const windowReturn = perfValueZoom === "Max" && published && number(published.cumulative_return) != null ? Number(published.cumulative_return) : !path.length ? null : perfValueZoom === "Max" ? perfIndexReturn(path, perfTime(path[0].as_of), lastTime) : perfIndexReturn(path, from, lastTime);
-    const twrStart = perfValueZoom === "Max" ? (published?.window_start || path[0]?.as_of || null) : perfDate(from);
-    const twrStartText = windowReturn != null && twrStart ? `from ${safe(formatDate(String(twrStart).slice(0, 10)))}${String(twrStart).slice(0, 10) !== perfDate(first.time) ? " (not the start of the value change beside it)" : ""}; ` : "";
+    // The window's own governed-index return, over the same dates as the value change beside it; the since-start figure is in the bases line.
+    const windowReturn = !path.length ? null : perfIndexReturn(path, from, lastTime);
+    const twrStartText = windowReturn != null ? `from ${safe(formatDate(perfDate(from)))}; ` : "";
     $("#perf-value-readout").innerHTML = `<div class="perf-readout"><div><span>Systematic portfolio value</span><b>${currency(end.total)}</b><small>${safe(formatDate(end.date))}, reserve excluded</small></div><div><span>Change in value, ${safe(perfValueZoom)}</span><b>${currency(end.total - first.total)}</b><small>${safe(perfDate(first.time))} to ${safe(perfDate(end.time))}; includes deposits and withdrawals</small></div><div><span>Time-weighted return, ${safe(perfValueZoom)}</span><b>${windowReturn == null ? "—" : pct(windowReturn)}</b><small>${twrStartText}${windowReturn == null ? "no governed index in this snapshot" : `${safe(proofLabel)}, levered net NAV basis`}${summedText ? `<br>${safe(summedText)}` : ""}${basesText ? `<br>${safe(basesText)}` : ""}</small></div></div>`;
     const benchmarkGapDays = (item) => {
       const first = table.findIndex((row, position) => row.time >= from && item.dollars[position] > 0);

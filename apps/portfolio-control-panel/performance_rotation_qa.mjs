@@ -3,7 +3,7 @@
 // chart zooms, series toggles and tooltips, asserting the properties the visual audit found broken (overlapping or
 // repeated tick labels, absurd or crowded y ticks, illegible tick text, chips without a window, a silent zoom cap).
 //
-//   node performance_rotation_qa.mjs --page <path to index.html> --out <result.json> [--shots <dir>] [--y-bound 50] [--viewports desktop,mobile]
+//   node performance_rotation_qa.mjs --page <path to index.html> --out <result.json> [--shots <dir>] [--y-bound 50] [--viewports desktop,mobile] [--expect <expected.json>]
 //
 // The page must show the Performance view (the script opens `#performance`).  Exit code 1 lists violations in the JSON.
 import fs from "node:fs";
@@ -22,6 +22,10 @@ function args(argv) {
 const options = args(process.argv.slice(2));
 if (!options.page || !options.out) throw new Error("--page and --out are required");
 const yBound = Number(options["y-bound"] || 50);
+// Dates derived from the source data by the caller: { returns: { <zoom>: { start, end } | null }, value: { <zoom>: { start, end } } }.
+const expected = options.expect ? JSON.parse(fs.readFileSync(options.expect, "utf8")) : null;
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const edgeIso = (label) => { const m = /^([A-Z][a-z]{2}) ([0-9]{1,2}), ([0-9]{4})$/.exec(label || ""); return m ? `${m[3]}-${String(MONTHS.indexOf(m[1]) + 1).padStart(2, "0")}-${m[2].padStart(2, "0")}` : null; };
 const here = path.dirname(fileURLToPath(import.meta.url));
 const modulePath = process.env.PLAYWRIGHT_MODULE || path.join(here, "node_modules", "playwright", "index.mjs");
 const { chromium } = await import(pathToFileURL(modulePath).href);
@@ -41,7 +45,7 @@ const probe = (selector) => {
   const box = svg.getBoundingClientRect();
   const vb = svg.viewBox.baseVal;
   const scale = box.width / vb.width;
-  const labels = [...svg.querySelectorAll("text.axis-label")].map((node) => ({ text: node.textContent, anchor: node.getAttribute("text-anchor"), rect: node.getBoundingClientRect(), size: parseFloat(getComputedStyle(node).fontSize) * scale }));
+  const labels = [...svg.querySelectorAll("text.axis-label")].map((node) => ({ text: node.textContent, anchor: node.getAttribute("text-anchor"), rect: node.getBoundingClientRect(), size: parseFloat(getComputedStyle(node).fontSize) * scale, y: Number(node.getAttribute("y")) }));
   const xs = labels.filter((item) => item.anchor);
   const ys = labels.filter((item) => !item.anchor);
   let overlaps = 0;
@@ -52,13 +56,29 @@ const probe = (selector) => {
   const clippedLeft = xs.filter((item) => item.rect.left < box.left - 1 || item.rect.right > box.right + 1).length;
   const baseline = svg.querySelector('line[stroke-dasharray="4 3"]');
   const starts = [...svg.querySelectorAll("polyline:not(.perf-cursor)")].map((line) => line.getAttribute("points").trim().split(/\s+/)[0].split(",").map(Number));
-  return { baselineY: baseline ? Number(baseline.getAttribute("y1")) : null, starts, x: xs.map((item) => item.text), y: ys.map((item) => item.text), overlaps, clippedLeft, minFont: Math.min(...labels.map((item) => item.size)), viewBoxWidth: vb.width, boxWidth: box.width, overflowX: document.documentElement.scrollWidth > innerWidth };
+  const yPoints = ys.map((item) => [item.text, item.y]);
+  return { yPoints, baselineY: baseline ? Number(baseline.getAttribute("y1")) : null, starts, x: xs.map((item) => item.text), y: ys.map((item) => item.text), overlaps, clippedLeft, minFont: Math.min(...labels.map((item) => item.size)), viewBoxWidth: vb.width, boxWidth: box.width, overflowX: document.documentElement.scrollWidth > innerWidth };
 };
 const yNumber = (text) => { const match = /^([\d,.]+)([KMBT]?)$/.exec(text); return match ? parseFloat(match[1].replace(/,/g, "")) * ({ "": 1, K: 1e3, M: 1e6, B: 1e9, T: 1e12 })[match[2]] : NaN; };
 
-function check(state, measured, { own = false } = {}) {
+function check(state, measured, { own = false, scale = null, expectEdges = null } = {}) {
   states += 1;
   const fail = (message) => violations.push({ state, message });
+  // The y labels sit where the active axis says: linear in the value, or in its logarithm.
+  if (scale && measured.yPoints) {
+    const points = measured.yPoints.map(([text, y]) => [yNumber(text), y]).filter(([value]) => Number.isFinite(value) && value > 0);
+    if (points.length >= 3) {
+      const map = scale === "log" ? Math.log : (value) => value;
+      const slopes = points.slice(1).map(([value, y]) => (y - points[0][1]) / (map(value) - map(points[0][0])));
+      const mean = slopes.reduce((total, item) => total + item, 0) / slopes.length;
+      if (slopes.some((slope) => Math.abs(slope - mean) > Math.abs(mean) * 0.03)) fail(`y labels do not follow a ${scale} axis: ${measured.yPoints.map((item) => item.join("@")).join(" ")}`);
+    }
+  }
+  // The first and last axis dates are the source-derived window, not whatever the app printed.
+  if (expectEdges && !measured.missing) {
+    if (edgeIso(measured.x[0]) !== expectEdges.start) fail(`axis starts ${edgeIso(measured.x[0])}, source says ${expectEdges.start}`);
+    if (edgeIso(measured.x.at(-1)) !== expectEdges.end) fail(`axis ends ${edgeIso(measured.x.at(-1))}, source says ${expectEdges.end}`);
+  }
   if (measured.missing) return fail("chart svg missing");
   if (measured.overlaps > 0) fail(`${measured.overlaps} overlapping x tick labels`);
   if (new Set(measured.x).size !== measured.x.length) fail(`repeated x tick labels: ${measured.x.join(" | ")}`);
@@ -109,7 +129,10 @@ for (const [viewport, width, height] of VIEWPORTS) {
           const state = `${viewport}/${mode}/${zoom}/${basis}/${axis}`;
           check.rebased = true;
           const measured = await page.evaluate(probe, "#perf-returns-chart");
-          check(state, measured, { own: basis === "own" });
+          const activeAxis = await page.$eval("[data-perf-axis].is-active", (node) => node.dataset.perfAxis);
+          const sourceWindow = expected?.returns?.[zoom];
+          check(state, measured, { own: basis === "own", scale: activeAxis, expectEdges: basis === "common" && sourceWindow ? sourceWindow : null });
+          if (basis === "common" && expected && sourceWindow === null && !(await page.$eval("#perf-returns-chart", (node) => node.textContent)).includes("no full week yet")) violations.push({ state, message: "an unavailable zoom does not say so" });
           check.rebased = false;
           // The window line and the chart's first date label agree on the start.
           if (basis === "common") {
@@ -165,7 +188,7 @@ for (const [viewport, width, height] of VIEWPORTS) {
   for (const zoom of vzooms) {
     await page.click(`[data-perf-value-zoom="${zoom}"]`);
     const state = `${viewport}/value/${zoom}`;
-    check(state, await page.evaluate(probe, "#perf-value-chart"), { own: true });
+    check(state, await page.evaluate(probe, "#perf-value-chart"), { own: true, scale: "linear", expectEdges: expected?.value?.[zoom] || null });
     const legend = await page.$eval("#perf-value-legend", (node) => node.innerText);
     if (/\$0\b(?!,)/.test(legend.replace(/\$0\.\d+/g, ""))) violations.push({ state, message: "value legend lists a $0 slice" });
     if (!(await page.$eval("#perf-value-window-note", (node) => node.textContent)).includes("flow-matched")) violations.push({ state, message: "value chart does not label its benchmark basis" });

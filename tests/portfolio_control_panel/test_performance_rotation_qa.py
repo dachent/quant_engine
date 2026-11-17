@@ -4,13 +4,14 @@ Builds a synthetic page (the repo's index.html, styles and app.js with the long-
 fixture of ``test_performance_chart_audit``) and runs ``performance_rotation_qa.mjs`` in
 Chromium over every viewport x mode x zoom x axis x Max basis, the value-chart zooms,
 series toggles and tooltips.  The script asserts: no overlapping or repeated tick labels,
-exact start and end dates on both axes, no y tick above a sane bound in the comparable
+the first and last axis dates equal the window derived from the fixture's source arrays (not the app's own note), y labels sit where the active axis (linear or log) puts them, no y tick above a sane bound in the comparable
 views, at most ten y ticks, legible tick text, a window on every legend chip, 1y differs from
 3y or 3y says it is limited, no $0 value-legend slice, benchmark basis labelled.
 """
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,7 @@ import shutil
 import subprocess
 
 from browser_runtime import require_browser_runtime
-from test_performance_chart_audit import _payload
+from test_performance_chart_audit import FIRST_MONDAY, WEEKS, ZOOMS, _payload, _slices
 from test_shell_qc1_labels import PANEL_ROOT
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -61,10 +62,63 @@ def _page(directory: Path, anchor: int) -> Path:
     return directory / "index.html"
 
 
+_RETURN_DAYS = {"1m": 30, "3m": 91, "6m": 183, "1y": 365, "3y": 1096}
+_VALUE_DAYS = {"1w": 7, "1m": 30, "3m": 91, "6m": 183, "1y": 365}
+
+
+def _expected(anchor: int) -> dict:
+    """Window start and end dates derived from the fixture's source arrays, not from the app."""
+
+    starts = [FIRST_MONDAY + timedelta(days=7 * index) for index in range(WEEKS)]
+    last_end = starts[-1] + timedelta(days=6)
+    returns: dict = {}
+    for zoom in ZOOMS:
+        if zoom == "Max":
+            requested = None
+        elif zoom == "YTD":
+            requested = date(last_end.year, 1, 1)
+        else:
+            requested = last_end - timedelta(days=_RETURN_DAYS[zoom])
+        found = (
+            0
+            if requested is None
+            else next((i for i, d in enumerate(starts) if d >= requested), None)
+        )
+        returns[zoom] = (
+            None
+            if found is None
+            else {
+                "start": starts[max(found, anchor)].isoformat(),
+                "end": last_end.isoformat(),
+            }
+        )
+    slices = _slices()
+    dates = [date.fromisoformat(item) for item in slices["dates"]]
+    totals = [
+        sum(row["nav_cents"][i] for row in slices["rows"]) for i in range(len(dates))
+    ]
+    peak = max(totals)
+    meaningful = next(
+        d for d, total in zip(dates, totals, strict=True) if total >= peak * 0.05
+    )
+    value: dict = {}
+    for zoom in ("1w", "1m", "3m", "6m", "YTD", "1y", "Max"):
+        if zoom == "Max":
+            start = meaningful
+        elif zoom == "YTD":
+            start = max(dates[0], date(dates[-1].year - 1, 12, 31))
+        else:
+            start = max(dates[0], dates[-1] - timedelta(days=_VALUE_DAYS[zoom]))
+        value[zoom] = {"start": start.isoformat(), "end": dates[-1].isoformat()}
+    return {"returns": returns, "value": value}
+
+
 def _rotate(tmp_path: Path, anchor: int) -> dict:
     node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
     page = _page(tmp_path / f"page-{anchor}", anchor)
     out = tmp_path / f"rotation-{anchor}.json"
+    expect = tmp_path / f"expected-{anchor}.json"
+    expect.write_text(json.dumps(_expected(anchor)), encoding="utf-8")
     env = dict(os.environ)
     env["PLAYWRIGHT_MODULE"] = playwright_module
     env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
@@ -76,6 +130,8 @@ def _rotate(tmp_path: Path, anchor: int) -> dict:
             str(page),
             "--out",
             str(out),
+            "--expect",
+            str(expect),
         ],
         capture_output=True,
         text=True,
