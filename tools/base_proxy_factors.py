@@ -15,7 +15,7 @@ not recorded yet is refused: its last ex-date would show as a loss.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, localcontext
 from typing import Any, Final, Mapping, Sequence
 
@@ -23,12 +23,11 @@ PROXIES: Final = {"SPY_XS": "SPY", "IWM_XS": "IWM", "HYG_XS": "HYG"}
 CASH: Final = "BIL"
 MONTHLY_PAYERS: Final = ("BIL", "HYG")
 OVERLAP_DAYS: Final = 60
-OVERLAP_TOLERANCE: Final = Decimal("0.0001")
+OVERLAP_TOLERANCE: Final = Decimal("0.00003")
 RISK_FREE_DAILY_MIN: Final = Decimal("-0.0005")
 RISK_FREE_DAILY_MAX: Final = Decimal("0.005")
-# monthly payers go ex around the first business day; no record for longer than
-# this before the last price means the provider has not posted the latest one
-MONTHLY_DIVIDEND_STALE_DAYS: Final = 35
+# monthly payers go ex in the first days of the month
+MONTHLY_EX_DATE_LAST_DAY: Final = 5
 
 
 class BaseProxyError(ValueError):
@@ -74,15 +73,27 @@ def total_returns(
 def _check_dividend_record(
     ticker: str, prices: Mapping[date, tuple[Decimal, Decimal]]
 ) -> None:
-    paid = [day for day, (_close, dividend) in prices.items() if dividend > 0]
+    """A monthly payer's latest ex-date must be recorded once the capture is past it.
+
+    Monthly ETFs go ex in the first days of the month: a capture dated after the
+    5th must show a distribution in its own month, an earlier one in the month before.
+    """
+
     last_price = max(prices)
-    if not paid or (last_price - max(paid)).days > MONTHLY_DIVIDEND_STALE_DAYS:
+    month_start = last_price.replace(day=1)
+    needed_from = (
+        month_start
+        if last_price.day > MONTHLY_EX_DATE_LAST_DAY
+        else (month_start - timedelta(days=1)).replace(day=1)
+    )
+    paid = [day for day, (_close, dividend) in prices.items() if dividend > 0]
+    if not paid or max(paid) < needed_from:
         raise BaseProxyError(
-            f"{ticker}: no distribution recorded in the {MONTHLY_DIVIDEND_STALE_DAYS} "
-            f"days to {last_price.isoformat()} (last "
+            f"{ticker}: no distribution recorded since {needed_from.isoformat()} "
+            f"(price data to {last_price.isoformat()}, last distribution "
             f"{max(paid).isoformat() if paid else 'none'}): the provider has not "
-            "posted the latest monthly distribution, so the last ex-date would show "
-            "as a loss; capture again once it is recorded"
+            "posted the latest monthly distribution, so its ex-date would show as "
+            "a loss; capture again once it is recorded"
         )
 
 

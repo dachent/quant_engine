@@ -2361,6 +2361,7 @@
     if (ctx.headline_status === "NOT_A_HEADLINE_INCLUDES_BACKTEST") lines.push("includes hypothetical backtest: not a live result, no headline");
     if ((ctx.quality_flags || []).includes("LARGE_EXPOSURE_CHECK_SCALE")) lines.push("a loading beyond 3 times: check the series scale");
     if ((ctx.quality_flags || []).includes("NEGATIVE_TRAIN_R_SQUARED")) lines.push("training R-squared is negative: poor fit");
+    if (ctx.research_lens_label) lines.push(ctx.research_lens_label);
     if (ctx.headline_status === "NOT_A_HEADLINE_MODEL_GATE_FAILED") lines.push("model failed the holdout gate: forensic only, no headline");
     if (ctx.headline_status === "NOT_A_HEADLINE_STALE_FACTOR_WINDOW") lines.push("factor window ends before the live series: no headline");
     if (ctx.headline_status === "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE") lines.push("window under a year or not a live series: no headline");

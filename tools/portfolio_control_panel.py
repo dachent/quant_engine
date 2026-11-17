@@ -5610,7 +5610,8 @@ SUSPECT_BETA_ABS: Final = Decimal(3)
 
 def _fit_quality_flags(row: Mapping[str, Any]) -> list[str]:
     flags: list[str] = []
-    for item in row.get("exposures") or []:
+    detail = _optional_mapping(row.get("diagnostic_detail")) or {}
+    for item in list(row.get("exposures") or []) + list(detail.get("exposures") or []):
         beta = _alpha_decimal(item.get("beta")) if isinstance(item, Mapping) else None
         if beta is not None and abs(beta) > SUSPECT_BETA_ABS:
             flags.append("LARGE_EXPOSURE_CHECK_SCALE")
@@ -5735,13 +5736,25 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(train_start, str) and isinstance(train_end, str)
         else None
     )
-    live_end = coverage.get("canonical_live_observed_end")
+    # the series this fit is shown beside ends at the accepted history end; a lens
+    # that stops earlier (French files) lags it by the difference
+    reference_ends = [
+        value
+        for value in (
+            coverage.get("canonical_live_observed_end"),
+            composition.get("accepted_history_complete_through"),
+        )
+        if isinstance(value, str)
+    ]
     window_lag_days = (
-        (date.fromisoformat(live_end) - date.fromisoformat(end)).days
-        if isinstance(live_end, str) and isinstance(end, str)
+        (date.fromisoformat(max(reference_ends)) - date.fromisoformat(end)).days
+        if reference_ends and isinstance(end, str)
         else None
     )
-    if net is None and gross is None:
+    if row.get("status") == "DIAGNOSTIC_ONLY":
+        # a fit the sealed gate rejected is forensic only; its alpha is withheld
+        headline_status = "NOT_A_HEADLINE_MODEL_GATE_FAILED"
+    elif net is None and gross is None:
         headline_status = "UNAVAILABLE_NO_ALPHA"
     elif row.get("status") not in (None, "AVAILABLE"):
         # a fit the sealed holdout gate rejected is forensic only, whatever its SE
@@ -5768,6 +5781,13 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "inference": inference,
         "headline_status": headline_status,
         "window_lag_days": window_lag_days,
+        "research_lens_label": (
+            f"research lens: factor data through {end}, not a cutoff-current headline"
+            if window_lag_days is not None
+            and window_lag_days > STALE_FACTOR_WINDOW_DAYS
+            and isinstance(end, str)
+            else None
+        ),
         "train_window_start": train_start,
         "train_window_end": train_end,
         "train_window_days": train_days,

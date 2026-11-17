@@ -119,3 +119,19 @@ def test_the_french_rf_column_is_read_as_decimal_daily_returns() -> None:
     }
     with pytest.raises(proxies.BaseProxyError, match="no RF"):
         proxies.french_rf_from_text("nothing here")
+
+
+def test_a_latest_distribution_missing_for_one_payer_is_refused_in_both_directions() -> (
+    None
+):
+    """Review: BIL posted and HYG unposted (or the reverse) must refuse; 36 days is not the test."""
+
+    for kwargs in ({"bil_dividend_on": None}, {"hyg_dividend_on": None}):
+        with pytest.raises(proxies.BaseProxyError, match="no distribution recorded"):
+            proxies.build_factors(_rows(**kwargs), _french(100))
+
+
+def test_a_risk_free_gap_over_a_few_hundredths_of_a_percent_a_year_is_refused() -> None:
+    off = {day: Decimal("0.000190") for day in _days()[1:100]}  # 4e-5/day above BIL
+    with pytest.raises(proxies.BaseProxyError, match="differs from French RF"):
+        proxies.build_factors(_rows(), off)

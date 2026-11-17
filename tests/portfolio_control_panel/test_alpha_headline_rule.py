@@ -230,3 +230,54 @@ def test_the_default_lens_is_a_cutoff_current_lens() -> None:
     assert panel._current_default_lens(
         [{"lens_id": "ECONOMIC_FACTOR"}, {"lens_id": "RETURN_SECTOR"}]
     ) == ("RETURN_SECTOR")
+
+
+def test_a_stale_lens_carries_the_research_lens_label() -> None:
+    """Factor-model audit D1: French-file lenses end at the last published month."""
+
+    row = _row("0.20", "0.05", 0)
+    row["coverage"]["observed_end"] = "2026-09-30"
+    row["coverage"]["canonical_live_observed_end"] = "2026-11-06"
+    ctx = panel._alpha_context(row)
+    assert ctx["research_lens_label"] == (
+        "research lens: factor data through 2026-09-30, not a cutoff-current headline"
+    )
+    row["coverage"]["observed_end"] = "2026-11-06"
+    assert panel._alpha_context(row)["research_lens_label"] is None
+
+
+def test_the_stale_gate_uses_the_accepted_history_end_real_rows_carry_08_31_as_live_end() -> (
+    None
+):
+    """Review P1-1: real ECONOMIC_FACTOR rows put 2026-08-31 in canonical_live_observed_end."""
+
+    row = _row("0.20", "0.05", 0)
+    row["coverage"]["observed_end"] = "2026-08-31"
+    row["coverage"]["canonical_live_observed_end"] = "2026-08-31"
+    row["series_composition"]["accepted_history_complete_through"] = "2026-11-06"
+    ctx = panel._alpha_context(row)
+    assert ctx["window_lag_days"] == 67
+    assert ctx["headline_status"] == "NOT_A_HEADLINE_STALE_FACTOR_WINDOW"
+    assert ctx["research_lens_label"] is not None
+
+
+def test_a_gate_rejected_row_with_its_alpha_withheld_still_says_why() -> None:
+    """Review follow-on: withheld alpha gave UNAVAILABLE_NO_ALPHA, hiding the gate."""
+
+    row = _row(None, None, 0)
+    row["status"] = "DIAGNOSTIC_ONLY"
+    assert panel._alpha_context(row)["headline_status"] == (
+        "NOT_A_HEADLINE_MODEL_GATE_FAILED"
+    )
+
+
+def test_large_loadings_on_a_gate_rejected_row_are_flagged_from_the_detail() -> None:
+    """Review P1-2: gate-rejected rows publish exposures [] and keep betas in diagnostic_detail."""
+
+    row = _row(None, None, 0)
+    row["status"] = "DIAGNOSTIC_ONLY"
+    row["exposures"] = []
+    row["diagnostic_detail"] = {
+        "exposures": [{"beta": "3.49465923275"}, {"beta": "-6.35912095865"}]
+    }
+    assert "LARGE_EXPOSURE_CHECK_SCALE" in panel._alpha_context(row)["quality_flags"]
