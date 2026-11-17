@@ -116,6 +116,7 @@ jobs:
           tools/portfolio123_generation.py
           tools/schwab_generation.py
           tools/statement_nav_generation.py
+          tools/statement_ytd_check.py
           tools/quantbase_generation.py
           tools/portfolio_provenance.py
           tools/provider_ledger.py

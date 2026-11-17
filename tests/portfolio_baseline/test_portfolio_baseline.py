@@ -6390,3 +6390,24 @@ def test_an_accepted_record_without_a_date_cannot_sit_inside_a_complete_row() ->
     row = _matrix_row(None, [_accepted("t-1"), undated], proof)
     assert row["status"] != "DECLARED_COMPLETE"
     assert "1 accepted records carry no date" in row["missing_interval_reason"]
+
+
+def test_a_statement_pin_for_an_account_the_ledger_already_admits_is_refused() -> None:
+    """Double-count guard: with the statement provider admitted through the ledger, the
+    statement_reserves pin for the same census account must not count it a second time."""
+
+    census = [
+        {"account_id": "acct-jh", "provider": "JOHN HANCOCK", "role": "INVESTMENT"}
+    ]
+    facts: dict[str, list[dict[str, Any]]] = {
+        "accounts": [{"account_id": "account-" + "c" * 16, "provider": "JOHN HANCOCK"}],
+        "nav": [
+            {"account_id": "account-" + "c" * 16, "as_of_date": "2026-09-30", "nav": {}}
+        ],
+        "admissions": [],
+    }
+
+    nav, _ = baseline._bind_statement_accounts(facts, census)  # the pin alone binds
+    assert [row["account_id"] for row in nav] == ["acct-jh"]
+    with pytest.raises(baseline.BaselineValidationError, match="already admitted"):
+        baseline._bind_statement_accounts(facts, census, {"acct-jh"})

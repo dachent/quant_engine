@@ -6595,6 +6595,7 @@ def _statement_reserve_facts(
 def _bind_statement_accounts(
     facts: Mapping[str, Sequence[Mapping[str, Any]]],
     accounts: Sequence[Mapping[str, Any]],
+    ledger_nav_accounts: Collection[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Re-key statement NAV points and admissions onto the census account of the provider.
 
@@ -6614,6 +6615,12 @@ def _bind_statement_accounts(
         if len(ids) != 1:
             raise BaselineValidationError(
                 "statement reserve provider does not name exactly one census account"
+            )
+        if ids[0] in ledger_nav_accounts:
+            # the ledger already admits this account's NAV (the statement provider is a
+            # ledger provider): the pinned statement catalog would count it twice
+            raise BaselineValidationError(
+                "statement reserve account is already admitted through the provider ledger"
             )
         rebind[str(row["account_id"])] = ids[0]
 
@@ -6744,7 +6751,15 @@ def build_catalog(
                 spec["statement_reserves"], as_of
             )
             statement_nav, statement_admissions = _bind_statement_accounts(
-                statement_facts, accounts
+                statement_facts,
+                accounts,
+                {
+                    str(item["account_id"])
+                    for item in provider_admissions
+                    if item.get("fact_type") == "nav_observations"
+                    and item.get("disposition") == "AUTHORITATIVE"
+                    and item.get("account_id") is not None
+                },
             )
             nav = [*nav, *statement_nav]
             provider_admissions = [*provider_admissions, *statement_admissions]
