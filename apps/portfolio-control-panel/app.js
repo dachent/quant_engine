@@ -122,9 +122,10 @@
     NOT_VALIDATED: "warning",
     VALIDATED: "positive",
     tested: "positive",
-    not_testable: "warning",
-    partial_only: "warning",
-    not_same_vintage: "warning",
+    // A structural limitation (no comparator exists) is information, not a defect.
+    not_testable: "neutral",
+    partial_only: "neutral",
+    not_same_vintage: "neutral",
   });
   function toneForStatus(status = "") {
     if (Object.hasOwn(STATUS_TONES, String(status))) return STATUS_TONES[String(status)];
@@ -245,6 +246,18 @@
     return kind && window.days_basis ? `${kind}, days ${operatorText(window.days_basis)}` : kind;
   };
   const statusText = (status) => `<span class="status-text ${toneForStatus(status)}">${safe(humanStatus(status))}</span>`;
+  // The report derives the account-versus-model status from the row's own evidence (`implementation_gap_basis`); the
+  // retained audit token is provenance only and is shown in the tooltip.  A row with no comparator says so in the
+  // payload's own words and is not painted as a defect.
+  const implementationGapMarkup = (row) => {
+    const basis = row.implementation_gap_basis;
+    let line = null;
+    if (basis === "VERIFIED_IMPLEMENTATION_RECONCILIATION") line = "Verified implementation reconciliation";
+    else if (basis === "EXACT_DATE_PROVIDER_COMPARISON") line = `Exact-date provider comparison · ${integer.format(row.provider_comparison_observations || 0)} observations${row.provider_comparison_version_compatibility === "UNRESOLVED" ? " · version compatibility unresolved" : ""}`;
+    else if (basis === "NO_COMPARATOR_ADMITTED") line = row.provider_comparison_disposition || "No model or provider comparator is admitted";
+    const audit = row.implementation_gap_audit_status ? ` title="Retained audit token: ${safe(row.implementation_gap_audit_status)}"` : "";
+    return `<span${audit}>${statusText(row.implementation_gap_status)}</span>${line ? `<span class="cell-secondary">${safe(line)}</span>` : ""}`;
+  };
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;
   const renderKpis = (selector, items) => { $(selector).innerHTML = items.map((item) => kpi(...item)).join(""); };
   const emptyRow = (columns, message = "No matching rows") => `<tr><td colspan="${columns}" class="cell-secondary">${safe(message)}</td></tr>`;
@@ -343,7 +356,9 @@
       // N55 (general): `provider_comparison_reason` is the not-ready reason surface for
       // ANY comparison path, not a benchmark-only or N55-only field; render it beside the
       // disposition whenever the report publishes one.
-      return `${statusText(status)}<span class="cell-secondary">${safe(row.provider_comparison_disposition || "Model live vs My live comparison not published")}</span>${row.provider_comparison_reason ? `<span class="cell-secondary">${safe(row.provider_comparison_reason)}</span>` : ""}`;
+      const head = row.implementation_gap_basis ? statusText(row.implementation_gap_status) : statusText(status);
+      const verified = row.implementation_gap_basis === "VERIFIED_IMPLEMENTATION_RECONCILIATION" ? '<span class="cell-secondary">Verified implementation reconciliation</span>' : "";
+      return `${head}${verified}<span class="cell-secondary">${safe(row.provider_comparison_disposition || "Model live vs My live comparison not published")}</span>${row.provider_comparison_reason ? `<span class="cell-secondary">${safe(row.provider_comparison_reason)}</span>` : ""}`;
     }
     // A5: `provider_annualization.label` already encodes basis/window (and "(<1 year)"
     // when short); render it beside the annualized figure it describes.
@@ -802,7 +817,7 @@
     $("#operator-queue").innerHTML = Array.isArray(operatorItems) ? operatorItems.join("") : operatorItems;
     const implementationRows = currentStrategies().map((row) => {
       const factor = factorModelSummary(row.strategy_name);
-      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td>${statusText(row.implementation_gap_status)}</td><td>${safe(costLabel(row))}${costComponentsMarkup(row)}</td><td>${statusText(factor.state)}<span class="cell-secondary">${safe(factor.note)}</span></td></tr>`;
+      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td>${implementationGapMarkup(row)}</td><td>${safe(costLabel(row))}${costComponentsMarkup(row)}</td><td>${statusText(factor.state)}<span class="cell-secondary">${safe(factor.note)}</span></td></tr>`;
     });
     $("#portfolio-implementation-table").innerHTML = tableMarkup([["Strategy"], ["Source evidence"], ["Implementation gap (account vs model)"], ["Cost"], ["Factor model"]], implementationRows, evidenceCaption("Implementation, costs, and model readiness"));
     const constructionPoints = performanceLineageMismatch
