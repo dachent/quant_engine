@@ -5242,7 +5242,13 @@ def _accounts(
             else:
                 value = reserve["value_text"]
                 as_of = reserve["as_of_date"]
-                status = "AVAILABLE_MANDATE_CLASSIFICATION"
+                # A statement-dated reserve (Decision B) is dated at its own point, not
+                # the cutoff; the row says so instead of claiming it is available at the cutoff.
+                status = (
+                    "AVAILABLE_MANDATE_CLASSIFICATION"
+                    if not isinstance(cutoff, str) or as_of == cutoff
+                    else "STATEMENT_DATED_MANDATE_CLASSIFICATION"
+                )
         elif account_id in latest:
             as_of, value = latest[account_id]
             status = "AVAILABLE_LATEST_OBSERVATION"
