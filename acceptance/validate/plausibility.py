@@ -1477,13 +1477,16 @@ def pl35(panel: Panel) -> Iterator[Hit]:
     ]
     if central_adv is not None and parts and None not in parts:
         total = sum(parts)  # type: ignore[arg-type]
-        if total > 0 and abs(central_adv - total) > 0.05 * total:
+        # the central case is the square-root-of-quadratic-form combination of its components:
+        # it is never above their plain sum (equal only at correlation 1), so only a value
+        # ABOVE the sum is wrong; a value below it is the diversification the form measures
+        if total > 0 and central_adv > total * (1 + 1e-9):
             yield _hit(
                 "PL35",
                 "$.advisory.central_case_loss",
                 {"advisory": central_adv, "component_sum": total},
-                "within 5 %",
-                "central-case loss differs from its components",
+                "central case <= sum of its components",
+                "central-case loss exceeds the sum of its components",
             )
 
 
@@ -1668,19 +1671,29 @@ def pl43(panel: Panel) -> Iterator[Hit]:
     "capital reconciliation closes within its stated tolerance",
 )
 def pl44(panel: Panel) -> Iterator[Hit]:
+    # difference_usd is the EXPLAINED difference (components that net to it); closure is the
+    # residual and the status, never the difference itself
     cr = panel.data.get("capital_reconciliation") or {}
-    for key, value in cr.items():
-        if re.search(r"(difference|residual|unexplained)", key):
-            v = num(value)
-            tol = num(cr.get("tolerance")) or 0.01
-            if v is not None and abs(v) > max(tol, 0.01):
-                yield _hit(
-                    "PL44",
-                    f"$.capital_reconciliation.{key}",
-                    v,
-                    f"|x| <= {tol}",
-                    "the account does not close",
-                )
+    tol = max(num(cr.get("tolerance")) or 0.01, 0.01)
+    for key in ("residual_usd", "unexplained_usd"):
+        v = num(cr.get(key))
+        if v is not None and abs(v) > tol:
+            yield _hit(
+                "PL44",
+                f"$.capital_reconciliation.{key}",
+                v,
+                f"|x| <= {tol}",
+                "an unexplained residual: the account does not close",
+            )
+    status = cr.get("status")
+    if isinstance(status, str) and not status.startswith("RECONCILED"):
+        yield _hit(
+            "PL44",
+            "$.capital_reconciliation.status",
+            status,
+            "RECONCILED",
+            "the reconciliation does not report closed",
+        )
 
 
 @rule(

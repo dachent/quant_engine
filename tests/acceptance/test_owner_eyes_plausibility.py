@@ -221,7 +221,12 @@ def clean_payload() -> dict[str, Any]:
                 "schema": "x/1",
             },
         ],
-        "capital_reconciliation": {"difference_usd": 0.0, "tolerance": 0.01},
+        "capital_reconciliation": {
+            "difference_usd": 17023.09,  # the EXPLAINED difference
+            "residual_usd": "0",
+            "status": "RECONCILED",
+            "tolerance": 0.01,
+        },
         "counts": {"twr_rows": 1},
         "performance": [{"account_id": "a"}],
         "account_summary": [
@@ -485,7 +490,8 @@ def _m_gap_empty(p):
 
 
 def _m_close(p):  # A5: account does not close
-    p["capital_reconciliation"]["difference_usd"] = 17000.0
+    p["capital_reconciliation"]["residual_usd"] = "17000"
+    p["capital_reconciliation"]["status"] = "UNRECONCILED"
 
 
 def _m_readiness(p):
@@ -877,3 +883,18 @@ def test_the_command_runs_the_consumer_check_against_a_checkout(tmp_path):
         json.dumps({"internal": {"contracts/rubric-v1.json": "builder input only"}})
     )
     assert check_plausibility.main(args) == 0
+
+
+def test_an_explained_difference_is_not_an_unclosed_account():
+    payload = clean_payload()  # difference_usd 17023.09 with residual 0 and RECONCILED
+    assert "PL44" not in {h.rule for h in hits_of(payload)}
+    payload["capital_reconciliation"]["status"] = "PARTIAL"
+    assert "PL44" in {h.rule for h in hits_of(payload)}
+
+
+def test_a_central_case_below_the_component_sum_is_diversification_not_an_error():
+    payload = clean_payload()
+    payload["advisory"]["central_case_loss"] = "0.1"  # components sum to 0.2
+    assert "PL35" not in {h.rule for h in hits_of(payload)}
+    payload["advisory"]["central_case_loss"] = "0.25"
+    assert "PL35" in {h.rule for h in hits_of(payload)}
