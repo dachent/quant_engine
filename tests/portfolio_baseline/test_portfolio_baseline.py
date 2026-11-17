@@ -6019,7 +6019,7 @@ def test_a_reason_names_the_provider_records_that_were_excluded_not_attributed()
 
     plain = _matrix_row(None, [])
     assert plain["status"] == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
-    assert "carry no strategy attribution" not in plain["missing_interval_reason"]
+    assert "lack a strategy attribution" not in plain["missing_interval_reason"]
     # absent or zero counts leave the row byte-identical
     assert _matrix_row({}, []) == plain
     assert _matrix_row({("account-reserve", "transactions"): 0}, []) == plain
@@ -6028,8 +6028,8 @@ def test_a_reason_names_the_provider_records_that_were_excluded_not_attributed()
     assert row["status"] == plain["status"]  # no new status string
     assert row["missing_interval_reason"] == (
         plain["missing_interval_reason"]
-        + "; provider ledger transactions for this account: 444 carry no strategy "
-        "attribution and are excluded from the accepted records"
+        + "; provider ledger transactions for this account: 444 lack a strategy "
+        "attribution and are left out of the accepted records"
     )
     # another account's or another fact's count never leaks into this row
     other = _matrix_row(
