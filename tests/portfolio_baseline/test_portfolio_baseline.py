@@ -141,6 +141,16 @@ def _published_provenance(
             "source_routes": ["synthetic-source"],
         },
     ]
+    if "account-jh" in reserve_accounts:
+        accounts.append(
+            {
+                "account_id": "account-jh",
+                "aliases": ["John Hancock | SYNTH-JH"],
+                "name": "SYNTHETIC",
+                "role": "INVESTMENT",
+                "source_routes": ["synthetic-source"],
+            }
+        )
     assignments = []
     for index, account_id in enumerate(
         ("account-schwab-a", "account-ibkr", "account-alpaca"), start=1
@@ -5884,89 +5894,84 @@ def test_statement_reserve_pin_with_a_misspelled_key_is_refused(tmp_path: Path) 
         baseline._statement_reserve_facts([pin], date(2026, 9, 17))
 
 
-def test_statement_reserve_account_carries_a_role_into_calendar_statuses(
-    tmp_path: Path,
-) -> None:
-    """Kill test: the merged reserve account must pass `_calendar_statuses` (it keys on `role`)."""
-
-    account = "account-" + "c" * 16
+def _statement_pin(
+    tmp_path: Path, letter: str, provider: str, role: str
+) -> dict[str, Any]:
+    account = "account-" + letter * 16
     catalog = {
         "catalog_schema_version": 1,
-        "accounts": [{"account_id": account, "provider": "JOHN_HANCOCK"}],
+        "accounts": [{"account_id": account, "provider": provider}],
         "nav_observations": [
             {
                 "account_id": account,
-                "as_of_date": "2026-09-30",
+                "as_of_date": "2026-06-30",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
-                "record_id": "jh:2026-09-30",
+                "record_id": f"{letter}:2026-06-30",
             }
         ],
     }
     raw = json.dumps(catalog).encode()
-    path = tmp_path / "catalog.json"
+    path = tmp_path / f"statement-{letter}.json"
     path.write_bytes(raw)
-    pin = {
+    return {
         "path": str(path),
         "sha256": hashlib.sha256(raw).hexdigest(),
         "size_bytes": len(raw),
-        "role": "RESERVE",
+        "role": role,
     }
-    facts = baseline._statement_reserve_facts([pin], date(2026, 11, 6))
-    assert [(a["role"], a["provider"]) for a in facts["accounts"]] == [
-        ("RESERVE", "JOHN HANCOCK")
-    ]
-    assert baseline._calendar_statuses(facts["accounts"], facts["nav"], {}) == []
-    # the publish consumer validates every baseline assignment row
-    from account_strategy_manifest import partition_assignments
-
-    partition_assignments(list(facts["assignments"]))
-    assert facts["assignments"][0]["strategy_mapping_disposition"] == (
-        "RESERVE_NOT_APPLICABLE"
-    )
 
 
-def test_statement_reserve_and_excluded_accounts_build_end_to_end(
+def test_statement_points_bind_to_the_census_account_of_the_provider(
     tmp_path: Path,
 ) -> None:
-    """End to end: both pin roles, in the real catalog shape, through `build_catalog`."""
+    """Kill test (#972 P1-A): the census John Hancock account is the one account; the
+    statement account id never reaches accounts, assignments or NAV rows."""
 
-    spec_path, spec = _spec(tmp_path)
+    pin = _statement_pin(tmp_path, "c", "JOHN_HANCOCK", "RESERVE")
+    facts = baseline._statement_reserve_facts([pin], date(2026, 11, 6))
+    assert facts["assignments"] == []
+    census = [
+        {
+            "account_id": "account-aa20",
+            "provider": "JOHN HANCOCK",
+            "role": "INVESTMENT",
+        },
+        {"account_id": "account-x", "provider": "IBKR", "role": "INVESTMENT"},
+    ]
+    nav, admissions = baseline._bind_statement_accounts(facts, census)
+    assert {r["account_id"] for r in nav} == {"account-aa20"}
+    assert {r["account_id"] for r in admissions} == {"account-aa20"}
+    for census_without_or_twice in (census[1:], [*census, census[0]]):
+        with pytest.raises(baseline.BaselineValidationError, match="exactly one"):
+            baseline._bind_statement_accounts(facts, census_without_or_twice)
+
+
+def test_statement_reserve_with_census_account_builds_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """Census-shaped end to end: John Hancock already a census INVESTMENT account with an
+    open General reserve assignment; reserve is AVAILABLE from the statement point, there
+    is one John Hancock account, and no assignment or role is added for the statement."""
+
+    spec_path, spec = _spec(tmp_path, reserve_accounts=("account-jh",))
     root, ref = _provider_ledger_generation(tmp_path, catalog_schema_version=2)
     spec["roots"]["provider-ledger"] = str(root)
     spec["schema_version"] = 3
     spec["provider_ledger"] = ref
-    pins = []
-    for letter, provider, role in (
-        ("c", "JOHN HANCOCK", "RESERVE"),
-        ("d", "COMPOSER", "EXCLUDED_IMMATERIAL"),
-    ):
-        account = "account-" + letter * 16
-        catalog = {
-            "catalog_schema_version": 1,
-            "accounts": [{"account_id": account, "provider": provider}],
-            "nav_observations": [
-                {
-                    "account_id": account,
-                    "as_of_date": "2026-06-30",
-                    "nav": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
-                    "record_id": f"{letter}:2026-06-30",
-                }
-            ],
-        }
-        raw = json.dumps(catalog).encode()
-        path = tmp_path / f"statement-{letter}.json"
-        path.write_bytes(raw)
-        pins.append(
-            {
-                "path": str(path),
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "size_bytes": len(raw),
-                "role": role,
-            }
-        )
-    spec["statement_reserves"] = pins
+    spec["statement_reserves"] = [
+        _statement_pin(tmp_path, "c", "JOHN_HANCOCK", "RESERVE"),
+        _statement_pin(tmp_path, "d", "COMPOSER", "EXCLUDED_IMMATERIAL"),
+    ]
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
 
     catalog, _, _ = baseline.build_catalog(spec_path)
 
-    assert "account-" + "c" * 16 in {a["account_id"] for a in catalog["accounts"]}
+    ids = [a["account_id"] for a in catalog["accounts"]]
+    assert "account-jh" in ids and "account-" + "c" * 16 not in ids
+    assert [a["provider"] for a in catalog["accounts"]].count("JOHN HANCOCK") == 1
+    assert all(a["account_id"] != "account-" + "c" * 16 for a in catalog["assignments"])
+    members = {
+        m["account_id"]: m for m in catalog["current_capital"]["reserve"]["members"]
+    }
+    assert members["account-jh"]["authority"] == "AUTHORITATIVE"
+    assert members["account-jh"]["as_of_date"] == "2026-06-30"

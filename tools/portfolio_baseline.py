@@ -6419,6 +6419,39 @@ def _statement_reserve_facts(
     return merged
 
 
+def _bind_statement_accounts(
+    facts: Mapping[str, Sequence[Mapping[str, Any]]],
+    accounts: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Re-key statement NAV points and admissions onto the census account of the provider.
+
+    The census already carries each statement provider's account with its reserve-pool
+    assignment; adding the statement's own account would duplicate it. Exactly one census
+    account must carry the provider, else the input is refused.
+    """
+
+    census: dict[str, list[str]] = {}
+    for account in accounts:
+        census.setdefault(str(account.get("provider")), []).append(
+            str(account["account_id"])
+        )
+    rebind: dict[str, str] = {}
+    for row in facts["accounts"]:
+        ids = census.get(str(row.get("provider")), [])
+        if len(ids) != 1:
+            raise BaselineValidationError(
+                "statement reserve provider does not name exactly one census account"
+            )
+        rebind[str(row["account_id"])] = ids[0]
+
+    def rekey(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {**dict(row), "account_id": rebind[str(row["account_id"])]} for row in rows
+        ]
+
+    return rekey(facts["nav"]), rekey(facts["admissions"])
+
+
 def build_catalog(
     spec_path: Path,
 ) -> tuple[dict[str, Any], GenerationManifest, bytes]:
@@ -6525,16 +6558,18 @@ def build_catalog(
         provider_admissions = _objects(
             provider_catalog.get("admissions"), "provider-ledger.admissions"
         )
+        ledger_nav = nav
         if "statement_reserves" in spec:
             # #900 (B): statement NAV points of reserve accounts that are not provider-ledger
             # providers, read from hash-pinned catalogs (latest on or before the cutoff).
             statement_facts = _statement_reserve_facts(
                 spec["statement_reserves"], as_of
             )
-            nav = [*nav, *statement_facts["nav"]]
-            accounts = [*accounts, *statement_facts["accounts"]]
-            assignments = [*assignments, *statement_facts["assignments"]]
-            provider_admissions = [*provider_admissions, *statement_facts["admissions"]]
+            statement_nav, statement_admissions = _bind_statement_accounts(
+                statement_facts, accounts
+            )
+            nav = [*nav, *statement_nav]
+            provider_admissions = [*provider_admissions, *statement_admissions]
             statement_excluded = statement_facts["excluded"]
         reference_flows = _objects(
             provider_catalog.get("flows"), "provider-ledger.flows"
@@ -6576,11 +6611,12 @@ def build_catalog(
                 grouped_unmapped.items()
             )
         ]
-        for record in nav:
+        # statement points are quarterly/monthly, not a daily calendar: they stay out of it
+        for record in ledger_nav:
             provider_dates.setdefault(
                 str(record.get("provider", "UNKNOWN")), set()
             ).add(_date(record["as_of_date"], "nav.as_of_date"))
-        calendar = _calendar_statuses(accounts, nav, provider_dates)
+        calendar = _calendar_statuses(accounts, ledger_nav, provider_dates)
     allocations, strategy_nav_coverage, costs, systematic_total, nav_covered = (
         _allocations_and_coverage(
             paths,
