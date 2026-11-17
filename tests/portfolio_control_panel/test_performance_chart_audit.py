@@ -739,3 +739,59 @@ def test_a_flat_week_prints_zero_not_negative_zero(tmp_path: Path) -> None:
     assert _eval(tmp_path, "perfPercent(1.00001)") == "0.0%"
     assert _eval(tmp_path, "perfPercent(1.05)") == "+5.0%"
     assert _eval(tmp_path, "perfPercent(0.95)") == "-5.0%"
+
+
+def test_a_mixed_week_before_live_weeks_is_where_live_trading_began(
+    tmp_path: Path,
+) -> None:
+    # BACKTEST, then one MIXED week (the week spanning two layers), then LIVE: the Live-only line starts at the MIXED week.
+    payload = _payload(anchor=100)
+    for mode in {
+        id(m): m for m in payload["performance_tab"]["modes"].values()
+    }.values():
+        for line in mode["lines"]:
+            if line["series_id"] == "strategy:Alpha":
+                line["origin"] = [
+                    [max(0, 100 - 100), 259, "BACKTEST"],
+                    [260, 260, "MIXED"],
+                    [261, WEEKS - 1, "ACCOUNT_LIVE"],
+                ]
+    dom = _run(tmp_path, payload, ['perfZoom = "Max"'])
+    legend = _text(dom, "#perf-returns-legend")
+    assert f"live from {_week_start(260)}" in legend  # the MIXED week, not week 261
+    assert f"live from {_week_start(261)}" not in legend
+    assert (
+        f"live evidence starts {_week_start(260)}"
+        in dom["#perf-returns-chart"]["innerHTML"]
+    )
+
+
+def test_a_portfolio_line_that_is_mixed_throughout_has_no_live_start(
+    tmp_path: Path,
+) -> None:
+    dom = _run(tmp_path, _payload(anchor=100), ['perfZoom = "Max"'])
+    chips = re.findall(
+        r"<button[^>]*perf-legend-item.*?</button>",
+        dom["#perf-returns-legend"]["innerHTML"],
+        flags=re.S,
+    )
+    equal = next(chip for chip in chips if "Equal-weight portfolio" in chip)
+    assert "live from" not in equal
+
+
+def test_a_governed_index_that_starts_after_the_window_says_so(tmp_path: Path) -> None:
+    payload = _payload()
+    payload["hwm_governed_proof"] = {
+        "financial_acceptance": "PENDING_OWNER_ACCEPTANCE",
+        "index_path": [
+            {"as_of": "2025-09-01", "index": "100"},
+            {"as_of": "2025-11-17", "index": "110"},
+        ],
+    }
+    dom = _run(tmp_path, payload, ['perfValueZoom = "Max"'])
+    readout = _text(dom, "#perf-value-readout")
+    assert (
+        "the governed index starts Sep 1, 2025, after the start of this window"
+        in readout
+    )
+    assert "no governed index in this snapshot" not in readout

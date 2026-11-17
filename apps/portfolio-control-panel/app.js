@@ -3226,7 +3226,8 @@
   // First live week of a line that has earlier non-live weeks (backtest or model); null when it is live throughout.
   function perfLiveStart(line, startByEnd) {
     const pts = line.points.filter((point) => point.value != null);
-    const index = pts.findIndex((point) => perfIsLive(point.origin));
+    // The week that spans two layers (MIXED) and is followed by live weeks is the week live trading began: the Live-only line starts there.
+    const index = pts.findIndex((point, position) => perfIsLive(point.origin) || (point.origin === "MIXED" && pts.slice(position + 1).some((later) => perfIsLive(later.origin))));
     if (index <= 0 || !pts.slice(0, index).some((point) => !perfIsLive(point.origin))) return null;
     const latest = pts[pts.length - 1].value;
     return { time: startByEnd?.get(pts[index].time) ?? pts[index - 1].time, value: pts[index - 1].value, liveReturn: latest / pts[index - 1].value - 1 };
@@ -3688,7 +3689,7 @@
     // The window's own governed-index return, over the same dates as the value change beside it; the since-start figure is in the bases line.
     const windowReturn = !path.length ? null : perfIndexReturn(path, from, lastTime);
     const twrStartText = windowReturn != null ? `from ${safe(formatDate(perfDate(from)))}; ` : "";
-    $("#perf-value-readout").innerHTML = `<div class="perf-readout"><div><span>Systematic portfolio value</span><b>${currency(end.total)}</b><small>${safe(formatDate(end.date))}, reserve excluded</small></div><div><span>Change in value, ${safe(perfValueZoom)}</span><b>${currency(end.total - first.total)}</b><small>${safe(perfDate(first.time))} to ${safe(perfDate(end.time))}; includes deposits and withdrawals</small></div><div><span>Time-weighted return, ${safe(perfValueZoom)}</span><b>${windowReturn == null ? "—" : pct(windowReturn)}</b><small>${twrStartText}${windowReturn == null ? "no governed index in this snapshot" : `${safe(proofLabel)}, levered net NAV basis`}${summedText ? `<br>${safe(summedText)}` : ""}${basesText ? `<br>${safe(basesText)}` : ""}</small></div></div>`;
+    $("#perf-value-readout").innerHTML = `<div class="perf-readout"><div><span>Systematic portfolio value</span><b>${currency(end.total)}</b><small>${safe(formatDate(end.date))}, reserve excluded</small></div><div><span>Change in value, ${safe(perfValueZoom)}</span><b>${currency(end.total - first.total)}</b><small>${safe(perfDate(first.time))} to ${safe(perfDate(end.time))}; includes deposits and withdrawals</small></div><div><span>Time-weighted return, ${safe(perfValueZoom)}</span><b>${windowReturn == null ? "—" : pct(windowReturn)}</b><small>${twrStartText}${windowReturn == null ? (path.length ? `the governed index starts ${safe(formatDate(String(path[0].as_of).slice(0, 10)))}, after the start of this window` : "no governed index in this snapshot") : `${safe(proofLabel)}, levered net NAV basis`}${summedText ? `<br>${safe(summedText)}` : ""}${basesText ? `<br>${safe(basesText)}` : ""}</small></div></div>`;
     const benchmarkGapDays = (item) => {
       const first = table.findIndex((row, position) => row.time >= from && item.dollars[position] > 0);
       return first < 0 ? 0 : table.filter((row, position) => position > first && row.time >= from && !(item.dollars[position] > 0)).length;
