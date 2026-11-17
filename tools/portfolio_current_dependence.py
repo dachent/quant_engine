@@ -797,7 +797,7 @@ def _selected_history(
         )
     except Exception as exc:
         raise CurrentDependenceError(
-            "selected layered history authority differs"
+            f"selected layered history authority differs: {type(exc).__name__}: {exc}"
         ) from exc
     mode_status = _object(verified.get("mode_status"), "selected history mode status")
     for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
