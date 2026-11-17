@@ -146,7 +146,7 @@
       "defect": "The proxy risk-free column (a cash-ETF price return) carried a -0.316% distribution drop into every fit.",
       "status": "covered",
       "kill": "Pre-fix _read_factors accepts any finite RF; the helper does not exist so the call raises AttributeError.",
-      "test": "tests/regression/test_risk_free_distribution_drop.py::test_risk_free_distribution_drop"
+      "test": "tests/regression/test_rf_distribution_drop.py::test_risk_free_distribution_drop"
     }
   },
   "tickets": {
