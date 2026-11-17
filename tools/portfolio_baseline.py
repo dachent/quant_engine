@@ -5300,6 +5300,7 @@ def _coverage_evidence(
     transactions: Sequence[Mapping[str, Any]],
     flows: Sequence[Mapping[str, Any]],
     as_of_date: date,
+    statement_accounts: Collection[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Build value-free account/fact evidence without inventing completeness."""
 
@@ -5385,6 +5386,7 @@ def _coverage_evidence(
             account_id = _text(account.get("account_id"), "account.account_id")
             provider_id = _text(account.get("provider"), "account.provider").upper()
             accepted = records_by_account.get(account_id, [])
+            row_cadence = cadence
             accepted_dates = sorted(
                 str(item[date_field]) for item in accepted if item.get(date_field)
             )
@@ -5426,6 +5428,10 @@ def _coverage_evidence(
                     else "LEGACY_ACCEPTED_FACTS"
                 )
                 boundary_basis = "OBSERVED_RECORDS_ONLY"
+                if fact_type == "nav" and account_id in statement_accounts:
+                    # hash-pinned periodic statement points, not a daily provider feed
+                    authority = "PINNED_STATEMENT_POINTS"
+                    row_cadence = "STATEMENT_PERIODIC"
             elif admitted:
                 status = (
                     "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
@@ -5463,7 +5469,7 @@ def _coverage_evidence(
                     ),
                     "authority": authority,
                     "boundary_basis": boundary_basis,
-                    "cadence": cadence,
+                    "cadence": row_cadence,
                     "declared_end": None,
                     "declared_start": None,
                     "disposition": disposition,
@@ -6512,6 +6518,7 @@ def build_catalog(
     custody_authority: dict[str, Any] = {}
     fx_authority: dict[str, Any] = {}
     statement_excluded: list[dict[str, Any]] = []
+    statement_nav: list[dict[str, Any]] = []
     if spec["schema_version"] == 2:
         schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
             spec["provider_generations"], roots, accounts, as_of
@@ -6573,7 +6580,6 @@ def build_catalog(
             provider_catalog.get("admissions"), "provider-ledger.admissions"
         )
         ledger_nav = nav
-        statement_nav: list[dict[str, Any]] = []
         if "statement_reserves" in spec:
             # #900 (B): statement NAV points of reserve accounts that are not provider-ledger
             # providers, read from hash-pinned catalogs (latest on or before the cutoff).
@@ -6763,6 +6769,7 @@ def build_catalog(
             transactions,
             flows,
             as_of,
+            {str(item["account_id"]) for item in statement_nav},
         )
     )
     fact_coverage, exceptions = _fact_coverage(

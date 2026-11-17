@@ -5976,6 +5976,15 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
         r for r in catalog["calendar_coverage"] if r["account_id"] == "account-jh"
     ]
     assert [r["status"] for r in jh_calendar] == ["STATEMENT_CADENCE_NAV_OBSERVATIONS"]
+    jh_nav = next(
+        r
+        for r in catalog["fact_coverage_matrix"]
+        if r["account_id"] == "account-jh" and r["fact_type"] == "nav"
+    )
+    assert (jh_nav["authority"], jh_nav["cadence"]) == (
+        "PINNED_STATEMENT_POINTS",
+        "STATEMENT_PERIODIC",
+    )
     assert members["account-jh"]["authority"] == "AUTHORITATIVE"
     assert members["account-jh"]["as_of_date"] == "2026-06-30"
 
