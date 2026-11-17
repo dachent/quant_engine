@@ -1199,7 +1199,7 @@ def test_diagnostic_dynamic_contributions_use_changing_beta_rows(
     # Latest beta times mean factor return is 0.008, not the actual path mean.
     assert (
         row["contribution_summary"]["factor_means"]["SPY_XS"]
-        != row["exposures"][0]["holdout_mean_period_contribution"]
+        != row["diagnostic_detail"]["exposures"][0]["holdout_mean_period_contribution"]
     )
 
 
