@@ -584,3 +584,23 @@ def test_the_manifest_records_the_bound_identities_and_the_verifier_checks_them(
 
     with pytest.raises(target_series.TargetSeriesError):
         _validate(world, artifacts, _retie(manifest, other_generation))
+
+
+@pytest.fixture(autouse=True)
+def _model_live_layers_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests prove the basis restatement, not the model-live admission.
+
+    The real contract now admits the model-live layers; here they stay held, the
+    state the main-output digests were taken in, so that the restatement is the
+    only difference under test.
+    """
+
+    original = target_series._model_live_layers
+
+    def held(corrections: Any) -> Any:
+        return {
+            strategy: (start, False)
+            for strategy, (start, _admitted) in original(corrections).items()
+        }
+
+    monkeypatch.setattr(target_series, "_model_live_layers", held)
