@@ -5979,3 +5979,313 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
     assert [r["status"] for r in jh_calendar] == ["STATEMENT_CADENCE_NAV_OBSERVATIONS"]
     assert members["account-jh"]["authority"] == "AUTHORITATIVE"
     assert members["account-jh"]["as_of_date"] == "2026-06-30"
+
+
+def _hist_assignment(
+    account: str, start: str | None, end: str | None, strategy: str | None = None
+) -> dict[str, Any]:
+    return {
+        "account_id": account,
+        "assignment_id": f"assignment-{account}-{start}-{strategy}",
+        "effective_start": start,
+        "effective_end": end,
+        "mapping_status": "MAPPED" if strategy else "UNMAPPED",
+        "pool_id": None if strategy else "systematic-capital",
+        "strategy_id": strategy,
+    }
+
+
+def _historical_claim(assignments: list[dict[str, Any]]) -> dict[str, Any]:
+    accounts = [
+        {"account_id": a, "role": "INVESTMENT", "provider": "SCHWAB"}
+        for a in sorted({row["account_id"] for row in assignments})
+    ]
+    claims, _ = baseline._fact_coverage(
+        accounts, assignments, [], [], [], [], 0, date(2026, 11, 6)
+    )
+    return next(
+        c for c in claims if c["fact_type"] == "historical_strategy_attribution"
+    )
+
+
+def test_pool_only_history_before_the_first_strategy_assignment_is_derived_structural() -> (
+    None
+):
+    """Rule-derived (#900 attribution): the interval ends on/before the account's first
+    strategy assignment, so no strategy existed for it; derived from the records."""
+
+    claim = _historical_claim(
+        [
+            _hist_assignment("a-end-on", "2024-02-26", "2025-11-25"),
+            _hist_assignment("a-end-on", "2025-11-25", None, "tt-portfolio"),
+            _hist_assignment("a-day-before", "2025-09-15", "2025-11-19"),
+            _hist_assignment("a-day-before", "2025-11-20", None, "p123-eu"),
+        ]
+    )
+
+    assert claim["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert claim["known_gaps"] == []
+    assert claim["disposition"]["code"] == "PRE_STRATEGY_HISTORY"
+    rows = claim["disposition"]["structural_intervals"]
+    assert [(r["account_id"], r["first_strategy_assignment"]) for r in rows] == [
+        ("a-day-before", "2025-11-20"),
+        ("a-end-on", "2025-11-25"),
+    ]
+    assert rows[0]["reason"] == (
+        "account held as pool until its first strategy assignment on 2025-11-20"
+    )
+
+
+def test_pool_only_intervals_outside_the_rule_stay_gaps() -> None:
+    """Kill tests: an account that never gets a strategy row (the IBKR 2d0a996c case) and an
+    interval that outlasts its account's first strategy assignment both stay gaps."""
+
+    claim = _historical_claim(
+        [
+            _hist_assignment("never", "2025-09-15", "2026-03-31"),
+            _hist_assignment("overlap", "2025-01-01", "2025-12-31"),
+            _hist_assignment("overlap", "2025-06-01", None, "qsi"),
+            _hist_assignment("clean", "2024-01-01", "2025-05-31"),
+            _hist_assignment("clean", "2025-06-01", None, "qsi"),
+        ]
+    )
+
+    assert claim["status"] == "PARTIAL"
+    assert claim["known_gaps"] == ["2 historical intervals remain pool-only"]
+    assert claim["disposition"]["code"] == "POOL_ONLY_UNALLOCATED_RETAINED"
+    assert [r["account_id"] for r in claim["disposition"]["structural_intervals"]] == [
+        "clean"
+    ]
+
+
+def test_a_current_pool_only_interval_is_never_derived_history() -> None:
+    """Kill test: current attribution is untouched by the historical rule."""
+
+    claims, _ = baseline._fact_coverage(
+        [{"account_id": "cur", "role": "INVESTMENT", "provider": "SCHWAB"}],
+        [
+            _hist_assignment("cur", "2025-01-01", None),
+            _hist_assignment("cur", "2026-12-01", None, "qsi"),
+        ],
+        [],
+        [],
+        [],
+        [],
+        0,
+        date(2026, 11, 6),
+    )
+    current = next(
+        c for c in claims if c["fact_type"] == "current_strategy_attribution"
+    )
+    assert current["status"] == "PARTIAL"
+    assert current["record_count"] == 1
+
+
+def _closure_claim(
+    *,
+    nav_last: str = "0",
+    flows: list[dict[str, Any]] | None = None,
+    extra_assignments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    def nav_row(day: str, value: str) -> dict[str, Any]:
+        return {
+            "account_id": "sleeve",
+            "as_of_date": day,
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
+        }
+
+    def flow(account: str, day: str, kind: str, amount: str) -> dict[str, Any]:
+        return {
+            "account_id": account,
+            "event_date": day,
+            "flow_type": kind,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        }
+
+    if flows is None:
+        flows = [
+            flow("sleeve", "2025-12-01", "TRANSFER:INTERNAL:IN", "100"),
+            flow("other", "2025-12-01", "TRANSFER:INTERNAL:OUT", "-100"),
+            flow("sleeve", "2026-02-01", "TRANSFER:INTERNAL:OUT", "-90"),
+            flow("other", "2026-02-01", "TRANSFER:INTERNAL:IN", "90"),
+        ]
+    assignments = [
+        _hist_assignment("sleeve", "2025-09-15", "2026-03-31"),
+        *(extra_assignments or []),
+    ]
+    accounts = [{"account_id": "sleeve", "role": "INVESTMENT", "provider": "IBKR"}]
+    claims, _ = baseline._fact_coverage(
+        accounts,
+        assignments,
+        [],
+        [],
+        [],
+        [],
+        0,
+        date(2026, 11, 6),
+        nav=[
+            nav_row("2025-11-20", "10"),
+            nav_row("2025-12-02", "110"),
+            nav_row("2026-03-31", nav_last),
+        ],
+        reference_flows=flows,
+    )
+    return next(
+        c for c in claims if c["fact_type"] == "historical_strategy_attribution"
+    )
+
+
+def test_a_closed_unassigned_interval_is_disclosed_with_its_closure() -> None:
+    claim = _closure_claim()
+
+    assert claim["disposition"]["code"] == "CLOSED_FLOW_CLOSED_UNASSIGNED"
+    # never rendered as clean: a disclosed item that keeps the fact PARTIAL
+    assert claim["status"] == "PARTIAL"
+    assert "not attributed to a strategy" in claim["known_gaps"][0]
+    (row,) = claim["disposition"]["closed_unassigned_intervals"]
+    assert (row["opening_nav"], row["net_transfers"], row["closing_nav"]) == (
+        "10",
+        "10",
+        "0",
+    )
+    assert row["implied_pnl"] == "-20"  # 0 - 10 - 10, shown, never hidden
+    assert row["transfer_count"] == 2 and row["unmatched_transfer_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("nav_not_zero", "unmatched_transfer", "external_flow", "has_strategy"),
+)
+def test_a_non_closing_unassigned_interval_stays_a_gap(case: str) -> None:
+    """Kill tests: every way the closure can fail leaves the interval a gap."""
+
+    def flow(account: str, day: str, kind: str, amount: str) -> dict[str, Any]:
+        return {
+            "account_id": account,
+            "event_date": day,
+            "flow_type": kind,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        }
+
+    kwargs: dict[str, Any] = {}
+    if case == "nav_not_zero":
+        kwargs["nav_last"] = "55"
+    elif case == "unmatched_transfer":
+        kwargs["flows"] = [flow("sleeve", "2025-12-01", "TRANSFER:INTERNAL:IN", "100")]
+    elif case == "external_flow":
+        kwargs["flows"] = [
+            flow("sleeve", "2025-12-01", "EXTERNAL_PROVIDER_TRANSFER", "-100"),
+            flow("other", "2025-12-01", "TRANSFER:INTERNAL:IN", "100"),
+        ]
+    else:
+        kwargs["extra_assignments"] = [
+            _hist_assignment("sleeve", "2025-12-15", None, "qsi")
+        ]
+
+    claim = _closure_claim(**kwargs)
+
+    assert claim["status"] == "PARTIAL"
+    assert claim["disposition"]["code"] == "POOL_ONLY_UNALLOCATED_RETAINED"
+    assert "closed_unassigned_intervals" not in claim["disposition"]
+
+
+def _tracker_closure(tracker_flows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The closure fixture with accepted (tracker) flows before the ledger's first leg."""
+
+    def nav_row(day: str, value: str) -> dict[str, Any]:
+        return {
+            "account_id": "sleeve",
+            "as_of_date": day,
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
+        }
+
+    def leg(account: str, day: str, amount: str) -> dict[str, Any]:
+        return {
+            "account_id": account,
+            "event_date": day,
+            "flow_type": "TRANSFER:INTERNAL:IN"
+            if float(amount) > 0
+            else "TRANSFER:INTERNAL:OUT",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        }
+
+    reference = [
+        leg("sleeve", "2025-12-01", "100"),
+        leg("other", "2025-12-01", "-100"),
+        leg("sleeve", "2026-02-01", "-90"),
+        leg("other", "2026-02-01", "90"),
+    ]
+    claims, exceptions = baseline._fact_coverage(
+        [{"account_id": "sleeve", "role": "INVESTMENT", "provider": "IBKR"}],
+        [_hist_assignment("sleeve", "2025-09-15", "2026-03-31")],
+        [],
+        tracker_flows,
+        [],
+        [],
+        0,
+        date(2026, 11, 6),
+        nav=[
+            nav_row("2025-09-15", "0"),
+            nav_row("2025-10-21", "50"),
+            nav_row("2025-12-02", "110"),
+            nav_row("2026-03-31", "0"),
+        ],
+        reference_flows=reference,
+    )
+    claim = next(
+        c for c in claims if c["fact_type"] == "historical_strategy_attribution"
+    )
+    exception = next(
+        e
+        for e in exceptions
+        if e["exception_id"] == "historical-strategy-attribution-unresolved"
+    )
+    return {"claim": claim, "exception": exception}
+
+
+def _tracker_leg(account: str, amount: str) -> dict[str, Any]:
+    return {
+        "account_id": account,
+        "event_date": "2025-10-20",
+        "flow_type": "TRANSFER_FLOW",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+    }
+
+
+def test_closure_starts_from_the_earliest_nav_and_counts_pre_ledger_transfers() -> None:
+    """The opening is the interval's earliest NAV, and a matched tracker transfer before the
+    ledger's first leg is part of the closure (the IBKR 2d0a996c +2,674.30 on 2025-10-20)."""
+
+    result = _tracker_closure(
+        [_tracker_leg("sleeve", "50"), _tracker_leg("other", "-50")]
+    )
+
+    (row,) = result["claim"]["disposition"]["closed_unassigned_intervals"]
+    assert (row["opening_nav"], row["opening_nav_date"]) == ("0", "2025-09-15")
+    assert row["net_transfers"] == "60"  # +50 tracker, +100, -90
+    assert row["implied_pnl"] == "-60"  # 0 - 0 - 60
+    assert row["transfer_count"] == 3 and row["unmatched_transfer_count"] == 0
+
+
+def test_an_unmatched_pre_ledger_transfer_keeps_the_interval_a_gap() -> None:
+    result = _tracker_closure([_tracker_leg("sleeve", "50")])
+
+    assert "closed_unassigned_intervals" not in result["claim"]["disposition"]
+    assert result["claim"]["disposition"]["code"] == "POOL_ONLY_UNALLOCATED_RETAINED"
+
+
+def test_a_closed_unassigned_interval_keeps_the_exception_and_the_effect_text_honest() -> (
+    None
+):
+    """Kill tests: the historical exception does not flip PASS while the fact is PARTIAL, and
+    the effect text does not say every interval is attributed."""
+
+    result = _tracker_closure(
+        [_tracker_leg("sleeve", "50"), _tracker_leg("other", "-50")]
+    )
+
+    assert result["exception"]["record_count"] == 1
+    assert result["exception"]["status"] == "RETAINED_WITH_EXPLICIT_DISPOSITION"
+    effect = result["claim"]["disposition"]["effect"]
+    assert "not attributed to a strategy" in effect
+    assert "Every historical" not in effect
