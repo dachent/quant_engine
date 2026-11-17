@@ -2044,9 +2044,9 @@ def _overlap_reconciliation(
     # sample standard deviation, like every other tracking error (#904 item 13)
     # periods a year from the overlap dates themselves: model-live provider paths
     # carry holiday zero rows (261-262 a year), not the exchange-calendar 252
-    from portfolio_attribution import _effective_periods_per_year
+    from portfolio_attribution import effective_periods_per_year
 
-    periods, _basis = _effective_periods_per_year(
+    periods, _basis = effective_periods_per_year(
         [date.fromisoformat(day) if isinstance(day, str) else day for day in common],
         252,
     )
