@@ -5916,6 +5916,13 @@ def test_statement_reserve_account_carries_a_role_into_calendar_statuses(
         ("RESERVE", "JOHN HANCOCK")
     ]
     assert baseline._calendar_statuses(facts["accounts"], facts["nav"], {}) == []
+    # the publish consumer validates every baseline assignment row
+    from account_strategy_manifest import partition_assignments
+
+    partition_assignments(list(facts["assignments"]))
+    assert facts["assignments"][0]["strategy_mapping_disposition"] == (
+        "RESERVE_NOT_APPLICABLE"
+    )
 
 
 def test_statement_reserve_and_excluded_accounts_build_end_to_end(

@@ -40,6 +40,28 @@ def verified_catalog(raw: bytes, pin: Mapping[str, Any]) -> dict[str, Any]:
     return catalog
 
 
+def _reserve_assignment(account_id: str, label: str, start: date) -> dict[str, Any]:
+    """The reserve pool assignment, with the keys every provenance reserve row carries."""
+
+    payload: dict[str, Any] = {
+        "account_id": account_id,
+        "effective_end": None,
+        "effective_start": start.isoformat(),
+        "mapping_status": "UNMAPPED",
+        "observed_label": label,
+        "pool_id": RESERVE_POOL_ID,
+        "pool_mapping_status": "MAPPED",
+        "source_classification": "statement_reserve_pin",
+        "source_id": "statement-reserves",
+        "strategy_id": None,
+        "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:20]
+    return {"assignment_id": f"assignment-{digest}", **payload}
+
+
 def statement_reserve_facts(
     catalog: Mapping[str, Any], cutoff: date, role: str = "RESERVE"
 ) -> dict[str, list[dict[str, Any]]]:
@@ -90,6 +112,7 @@ def statement_reserve_facts(
         }
     if role != "RESERVE":
         raise StatementReserveError("statement reserve role is unknown")
+    provider_label = str(account.get("provider", "")).upper().replace("_", " ")
     admissions: list[dict[str, Any]] = []
     for index, (day, _row) in enumerate(points):
         end = (
@@ -120,14 +143,7 @@ def statement_reserve_facts(
                 "role": role,
             }
         ],
-        "assignments": [
-            {
-                "account_id": account_id,
-                "effective_end": None,
-                "effective_start": points[0][0].isoformat(),
-                "pool_id": RESERVE_POOL_ID,
-            }
-        ],
+        "assignments": [_reserve_assignment(account_id, provider_label, points[0][0])],
         "nav": [
             {**dict(row), "provider_id": str(account.get("provider", "")).lower()}
             for _day, row in points
