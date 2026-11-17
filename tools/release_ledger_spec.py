@@ -66,6 +66,7 @@ CARRIED = (
     "account_roles",
     "quantbase_fill_closes",
     "zero_financing_observations",
+    "event_completeness_declaration",
 )
 REGENERATED = (
     "as_of_date",
@@ -241,6 +242,7 @@ def build(
     account_roles: Path | None = None,
     quantbase_fill_closes: Path | None = None,
     zero_financing_observations: Path | None = None,
+    event_completeness_declaration: Path | None = None,
 ) -> dict[str, Any]:
     """Return ``{"observation": bytes, "spec": bytes-builder inputs}``; writes nothing.
 
@@ -353,6 +355,17 @@ def build(
                 + ", ".join(sorted(ZERO_FINANCING_PIN_KEYS)),
             )
         spec["zero_financing_observations"] = pin
+    if "event_completeness_declaration" in predecessor_spec:
+        spec["event_completeness_declaration"] = predecessor_spec[
+            "event_completeness_declaration"
+        ]
+    if event_completeness_declaration is not None:
+        raw = event_completeness_declaration.resolve().read_bytes()
+        spec["event_completeness_declaration"] = {
+            "path": str(event_completeness_declaration.resolve()),
+            "sha256": _sha256(raw),
+            "size_bytes": len(raw),
+        }
     if quantbase_fill_closes is not None:
         pins = json.loads(quantbase_fill_closes.read_bytes())
         if not isinstance(pins, list) or not pins:
@@ -432,6 +445,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     command.add_argument("--account-roles", type=Path)
     command.add_argument("--quantbase-fill-closes", type=Path)
     command.add_argument("--zero-financing-observations", type=Path)
+    command.add_argument("--event-completeness-declaration", type=Path)
     command.add_argument(
         "--plan", action="store_true", help="build and print, write nothing"
     )
@@ -454,6 +468,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.account_roles,
             args.quantbase_fill_closes,
             args.zero_financing_observations,
+            args.event_completeness_declaration,
         )
         if args.plan:
             print(
