@@ -129,6 +129,24 @@
     "validator_fixture_values_no_builder_emits": {
       "defect": "Validator fixtures carry values no builder ever emits, so a check passes on fixtures and fails on real output.",
       "status": "open"
+    },
+    "factor_rejected_fit_alpha_headline": {
+      "defect": "A fit the sealed holdout gate rejected (DIAGNOSTIC_ONLY) stood as a headline alpha.",
+      "status": "covered",
+      "kill": "Pre-fix _alpha_context has no model-gate check: a DIAGNOSTIC_ONLY row with a standard error returns HEADLINE_ALLOWED.",
+      "test": "tests/regression/test_factor_rejected_fit_alpha_headline.py::test_factor_rejected_fit_alpha_headline"
+    },
+    "factor_window_ends_before_live_series": {
+      "defect": "The default ECONOMIC_FACTOR lens fitted to 2026-08-31 and was shown beside 2026-11-06 figures.",
+      "status": "covered",
+      "kill": "Pre-fix _alpha_context has no window_lag_days and returns HEADLINE_ALLOWED for a 67-day-stale window; the fixture has the real row shape (the builder truncates the live end to the fit window, so only series_composition.accepted_history_complete_through shows the lag).",
+      "test": "tests/regression/test_factor_window_ends_before_live_series.py::test_factor_window_ends_before_live_series"
+    },
+    "risk_free_distribution_drop": {
+      "defect": "The proxy risk-free column (a cash-ETF price return) carried a -0.316% distribution drop into every fit.",
+      "status": "covered",
+      "kill": "Pre-fix _read_factors accepts any finite RF; the helper does not exist so the call raises AttributeError.",
+      "test": "tests/regression/test_rf_distribution_drop.py::test_risk_free_distribution_drop"
     }
   },
   "tickets": {

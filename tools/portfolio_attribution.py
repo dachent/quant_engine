@@ -177,6 +177,14 @@ def _effective_periods_per_year(
     return min(max(observed, 1), 366), PERIODS_BASIS_DERIVED
 
 
+def effective_periods_per_year(
+    common: Sequence[date], declared: int
+) -> tuple[int, str]:
+    """Public entry to the periods-a-year derivation (other tools must not import the private name)."""
+
+    return _effective_periods_per_year(common, declared)
+
+
 def _check_annualization_frequency(
     common: Sequence[date], periods_per_year: int, *, upper: bool = True
 ) -> None:

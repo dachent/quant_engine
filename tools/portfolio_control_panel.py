@@ -5558,6 +5558,10 @@ def _available_prefixed(status: object) -> str:
     return text if text.startswith("AVAILABLE_") else "AVAILABLE_" + text
 
 
+# a factor window ending more than this many days before the live series end is stale
+STALE_FACTOR_WINDOW_DAYS = 10
+
+
 def _fit_segments(
     row: Mapping[str, Any], start: Any, end: Any, observations: int
 ) -> list[series_label.SeriesLabel]:
@@ -5591,6 +5595,87 @@ def _fit_segments(
         ]
     except (series_label.SeriesLabelError, ValueError):
         return []
+
+
+_GATE_DYNAMIC_RESULT_KEYS: Final = (
+    "exposure_path",
+    "holdout_forecasts",
+    "largest_exposure_changes",
+)
+
+
+def _gate_forensic_dynamic(diagnostics: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The result-bearing part of the dynamic diagnostics of a gate-rejected fit."""
+
+    dynamic = _optional_mapping(diagnostics.get("dynamic"))
+    if dynamic is None:
+        return None
+    return {key: dynamic[key] for key in _GATE_DYNAMIC_RESULT_KEYS if key in dynamic}
+
+
+def _gate_public_diagnostics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
+    """Diagnostics of a gate-rejected fit without any per-date beta or forecast exposure."""
+
+    public = dict(diagnostics)
+    dynamic = _optional_mapping(public.get("dynamic"))
+    if dynamic is not None:
+        public["dynamic"] = {
+            key: value
+            for key, value in dynamic.items()
+            if key not in _GATE_DYNAMIC_RESULT_KEYS
+        }
+    return public
+
+
+def _gate_withheld_alpha() -> dict[str, Any]:
+    return {
+        "annualized_standard_error": None,
+        "confidence_status": "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE",
+        "gross_annualized": None,
+        "gross_status": "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE",
+        "net_annualized": None,
+        "net_status": "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE",
+        "periodic_intercept": None,
+    }
+
+
+# Factor-model audit D7/D8: a loading beyond this size, or a negative training R2,
+# is shown with a flag so a reader checks the scale and the fit before using it.
+SUSPECT_BETA_ABS: Final = Decimal(3)
+
+
+def _fit_quality_flags(row: Mapping[str, Any]) -> list[str]:
+    flags: list[str] = []
+    detail = _optional_mapping(row.get("diagnostic_detail")) or {}
+    for item in list(row.get("exposures") or []) + list(detail.get("exposures") or []):
+        beta = _alpha_decimal(item.get("beta")) if isinstance(item, Mapping) else None
+        if beta is not None and abs(beta) > SUSPECT_BETA_ABS:
+            flags.append("LARGE_EXPOSURE_CHECK_SCALE")
+            break
+    diagnostics = _optional_mapping(row.get("diagnostics")) or {}
+    train = _optional_mapping(diagnostics.get("train")) or {}
+    train_r2 = _alpha_decimal(train.get("r_squared"))
+    if train_r2 is not None and train_r2 < 0:
+        flags.append("NEGATIVE_TRAIN_R_SQUARED")
+    return flags
+
+
+def _train_window(row: Mapping[str, Any], start: Any, end: Any) -> tuple[Any, Any]:
+    """First to last TRAIN anchor of the fit; the whole window when no buckets ship."""
+
+    association = _optional_mapping(row.get("interval_association")) or {}
+    buckets = association.get("buckets")
+    if not isinstance(buckets, list):
+        return start, end
+    candidates = [
+        item.get("factor_anchor")
+        for item in buckets
+        if isinstance(item, Mapping) and item.get("partition") == "TRAIN"
+    ]
+    anchors: list[str] = [item for item in candidates if isinstance(item, str)]
+    if not anchors:
+        return start, end
+    return min(anchors), max(anchors)
 
 
 def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -5679,16 +5764,49 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         or (isinstance(layers, list) and "BACKTEST" in layers)
     )
     composition_known = isinstance(backtest, int) and not isinstance(backtest, bool)
-    if net is None and gross is None:
+    # the alpha is the TRAIN intercept: its window is the training buckets', not the
+    # whole sample's (factor-model audit, annualization matrix D2)
+    train_start, train_end = _train_window(row, start, end)
+    train_days = (
+        (date.fromisoformat(train_end) - date.fromisoformat(train_start)).days
+        if isinstance(train_start, str) and isinstance(train_end, str)
+        else None
+    )
+    fit_days = train_days if train_days is not None else days
+    # the series this fit is shown beside ends at the accepted history end; a lens
+    # that stops earlier (French files) lags it by the difference
+    reference_ends = [
+        value
+        for value in (
+            coverage.get("canonical_live_observed_end"),
+            composition.get("accepted_history_complete_through"),
+        )
+        if isinstance(value, str)
+    ]
+    window_lag_days = (
+        (date.fromisoformat(max(reference_ends)) - date.fromisoformat(end)).days
+        if reference_ends and isinstance(end, str)
+        else None
+    )
+    if row.get("status") == "DIAGNOSTIC_ONLY":
+        # a fit the sealed gate rejected is forensic only; its alpha is withheld
+        headline_status = "NOT_A_HEADLINE_MODEL_GATE_FAILED"
+    elif net is None and gross is None:
         headline_status = "UNAVAILABLE_NO_ALPHA"
+    elif row.get("status") not in (None, "AVAILABLE"):
+        # a fit the sealed holdout gate rejected is forensic only, whatever its SE
+        headline_status = "NOT_A_HEADLINE_MODEL_GATE_FAILED"
     elif includes_backtest:
         headline_status = "NOT_A_HEADLINE_INCLUDES_BACKTEST"
+    elif window_lag_days is not None and window_lag_days > STALE_FACTOR_WINDOW_DAYS:
+        # the fit's window ends well before the accepted live series it is shown beside
+        headline_status = "NOT_A_HEADLINE_STALE_FACTOR_WINDOW"
     elif not composition_known:
         headline_status = "NOT_A_HEADLINE_COMPOSITION_UNKNOWN"
     elif t_stat is None:
         headline_status = "NOT_A_HEADLINE_NO_STANDARD_ERROR"
     elif not series_label.headline_allowed(
-        _fit_segments(row, start, end, used if isinstance(used, int) else 1)
+        _fit_segments(row, train_start, train_end, used if isinstance(used, int) else 1)
     ):
         # sprint-p123's layer rule: only MODEL_LIVE / ACCOUNT_LIVE segments, over
         # at least one year
@@ -5699,6 +5817,18 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "status": "AVAILABLE" if available else "UNAVAILABLE",
         "inference": inference,
         "headline_status": headline_status,
+        "window_lag_days": window_lag_days,
+        "research_lens_label": (
+            f"research lens: factor data through {end}, not a cutoff-current headline"
+            if window_lag_days is not None
+            and window_lag_days > STALE_FACTOR_WINDOW_DAYS
+            and isinstance(end, str)
+            else None
+        ),
+        "train_window_start": train_start,
+        "train_window_end": train_end,
+        "train_window_days": train_days,
+        "quality_flags": _fit_quality_flags(row),
         # one headline alpha per strategy: the fit on the accepted live return series
         # with a standard error and t-statistic; every other fit is secondary
         "lens_role": "HEADLINE"
@@ -5729,9 +5859,9 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "annualisation": ALPHA_ANNUALISATION,
         "annualisation_basis": (
             None
-            if days is None
+            if fit_days is None
             else "ANNUALISED_FROM_DAYS"
-            if days < 365
+            if fit_days < 365
             else "ANNUALISED"
         ),
         "alternatives": [],
@@ -5945,25 +6075,44 @@ def _factor_analysis(
             )
             rows.append(
                 {
-                    "alpha": diagnostic_alpha,
-                    "contribution_summary": (
-                        _factor_contribution_summary(model)
-                        if model.get("contributions")
-                        else None
-                    ),
+                    # a fit the sealed gate rejected publishes status and reason, no
+                    # result: its numbers sit under a labelled diagnostic detail only
+                    "alpha": _gate_withheld_alpha(),
+                    "diagnostic_detail": {
+                        "alpha": diagnostic_alpha,
+                        "exposures": diagnostic_exposures,
+                        "contribution_summary": (
+                            _factor_contribution_summary(model)
+                            if model.get("contributions")
+                            else None
+                        ),
+                        "dynamic": _gate_forensic_dynamic(diagnostics),
+                        "orthogonal_attribution": orthogonal_surface_fields.get(
+                            "orthogonal_attribution"
+                        ),
+                        "warning": "COMPUTED_NOT_ACCEPTED_FOR_PM_ALPHA_OR_EXPOSURE_CONCLUSIONS",
+                    },
+                    "contribution_summary": None,
                     "cost_coverage": _text(
                         model.get("cost_coverage"), "model.cost_coverage"
                     ),
                     "coverage": _object(model.get("coverage"), "model.coverage"),
-                    "diagnostics": diagnostics,
+                    "diagnostics": _gate_public_diagnostics(diagnostics),
                     "estimator": estimator,
                     "evidence_layer": _text(
                         model.get("evidence_layer"), "model.evidence_layer"
                     ),
-                    "exposures": diagnostic_exposures,
+                    "exposures": [],
                     "model_id": model_id,
                     "model_quality": model_quality,
-                    **orthogonal_surface_fields,
+                    **{
+                        key: (
+                            {"status": "WITHHELD_MODEL_QUALITY_GATE"}
+                            if key == "orthogonal_attribution"
+                            else value
+                        )
+                        for key, value in orthogonal_surface_fields.items()
+                    },
                     "selection_status": _text(
                         selection.get("status"), "selection.status"
                     ),
@@ -6514,6 +6663,19 @@ def _attach_alpha_alternatives(grouped: Sequence[Mapping[str, Any]]) -> None:
                     )
 
 
+# Factor-model audit D1: the economic-factor lens reads monthly-published French files
+# and ends before the cutoff, so a cutoff-current lens leads the panel.
+DEFAULT_LENS_ORDER: Final = ("ETF_STYLE", "RETURN_SECTOR", "ECONOMIC_FACTOR")
+
+
+def _current_default_lens(lenses: Sequence[Mapping[str, Any]]) -> str:
+    present = [item.get("lens_id") for item in lenses]
+    for lens_id in DEFAULT_LENS_ORDER:
+        if lens_id in present:
+            return lens_id
+    return str(present[0]) if present and present[0] else "ECONOMIC_FACTOR"
+
+
 def _decomposition_lenses_for_mode(
     root: Path,
     plan_bundle: Path,
@@ -6821,7 +6983,7 @@ def _decomposition_lenses_for_mode(
     _attach_alpha_alternatives(grouped)
     return (
         {
-            "default_lens": "ECONOMIC_FACTOR",
+            "default_lens": _current_default_lens(grouped),
             "lenses": grouped,
             "plan_bundle_id": plan_bundle.name,
             "plan_manifest_sha256": manifest_sha256,
