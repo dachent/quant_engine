@@ -1009,6 +1009,11 @@
       1
     ],
     [
+      "style_capture_assemble",
+      "base_proxy_factors",
+      1
+    ],
+    [
       "tt_source_manifest_builder",
       "portfolio_implementation_reconciliation",
       1
