@@ -5515,7 +5515,29 @@ def _coverage_evidence(
             declared_start: str | None = None
             declared_end: str | None = None
             proof = (completeness or {}).get((account_id, fact_type))
+            proof_gap: str | None = None
             if proof is not None and proof.get("status") == "DECLARED_COMPLETE":
+                # the closure proved the ledger's rows: the accepted records of this interval must
+                # be exactly those rows, and none may have been excluded
+                lo, hi = str(proof["declared_start"]), str(proof["declared_end"])
+                accepted_ids = {
+                    str(item.get("record_id"))
+                    for item in accepted
+                    if item.get(date_field) and lo <= str(item[date_field]) <= hi
+                }
+                proven_ids = {str(x) for x in proof.get("proven_record_ids", [])}
+                if excluded or accepted_ids != proven_ids:
+                    proof_gap = (
+                        f"; ledger closure {proof['closure']} proved the provider event stream "
+                        f"but the accepted records differ: {len(proven_ids - accepted_ids)} "
+                        f"proven records are not accepted, {len(accepted_ids - proven_ids)} "
+                        "accepted records are not proven"
+                    )
+            if (
+                proof is not None
+                and proof.get("status") == "DECLARED_COMPLETE"
+                and proof_gap is None
+            ):
                 # the ledger evaluated the declaration's closure on its own rows: every check passed
                 status = "DECLARED_COMPLETE"
                 disposition = "DECLARED_COMPLETE_BY_LEDGER_CLOSURE"
@@ -5526,6 +5548,8 @@ def _coverage_evidence(
                 missing_reason = (
                     f"completeness proved by ledger closure {proof['closure']}"
                 )
+            elif proof_gap is not None:
+                missing_reason += proof_gap
             elif proof is not None and proof.get("status") in _TYPED_OUTCOME_STATUS:
                 # governed, evidence-cited outcome that proves nothing about completeness
                 status, disposition = _TYPED_OUTCOME_STATUS[str(proof["status"])]

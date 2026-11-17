@@ -6082,7 +6082,9 @@ def test_unattributed_provider_records_counts_only_records_that_are_not_mapped()
 
 
 def _closure_row(
-    status: str, failed: list[tuple[str, int]] | None = None
+    status: str,
+    failed: list[tuple[str, int]] | None = None,
+    proven: list[str] | None = None,
 ) -> dict[str, Any]:
     checks = [
         {
@@ -6102,6 +6104,7 @@ def _closure_row(
         "declared_start": "2026-01-02",
         "declared_end": "2026-07-30",
         "checks": checks,
+        "proven_record_ids": proven or [],
     }
 
 
@@ -6154,7 +6157,11 @@ def test_a_closure_proof_does_not_hide_unavailable_amounts() -> None:
                 "record_id": "t-1",
             }
         ],
-        {("account-reserve", "transactions"): _closure_row("DECLARED_COMPLETE")},
+        {
+            ("account-reserve", "transactions"): _closure_row(
+                "DECLARED_COMPLETE", proven=["t-1"]
+            )
+        },
     )
     # the consumer's own rule still refuses a row with an unavailable amount
     assert row["unavailable_amount_count"] == 1
@@ -6200,3 +6207,85 @@ def test_a_governed_outcome_types_the_row_and_never_declares_it_complete(
     assert "owner ruling 2026-11-17" in row["missing_interval_reason"]
     assert row["declared_start"] is None and row["declared_end"] is None
     assert not baseline._declares_complete(row, date(2026, 7, 30))
+
+
+def _accepted(record_id: str, day: str = "2026-02-01") -> dict[str, Any]:
+    return {
+        "account_id": "account-reserve",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+        "event_date": day,
+        "record_id": record_id,
+    }
+
+
+def test_a_closure_proof_declares_complete_only_over_the_records_it_proved() -> None:
+    """Opus probe on real A5 inputs: the closure proved 31 ledger rows that were all excluded
+    (no strategy attribution) while the baseline accepted 18 others; the row must not be complete."""
+
+    proof = {
+        ("account-reserve", "transactions"): _closure_row(
+            "DECLARED_COMPLETE", proven=["t-1", "t-2", "t-3"]
+        )
+    }
+    complete = _matrix_row(
+        None, [_accepted("t-1"), _accepted("t-2"), _accepted("t-3")], proof
+    )
+    assert complete["status"] == "DECLARED_COMPLETE"
+    assert baseline._declares_complete(complete, date(2026, 7, 30))
+
+    # a proven record the baseline did not accept (here two were excluded as unattributed)
+    short = _matrix_row(
+        {("account-reserve", "transactions"): 2},
+        [_accepted("t-1")],
+        proof,
+    )
+    assert short["status"] != "DECLARED_COMPLETE"
+    assert not baseline._declares_complete(short, date(2026, 7, 30))
+    assert "2 proven records are not accepted" in short["missing_interval_reason"]
+    assert short["declared_start"] is None
+
+    # an accepted record the closure never saw
+    extra = _matrix_row(
+        None,
+        [_accepted("t-1"), _accepted("t-2"), _accepted("t-3"), _accepted("t-9")],
+        proof,
+    )
+    assert extra["status"] != "DECLARED_COMPLETE"
+    assert "1 accepted records are not proven" in extra["missing_interval_reason"]
+
+    # identical records but one was ALSO excluded: still not complete
+    excluded = _matrix_row(
+        {("account-reserve", "transactions"): 1},
+        [_accepted("t-1"), _accepted("t-2"), _accepted("t-3")],
+        proof,
+    )
+    assert excluded["status"] != "DECLARED_COMPLETE"
+
+    # records outside the declared interval do not count against it
+    outside = _matrix_row(
+        None,
+        [
+            _accepted("t-1"),
+            _accepted("t-2"),
+            _accepted("t-3"),
+            _accepted("t-0", "2025-12-01"),
+        ],
+        proof,
+    )
+    assert outside["status"] == "DECLARED_COMPLETE"
+
+
+def test_a_row_with_all_events_unattributed_stays_typed_not_complete_despite_a_proof() -> (
+    None
+):
+    row = _matrix_row(
+        {("account-reserve", "transactions"): 31},
+        [],
+        {
+            ("account-reserve", "transactions"): _closure_row(
+                "DECLARED_COMPLETE", proven=[f"t-{i}" for i in range(31)]
+            )
+        },
+    )
+    assert row["status"] == "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF"
+    assert "31 proven records are not accepted" in row["missing_interval_reason"]

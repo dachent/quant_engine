@@ -554,3 +554,33 @@ def test_the_schwab_closure_only_covers_a_schwab_account() -> None:
     )[0]
     assert row["status"] == ec.CLOSURE_FAILED
     assert _failed(row) == ["ACCOUNT_BELONGS_TO_CLOSURE_PROVIDER"]
+
+
+def test_a_closure_row_names_the_records_it_proved() -> None:
+    day = _days()[1]
+    flows = [_flow(A, day, "1000"), _flow(B, day, "7")]
+    rows = _run([_entry()], flows, _cin(A, {day: "1000"}))
+    assert rows[0]["status"] == ec.DECLARED_COMPLETE
+    assert rows[0]["proven_record_ids"] == [f"{A}:{day}:1000:DEPOSIT_OR_WITHDRAWAL"]
+    # only the account's own flows inside the interval are named
+    out = _run([_entry()], [_flow(A, date(2025, 12, 1), "5")], _cin(A))
+    assert out[0]["proven_record_ids"] == []
+
+
+def test_a_nonzero_internal_cash_transfer_component_must_tie_to_the_ledger_flows() -> (
+    None
+):
+    day = _days()[2]
+    cin = _cin(A)
+    for row in cin:
+        if row["accounting_date"] == day.isoformat():
+            row["components"].append(
+                {"source_component_key": "internalCashTransfers", "value": "40"}
+            )
+    broken = _run([_entry()], [], cin)[0]
+    assert "STATEMENT_TOTALS_EQUAL_LEDGER_FLOWS" in _failed(broken)
+    flows = [
+        _flow(A, day, "40", "TRANSFER:INTERNAL:IN"),
+        _flow(B, day, "-40", "TRANSFER:INTERNAL:OUT"),
+    ]
+    assert _run([_entry()], flows, cin)[0]["status"] == ec.DECLARED_COMPLETE

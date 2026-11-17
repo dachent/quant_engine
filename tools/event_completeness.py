@@ -50,7 +50,11 @@ _FLOW_TYPES: Final = frozenset(
         "TRANSFER:INTERNAL:OUT",
     }
 )
-_STATEMENT_FLOW_KEYS: Final = ("depositsWithdrawals", "assetTransfers")
+_STATEMENT_FLOW_KEYS: Final = (
+    "depositsWithdrawals",
+    "assetTransfers",
+    "internalCashTransfers",
+)
 # A closed account is derived, never declared: its NAV settles to dust (at most this many dollars)
 # and stays there with no position, transaction or flow after the settling day, for a stretch long
 # enough that a missing observation cannot pass as a closure.
@@ -291,7 +295,7 @@ def _evaluate_schwab_empty(
     positions: Sequence[Mapping[str, Any]],
     transactions: Sequence[Mapping[str, Any]],
     as_of_date: date,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     """The position set is empty from the settled day to the cutoff.
 
     Derived from the ledger rows alone: the account's last security activity (any transaction
@@ -374,7 +378,7 @@ def _evaluate_schwab_empty(
         and _day(p["as_of_date"], "position as_of_date") >= floor
     ]
     record("NO_POSITION_ROWS_SINCE_LAST_SECURITY_ACTIVITY", len(stale_positions))
-    return checks
+    return checks, []
 
 
 def _evaluate_ibkr_flows(
@@ -385,7 +389,7 @@ def _evaluate_ibkr_flows(
     positions: Sequence[Mapping[str, Any]],
     transactions: Sequence[Mapping[str, Any]],
     as_of_date: date,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     start, end = declaration.declared_start, declaration.declared_end
     account = declaration.account_id
     checks: list[dict[str, Any]] = []
@@ -474,7 +478,8 @@ def _evaluate_ibkr_flows(
         and start <= _day(f.get("event_date"), "flow event_date") <= end
     ]
     record("INTERNAL_TRANSFERS_PAIRED", len(unpaired))
-    return checks
+    proven = sorted(str(f["record_id"]) for f in in_interval if f.get("record_id"))
+    return checks, proven
 
 
 def evaluate(
@@ -512,6 +517,7 @@ def evaluate(
             )
             continue
         provider, fact = _CLOSURES[declaration.closure]
+        proven_ids: list[str] = []
         if account_provider.get(declaration.account_id) != provider:
             checks = [
                 {
@@ -521,7 +527,7 @@ def evaluate(
                 }
             ]
         elif declaration.closure == CLOSURE_SCHWAB_EMPTY:
-            checks = _evaluate_schwab_empty(
+            checks, proven_ids = _evaluate_schwab_empty(
                 declaration,
                 nav_values_by_account.get(declaration.account_id, {}),
                 positions,
@@ -529,7 +535,7 @@ def evaluate(
                 as_of_date,
             )
         else:
-            checks = _evaluate_ibkr_flows(
+            checks, proven_ids = _evaluate_ibkr_flows(
                 declaration,
                 flows,
                 change_in_nav_by_provider.get(provider, ()),
@@ -553,6 +559,7 @@ def evaluate(
                 "fact_type": fact,
                 "provider_id": provider,
                 "citation": declaration.citation,
+                "proven_record_ids": proven_ids,
                 "status": DECLARED_COMPLETE if passed else CLOSURE_FAILED,
             }
         )
