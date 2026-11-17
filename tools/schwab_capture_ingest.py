@@ -1160,8 +1160,8 @@ def _liquidation_values(
 
     The value is the figure ``schwab_nav_derive.official_value`` builds the NAV from, so it is
     published (``closure == "CLOSED"``) only when the provider's own native balance of the cutoff
-    day, an observation and not a repeat of the day before, agrees with it within the derivation's
-    tolerance.  Any other account keeps ``UNAVAILABLE`` and names why; the value is never a
+    day agrees with it within the derivation's tolerance (a repeat of the day before that
+    disagrees is a possible stale carry and proves nothing).  Any other account keeps ``UNAVAILABLE`` and names why; the value is never a
     provider-quoted total (those are last-trade prices, not the official close).
     """
 
@@ -1190,16 +1190,18 @@ def _liquidation_values(
         item: dict[str, Any] = {"value": value}
         if not kept or kept[-1][0] != cutoff.as_of_date:
             item["closure"] = "NO_NATIVE_CUTOFF_ROW"
-        elif len(kept) > 1 and kept[-1][1] == kept[-2][1]:
-            item["native"] = kept[-1][1]
-            item["closure"] = "NATIVE_CUTOFF_ROW_REPEATS_PRIOR_DAY"
         else:
             item["native"] = kept[-1][1]
-            item["closure"] = (
-                "CLOSED"
-                if abs(value - kept[-1][1]) <= derive_tool.DEFAULT_TOLERANCE
-                else "NOT_CLOSED"
-            )
+            agrees = abs(value - kept[-1][1]) <= derive_tool.DEFAULT_TOLERANCE
+            if agrees:
+                # the value is built from the capture, independently of the native series:
+                # agreement proves it even where the native row repeats the day before
+                item["closure"] = "CLOSED"
+            elif len(kept) > 1 and kept[-1][1] == kept[-2][1]:
+                # a disagreeing repeat may be a stale carry: not a measurement of the day
+                item["closure"] = "NATIVE_CUTOFF_ROW_REPEATS_PRIOR_DAY"
+            else:
+                item["closure"] = "NOT_CLOSED"
         out[internal] = item
     return out
 

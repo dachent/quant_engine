@@ -23,8 +23,9 @@ balances are unavailable in general, because downstream gates copy that text.
 The retained-capture ingest (`tools/schwab_capture_ingest.py`) derives each
 account's liquidation value as its holdings at the official closes plus its
 cash, the same figure the NAV derivation builds, and publishes it only when the
-provider's own native balance of the cutoff day (an observation, not a repeat of
-the day before) agrees within the derivation tolerance. Any other account keeps
+provider's own native balance of the cutoff day agrees within the derivation tolerance
+(the value is built from the capture, so agreement proves it even where that native row
+repeats the day before; a disagreeing repeat is a possible stale carry and proves nothing). Any other account keeps
 `UNAVAILABLE` and the binding's `liquidation_value` block names the closure
 verdict; the provider-quoted total is never used (it is priced at the last
 trade, not the official close). Structure is not a gap: Investor Checking and an

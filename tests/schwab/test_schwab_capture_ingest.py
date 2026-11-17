@@ -1965,9 +1965,12 @@ def test_the_closure_tolerance_and_the_native_row_rules(tmp_path: Path) -> None:
     assert (
         verdict({**prior, "6/13/2031": row(official + Decimal("0.06"))}) == "NOT_CLOSED"
     )
-    # a repeat of the prior day is a carry, not an observation of the cutoff day
+    # a repeat of the prior day that agrees is still the independently derived value;
+    # a repeat that disagrees may be a stale carry and proves nothing
+    assert verdict({"6/12/2031": row(official), "6/13/2031": row(official)}) == "CLOSED"
+    stale = official + Decimal("7")
     assert (
-        verdict({"6/12/2031": row(official), "6/13/2031": row(official)})
+        verdict({"6/12/2031": row(stale), "6/13/2031": row(stale)})
         == "NATIVE_CUTOFF_ROW_REPEATS_PRIOR_DAY"
     )
     assert verdict(prior) == "NO_NATIVE_CUTOFF_ROW"
