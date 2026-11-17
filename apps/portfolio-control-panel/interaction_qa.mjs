@@ -1008,7 +1008,13 @@ for (const group of requiredWeeklyGroups) {
     rows: await page.locator("#weekly-table tbody tr").count(),
   });
 }
-const weeklyRows = weeklyGroupEvidence.find((item) => item.group === "STRATEGY")?.rows;
+// The strategy view also pins the benchmarks the performance charts name (payload-carried): they follow the strategy rows.
+const weeklyPinnedBenchmarks = await page.evaluate(() => {
+  const data = window.PORTFOLIO_DATA;
+  const named = new Set((data?.performance_tab?.benchmarks || []).map((item) => item.series_id));
+  return (data?.weekly_returns?.series || []).filter((row) => named.has(row.series_id) && !(row.display_groups || []).includes("STRATEGY")).length;
+});
+const weeklyRows = (weeklyGroupEvidence.find((item) => item.group === "STRATEGY")?.rows ?? NaN) - weeklyPinnedBenchmarks;
 const benchmarkRows = weeklyGroupEvidence.find((item) => item.group === "CORE_BENCHMARK")?.rows;
 checks.push(check(
   "Every weekly display group is rendered and exercised",

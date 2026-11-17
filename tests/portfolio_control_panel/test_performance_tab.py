@@ -1515,3 +1515,34 @@ def test_boundary_week_is_backtest_not_mixed_and_explicit_flags_win() -> None:
     back = [3, "2026-01-19", "2026-01-23", "COMPLETE", ["ORIGIN_BACKTEST"]]
     assert tab._flag_origin(back) == "BACKTEST"
     assert tab._origin_of(back, None, "LIVE_PLUS_BACKTEST") == "BACKTEST"
+
+
+def test_the_last_week_stays_partial_while_a_strategy_line_is_partial_in_it() -> None:
+    """A seven-day calendar is still PARTIAL_BOUNDARY at a Friday cutoff although the global flag is complete."""
+
+    def _panel_with(status: str) -> dict[str, Any]:
+        panel = _panel()
+        panel["weekly_returns"]["current_week"] = {
+            "is_partial": False,
+            "data_through_date": "2026-03-05",
+            "week_start": WEEKS[7],
+        }
+        for row in panel["weekly_returns"]["series"]:
+            for mode_meta in row["observation_meta_by_mode"].values():
+                if WEEKS[7] in mode_meta:
+                    mode_meta[WEEKS[7]][3] = "COMPLETE"
+        crypto = panel["weekly_returns"]["series"][0]["observation_meta_by_mode"]
+        for mode_meta in crypto.values():
+            if WEEKS[7] in mode_meta:
+                mode_meta[WEEKS[7]][3] = status
+        return panel
+
+    partial = _panel_with("PARTIAL_BOUNDARY")
+    block = tab.build_performance_tab(partial)
+    assert block["modes"]["LIVE_ONLY"]["last_week_partial"] is True
+    tab.verify_performance_tab(block, partial)
+
+    complete = _panel_with("COMPLETE")
+    block = tab.build_performance_tab(complete)
+    assert block["modes"]["LIVE_ONLY"]["last_week_partial"] is False
+    tab.verify_performance_tab(block, complete)
