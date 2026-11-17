@@ -12,6 +12,17 @@ from typing import Any
 
 import pytest
 
+from quant_engine.core import (
+    AdapterIdentity,
+    CoverageClaim,
+    CoverageStatus,
+    GenerationManifest,
+    SourceArtifact,
+    VerificationStatus,
+    publish_generation,
+    stage_generation,
+)
+from quant_engine.core.contracts import canonical_json_bytes
 from tools import statement_nav_generation as gen
 
 ACCOUNT = "account-0123456789abcdef"
@@ -161,6 +172,50 @@ def _write(root: Path, name: str, content: str) -> dict[str, Any]:
     }
 
 
+def _census(
+    root: Path, accounts: list[dict[str, Any]], assignments: list[dict[str, Any]]
+) -> dict[str, str]:
+    """A governed provenance generation (staged and published) and the reference to it."""
+
+    catalog = {
+        "accounts": accounts,
+        "as_of_date": "2026-11-06",
+        "assignments": assignments,
+        "baseline_schema_version": 1,
+    }
+    raw = canonical_json_bytes(catalog)
+    digest = hashlib.sha256(raw).hexdigest()
+    artifact = SourceArtifact(
+        artifact_id="normalized/portfolio-baseline.json",
+        sha256=digest,
+        size_bytes=len(raw),
+        as_of_date=date(2026, 11, 6),
+        schema_name="portfolio-baseline-catalog",
+        schema_version="1",
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 11, 6),
+        adapter=AdapterIdentity("synthetic-provenance", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic census",
+            fact_types=("accounts",),
+            observed_start=date(2026, 11, 6),
+            observed_end=date(2026, 11, 6),
+        ),
+        artifacts=(artifact,),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(root, manifest)
+    (manifest_path.parent / "portfolio-baseline.json").write_bytes(raw)
+    publish_generation(root, manifest.generation_id)
+    return {
+        "catalog_sha256": digest,
+        "generation_id": manifest.generation_id,
+        "root": str(root),
+    }
+
+
 def _spec(
     tmp_path: Path,
     provider: str,
@@ -189,31 +244,17 @@ def _spec(
                 }
             )
     alias = "John Hancock" if provider == "john_hancock" else "Composer"
-    census = {
-        "accounts": census_accounts
+    census_ref = _census(
+        tmp_path / f"census-{provider}",
+        census_accounts
         if census_accounts is not None
-        else [
-            {
-                "account_id": ACCOUNT,
-                "aliases": [alias],
-                "role": "INVESTMENT",
-            }
-        ],
-        "assignments": [
-            {"account_id": ACCOUNT, "effective_start": census_start},
-        ],
-    }
-    census_bytes = json.dumps(census).encode()
-    census_path = tmp_path / f"census-{provider}.json"
-    census_path.write_bytes(census_bytes)
+        else [{"account_id": ACCOUNT, "provider": alias.upper(), "role": "INVESTMENT"}],
+        [{"account_id": ACCOUNT, "effective_start": census_start}],
+    )
     spec = {
         "as_of_date": "2026-11-06",
         "baseline": {"statement_count": len(statements)},
-        "census_catalog": {
-            "path": str(census_path),
-            "sha256": hashlib.sha256(census_bytes).hexdigest(),
-            "size_bytes": len(census_bytes),
-        },
+        "census_catalog": census_ref,
         "coverage_end": coverage[1],
         "coverage_start": coverage[0],
         "crosswalk": [
@@ -825,42 +866,89 @@ def test_john_hancock_amount_swapped_between_labels_is_refused() -> None:
         gen.parse_john_hancock("\n".join(lines))
 
 
-def test_internal_account_must_be_a_pinned_census_account(tmp_path: Path) -> None:
-    """P1-4: the account is read from a hash-pinned census catalog, not from the spec."""
+def test_internal_account_must_be_in_the_governed_census(tmp_path: Path) -> None:
+    """P1-4: the account is read from the governed provenance generation the root's CURRENT
+    pointer names, not from a spec-supplied copy."""
 
-    spec = _jh(tmp_path)
-    data = json.loads(spec.read_text())
-    census = json.loads(Path(data["census_catalog"]["path"]).read_text())
-    census["accounts"][0]["account_id"] = "account-ffffffffffffffff"
-    raw = json.dumps(census).encode()
-    Path(data["census_catalog"]["path"]).write_bytes(raw)
-    data["census_catalog"]["sha256"] = hashlib.sha256(raw).hexdigest()
-    data["census_catalog"]["size_bytes"] = len(raw)
-    spec.write_text(json.dumps(data))
+    # an account id the census does not hold
+    spec = _jh(
+        tmp_path,
+        census_accounts=[
+            {
+                "account_id": "account-ffffffffffffffff",
+                "provider": "JOHN HANCOCK",
+                "role": "INVESTMENT",
+            }
+        ],
+    )
     with pytest.raises(gen.StatementGenerationError, match="not a census account"):
         gen.build_generation(spec)
 
-    # a census file whose bytes differ from the pin is refused
+    # a catalog whose bytes differ from the configured sha256
     other = tmp_path / "pinned"
     other.mkdir()
     spec = _jh(other)
     data = json.loads(spec.read_text())
-    data["census_catalog"]["sha256"] = "0" * 64
+    data["census_catalog"]["catalog_sha256"] = "0" * 64
     spec.write_text(json.dumps(data))
     with pytest.raises(gen.StatementGenerationError, match="differs from its pin"):
         gen.build_generation(spec)
 
-    # an account of another provider is refused
-    third = tmp_path / "wrong-provider"
+    # a generation id that is not what the root's CURRENT pointer names (a copy, a forgery)
+    third = tmp_path / "not-current"
     third.mkdir()
+    spec = _jh(third)
+    data = json.loads(spec.read_text())
+    data["census_catalog"]["generation_id"] = "1" * 64
+    spec.write_text(json.dumps(data))
+    with pytest.raises(gen.StatementGenerationError, match="not the current authority"):
+        gen.build_generation(spec)
+
+    # a root with no governed generation at all (a hand-written catalog in a plain folder)
+    fourth = tmp_path / "plain"
+    fourth.mkdir()
+    spec = _jh(fourth)
+    data = json.loads(spec.read_text())
+    data["census_catalog"]["root"] = str(fourth / "empty")
+    spec.write_text(json.dumps(data))
+    with pytest.raises(gen.StatementGenerationError, match="no current generation"):
+        gen.build_generation(spec)
+
+    # an account of another provider is refused
+    fifth = tmp_path / "wrong-provider"
+    fifth.mkdir()
     spec = _jh(
-        third,
+        fifth,
         census_accounts=[
-            {"account_id": ACCOUNT, "aliases": ["Composer"], "role": "INVESTMENT"}
+            {"account_id": ACCOUNT, "provider": "COMPOSER", "role": "INVESTMENT"}
         ],
     )
     with pytest.raises(gen.StatementGenerationError, match="not this provider"):
         gen.build_generation(spec)
+
+    # a census without aliases is a refusal, not a KeyError
+    sixth = tmp_path / "no-aliases"
+    sixth.mkdir()
+    spec = _jh(sixth, census_accounts=[{"account_id": ACCOUNT, "role": "INVESTMENT"}])
+    with pytest.raises(gen.StatementGenerationError, match="not this provider"):
+        gen.build_generation(spec)
+
+
+def test_the_census_identity_is_written_into_the_generation(tmp_path: Path) -> None:
+    spec = _jh(tmp_path)
+    ref = json.loads(spec.read_text())["census_catalog"]
+
+    catalog, manifest, _bytes = gen.build_generation(spec)
+
+    assert catalog["census"] == {
+        "catalog_sha256": ref["catalog_sha256"],
+        "generation_id": ref["generation_id"],
+    }
+    assert any(
+        a.artifact_id == "authority/portfolio-baseline.json"
+        and a.sha256 == ref["catalog_sha256"]
+        for a in manifest.artifacts
+    )
 
 
 def test_a_first_statement_with_a_balance_makes_the_generation_partial(
@@ -983,4 +1071,36 @@ def test_john_hancock_negative_contribution_is_refused() -> None:
     with pytest.raises(
         gen.StatementGenerationError, match="contribution row is negative"
     ):
+        gen.parse_john_hancock(text)
+
+
+def test_john_hancock_gain_loss_relabelled_as_dividends_is_refused() -> None:
+    """Forged text: a negative amount cannot be dividends/interest."""
+
+    text = _jh_text(
+        date(2026, 1, 1),
+        date(2026, 3, 31),
+        opening="1,000.00",
+        items=["-30.00", "-2.00"],
+        closing="968.00",
+        labels=["Dividends/Interest", "Administrative Fee"],
+    )
+    with pytest.raises(gen.StatementGenerationError, match="dividends row is negative"):
+        gen.parse_john_hancock(text)
+
+
+def test_john_hancock_printed_total_without_a_row_is_refused() -> None:
+    """The summary check is two-way: a printed contribution with no contribution row."""
+
+    text = _jh_text(
+        date(2026, 1, 1),
+        date(2026, 3, 31),
+        opening="1,000.00",
+        items=["30.00", "-20.00"],
+        closing="1,010.00",
+    ).replace(
+        "Closing Balance   $1,010.00",
+        "Participant Contributions   $ 777.00\nClosing Balance   $1,010.00",
+    )
+    with pytest.raises(gen.StatementGenerationError, match="no activity row accounts"):
         gen.parse_john_hancock(text)

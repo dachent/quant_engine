@@ -33,6 +33,7 @@ from quant_engine.core import (
     SourceArtifact,
     VerificationStatus,
     hash_file,
+    read_current,
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
@@ -190,7 +191,11 @@ def _jh_check_fund_split(
 
 
 def _jh_check_summary(
-    lines: list[str], labels: list[str], items: list[Decimal]
+    lines: list[str],
+    labels: list[str],
+    items: list[Decimal],
+    opening: Decimal,
+    closing: Decimal,
 ) -> None:
     """The page-1 summary prints the contribution and the market change as totals: the
     rows labelled as such must add up to values printed there."""
@@ -219,6 +224,16 @@ def _jh_check_summary(
             raise StatementGenerationError(
                 f"John Hancock {name} rows do not add up to the printed summary total"
             )
+    # two-way: a printed total no row accounts for (a contribution that has no row) is refused
+    fees = amounts.get("Administrative Fee", _ZERO) + amounts.get(
+        "General Administrative Charge", _ZERO
+    )
+    explained = {*groups.values(), fees, -fees, opening, closing}
+    stray = printed - explained
+    if stray:
+        raise StatementGenerationError(
+            "John Hancock summary prints a total no activity row accounts for"
+        )
 
 
 def _jh_labelled_items(
@@ -266,9 +281,13 @@ def _jh_labelled_items(
         for match in re.finditer(_MONEY, line)
     ]
     _jh_check_fund_split(positioned, items, opening, closing, labels)
-    _jh_check_summary(lines, labels, items)
+    _jh_check_summary(lines, labels, items, opening, closing)
     for label, item in zip(labels, items, strict=True):
-        # semantics: a contribution is never a negative amount
+        # semantics: dividends/interest are never negative
+        if label == "Dividends/Interest" and item < _ZERO:
+            raise StatementGenerationError(
+                "John Hancock dividends row is negative: label and amount do not agree"
+            )
         if label == "Roth 401(k) Contribution" and item < _ZERO:
             raise StatementGenerationError(
                 "John Hancock contribution row is negative: label and amount do not agree"
@@ -673,28 +692,45 @@ def _composer_table_closure(
     }
 
 
-def _census_account_start(pin: object, account_id: str, label: str) -> date | None:
-    """The account's start in the pinned census (provenance) catalog, or None if it has none.
+def _census_account_start(
+    ref: object, account_id: str, label: str
+) -> tuple[date | None, SourceArtifact]:
+    """The account's start in the GOVERNED census: the published baseline generation.
 
-    The catalog must be the pinned bytes, carry the account as an INVESTMENT account whose
-    alias names this provider, and the start is the earliest dated assignment of the account.
+    The catalog is read from the generation the root's CURRENT pointer names (the pointer
+    must name the configured generation id and the catalog must hash to the configured
+    sha256), so a copy or a hand-written catalog cannot stand in for it.  The account must
+    be an INVESTMENT account of this provider in its accounts; its start is the earliest
+    dated assignment.  The returned artifact identifies the census in the manifest.
     """
 
-    if not isinstance(pin, dict) or set(pin) != {"path", "sha256", "size_bytes"}:
-        raise StatementGenerationError("census catalog pin has wrong keys")
+    if not isinstance(ref, dict) or set(ref) != {
+        "catalog_sha256",
+        "generation_id",
+        "root",
+    }:
+        raise StatementGenerationError("census reference has wrong keys")
+    root = Path(_text(ref["root"], "census root"))
+    generation_id = _text(ref["generation_id"], "census generation_id")
     try:
-        raw = Path(str(pin["path"])).read_bytes()
+        pointer = read_current(root)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise StatementGenerationError("census root has no current generation") from exc
+    if pointer.generation_id != generation_id:
+        raise StatementGenerationError("configured census is not the current authority")
+    path = root / "generations" / generation_id / "portfolio-baseline.json"
+    try:
+        raw = path.read_bytes()
     except OSError as exc:
         raise StatementGenerationError("census catalog is unreadable") from exc
-    if (
-        hashlib.sha256(raw).hexdigest() != pin["sha256"]
-        or len(raw) != pin["size_bytes"]
-    ):
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != _text(ref["catalog_sha256"], "census catalog_sha256"):
         raise StatementGenerationError("census catalog differs from its pin")
     try:
         catalog = json.loads(raw)
         accounts = catalog["accounts"]
         assignments = catalog["assignments"]
+        as_of = _date(catalog["as_of_date"], "census as_of_date")
     except (ValueError, KeyError, TypeError) as exc:
         raise StatementGenerationError("census catalog shape differs") from exc
     matches = [item for item in accounts if item.get("account_id") == account_id]
@@ -702,15 +738,25 @@ def _census_account_start(pin: object, account_id: str, label: str) -> date | No
         raise StatementGenerationError("internal account is not a census account")
     account = matches[0]
     provider = label.replace("_", " ")
-    aliases = [str(alias).split("|")[0].strip().upper() for alias in account["aliases"]]
-    if account.get("role") != "INVESTMENT" or provider not in aliases:
+    if (
+        account.get("role") != "INVESTMENT"
+        or str(account.get("provider", "")).upper() != provider
+    ):
         raise StatementGenerationError("census account is not this provider's account")
     starts = [
         _date(item["effective_start"], "census assignment start")
         for item in assignments
         if item.get("account_id") == account_id and item.get("effective_start")
     ]
-    return min(starts) if starts else None
+    artifact = SourceArtifact(
+        artifact_id="authority/portfolio-baseline.json",
+        sha256=digest,
+        size_bytes=len(raw),
+        as_of_date=as_of,
+        schema_name="portfolio-baseline-catalog",
+        schema_version=str(catalog.get("baseline_schema_version", "unknown")),
+    )
+    return (min(starts) if starts else None), artifact
 
 
 def _us_date(text: str) -> str:
@@ -984,7 +1030,7 @@ def build_generation(
     internal = _text(crosswalk[0]["internal_account_id"], "internal_account_id")
     if re.fullmatch(r"account-[0-9a-f]{16}", internal) is None:
         raise StatementGenerationError("internal account ID is invalid")
-    census_start = _census_account_start(
+    census_start, census_artifact = _census_account_start(
         spec["census_catalog"], internal, str(meta["label"])
     )
     identity = _text(spec["identity"], "identity")
@@ -1171,6 +1217,10 @@ def build_generation(
         ],
         "as_of_date": generation_as_of.isoformat(),
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
+        "census": {
+            "catalog_sha256": census_artifact.sha256,
+            "generation_id": dict(spec["census_catalog"])["generation_id"],
+        },
         "continuity_breaks": breaks,
         "coverage": {
             "cadence": meta["cadence"],
@@ -1239,7 +1289,7 @@ def build_generation(
             observed_end=coverage_end,
             known_gaps=tuple(known_gaps),
         ),
-        artifacts=(*artifacts, normalized),
+        artifacts=(*artifacts, census_artifact, normalized),
         verification=VerificationStatus.VERIFIED,
     )
     return catalog, manifest, catalog_bytes
