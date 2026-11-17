@@ -3049,6 +3049,26 @@ def _itemized_candidates(
         + reserve_value,
     }
     at_cutoff.update(account_lane)
+    # The current capital identity is systematic + the CURRENT reserve (the reserve
+    # classification row, statement-dated under Decision B) + the retained excluded
+    # balance; the allocation_history reserve is a dated snapshot, not the current one.
+    current_reserve = next(
+        (
+            to_decimal(item.get("latest_value_usd"))
+            for item in rows(ctx.report, "account_summary")
+            if item.get("account_id") == "reserve-classification"
+        ),
+        None,
+    )
+    if current_reserve is not None:
+        retained = summary_value(ctx, "Retained excluded systematic balance")
+        retained_value = retained[1] if retained and retained[1] is not None else Decimal(0)
+        at_cutoff["sum(current account values at cutoff) + current reserve"] = (
+            cutoff_systematic + current_reserve
+        )
+        at_cutoff[
+            "sum(current account values at cutoff) + current reserve + retained excluded"
+        ] = cutoff_systematic + current_reserve + retained_value
     strategy = row.get("strategy_id")
     if isinstance(strategy, str):
         for item in rows(ctx.report, "allocation_history"):
