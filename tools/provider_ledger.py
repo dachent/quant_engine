@@ -11274,8 +11274,14 @@ def build_catalog(
             if run_observation is not None
             else as_of
         )
+        # a provider fact is admitted downstream only under the provider's selected
+        # generation; the statement-derived generation id stays beside it
         projected = [
-            row
+            {
+                **row,
+                "generation_id": manifests[zero_provider].generation_id,
+                "observation_generation_id": row["generation_id"],
+            }
             for row in zero_rows
             if date.fromisoformat(row["as_of_date"]) <= zero_cutoff
         ]
