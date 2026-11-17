@@ -201,7 +201,7 @@ _RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST: Final = (
 _MATRIXPORT_OWNER_EPOCH: Final = {
     "effective_start": "2025-12-06",
     "observed_start": "2025-12-07",
-    "observed_end": "2026-09-03",
+    "observed_end": "2026-11-06",
 }
 _MATRIXPORT_GAP_SPAN_RECEIPTS: Final = (
     {
@@ -244,22 +244,22 @@ _HISTORY_AUTHORITY_SEMANTIC_SHA256: Final = (
 )
 _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
     "accepted_generation_id": (
-        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
+        "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f"
     ),
     "accepted_manifest_sha256": (
-        "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+        "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
     ),
     "accepted_catalog_sha256": (
-        "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
+        "972eb0934fff097414f7698295255cf7e981d417387c0b9342756a71508e5adf"
     ),
     "current_generation_id": (
-        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
+        "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f"
     ),
     "current_manifest_sha256": (
-        "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+        "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
     ),
     "current_catalog_sha256": (
-        "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
+        "972eb0934fff097414f7698295255cf7e981d417387c0b9342756a71508e5adf"
     ),
     "legacy_generation_id": (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
