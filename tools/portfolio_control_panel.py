@@ -5552,6 +5552,10 @@ def _available_prefixed(status: object) -> str:
     return text if text.startswith("AVAILABLE_") else "AVAILABLE_" + text
 
 
+# a factor window ending more than this many days before the live series end is stale
+STALE_FACTOR_WINDOW_DAYS = 10
+
+
 def _fit_segments(
     row: Mapping[str, Any], start: Any, end: Any, observations: int
 ) -> list[series_label.SeriesLabel]:
@@ -5673,10 +5677,22 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         or (isinstance(layers, list) and "BACKTEST" in layers)
     )
     composition_known = isinstance(backtest, int) and not isinstance(backtest, bool)
+    live_end = coverage.get("canonical_live_observed_end")
+    window_lag_days = (
+        (date.fromisoformat(live_end) - date.fromisoformat(end)).days
+        if isinstance(live_end, str) and isinstance(end, str)
+        else None
+    )
     if net is None and gross is None:
         headline_status = "UNAVAILABLE_NO_ALPHA"
+    elif row.get("status") not in (None, "AVAILABLE"):
+        # a fit the sealed holdout gate rejected is forensic only, whatever its SE
+        headline_status = "NOT_A_HEADLINE_MODEL_GATE_FAILED"
     elif includes_backtest:
         headline_status = "NOT_A_HEADLINE_INCLUDES_BACKTEST"
+    elif window_lag_days is not None and window_lag_days > STALE_FACTOR_WINDOW_DAYS:
+        # the fit's window ends well before the accepted live series it is shown beside
+        headline_status = "NOT_A_HEADLINE_STALE_FACTOR_WINDOW"
     elif not composition_known:
         headline_status = "NOT_A_HEADLINE_COMPOSITION_UNKNOWN"
     elif t_stat is None:
@@ -5693,6 +5709,7 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "status": "AVAILABLE" if available else "UNAVAILABLE",
         "inference": inference,
         "headline_status": headline_status,
+        "window_lag_days": window_lag_days,
         # one headline alpha per strategy: the fit on the accepted live return series
         # with a standard error and t-statistic; every other fit is secondary
         "lens_role": "HEADLINE"

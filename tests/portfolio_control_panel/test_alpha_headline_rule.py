@@ -159,3 +159,28 @@ def test_the_layer_and_the_opening_close_decide_the_headline() -> None:
         assert panel._alpha_context(row)["headline_status"] == (
             "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE"
         )
+
+
+def test_a_fit_the_sealed_gate_rejected_is_never_a_headline() -> None:
+    """Factor-model audit D3: a DIAGNOSTIC_ONLY fit with a standard error stood as a headline."""
+
+    row = _row("0.349", "0.05", 0)
+    row["status"] = "DIAGNOSTIC_ONLY"
+    ctx = panel._alpha_context(row)
+    assert ctx["headline_status"] == "NOT_A_HEADLINE_MODEL_GATE_FAILED"
+    assert ctx["lens_role"] == "SECONDARY"
+    assert panel._alpha_headline(row) is False
+
+
+def test_a_fit_window_that_stops_before_the_live_series_is_not_a_headline() -> None:
+    """Factor-model audit D1: the default lens ended 2026-08-31 beside 2026-11-06 figures."""
+
+    row = _row("0.20", "0.05", 0)
+    row["coverage"]["observed_end"] = "2026-08-31"
+    row["coverage"]["canonical_live_observed_end"] = "2026-11-06"
+    ctx = panel._alpha_context(row)
+    assert ctx["window_lag_days"] == 67
+    assert ctx["headline_status"] == "NOT_A_HEADLINE_STALE_FACTOR_WINDOW"
+    # a few days of lag is not stale
+    row["coverage"]["observed_end"] = "2026-11-02"
+    assert panel._alpha_context(row)["headline_status"] == "HEADLINE_ALLOWED"
