@@ -28,10 +28,12 @@ RISK_FREE_DAILY_MIN: Final = Decimal("-0.0005")
 RISK_FREE_DAILY_MAX: Final = Decimal("0.005")
 # monthly payers go ex in the first days of the month
 MONTHLY_EX_DATE_LAST_DAY: Final = 5
-# every ex-date of the last three years must be recorded: successive distributions
-# are never more than two months apart (a missing month stays a price drop)
+# every ex-date of the last three years must be recorded. Measured on the R3-BASE-2
+# capture, successive BIL and HYG distributions are 13-49 days apart (the longest are
+# the Dec 31 -> early February steps); one missing month gives at least 56, so 52
+# separates them: a missing month stays a price drop.
 DIVIDEND_GAP_WINDOW_DAYS: Final = 1095
-MONTHLY_MAX_GAP_DAYS: Final = 70
+MONTHLY_MAX_GAP_DAYS: Final = 52
 
 
 class BaseProxyError(ValueError):

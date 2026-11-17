@@ -170,7 +170,7 @@ def test_an_interior_french_gap_is_refused_not_filled_from_bil() -> None:
 
 
 def test_an_earlier_missing_monthly_distribution_is_refused() -> None:
-    """Astra: a posted latest month must not hide an earlier unposted one."""
+    """Astra: a posted latest month must not hide ONE earlier unposted month."""
 
     with pytest.raises(proxies.BaseProxyError, match="earlier month is missing"):
-        proxies.build_factors(_rows(bil_skip=(63, 84)), _french(100))
+        proxies.build_factors(_rows(bil_skip=(63,)), _french(100))
