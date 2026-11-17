@@ -279,7 +279,7 @@
    "kinds": [
     "universal"
    ],
-   "text": "Exploratory hybrid view: only version-matched backtest observations before live inception are included."
+   "text": "Exploratory hybrid view: only version-matched backtest observations before live inception (model-live inception where a strategy has an admitted model-live layer) are included."
   },
   {
    "file": "apps/portfolio-control-panel/app.js",
@@ -734,7 +734,7 @@
    "kinds": [
     "universal"
    ],
-   "text": "live observations remain authoritative from inception forward."
+   "text": "{} observations remain authoritative from inception forward."
   },
   {
    "file": "apps/portfolio-control-panel/app.js",

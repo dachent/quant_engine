@@ -2156,7 +2156,7 @@
     const detail = noMatchedPrehistory
       ? `No accepted version-matched backtest observations exist before ${liveWord} inception; this result therefore equals the ${liveWord === "live" ? "live-only" : "model-live"} history and is not described as a long-history result.`
       : selectedFactorEvidenceMode === "LIVE_PLUS_BACKTEST"
-        ? "Accepted version-matched backtest observations end before live inception; live observations remain authoritative from inception forward."
+        ? `Accepted version-matched backtest observations end before ${liveWord} inception; ${liveWord} observations remain authoritative from inception forward.`
         : "Only accepted live observations enter this result; backtest observations are excluded.";
     return `<div class="callout ${noMatchedPrehistory ? "callout-warning" : "callout-neutral"}"><strong>Evidence composition:</strong> ${integer.format(liveCount)} ${liveWord} + ${integer.format(backtestCount)} backtest observations · ${liveWord} inception ${formatDateHtml(composition.live_inception)} · ${statusText(composition.status)}. ${safe(detail)}${rejectedOverlap ? ` ${integer.format(rejectedOverlap)} overlapping backtest observations were rejected because live evidence has precedence.` : ""}${safe(rejectedBucketNote(row))}</div>`;
   }
@@ -2684,7 +2684,7 @@
     const blockedHybrid = Array.isArray(data.hybrid_mode_gate?.blocked_strategies) ? data.hybrid_mode_gate.blocked_strategies : [];
     const blockedHybridText = blockedHybrid.length ? ` Excluded from this view (live only): ${blockedHybrid.map((item) => `${item.strategy_name} (${humanStatus(item.compatibility_status || "UNAVAILABLE").toLowerCase()})`).join("; ")}.` : "";
     $("#evidence-mode-boundary").textContent = combined
-      ? `Exploratory hybrid view: only version-matched backtest observations before live inception are included. Live observations win from inception onward. This mode cannot change readiness, allocation, or risk-control authority.${blockedHybridText}`
+      ? `Exploratory hybrid view: only version-matched backtest observations before live inception (model-live inception where a strategy has an admitted model-live layer) are included. Live observations win from inception onward. This mode cannot change readiness, allocation, or risk-control authority.${blockedHybridText}`
       : "Live-only evidence is the authoritative default for readiness, allocation, and risk controls.";
     $$('[data-evidence-mode]').forEach((button) => {
       const available = Boolean(dependenceModes[button.dataset.evidenceMode]);
