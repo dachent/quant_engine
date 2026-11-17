@@ -113,3 +113,28 @@ def test_stage_records_its_end_time(
         pass
     row = json.loads(log.read_text("utf-8"))
     assert row["t_end"] > 1_000_000_000
+
+
+def test_attended_children_and_verifiers_are_timed_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P-timers: the attended role loop, the account-manifest build/verify split and
+    the panel candidate verification emit named timing rows (observation only)."""
+
+    root = Path(__file__).resolve().parents[2] / "tools"
+    wiring = {
+        "portfolio_pipeline_materialize.py": 'timed_stage("attended_role", role=role)',
+        "build_account_manifest_generation.py": 'timed_stage("account_manifest_verify")',
+        "portfolio_control_panel.py": '@timed_call("panel_verify_candidate")',
+    }
+    for name, needle in wiring.items():
+        assert needle in (root / name).read_text("utf-8"), name
+    assert 'timed_stage("account_manifest_build")' in (
+        root / "build_account_manifest_generation.py"
+    ).read_text("utf-8")
+    log = tmp_path / "t.jsonl"
+    monkeypatch.setenv(stage_timing.TIMING_LOG_ENV, str(log))
+    with stage_timing.stage("attended_role", role="report"):
+        pass
+    (row,) = [json.loads(line) for line in log.read_text("utf-8").splitlines()]
+    assert row["stage"] == "attended_role" and row["role"] == "report"
