@@ -13,7 +13,7 @@ existing destination, and prints the plan unless ``--apply`` is given. ``--roots
 manifest commands read.
 
     python tools/release_world.py copy --from C:/Dev/scratch/qe-r3/world-B2 --to C:/Dev/scratch/qe-r3/world-X \\
-        [--dirs a,b,c (default: every subdirectory)] [--roots-file roots.json --data-root D] [--apply]
+        [--dirs a,b,c (default: every subdirectory)] [--swap in/sector-d=SRC ...] [--roots-file roots.json --data-root D] [--apply]
 """
 
 from __future__ import annotations
@@ -61,8 +61,39 @@ def plan(src: Path, dst: Path, dirs: Sequence[str]) -> list[str]:
     return [f"copy {src / name} -> {dst / name}" for name in dirs]
 
 
-def copy_world(src: Path, dst: Path, dirs: Sequence[str]) -> dict[str, int]:
-    """Copy ``dirs``, repoint the JSON files, refuse on a leftover old-world name."""
+def _swap(dst: Path, relative: str, source: Path) -> None:
+    """Replace ``dst/relative`` (a bundle or a world-local provider root) with ``source``; keep the old one aside."""
+
+    parts = Path(relative).parts
+    if not parts or Path(relative).is_absolute() or ".." in parts:
+        raise WorldError(
+            f"swap target must be a relative path inside the world: {relative}"
+        )
+    if not source.exists():
+        raise WorldError(f"swap source does not exist: {source}")
+    target = dst.joinpath(*parts)
+    aside = target.with_name(target.name + ".superseded")
+    if aside.exists():
+        raise WorldError(f"{aside.name} already exists")
+    if target.exists():
+        target.rename(aside)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir():
+        shutil.copytree(source, target)
+    else:
+        shutil.copyfile(source, target)
+
+
+def copy_world(
+    src: Path,
+    dst: Path,
+    dirs: Sequence[str],
+    swaps: Sequence[tuple[str, Path]] = (),
+) -> dict[str, int]:
+    """Copy ``dirs``, repoint the JSON files, refuse on a leftover old-world name, then apply ``swaps``.
+
+    Swaps run after the rewrite: their content comes from elsewhere and its paths are not this world's.
+    """
 
     plan(src, dst, dirs)
     leaf = src.name
@@ -88,12 +119,18 @@ def copy_world(src: Path, dst: Path, dirs: Sequence[str]) -> dict[str, int]:
                     f"{path.relative_to(dst).as_posix()} still names the old world {leaf!r} "
                     "in a spelling this tool does not rewrite"
                 )
+        for relative, source in swaps:
+            _swap(dst, relative, source)
     except Exception:
-        shutil.rmtree(
-            dst, ignore_errors=True
-        )  # a refused copy leaves no half world behind
+        # a refused copy leaves no half world behind
+        shutil.rmtree(dst, ignore_errors=True)
         raise
-    return {"dirs": len(dirs), "json_scanned": scanned, "json_rewritten": rewritten}
+    return {
+        "dirs": len(dirs),
+        "json_scanned": scanned,
+        "json_rewritten": rewritten,
+        "swaps": len(swaps),
+    }
 
 
 def write_roots(path: Path, data_root: Path, world: Path) -> None:
@@ -120,6 +157,13 @@ def _parser() -> argparse.ArgumentParser:
     copy.add_argument("--dirs", default="")
     copy.add_argument("--roots-file", type=Path)
     copy.add_argument("--data-root", type=Path)
+    copy.add_argument(
+        "--swap",
+        action="append",
+        default=[],
+        metavar="RELATIVE=SOURCE",
+        help="replace a bundle or provider root inside the new world (old one kept as .superseded)",
+    )
     copy.add_argument("--apply", action="store_true")
     return parser
 
@@ -136,7 +180,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.apply:
             print("\n".join(steps) + "\n(dry run: pass --apply)")
             return 0
-        result = copy_world(args.src, args.dst, dirs)
+        swaps = []
+        for item in args.swap:
+            relative, _, source = item.partition("=")
+            if not relative or not source:
+                raise WorldError(f"--swap needs RELATIVE=SOURCE, got {item!r}")
+            swaps.append((relative, Path(source)))
+        result = copy_world(args.src, args.dst, dirs, swaps)
         if args.roots_file is not None:
             write_roots(args.roots_file, args.data_root, args.dst)
     except (WorldError, OSError) as exc:

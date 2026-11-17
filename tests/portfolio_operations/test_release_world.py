@@ -55,3 +55,29 @@ def test_the_destination_is_create_only_and_missing_dirs_refuse(tmp_path: Path) 
         tool.plan(old, tmp_path / "taken", ["cm"])
     with pytest.raises(tool.WorldError, match="lacks"):
         tool.plan(old, tmp_path / "fresh", ["cm", "nope"])
+
+
+def test_swaps_replace_a_bundle_and_keep_the_old_one_aside(tmp_path: Path) -> None:
+    old, new = _world(tmp_path), tmp_path / "world-new"
+    (old / "in" / "sector-d").mkdir()
+    (old / "in" / "sector-d" / "f.csv").write_text("old")
+    fresh = tmp_path / "fresh-sector"
+    fresh.mkdir()
+    (fresh / "f.csv").write_text("new")
+    (fresh / "p.json").write_text(
+        json.dumps({"p": str(old)})
+    )  # swap content is not rewritten
+    result = tool.copy_world(old, new, ["cm", "in"], [("in/sector-d", fresh)])
+    assert result["swaps"] == 1
+    assert (new / "in" / "sector-d" / "f.csv").read_text() == "new"
+    assert (new / "in" / "sector-d.superseded" / "f.csv").read_text() == "old"
+    assert str(old) in (new / "in" / "sector-d" / "p.json").read_text()
+
+
+def test_a_swap_outside_the_world_is_refused_and_leaves_no_world(
+    tmp_path: Path,
+) -> None:
+    old, new = _world(tmp_path), tmp_path / "world-new"
+    with pytest.raises(tool.WorldError, match="inside the world"):
+        tool.copy_world(old, new, ["cm"], [("../escape", tmp_path)])
+    assert not new.exists()
