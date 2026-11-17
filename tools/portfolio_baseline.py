@@ -4924,6 +4924,59 @@ def _costs_claim(costs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _split_pre_strategy_history(
+    historical: Sequence[Mapping[str, Any]],
+    assignments: Sequence[Mapping[str, Any]],
+) -> tuple[list[Mapping[str, Any]], list[dict[str, Any]]]:
+    """Derive, from the assignment records alone, which pool-only intervals are history.
+
+    A historical pool-only interval is PRE_STRATEGY_HISTORY when the account has a first
+    strategy assignment and the interval ends on or before that date (so no strategy row
+    precedes it).  Anything else, including an account that never gets a strategy row,
+    stays a gap.
+    """
+
+    first_strategy: dict[str, date] = {}
+    for item in assignments:
+        if item.get("mapping_status") != "MAPPED" or item.get("strategy_id") is None:
+            continue
+        start = item.get("effective_start")
+        if start is None:
+            continue
+        day = _date(start, "assignment.effective_start")
+        account_id = str(item["account_id"])
+        if account_id not in first_strategy or day < first_strategy[account_id]:
+            first_strategy[account_id] = day
+    gaps: list[Mapping[str, Any]] = []
+    structural: list[dict[str, Any]] = []
+    for item in historical:
+        account_id = str(item["account_id"])
+        end = item.get("effective_end")
+        first = first_strategy.get(account_id)
+        if (
+            first is not None
+            and end is not None
+            and (_date(end, "assignment.effective_end") <= first)
+        ):
+            structural.append(
+                {
+                    "account_id": account_id,
+                    "effective_end": str(end),
+                    "effective_start": item.get("effective_start"),
+                    "first_strategy_assignment": first.isoformat(),
+                    "reason": (
+                        "account held as pool until its first strategy assignment "
+                        f"on {first.isoformat()}"
+                    ),
+                }
+            )
+        else:
+            gaps.append(item)
+    return gaps, sorted(
+        structural, key=lambda row: (row["account_id"], str(row["effective_start"]))
+    )
+
+
 def _fact_coverage(
     accounts: Sequence[Mapping[str, Any]],
     assignments: Sequence[Mapping[str, Any]],
@@ -4961,6 +5014,9 @@ def _fact_coverage(
             start is None or _date(start, "assignment.effective_start") <= as_of_date
         ) and (end is None or _date(end, "assignment.effective_end") >= as_of_date)
         (current_unmapped if active else historical_unmapped).append(item)
+    historical_unmapped, pre_strategy = _split_pre_strategy_history(
+        historical_unmapped, assignments
+    )
     claims: list[dict[str, Any]] = [
         {
             "fact_type": "accounts",
@@ -5022,13 +5078,18 @@ def _fact_coverage(
                 "code": (
                     "POOL_ONLY_UNALLOCATED_RETAINED"
                     if historical_unmapped
+                    else "PRE_STRATEGY_HISTORY"
+                    if pre_strategy
                     else "COMPLETE"
                 ),
                 "effect": (
                     "Historical pool-only intervals remain visible and are excluded from strategy attribution."
                     if historical_unmapped
+                    else "Every historical interval is a strategy assignment or pool-only history that ends before the account's first strategy assignment."
+                    if pre_strategy
                     else "Every historical systematic interval has an accepted strategy assignment."
                 ),
+                **({"structural_intervals": pre_strategy} if pre_strategy else {}),
             },
             "record_count": len(historical_unmapped),
         },

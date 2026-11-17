@@ -5979,3 +5979,103 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
     assert [r["status"] for r in jh_calendar] == ["STATEMENT_CADENCE_NAV_OBSERVATIONS"]
     assert members["account-jh"]["authority"] == "AUTHORITATIVE"
     assert members["account-jh"]["as_of_date"] == "2026-06-30"
+
+
+def _hist_assignment(
+    account: str, start: str | None, end: str | None, strategy: str | None = None
+) -> dict[str, Any]:
+    return {
+        "account_id": account,
+        "assignment_id": f"assignment-{account}-{start}-{strategy}",
+        "effective_start": start,
+        "effective_end": end,
+        "mapping_status": "MAPPED" if strategy else "UNMAPPED",
+        "pool_id": None if strategy else "systematic-capital",
+        "strategy_id": strategy,
+    }
+
+
+def _historical_claim(assignments: list[dict[str, Any]]) -> dict[str, Any]:
+    accounts = [
+        {"account_id": a, "role": "INVESTMENT", "provider": "SCHWAB"}
+        for a in sorted({row["account_id"] for row in assignments})
+    ]
+    claims, _ = baseline._fact_coverage(
+        accounts, assignments, [], [], [], [], 0, date(2026, 11, 6)
+    )
+    return next(
+        c for c in claims if c["fact_type"] == "historical_strategy_attribution"
+    )
+
+
+def test_pool_only_history_before_the_first_strategy_assignment_is_derived_structural() -> (
+    None
+):
+    """Rule-derived (#900 attribution): the interval ends on/before the account's first
+    strategy assignment, so no strategy existed for it; derived from the records."""
+
+    claim = _historical_claim(
+        [
+            _hist_assignment("a-end-on", "2024-02-26", "2025-11-25"),
+            _hist_assignment("a-end-on", "2025-11-25", None, "tt-portfolio"),
+            _hist_assignment("a-day-before", "2025-09-15", "2025-11-19"),
+            _hist_assignment("a-day-before", "2025-11-20", None, "p123-eu"),
+        ]
+    )
+
+    assert claim["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert claim["known_gaps"] == []
+    assert claim["disposition"]["code"] == "PRE_STRATEGY_HISTORY"
+    rows = claim["disposition"]["structural_intervals"]
+    assert [(r["account_id"], r["first_strategy_assignment"]) for r in rows] == [
+        ("a-day-before", "2025-11-20"),
+        ("a-end-on", "2025-11-25"),
+    ]
+    assert rows[0]["reason"] == (
+        "account held as pool until its first strategy assignment on 2025-11-20"
+    )
+
+
+def test_pool_only_intervals_outside_the_rule_stay_gaps() -> None:
+    """Kill tests: an account that never gets a strategy row (the IBKR 2d0a996c case) and an
+    interval that outlasts its account's first strategy assignment both stay gaps."""
+
+    claim = _historical_claim(
+        [
+            _hist_assignment("never", "2025-09-15", "2026-03-31"),
+            _hist_assignment("overlap", "2025-01-01", "2025-12-31"),
+            _hist_assignment("overlap", "2025-06-01", None, "qsi"),
+            _hist_assignment("clean", "2024-01-01", "2025-05-31"),
+            _hist_assignment("clean", "2025-06-01", None, "qsi"),
+        ]
+    )
+
+    assert claim["status"] == "PARTIAL"
+    assert claim["known_gaps"] == ["2 historical intervals remain pool-only"]
+    assert claim["disposition"]["code"] == "POOL_ONLY_UNALLOCATED_RETAINED"
+    assert [r["account_id"] for r in claim["disposition"]["structural_intervals"]] == [
+        "clean"
+    ]
+
+
+def test_a_current_pool_only_interval_is_never_derived_history() -> None:
+    """Kill test: current attribution is untouched by the historical rule."""
+
+    claims, _ = baseline._fact_coverage(
+        [{"account_id": "cur", "role": "INVESTMENT", "provider": "SCHWAB"}],
+        [
+            _hist_assignment("cur", "2025-01-01", None),
+            _hist_assignment("cur", "2026-12-01", None, "qsi"),
+        ],
+        [],
+        [],
+        [],
+        [],
+        0,
+        date(2026, 11, 6),
+    )
+    current = next(
+        c for c in claims if c["fact_type"] == "current_strategy_attribution"
+    )
+    assert current["status"] == "PARTIAL"
+    assert current["record_count"] == 1
