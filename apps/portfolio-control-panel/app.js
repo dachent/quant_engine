@@ -2810,11 +2810,18 @@
       return;
     }
     const query = weeklySearch.toLowerCase();
-    const rows = weekly.series.filter((row) => (selectedWeeklyGroup === "ALL" || row.display_groups.includes(selectedWeeklyGroup)) && (!query || `${row.display_name} ${row.series_id} ${row.source_key}`.toLowerCase().includes(query)));
+    const queryMatch = (row) => !query || `${row.display_name} ${row.series_id} ${row.source_key}`.toLowerCase().includes(query);
+    const groupRows = weekly.series.filter((row) => (selectedWeeklyGroup === "ALL" || row.display_groups.includes(selectedWeeklyGroup)) && queryMatch(row));
+    // The strategy view also pins the benchmarks the performance charts compare against (the payload names them), so the
+    // owner sees them under the strategy rows without switching group; a pinned row is labelled as such.
+    const pinnedIds = new Set(Array.isArray(data.performance_tab?.benchmarks) ? data.performance_tab.benchmarks.map((item) => item.series_id) : []);
+    const pinnedRows = selectedWeeklyGroup === "STRATEGY" ? weekly.series.filter((row) => pinnedIds.has(row.series_id) && !groupRows.includes(row) && queryMatch(row)) : [];
+    const pinnedSet = new Set(pinnedRows);
+    const rows = [...groupRows, ...pinnedRows];
     const weeks = weeklyVisibleWeeks();
     const missingCells = rows.reduce((count, row) => count + weeks.filter((week) => weeklyValue(row, week) == null).length, 0);
     renderKpis("#weekly-kpis", [
-      ["Visible series", String(rows.length), weeklyGroupLabels[selectedWeeklyGroup] || selectedWeeklyGroup],
+      ["Visible series", String(rows.length), `${weeklyGroupLabels[selectedWeeklyGroup] || selectedWeeklyGroup}${pinnedRows.length ? ` + ${pinnedRows.length} pinned benchmark${pinnedRows.length === 1 ? "" : "s"}` : ""}`],
       ["Displayed weeks", String(weeks.length), selectedWeeklyWindow === "full" ? `Full-history page ${weeklyPage + 1}` : `Latest ${selectedWeeklyWindow}`],
       ["Unavailable cells", String(missingCells), "Missing is never zero", missingCells ? "warning" : "positive"],
       performanceLineageMismatch && selectedWeeklyGroup === "STRATEGY"
@@ -2822,7 +2829,7 @@
         : ["Strategy evidence", humanStatus(selectedWeeklyMode), selectedWeeklyMode === "LIVE_ONLY" ? "Authoritative default" : "Version-matched pre-live backtest", selectedWeeklyMode === "LIVE_ONLY" ? "positive" : "warning"],
     ]);
     const header = `<thead><tr><th scope="col">Series / basis</th>${weeks.map((week) => `<th scope="col"><span class="weekly-date">${safe(week.slice(5))}</span><span class="cell-secondary">${safe(week.slice(0, 4))}</span></th>`).join("")}</tr></thead>`;
-    const body = rows.map((row) => `<tr><th scope="row"><span class="cell-primary">${safe(row.display_name)}</span><span class="cell-secondary">${safe(humanStatus(row.return_basis))} · ${safe(humanStatus(String(row.source_key || "").replaceAll("-", "_")))}</span></th>${weeks.map((week) => {
+    const body = rows.map((row) => `<tr><th scope="row"><span class="cell-primary">${safe(row.display_name)}</span><span class="cell-secondary">${safe(humanStatus(row.return_basis))} · ${safe(humanStatus(String(row.source_key || "").replaceAll("-", "_")))}${pinnedSet.has(row) ? " · pinned benchmark" : ""}</span></th>${weeks.map((week) => {
       const value = weeklyValue(row, week);
       const meta = weeklyMeta(row, week);
       const numeric = value == null ? null : Number(value);

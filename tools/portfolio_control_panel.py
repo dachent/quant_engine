@@ -28,6 +28,7 @@ import zlib
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping, Sequence, cast
 
 from quant_engine.core import check_entry_interpreter
+from quant_engine.core import last_nyse_trading_day
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -7066,7 +7067,9 @@ def _weekly_return_analysis(
             or current_week.get("week_start") != week_start.isoformat()
             or current_week.get("week_end") != week_end.isoformat()
             or current_week.get("data_through_date") != as_of.isoformat()
-            or current_week.get("is_partial") is not (as_of < week_end)
+            # partial only while data stops before the last NYSE trading day of the week
+            or current_week.get("is_partial")
+            is not (as_of < last_nyse_trading_day(week_start + timedelta(days=4)))
             or not isinstance(weekly.get("weeks"), list)
             or week_start.isoformat() not in weekly["weeks"]
         ):

@@ -24,6 +24,7 @@ from quant_engine.core import (
     SourceArtifact,
     VerificationStatus,
     hash_file,
+    last_nyse_trading_day,
     publish_generation,
     read_current,
     read_generation,
@@ -226,13 +227,38 @@ def _week_start(day: date) -> date:
     return day - timedelta(days=day.weekday())
 
 
+def _last_trading_day_of_week(start: date) -> date:
+    """The last NYSE trading day of the ISO week starting start (holiday-aware)."""
+
+    return last_nyse_trading_day(start + timedelta(days=4))
+
+
+def _week_complete_through(start: date, calendar_basis: str) -> date:
+    """The date from which a week holds every observation its calendar can produce.
+
+    A seven-day calendar (crypto) is complete on the Sunday; a weekday calendar is
+    complete on the week's last trading day, so a Friday cutoff, or a Thursday cutoff
+    before Good Friday, is a complete trading week.
+    """
+
+    if calendar_basis == "CALENDAR_7_DAY":
+        return start + timedelta(days=6)
+    return _last_trading_day_of_week(start)
+
+
+def current_week_is_partial(as_of: date) -> bool:
+    """True only while data stops before the last trading day of the as-of week."""
+
+    return as_of < _last_trading_day_of_week(_week_start(as_of))
+
+
 def _current_week(as_of: date) -> dict[str, Any]:
     start = _week_start(as_of)
     end = start + timedelta(days=6)
     return {
         "data_through_date": as_of.isoformat(),
         "default_visible": True,
-        "is_partial": as_of < end,
+        "is_partial": current_week_is_partial(as_of),
         "week_end": end.isoformat(),
         "week_start": start.isoformat(),
     }
@@ -270,16 +296,16 @@ def _weekly_series(
         boundary_reasons: list[str] = []
         if actual_start == first_observed and actual_start > start:
             boundary_reasons.append("SOURCE_START")
-        expected_end = start + timedelta(
-            days=6 if calendar_basis == "CALENDAR_7_DAY" else 4
-        )
+        expected_end = _week_complete_through(start, calendar_basis)
         if (
             actual_end == last_observed
             and actual_end < min(expected_end, as_of)
             and start <= _week_start(as_of)
         ):
             boundary_reasons.append("SOURCE_END")
-        if start == _week_start(as_of) and as_of < start + timedelta(days=6):
+        if start == _week_start(as_of) and as_of < _week_complete_through(
+            start, calendar_basis
+        ):
             boundary_reasons.append("CURRENT_AS_OF")
         status = (
             "PARTIAL_BOUNDARY"
@@ -1366,10 +1392,7 @@ def verify_candidate(
         "current_week_source_cutoff": payload["current_week"]["data_through_date"]
         == payload["as_of_date"]
         and payload["current_week"]["is_partial"]
-        == (
-            date.fromisoformat(payload["as_of_date"])
-            < date.fromisoformat(payload["current_week"]["week_end"])
-        ),
+        == current_week_is_partial(date.fromisoformat(payload["as_of_date"])),
         "evidence_modes_exact": payload["strategy_evidence_modes"]
         == list(STRATEGY_MODES),
         "strategy_boundary": bool(expected_strategies)
