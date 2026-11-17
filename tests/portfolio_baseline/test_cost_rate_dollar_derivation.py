@@ -158,6 +158,14 @@ def test_the_base_is_the_cutoff_value_of_the_current_capital_view() -> None:
     assert volatis["cost_derivation"]["base_value_usd"] == "48057.62"
 
 
+def test_the_published_base_is_cents_and_the_amount_follows_from_it() -> None:
+    values = {"volatis": (Decimal("49868.14294300700543930275696"), AS_OF)}
+    out = baseline._derive_rate_dollar_costs(_rows("NON_QUALIFIED_FLAT"), values, AS_OF)
+    volatis = next(row for row in out if row["strategy_id"] == "volatis")
+    assert volatis["cost_derivation"]["base_value_usd"] == "49868.14"
+    assert volatis["derived_annual_cost_usd"] == "1745.38"  # 0.035 x 49868.14
+
+
 def test_a_capital_row_not_dated_at_the_cutoff_gives_no_base() -> None:
     old = {"strategies": [_capital("66593.33", "2026-08-16")]}
     assert baseline._cutoff_capital_values(old, AS_OF) == {}

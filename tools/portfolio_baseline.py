@@ -72,7 +72,7 @@ CATALOG_SCHEMA_VERSION: Final = 1
 # A catalog that carries custody-derived cash publishes version 2: each cash line is dated
 # by the coverage that proves it and names its last event and its coverage end.
 CUSTODY_CASH_CATALOG_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "1.4.0"
+BUILDER_VERSION: Final = "1.5.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 # The provenance registry binds fifteen strategy identities: the seven current
 # strategies, the retained excluded ones, and six retired history-only records
@@ -2472,6 +2472,9 @@ def _derive_rate_dollar_costs(
                         f"sleeve value of {item['strategy_id']} is negative"
                     )
                 rate = Decimal(tier_row["management_rate"])
+                # the base is published to the cent and the amount is that base times
+                # the rate, so a reader reproduces it from the published figures
+                value = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
                 unpriced: list[str] = []
                 classified: list[dict[str, Any]] = []
                 if tier_row["performance_rate"] not in (None, "0"):

@@ -87,7 +87,7 @@ longer has, so the report ignores that quotient and the cost mirror under
   (a percent row carrying an amount is refused). The row may carry `derived_annual_cost_usd`
   (documented management rate x the cutoff sleeve value, method `DERIVED_FROM_DOCUMENTED_RATE`)
   and `cost_derivation`; an in-NAV performance fee is `IN_NAV_NOT_BILLED` and a redemption fee
-  `CONTINGENT_ON_REDEMPTION`, never priced as rate x value. `documented_rate_tier_unsettled` is
+  `EVENT_FEE_NOT_ANNUAL`, never priced as rate x value. `documented_rate_tier_unsettled` is
   `UNAVAILABLE`.
 - A percent-based row also publishes `fee_rates` (the baseline's documented rates) and
   `cost_rate_disclosure`, one sentence built only from those fields (tier label, management
