@@ -961,6 +961,7 @@ def test_the_census_identity_is_written_into_the_generation(tmp_path: Path) -> N
     catalog, manifest, _bytes = gen.build_generation(spec)
 
     assert catalog["census"] == {
+        "baseline_root": str(Path(os.environ[gen._BASELINE_ROOT_ENV]).resolve()),
         "catalog_sha256": ref["catalog_sha256"],
         "generation_id": ref["generation_id"],
     }

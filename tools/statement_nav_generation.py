@@ -1072,11 +1072,9 @@ def build_generation(
     internal = _text(crosswalk[0]["internal_account_id"], "internal_account_id")
     if re.fullmatch(r"account-[0-9a-f]{16}", internal) is None:
         raise StatementGenerationError("internal account ID is invalid")
+    governed_root = _governed_baseline_root(baseline_root)
     census_start, census_artifact = _census_account_start(
-        spec["census_catalog"],
-        internal,
-        str(meta["label"]),
-        _governed_baseline_root(baseline_root),
+        spec["census_catalog"], internal, str(meta["label"]), governed_root
     )
     identity = _text(spec["identity"], "identity")
 
@@ -1263,6 +1261,7 @@ def build_generation(
         "as_of_date": generation_as_of.isoformat(),
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
         "census": {
+            "baseline_root": str(governed_root.resolve()),
             "catalog_sha256": census_artifact.sha256,
             "generation_id": dict(spec["census_catalog"])["generation_id"],
         },
