@@ -844,6 +844,47 @@ def _daily_fx_evidence(
     }
 
 
+def _attach_admitted_fx_evidence(
+    rows: list[dict[str, Any]],
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ],
+) -> None:
+    """Price every non-USD flow/transaction the admitted FX generation covers.
+
+    A row gets the generation's close for its own event date (the same dated,
+    labelled evidence the Matrixport projection attaches) when it has none, its
+    amount is available, and the generation holds a positive rate for that
+    currency and day.  A row the generation does not price is left untouched: it
+    stays unconverted and the FX fact reports it, never a silent par assumption.
+    """
+
+    rates = fx_rates[1]
+    for index, row in enumerate(rows):
+        amount = row.get("amount")
+        if (
+            row.get("event_time_fx") is not None
+            or not isinstance(amount, Mapping)
+            or amount.get("status") != "AVAILABLE"
+            or amount.get("currency") in (None, "USD")
+            or not isinstance(row.get("event_date"), str)
+        ):
+            continue
+        try:
+            day = date.fromisoformat(row["event_date"])
+        except ValueError:
+            continue
+        rate = rates.get((str(amount["currency"]), day))
+        if rate is None or rate <= 0:
+            continue
+        rows[index] = {
+            **row,
+            "event_time_fx": _daily_fx_evidence(str(amount["currency"]), day, fx_rates),
+        }
+
+
 def _excluded_source_row(
     findings: list[dict[str, Any]] | None,
     provider_id: str,
@@ -11231,6 +11272,12 @@ def build_catalog(
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
+    if fx_rates is not None:
+        # #905: the admitted generation prices every provider's non-USD rows it
+        # covers, not only Matrixport's.
+        for fact_type in ("flows", "transactions"):
+            if fact_type in combined:
+                _attach_admitted_fx_evidence(combined[fact_type], fx_rates)
     zero_financing = None
     if "zero_financing_observations" in spec:
         # the account type rule reaches back to each account's first NAV day
