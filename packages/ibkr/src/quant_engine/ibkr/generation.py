@@ -1230,6 +1230,10 @@ def _proven_position_transfer_pairs(
     return frozenset(proven)
 
 
+# residual NAV tolerated after the broker's closure date (sub-cent interest settles after it)
+_CLOSED_RESIDUAL_NAV: Final = Decimal("0.01")
+
+
 def _closed_accounts(
     statements: Sequence[FlexDailyStatement], crosswalk: Mapping[str, str]
 ) -> list[dict[str, str]]:
@@ -1256,6 +1260,31 @@ def _closed_accounts(
             continue
         closed = next(iter(dates))
         assert closed is not None
+        # the stated date is checked against the statements it claims to close, never relayed
+        if not ordered[0].report_date <= closed <= ordered[-1].report_date:
+            raise IbkrGenerationError(
+                "an account closure date lies outside the statements of the account"
+            )
+        for item in ordered:
+            if (
+                item.account_date_closed is None
+                and item.when_generated is not None
+                and item.when_generated > closed
+            ):
+                raise IbkrGenerationError(
+                    "a statement pulled after the stated account closure date does not state it"
+                )
+            if item.report_date > closed and (
+                item.positions
+                or item.trades
+                or item.cash_transactions
+                or item.transfers
+                or item.corporate_actions
+                or abs(item.nav) > _CLOSED_RESIDUAL_NAV
+            ):
+                raise IbkrGenerationError(
+                    "an account has activity or value after its stated closure date"
+                )
         rows.append(
             {"account_id": crosswalk[raw_id], "closed_date": closed.isoformat()}
         )

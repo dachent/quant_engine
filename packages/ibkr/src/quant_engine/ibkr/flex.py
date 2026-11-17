@@ -105,6 +105,29 @@ def _optional_day(value: str | None, name: str) -> date | None:
     return _day(value, name)
 
 
+def _closed_day(value: str | None) -> date | None:
+    """AccountInformation dateClosed: empty, or exactly YYYYMMDD / YYYY-MM-DD (no trailing text)."""
+
+    text = _optional(value)
+    if text is None:
+        return None
+    if re.fullmatch(r"\d{8}|\d{4}-\d{2}-\d{2}", text.strip()) is None:
+        raise FlexValidationError("account.dateClosed is not a plain date")
+    return _day(text.strip(), "account.dateClosed")
+
+
+def _generated_day(value: str | None) -> date | None:
+    """The day of a ``YYYYMMDD;HHMMSS`` whenGenerated stamp; None where absent or unreadable."""
+
+    match = re.match(r"^(\d{4})(\d{2})(\d{2});\d{6}$", (value or "").strip())
+    if match is None:
+        return None
+    try:
+        return date(int(match[1]), int(match[2]), int(match[3]))
+    except ValueError:
+        return None
+
+
 def _decimal(value: str | None, name: str) -> Decimal:
     raw = _text(value, name)
     try:
@@ -470,6 +493,9 @@ class FlexDailyStatement:
     open_positions_section_present: bool = False
     # AccountInformation dateClosed (the broker's own closure date), None while it is empty
     account_date_closed: date | None = None
+    # the day the FlexStatement was generated (whenGenerated), None where not stated: a statement
+    # pulled after an account closed must state the closure
+    when_generated: date | None = None
     # Every child element of the OpenPositions section (any tag, any levelOfDetail), and
     # the suspect ones: a tag other than OpenPosition, a levelOfDetail other than
     # SUMMARY/LOT, or a row (any level) whose accountId is absent or another account's.
@@ -974,9 +1000,8 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
             nav.attrib.get("marginFinancingChargeAccruals"),
             "nav.marginFinancingChargeAccruals",
         ),
-        account_date_closed=_optional_day(
-            account.attrib.get("dateClosed"), "account.dateClosed"
-        ),
+        account_date_closed=_closed_day(account.attrib.get("dateClosed")),
+        when_generated=_generated_day(element.attrib.get("whenGenerated")),
     )
 
 
