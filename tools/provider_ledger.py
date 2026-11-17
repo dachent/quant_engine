@@ -1724,7 +1724,15 @@ def _quantbase_restated_days(
             dashboard[_quantbase_day(price_row["time"], "quantbase Volatis time")] = (
                 value
             )
-    return quantbase_fund_days.corrected_values(dashboard, legs, fill_closes)
+    corrected = quantbase_fund_days.corrected_values(dashboard, legs, fill_closes)
+    if not quantbase_fund_days.closes_reproduce_the_dashboard(corrected, legs):
+        valued, failed = quantbase_fund_days.non_fill_closure_failures(corrected, legs)
+        raise ProviderLedgerError(
+            "quantbase_fill_closes do not reproduce the dashboard on non-fill days "
+            f"({failed} of {valued} valued days fail the holdings x close rebuild): the "
+            "close series is in other units than the order quantities (split-adjusted?)"
+        )
+    return corrected
 
 
 def _quantbase_nav_observations(

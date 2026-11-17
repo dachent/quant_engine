@@ -72,7 +72,7 @@ REAL_LEGS = [
 REAL_DASHBOARD = {
     E1: Decimal("21766.45"),
     E2: Decimal("21771.95"),
-    E3: Decimal("21788.60"),
+    E3: Decimal("22010.68"),
 }
 
 
@@ -139,3 +139,49 @@ def test_a_fill_to_close_move_beyond_the_gate_is_refused_even_when_the_rebuild_c
     out = q.corrected_values({D1: Decimal("1000"), D2: Decimal("1000")}, LEGS, closes)
     assert out[D2].status == q.UNRESTATED_IMPLAUSIBLE
     assert out[D2].value == Decimal("1000")
+
+
+def test_a_fill_day_whose_next_day_does_not_reproduce_is_refused() -> None:
+    # value that entered outside the order legs (a deposit the night of the fill): the restated
+    # day is inside 5 % but the next dashboard day is 5,000 above the rebuilt holdings
+    dashboard = dict(REAL_DASHBOARD)
+    dashboard[E3] = REAL_DASHBOARD[E3] + Decimal("5000")
+    out = q.corrected_values(
+        dashboard, REAL_LEGS, _real_closes(("85.64", "88.84", "89.74"))
+    )
+    assert out[E2].status == q.UNRESTATED_NEXT_DAY_UNPROVEN
+    assert out[E2].value == dashboard[E2]
+
+
+def test_the_next_day_proof_catches_a_scale_error_the_five_percent_gate_misses() -> (
+    None
+):
+    # closes 3 % low (a mis-scaled series): the fill day moves 3 % (inside the gate) and the
+    # following day's rebuild is off by 3 % (outside the 0.05 % tolerance)
+    out = q.corrected_values(
+        REAL_DASHBOARD, REAL_LEGS, _real_closes(("83.0", "86.2", "87.1"))
+    )
+    assert out[E2].status == q.UNRESTATED_NEXT_DAY_UNPROVEN
+
+
+def test_a_fill_day_with_no_following_dashboard_day_is_unproven() -> None:
+    dashboard = {E1: REAL_DASHBOARD[E1], E2: REAL_DASHBOARD[E2]}
+    out = q.corrected_values(
+        dashboard, REAL_LEGS, _real_closes(("85.64", "88.84", "89.74"))
+    )
+    assert out[E2].status == q.UNRESTATED_NEXT_DAY_UNPROVEN
+
+
+def test_a_close_series_that_fails_the_rebuild_on_many_non_fill_days_is_distrusted() -> (
+    None
+):
+    # 30 non-fill days holding TQQQ with closes at half the as-traded level
+    days = [date(2025, 9, 1 + i) for i in range(30)]
+    legs = [(days[0], "TQQQ", Decimal("100"))]
+    dashboard = {day: Decimal("8800") for day in days}
+    halved = {"TQQQ": {day: Decimal("44") for day in days}}
+    good = {"TQQQ": {day: Decimal("88") for day in days}}
+    bad = q.corrected_values(dashboard, legs, halved)
+    assert not q.closes_reproduce_the_dashboard(bad, legs)
+    ok = q.corrected_values(dashboard, legs, good)
+    assert q.closes_reproduce_the_dashboard(ok, legs)
