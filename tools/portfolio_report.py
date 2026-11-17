@@ -8876,7 +8876,11 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "category": "FACT_COVERAGE_DETAIL",
                 "evidence_authority": detail.get("authority"),
                 "item": (f"{detail.get('fact_type')}:{detail.get('account_id')}"),
-                "known_gap": detail.get("missing_interval_reason"),
+                "known_gap": (
+                    None
+                    if detail.get("status") == "DECLARED_COMPLETE"
+                    else detail.get("missing_interval_reason")
+                ),
                 "value": detail.get("record_count"),
             }
         )

@@ -5979,3 +5979,63 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
     assert [r["status"] for r in jh_calendar] == ["STATEMENT_CADENCE_NAV_OBSERVATIONS"]
     assert members["account-jh"]["authority"] == "AUTHORITATIVE"
     assert members["account-jh"]["as_of_date"] == "2026-06-30"
+
+
+def test_pinned_event_declarations_reach_the_matrix_and_claims_stay_partial_until_all(
+    tmp_path: Path,
+) -> None:
+    """Declaration channel end to end: a declared account row is DECLARED_COMPLETE, a
+    structural one is labelled, and the flows claim stays PARTIAL while any investment
+    account is undeclared; a declaration naming an unknown account is refused."""
+
+    spec_path, spec = _spec(tmp_path)
+    root, ref = _provider_ledger_generation(tmp_path, catalog_schema_version=2)
+    spec["roots"]["provider-ledger"] = str(root)
+    spec["schema_version"] = 3
+    spec["provider_ledger"] = ref
+
+    def pin(declarations: list[dict[str, Any]]) -> dict[str, Any]:
+        raw = json.dumps({"schema_version": 1, "declarations": declarations}).encode()
+        path = tmp_path / "declarations.json"
+        path.write_bytes(raw)
+        return {
+            "path": str(path),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size_bytes": len(raw),
+        }
+
+    evidence = [{"artifact_id": "x", "sha256": "b" * 64, "size_bytes": 1}]
+    declarations = [
+        {
+            "account_id": "account-composer",
+            "fact_type": "flows",
+            "status": "STRUCTURAL_NO_EVENT_SOURCE",
+            "reason": "provider publishes no activities",
+        },
+        {
+            "account_id": "account-alpaca",
+            "fact_type": "flows",
+            "status": "DECLARED_COMPLETE",
+            "method": "PROVIDER_ACTIVITY_PINS",
+            "declared_start": "2025-01-01",
+            "declared_end": "2026-07-30",
+            "evidence": evidence,
+        },
+    ]
+    spec["event_declarations"] = pin(declarations)
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    catalog, _, _ = baseline.build_catalog(spec_path)
+
+    rows = {
+        (r["account_id"], r["fact_type"]): r for r in catalog["fact_coverage_matrix"]
+    }
+    assert rows[("account-composer", "flows")]["status"] == "STRUCTURAL_NO_EVENT_SOURCE"
+    assert rows[("account-alpaca", "flows")]["status"] == "DECLARED_COMPLETE"
+    flows = next(f for f in catalog["fact_coverage"] if f["fact_type"] == "flows")
+    assert flows["status"] == "PARTIAL"
+
+    spec["event_declarations"] = pin([{**declarations[0], "account_id": "nobody"}])
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(baseline.BaselineValidationError, match="outside the matrix"):
+        baseline.build_catalog(spec_path)

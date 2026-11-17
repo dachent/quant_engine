@@ -32,6 +32,7 @@ from typing import (
 )
 from zoneinfo import ZoneInfo
 
+import event_declarations
 import statement_reserve_nav
 
 from quant_engine.core import (
@@ -485,6 +486,8 @@ def _load_spec(spec_path: Path) -> dict[str, Any]:
         keys.add("provider_ledger")
         if "statement_reserves" in spec:
             keys.add("statement_reserves")
+        if "event_declarations" in spec:
+            keys.add("event_declarations")
     _strict_keys(
         spec,
         keys,
@@ -6504,6 +6507,12 @@ def build_catalog(
     custody_authority: dict[str, Any] = {}
     fx_authority: dict[str, Any] = {}
     statement_excluded: list[dict[str, Any]] = []
+    declared_events: dict[tuple[str, str], dict[str, Any]] = {}
+    if "event_declarations" in spec:
+        try:
+            declared_events = event_declarations.load(spec["event_declarations"])
+        except event_declarations.EventDeclarationError as exc:
+            raise BaselineValidationError(f"event declarations: {exc}") from exc
     if spec["schema_version"] == 2:
         schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
             spec["provider_generations"], roots, accounts, as_of
@@ -6755,6 +6764,13 @@ def build_catalog(
             as_of,
         )
     )
+    if declared_events:
+        try:
+            fact_coverage_matrix = event_declarations.apply(
+                fact_coverage_matrix, declared_events, as_of
+            )
+        except event_declarations.EventDeclarationError as exc:
+            raise BaselineValidationError(f"event declarations: {exc}") from exc
     fact_coverage, exceptions = _fact_coverage(
         accounts,
         assignments,
