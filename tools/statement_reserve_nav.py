@@ -115,7 +115,8 @@ def statement_reserve_facts(
             {
                 "account_id": account_id,
                 "base_currency": "USD",
-                "provider": account.get("provider"),
+                # the baseline account convention: upper case, spaces (census "JOHN HANCOCK")
+                "provider": str(account.get("provider", "")).upper().replace("_", " "),
                 "role": role,
             }
         ],

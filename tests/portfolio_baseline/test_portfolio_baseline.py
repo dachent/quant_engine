@@ -5892,7 +5892,7 @@ def test_statement_reserve_account_carries_a_role_into_calendar_statuses(
     account = "account-" + "c" * 16
     catalog = {
         "catalog_schema_version": 1,
-        "accounts": [{"account_id": account, "provider": "JOHN HANCOCK"}],
+        "accounts": [{"account_id": account, "provider": "JOHN_HANCOCK"}],
         "nav_observations": [
             {
                 "account_id": account,
@@ -5912,7 +5912,9 @@ def test_statement_reserve_account_carries_a_role_into_calendar_statuses(
         "role": "RESERVE",
     }
     facts = baseline._statement_reserve_facts([pin], date(2026, 11, 6))
-    assert [a["role"] for a in facts["accounts"]] == ["RESERVE"]
+    assert [(a["role"], a["provider"]) for a in facts["accounts"]] == [
+        ("RESERVE", "JOHN HANCOCK")
+    ]
     assert baseline._calendar_statuses(facts["accounts"], facts["nav"], {}) == []
 
 
