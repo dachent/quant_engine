@@ -704,3 +704,58 @@ def test_the_hybrid_plan_of_an_admitted_model_live_strategy_is_backtest_then_mod
     assert {row["evidence_layer"] for row in composition["account_basis"]["rows"]} >= {
         "ACCOUNT_LIVE"
     }
+
+
+def _lane_manifest() -> dict[str, Any]:
+    return {
+        "strategy_basis_restatement": {
+            "sleeve_facts": json.dumps({"parent_account_id": "parent"}),
+            "strategies": [
+                {
+                    "series_id": SERIES,
+                    "strategy_id": AI,
+                    "series_sha256": "0" * 64,
+                    "account_id": "sleeve",
+                }
+            ],
+        }
+    }
+
+
+def _lanes(rows: list[dict[str, str]], mode: str) -> Any:
+    return planner._account_basis_lanes(
+        manifest=_lane_manifest(),
+        planned_series={SERIES: AI},
+        selected_projection=rows,
+        evidence_mode=mode,
+        provider_ledger_catalog_path=None,
+    )
+
+
+def _row(layer: str, day: str) -> dict[str, str]:
+    return {
+        "series_id": SERIES,
+        "date": day,
+        "evidence_layer": layer,
+        "return": "0.01",
+    }
+
+
+def test_the_sleeve_seal_is_kept_where_account_rows_are_selected() -> None:
+    """Kill test: in LIVE_ONLY the account rows must be the sealed sleeve rows."""
+
+    with pytest.raises(
+        planner.CurrentPlanError, match="selected live rows differ from the restated"
+    ):
+        _lanes([_row("ACCOUNT_LIVE", "2026-01-05")], "LIVE_ONLY")
+
+
+def test_a_model_live_research_series_never_carries_the_account() -> None:
+    """Kill test: a hybrid projection of a model-live strategy with an account row
+    is refused, where the seal check does not apply."""
+
+    with pytest.raises(planner.CurrentPlanError, match="carries the account"):
+        _lanes(
+            [_row("MODEL_LIVE", "2026-01-06"), _row("ACCOUNT_LIVE", "2026-01-05")],
+            "LIVE_PLUS_BACKTEST",
+        )
