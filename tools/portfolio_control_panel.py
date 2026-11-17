@@ -10345,7 +10345,9 @@ def _hwm_candidate(
         "evaluated_on": proof["evaluated_on"],
         "financial_acceptance": proof["financial_acceptance"],
         "not_accepted_reason": (
-            hwm_summary.get("hwm_numerical_reason") if unaccepted else None
+            hwm_summary.get("hwm_numerical_reason")
+            if unaccepted and not accepted
+            else None
         ),
         "not_accepted_register": None if accepted else "E2",
         "receipt_sha256": proof["receipt_sha256"],

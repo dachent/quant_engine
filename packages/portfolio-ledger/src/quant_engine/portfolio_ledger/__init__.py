@@ -19,6 +19,7 @@ from quant_engine.portfolio_ledger.hwm_gap_bounds import (
     hwm_financial_acceptance,
     numerical_from_governed_proof,
     proof_covers_spans,
+    receipt_missing_points,
 )
 from quant_engine.portfolio_ledger.models import (
     Account,
@@ -152,6 +153,7 @@ __all__ = [
     "hwm_financial_acceptance",
     "numerical_from_governed_proof",
     "proof_covers_spans",
+    "receipt_missing_points",
     "Account",
     "AccountPoolAssignment",
     "AccountPositionReconciliation",

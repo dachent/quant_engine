@@ -565,3 +565,40 @@ def test_the_panel_label_counts_the_checked_points_and_a_mismatch_raises() -> No
     assert pending is not None
     assert pending["status"] == "CANDIDATE_PENDING_OWNER_ACCEPTANCE"
     assert pending["not_accepted_register"] == "E2"
+
+
+def test_a_fourth_filled_day_is_not_the_accepted_gap_set() -> None:
+    """KILL (review): the acceptance covers exactly the recorded span-filled days."""
+
+    from quant_engine.portfolio_ledger import (
+        apply_hwm_owner_acceptance,
+        receipt_missing_points,
+    )
+
+    raw = RECORD_PATH.read_bytes()
+    proof = _accepted_shape_proof()
+    three = receipt_missing_points(_receipts_on(RECORD_DATES))
+    assert apply_hwm_owner_acceptance(proof, raw, three)["financial_acceptance"] == (
+        "OWNER_ACCEPTED"
+    )
+    four = receipt_missing_points(_receipts_on((*RECORD_DATES, "2026-03-03")))
+    two = receipt_missing_points(_receipts_on(RECORD_DATES[:2]))
+    moved = receipt_missing_points(_receipts_on((*RECORD_DATES[:2], "2026-10-17")))
+    for points in (four, two, moved, []):
+        out = apply_hwm_owner_acceptance(proof, raw, points)
+        assert out["financial_acceptance"] == "PENDING_OWNER_ACCEPTANCE", points
+        assert "owner_acceptance_sha256" not in out
+
+
+def test_an_accepted_candidate_states_no_unaccepted_reason() -> None:
+    candidate = panel._hwm_candidate(
+        _candidate_proof("OWNER_ACCEPTED"),
+        {
+            "policy_id": "PORT-HWM-3",
+            "hwm_numerical_status": "UNAVAILABLE",
+            "hwm_numerical_reason": "NO_HWM_INPUTS",
+        },
+        _receipts_on(RECORD_DATES),
+    )
+    assert candidate is not None
+    assert candidate["not_accepted_reason"] is None
