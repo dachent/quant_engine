@@ -5973,5 +5973,9 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
     members = {
         m["account_id"]: m for m in catalog["current_capital"]["reserve"]["members"]
     }
+    jh_calendar = [
+        r for r in catalog["calendar_coverage"] if r["account_id"] == "account-jh"
+    ]
+    assert [r["status"] for r in jh_calendar] == ["STATEMENT_CADENCE_NAV_OBSERVATIONS"]
     assert members["account-jh"]["authority"] == "AUTHORITATIVE"
     assert members["account-jh"]["as_of_date"] == "2026-06-30"

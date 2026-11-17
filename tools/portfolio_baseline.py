@@ -1381,6 +1381,7 @@ def _calendar_statuses(
     accounts: Sequence[Mapping[str, Any]],
     nav: Sequence[Mapping[str, Any]],
     provider_dates: Mapping[str, set[date]],
+    statement_accounts: Collection[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     by_account: dict[str, set[date]] = {}
     for record in nav:
@@ -1401,7 +1402,12 @@ def _calendar_statuses(
                     "account_id": account_id,
                     "date": None,
                     "provider": provider,
-                    "status": "NO_ACCOUNT_NAV_OBSERVATIONS",
+                    # statement points are periodic, not a daily calendar, but they exist
+                    "status": (
+                        "STATEMENT_CADENCE_NAV_OBSERVATIONS"
+                        if account_id in statement_accounts
+                        else "NO_ACCOUNT_NAV_OBSERVATIONS"
+                    ),
                 }
             )
             continue
@@ -6559,6 +6565,7 @@ def build_catalog(
             provider_catalog.get("admissions"), "provider-ledger.admissions"
         )
         ledger_nav = nav
+        statement_nav: list[dict[str, Any]] = []
         if "statement_reserves" in spec:
             # #900 (B): statement NAV points of reserve accounts that are not provider-ledger
             # providers, read from hash-pinned catalogs (latest on or before the cutoff).
@@ -6616,7 +6623,12 @@ def build_catalog(
             provider_dates.setdefault(
                 str(record.get("provider", "UNKNOWN")), set()
             ).add(_date(record["as_of_date"], "nav.as_of_date"))
-        calendar = _calendar_statuses(accounts, ledger_nav, provider_dates)
+        calendar = _calendar_statuses(
+            accounts,
+            ledger_nav,
+            provider_dates,
+            {str(item["account_id"]) for item in statement_nav},
+        )
     allocations, strategy_nav_coverage, costs, systematic_total, nav_covered = (
         _allocations_and_coverage(
             paths,
