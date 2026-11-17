@@ -37,6 +37,7 @@ ADMITTED_FIELDS = (
     "mark_price",
     "multiplier",
     "order_reference",
+    "fx_rate_to_base",
     "put_call",
     "strike",
     "sub_category",

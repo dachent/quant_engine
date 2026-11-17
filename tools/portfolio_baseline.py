@@ -4702,6 +4702,10 @@ def _build_audit_snapshot(
 
 #: Relative tolerance of an FX conversion against the provider's own USD amount.
 _FX_CLOSURE_TOLERANCE: Final = Decimal("0.005")
+#: Provider-own evidence is the provider's daily rate; the rate it booked a cash row at
+#: is a transaction-time rate, so the two differ by an intraday move (observed up to
+#: about 0.7 percent).  The reference tolerance for that pairing is one percent.
+_FX_PROVIDER_CLOSURE_TOLERANCE: Final = Decimal("0.01")
 
 
 def _fx_record_uncovered_reason(
@@ -4726,7 +4730,15 @@ def _fx_record_uncovered_reason(
     evidence = record.get("event_time_fx")
     if not isinstance(evidence, Mapping):
         return "NO_FX_EVIDENCE"
-    if evidence.get("generation_id") != fx_admission["generation_id"]:
+    provider_own = (
+        evidence.get("provider") == record.get("provider_id")
+        and evidence.get("generation_id") == record.get("generation_id")
+        and evidence.get("method") == "PROVIDER_REPORTED_CONVERSION_RATE"
+    )
+    if (
+        not provider_own
+        and evidence.get("generation_id") != fx_admission["generation_id"]
+    ):
         return "OTHER_GENERATION"
     if evidence.get("currency") != amount.get("currency"):
         return "CURRENCY_DIFFERS"
@@ -4745,7 +4757,9 @@ def _fx_record_uncovered_reason(
         or rate <= 0
     ):
         return "FX_EVIDENCE_INVALID"
-    if not fx_admission["start"] <= event_day <= fx_admission["end"]:
+    if not provider_own and not (
+        fx_admission["start"] <= event_day <= fx_admission["end"]
+    ):
         return "OUTSIDE_GENERATION_INTERVAL"
     provider_usd = record.get("provider_usd_amount")
     if isinstance(provider_usd, Mapping) and provider_usd.get("status") == "AVAILABLE":
@@ -4756,9 +4770,10 @@ def _fx_record_uncovered_reason(
         if not reported.is_finite():
             return "FX_EVIDENCE_INVALID"
         converted = native * rate
-        if abs(converted - reported) > _FX_CLOSURE_TOLERANCE * abs(reported) + Decimal(
-            "0.01"
-        ):
+        tolerance = (
+            _FX_PROVIDER_CLOSURE_TOLERANCE if provider_own else _FX_CLOSURE_TOLERANCE
+        )
+        if abs(converted - reported) > tolerance * abs(reported) + Decimal("0.01"):
             return "CLOSURE_FAILED"
     return None
 
