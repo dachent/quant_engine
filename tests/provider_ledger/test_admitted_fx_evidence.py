@@ -1,8 +1,9 @@
-"""#905 (data health): the admitted FX generation prices every provider's non-USD rows.
+"""#905 prerequisite: the ledger prices every provider's non-USD rows the admitted generation covers.
 
-Real records: 488 non-USD flow/transaction rows (CAD DKK EUR GBP NOK PLN SEK) carried no
-``event_time_fx`` because only the Matrixport projection was handed the generation, so the
-FX fact read PARTIAL (NO_FX_EVIDENCE) although the generation covers every one of them.
+The helper consults only rates the loader admitted.  Today the loader admits the USDC/USDT
+series alone, so on real data this prices no fiat row; it does not by itself close the fiat
+FX gap (that needs a governed fiat generation).  These tests use fiat rates to exercise the
+helper's own rules and the baseline fact's reaction to priced rows.
 """
 
 from __future__ import annotations

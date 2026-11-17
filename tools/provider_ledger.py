@@ -859,6 +859,13 @@ def _attach_admitted_fx_evidence(
     amount is available, and the generation holds a positive rate for that
     currency and day.  A row the generation does not price is left untouched: it
     stays unconverted and the FX fact reports it, never a silent par assumption.
+
+    Only rates the loader admitted are consulted.  Today the loader admits the
+    USDC/USDT series alone, so this prices no fiat row until a governed fiat
+    generation is admitted (see the fiat FX generation plan); it does not by
+    itself close the fiat FX gap.  A fiat rate must be USD per one unit of the
+    currency; an inverse quote (CAD per USD) is a different direction, and the
+    loader must enforce that direction when fiat is admitted.
     """
 
     rates = fx_rates[1]
@@ -11268,16 +11275,17 @@ def build_catalog(
                 else as_of
             ),
         )
+        if fx_rates is not None:
+            # Price the rows the admitted generation covers BEFORE the provider's
+            # facts are stored: the receipt's materialized digest is taken over the
+            # stored rows and must match the published ones.
+            for fact_type in ("flows", "transactions"):
+                if fact_type in facts:
+                    _attach_admitted_fx_evidence(facts[fact_type], fx_rates)
         provider_facts[provider_id] = facts
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
-    if fx_rates is not None:
-        # #905: the admitted generation prices every provider's non-USD rows it
-        # covers, not only Matrixport's.
-        for fact_type in ("flows", "transactions"):
-            if fact_type in combined:
-                _attach_admitted_fx_evidence(combined[fact_type], fx_rates)
     zero_financing = None
     if "zero_financing_observations" in spec:
         # the account type rule reaches back to each account's first NAV day
