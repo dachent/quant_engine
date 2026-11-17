@@ -8553,6 +8553,22 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
             )
         return
 
+    if ctx.gen.candidate_only and not artifacts:
+        # A panel CANDIDATE has no manifest yet (G2, before publication), so no artifact can be
+        # bound. The manifest-bound identity (one artifact, its hash) is judged on the published
+        # generation at the findings-panel stage, where this requirement is unchanged. Here the
+        # source is the panel's own declaration, so every panel-only check below still runs:
+        # the declared source cutoff against the last completed week, the current-week record
+        # and its visibility, and that the panel declares a well-formed source hash.
+        artifacts = [
+            {
+                "artifact_id": source_artifact_id,
+                "as_of_date": weekly.get("as_of_date"),
+                "sha256": weekly.get("source_sha256"),
+                "schema": {"name": "portfolio-weekly-returns", "version": "2"},
+                "size_bytes": 1,
+            }
+        ]
     if len(artifacts) != 1:
         yield _finding(
             "dates.weekly_current_week",
