@@ -3224,13 +3224,12 @@
   const perfPercent = (value) => { const percent = (value - 1) * 100; const text = Math.abs(percent) >= 100000 ? perfCompact.format(percent) : percent.toFixed(1); return Number(text) === 0 ? "0.0%" : `${percent > 0 ? "+" : ""}${text}%`; };
   const perfIsLive = (origin) => origin == null || origin === "ACCOUNT_LIVE" || origin === "LIVE";
   // First live week of a line that has earlier non-live weeks (backtest or model); null when it is live throughout.
-  function perfLiveStart(line, startByEnd) {
-    const pts = line.points.filter((point) => point.value != null);
-    // The week that spans two layers (MIXED) and is followed by live weeks is the week live trading began: the Live-only line starts there.
-    const index = pts.findIndex((point, position) => perfIsLive(point.origin) || (point.origin === "MIXED" && pts.slice(position + 1).some((later) => perfIsLive(later.origin))));
-    if (index <= 0 || !pts.slice(0, index).some((point) => !perfIsLive(point.origin))) return null;
-    const latest = pts[pts.length - 1].value;
-    return { time: startByEnd?.get(pts[index].time) ?? pts[index - 1].time, value: pts[index - 1].value, liveReturn: latest / pts[index - 1].value - 1 };
+  // A series' live start and live return are the first week and the cumulative return of its own line in the Live-only mode
+  // (line.live, read when the lines are built): that line is what "live only" means, so the chip can never disagree with it.
+  function perfLiveStart(line) {
+    if (!line.live) return null;
+    const before = line.points.filter((point) => point.value != null && point.time <= line.live.time);
+    return { time: line.live.time, value: before.length ? before[before.length - 1].value : null, liveReturn: line.live.liveReturn };
   }
   // The window each zoom really shows: the later of the requested start and the group anchor.
   function perfWindows(built) {
@@ -3300,7 +3299,16 @@
       if (firstIndex < 0) continue;
       // A line that carries member_counts is the available-members equal-weight line: drawn, but off until asked for.
       const partialMembership = Array.isArray(line.member_counts);
-      lines.push({ key: line.series_id, name, color, kind, tri, origin, firstIndex, partialMembership, definition: line.definition || "" });
+      // The same series in the Live-only mode: where it starts there (later than here when this mode has earlier history) and what it returned.
+      let live = null;
+      const liveBlock = tab.modes.LIVE_ONLY;
+      if (mode !== "LIVE_ONLY" && liveBlock && Array.isArray(liveBlock.lines) && Array.isArray(liveBlock.dates)) {
+        const liveLine = liveBlock.lines.find((item) => item.series_id === line.series_id);
+        const liveTri = liveLine && Array.isArray(liveLine.tri) ? liveLine.tri.map((value) => (number(value) == null ? null : Number(value))) : [];
+        const liveFirst = liveTri.findIndex((value) => value != null);
+        if (liveFirst >= 0 && perfTime(liveBlock.dates[liveFirst]) > starts[firstIndex]) live = { time: perfTime(liveBlock.dates[liveFirst]), liveReturn: [...liveTri].reverse().find((value) => value != null) - 1 };
+      }
+      lines.push({ key: line.series_id, name, color, kind, tri, origin, firstIndex, partialMembership, live, definition: line.definition || "" });
       if (partialMembership && !perfHiddenSeeded.has(line.series_id)) { perfHiddenSeeded.add(line.series_id); perfHidden.add(line.series_id); }
       if (kind === "portfolio" && line.definition) definitions.push(`${name}: ${line.definition}`);
       if (line.return_scope_label) definitions.push(`${name}: ${line.return_scope_label}`);
@@ -3374,7 +3382,6 @@
       return;
     }
     const { starts, ends } = built;
-    const startByEnd = new Map(ends.map((end, index) => [end, starts[index]]));
     const windows = perfWindows(built);
     const current = windows.find((item) => item.label === perfZoom) || windows[windows.length - 1];
     if (current.unavailable) {
@@ -3424,8 +3431,8 @@
     const paths = visibleLines.map((line) => perfSegments(line.points).map((segment) => `<polyline fill="none" stroke="${line.color}" stroke-width="${line.kind === "portfolio" ? 2.6 : 1.8}"${segment.style.dash ? ` stroke-dasharray="${segment.style.dash}"` : ""}${line.kind === "benchmark" ? ' stroke-opacity=".85"' : ""} points="${segment.points.map((point) => `${x(point.time).toFixed(1)},${y(point.value).toFixed(1)}`).join(" ")}"></polyline>`).join("")).join("");
     // A dot where a line's live evidence begins, after backtest or model weeks.
     const liveMarkers = visibleLines.map((line) => {
-      const live = perfLiveStart(line, startByEnd);
-      return live ? `<circle cx="${x(live.time).toFixed(1)}" cy="${y(live.value).toFixed(1)}" r="3.4" fill="${line.color}" stroke="#081018" stroke-width="1"><title>${safe(line.name)}: live evidence starts ${safe(perfDate(live.time))}</title></circle>` : "";
+      const live = perfLiveStart(line);
+      return live && live.value != null ? `<circle cx="${x(live.time).toFixed(1)}" cy="${y(live.value).toFixed(1)}" r="3.4" fill="${line.color}" stroke="#081018" stroke-width="1"><title>${safe(line.name)}: live evidence starts ${safe(perfDate(live.time))}</title></circle>` : "";
     }).join("");
     const latest = (line) => line.points.filter((point) => point.value != null).at(-1)?.value;
     const rebaseSummary = own ? "each line rebased at its own first week, log axis" : `rebased at ${perfDate(starts[baseIndex])}`;
@@ -3474,7 +3481,7 @@
     // Each chip says which weeks its percentage covers, and the live-only share for a line with earlier backtest weeks.
     const windowText = (line) => {
       const pts = line.points.filter((point) => point.value != null);
-      const live = perfLiveStart(line, startByEnd);
+      const live = perfLiveStart(line);
       const years = (pts[pts.length - 1].time - pts[0].time) / (365 * PERF_DAY);
       const annual = years >= 1 && pts[0].value > 0 ? ` · ${perfPercent(Math.pow(pts[pts.length - 1].value / pts[0].value, 1 / years))} a year` : " · under 1 year, not annualized";
       return `${perfDate(pts[0].time)} → ${perfDate(pts[pts.length - 1].time)}${annual}${live ? ` · live from ${perfDate(live.time)}, live ${perfPercent(1 + live.liveReturn)}` : ""}`;

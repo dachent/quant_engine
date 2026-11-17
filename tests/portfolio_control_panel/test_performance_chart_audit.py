@@ -348,37 +348,8 @@ def test_own_start_view_is_explicit_log_with_few_ticks_and_windows_on_every_chip
     assert "Own start" in _text(dom, "#perf-window-note")
 
 
-def test_each_chip_names_its_window_and_the_live_share_of_a_backtest_line(
-    tmp_path: Path,
-) -> None:
-    dom = _run(tmp_path, _payload(anchor=100), ['perfZoom = "Max"'])
-    legend = _text(dom, "#perf-returns-legend")
-    assert re.search(
-        r"Alpha .*?[0-9]{4}-[0-9]{2}-[0-9]{2} → [0-9]{4}-[0-9]{2}-[0-9]{2} · [+-][0-9.]+% a year · live from [0-9]{4}-[0-9]{2}-[0-9]{2}, live ",
-        legend,
-    )
-    gamma = re.search(
-        r"Gamma [^A-Z]*?(\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})([^A-Z]*)", legend
-    )
-    assert gamma and "live from" not in gamma.group(3)  # live throughout: no marker
-    # The live start is the first day of the first live week (week index 260 and 310 of the grid),
-    # the same day the live return is measured from, not that week's end.
-    assert f"live from {_week_start(260)}" in legend
-    assert f"live from {_week_start(310)}" in legend
-
-
 def _week_start(index: int) -> str:
     return (FIRST_MONDAY + timedelta(days=7 * index)).isoformat()
-
-
-def test_a_dot_marks_where_live_evidence_begins(tmp_path: Path) -> None:
-    dom = _run(tmp_path, _payload(anchor=100), ['perfZoom = "Max"'])
-    html = dom["#perf-returns-chart"]["innerHTML"]
-    assert (
-        html.count("live evidence starts") == 2
-    )  # Alpha and Beta; Gamma is live throughout
-    assert f"live evidence starts {_week_start(260)}" in html
-    assert f"live evidence starts {_week_start(310)}" in html
 
 
 def test_one_year_and_three_year_differ_when_the_anchor_allows(tmp_path: Path) -> None:
@@ -689,23 +660,6 @@ def test_early_january_ytd_says_no_week_has_started_instead_of_showing_december(
     )
 
 
-def test_origin_names_from_before_the_producer_rename_still_read_as_live(
-    tmp_path: Path,
-) -> None:
-    payload = _payload(anchor=100)
-    for mode in payload["performance_tab"]["modes"].values():
-        for line in mode["lines"]:
-            line["origin"] = [
-                [start, end, "LIVE" if flag == "ACCOUNT_LIVE" else flag]
-                for start, end, flag in line.get("origin", [])
-            ]
-    dom = _run(tmp_path, payload, ['perfZoom = "Max"'])
-    html = dom["#perf-returns-chart"]["innerHTML"]
-    assert html.count("live evidence starts") == 2
-    assert f"live evidence starts {_week_start(260)}" in html
-    assert "dashed = live" not in _text(dom, "#perf-returns-note")
-
-
 def test_gridline_labels_print_every_tick_exactly(tmp_path: Path) -> None:
     assert _eval(tmp_path, "perfTickDecimals([0.975, 1, 1.025, 1.05])") == 3
     assert _eval(tmp_path, "perfTickDecimals([0.8, 1, 1.2])") == 2
@@ -741,44 +695,6 @@ def test_a_flat_week_prints_zero_not_negative_zero(tmp_path: Path) -> None:
     assert _eval(tmp_path, "perfPercent(0.95)") == "-5.0%"
 
 
-def test_a_mixed_week_before_live_weeks_is_where_live_trading_began(
-    tmp_path: Path,
-) -> None:
-    # BACKTEST, then one MIXED week (the week spanning two layers), then LIVE: the Live-only line starts at the MIXED week.
-    payload = _payload(anchor=100)
-    for mode in {
-        id(m): m for m in payload["performance_tab"]["modes"].values()
-    }.values():
-        for line in mode["lines"]:
-            if line["series_id"] == "strategy:Alpha":
-                line["origin"] = [
-                    [max(0, 100 - 100), 259, "BACKTEST"],
-                    [260, 260, "MIXED"],
-                    [261, WEEKS - 1, "ACCOUNT_LIVE"],
-                ]
-    dom = _run(tmp_path, payload, ['perfZoom = "Max"'])
-    legend = _text(dom, "#perf-returns-legend")
-    assert f"live from {_week_start(260)}" in legend  # the MIXED week, not week 261
-    assert f"live from {_week_start(261)}" not in legend
-    assert (
-        f"live evidence starts {_week_start(260)}"
-        in dom["#perf-returns-chart"]["innerHTML"]
-    )
-
-
-def test_a_portfolio_line_that_is_mixed_throughout_has_no_live_start(
-    tmp_path: Path,
-) -> None:
-    dom = _run(tmp_path, _payload(anchor=100), ['perfZoom = "Max"'])
-    chips = re.findall(
-        r"<button[^>]*perf-legend-item.*?</button>",
-        dom["#perf-returns-legend"]["innerHTML"],
-        flags=re.S,
-    )
-    equal = next(chip for chip in chips if "Equal-weight portfolio" in chip)
-    assert "live from" not in equal
-
-
 def test_a_governed_index_that_starts_after_the_window_says_so(tmp_path: Path) -> None:
     payload = _payload()
     payload["hwm_governed_proof"] = {
@@ -795,3 +711,143 @@ def test_a_governed_index_that_starts_after_the_window_says_so(tmp_path: Path) -
         in readout
     )
     assert "no governed index in this snapshot" not in readout
+
+
+def _live_only_mode(anchor: int) -> dict[str, Any]:
+    """A Live-only mode with its own lines: the shapes the producer publishes.
+
+    Alpha: backtest to week 259, live from 260 (Live-only starts 260).
+    Beta: backtest to 309, one MIXED week 310, live from 311 (Live-only starts at the MIXED week, 310, with its own first-week return).
+    Gamma: live throughout. Equal-weight: MIXED for a long span then live (Live-only starts 30 weeks from the end).
+    """
+
+    plus = _mode(anchor)
+    only = json.loads(json.dumps(plus))
+    ew_live = WEEKS - 30
+    starts = {
+        "strategy:Alpha": 260,
+        "strategy:Beta": 310,
+        "portfolio:equal_weight": ew_live,
+    }
+    for line in only["lines"]:
+        first = starts.get(line["series_id"])
+        if first is None:
+            continue
+        level, tri = 1.0, [None] * first
+        for step in range(first, WEEKS):
+            level *= (
+                1.0 + 0.004 + 0.01 * math.sin(step / 5.0)
+            )  # Live-only weekly returns differ from the backtest-blended ones
+            tri.append(round(level, 6))
+        line["tri"] = tri
+        line["origin"] = [[first, WEEKS - 1, "ACCOUNT_LIVE"]]
+    only["group_anchor_index"] = max(starts.values())
+    only["group_anchor_date"] = only["dates"][only["group_anchor_index"]]
+    for line in plus["lines"]:
+        if line["series_id"] == "strategy:Beta":
+            line["origin"] = [
+                [max(0, anchor - 50), 309, "BACKTEST"],
+                [310, 310, "MIXED"],
+                [311, WEEKS - 1, "ACCOUNT_LIVE"],
+            ]
+        if line["series_id"] == "portfolio:equal_weight":
+            line["origin"] = [
+                [anchor, ew_live - 1, "MIXED"],
+                [ew_live, WEEKS - 1, "ACCOUNT_LIVE"],
+            ]
+    return {"plus": plus, "only": only}
+
+
+def _payload_live_only(anchor: int = 100) -> dict[str, Any]:
+    modes = _live_only_mode(anchor)
+    payload = _payload(anchor)
+    payload["performance_tab"]["modes"] = {
+        "LIVE_ONLY": modes["only"],
+        "LIVE_PLUS_BACKTEST": modes["plus"],
+    }
+    return payload
+
+
+def _chip(dom: dict[str, Any], name: str) -> str:
+    chips = re.findall(
+        r"<button[^>]*perf-legend-item.*?</button>",
+        dom["#perf-returns-legend"]["innerHTML"],
+        flags=re.S,
+    )
+    chip = next(
+        item
+        for item in chips
+        if f"> {name} " in item.replace("\n", " ") or name in item
+    )
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", chip))
+
+
+def _live_only_return(payload: dict[str, Any], series_id: str) -> str:
+    tri = next(
+        line["tri"]
+        for line in payload["performance_tab"]["modes"]["LIVE_ONLY"]["lines"]
+        if line["series_id"] == series_id
+    )
+    last = next(value for value in reversed(tri) if value is not None)
+    percent = (last - 1) * 100
+    return "0.0%" if round(percent, 1) == 0 else f"{percent:+.1f}%"
+
+
+def test_each_chip_live_start_and_return_are_the_same_series_live_only_line(
+    tmp_path: Path,
+) -> None:
+    payload = _payload_live_only()
+    dom = _run(tmp_path, payload, ['perfZoom = "Max"'])
+    for name, series, start in (
+        ("Alpha", "strategy:Alpha", 260),
+        (
+            "Beta",
+            "strategy:Beta",
+            310,
+        ),  # the MIXED week: where Live-only starts, including its own first-week return
+        (
+            "Equal-weight portfolio",
+            "portfolio:equal_weight",
+            WEEKS - 30,
+        ),  # a long MIXED span never counts
+    ):
+        chip = _chip(dom, name)
+        assert (
+            f"live from {_week_start(start)}, live {_live_only_return(payload, series)}"
+            in chip
+        ), (name, chip)
+    assert "live from" not in _chip(dom, "Gamma")  # live throughout: no marker
+
+
+def test_a_dot_marks_where_each_live_only_line_starts(tmp_path: Path) -> None:
+    dom = _run(tmp_path, _payload_live_only(), ['perfZoom = "Max"'])
+    html = dom["#perf-returns-chart"]["innerHTML"]
+    assert (
+        html.count("live evidence starts") == 3
+    )  # Alpha, Beta, equal-weight; not Gamma or the benchmarks
+    for start in (260, 310, WEEKS - 30):
+        assert f"live evidence starts {_week_start(start)}" in html
+
+
+def test_without_a_distinct_live_only_line_there_is_no_live_marker(
+    tmp_path: Path,
+) -> None:
+    # Both modes share one set of lines in this fixture: nothing is earlier than live, so nothing is marked.
+    dom = _run(tmp_path, _payload(anchor=100), ['perfZoom = "Max"'])
+    assert "live evidence starts" not in dom["#perf-returns-chart"]["innerHTML"]
+    assert "live from" not in _text(dom, "#perf-returns-legend")
+
+
+def test_origin_names_from_before_the_producer_rename_do_not_change_the_live_start(
+    tmp_path: Path,
+) -> None:
+    payload = _payload_live_only()
+    for mode in payload["performance_tab"]["modes"].values():
+        for line in mode["lines"]:
+            line["origin"] = [
+                [start, end, "LIVE" if flag == "ACCOUNT_LIVE" else flag]
+                for start, end, flag in line.get("origin", [])
+            ]
+    dom = _run(tmp_path, payload, ['perfZoom = "Max"'])
+    assert dom["#perf-returns-chart"]["innerHTML"].count("live evidence starts") == 3
+    assert "dashed = live" not in _text(dom, "#perf-returns-note")
