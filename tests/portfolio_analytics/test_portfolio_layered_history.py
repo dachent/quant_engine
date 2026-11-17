@@ -5472,6 +5472,9 @@ def _qsi_revision_fixture(tmp_path: Path) -> tuple[dict[str, Any], Path, Path]:
     _update_source_generation(
         contract, "strategy-backtests", seed_generation_path, "2026-09-17"
     )
+    # this fixture proves the QSI revision, at an as-of long after the synthetic
+    # model-live rows end; the model-live layers stay held here
+    _hold_eu_model_live(contract, ("p123-ai-model-live", "p123-eu-model-live"))
     _write_json(fixture["contract_path"], contract)
     fixture.update(
         {
@@ -6772,3 +6775,38 @@ def test_admitted_ai_model_live_layer_reaches_the_research_series_never_the_acco
         ai["modes"]["LIVE_PLUS_BACKTEST"].get("reason")
         != "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED"
     )
+
+
+def _days(*iso: str) -> list[Any]:
+    return [date.fromisoformat(item) for item in iso]
+
+
+def test_model_live_coverage_accepts_a_layer_that_reaches_the_cutoff_without_a_hole() -> (
+    None
+):
+    target_series._require_model_live_coverage(
+        "p123-ai-factor",
+        _days("2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06"),
+        date(2026, 11, 6),
+        date(2026, 11, 3),
+    )
+
+
+@pytest.mark.parametrize(
+    ("days", "account_start", "message"),
+    [
+        (_days("2026-10-01", "2026-10-02"), date(2026, 10, 2), "stop short"),
+        (_days("2026-09-01", "2026-09-30", "2026-11-06"), date(2026, 11, 1), "hole"),
+        (_days("2026-11-05", "2026-11-06"), date(2026, 11, 1), "after the account"),
+    ],
+)
+def test_model_live_coverage_refuses_a_short_a_holed_or_late_layer(
+    days: list[Any], account_start: Any, message: str
+) -> None:
+    """Kill tests: the layer must reach the cutoff, have no hole, and begin no later
+    than the account."""
+
+    with pytest.raises(TargetSeriesError, match=message):
+        target_series._require_model_live_coverage(
+            "p123-ai-factor", days, date(2026, 11, 6), account_start
+        )
