@@ -89,3 +89,19 @@ def test_v10_without_the_governed_plan_nothing_is_downgraded(tmp_path: Path) -> 
 def test_v10_a_lens_dated_after_the_cutoff_still_blocks(tmp_path: Path) -> None:
     findings = _findings(tmp_path, "2026-10-04", ["us-economic"])
     assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}
+
+
+def test_v10_a_lens_ending_in_a_later_complete_published_month_is_current(
+    tmp_path: Path,
+) -> None:
+    """Latest published French month (0.4.0 builder): ends after the last obliged month."""
+
+    findings = _findings(tmp_path, "2026-08-31", ["us-economic", "europe-economic"])
+    assert findings == []
+
+
+def test_v10_a_lens_ending_mid_month_after_the_eligible_month_still_blocks(
+    tmp_path: Path,
+) -> None:
+    findings = _findings(tmp_path, "2026-08-15", ["us-economic", "europe-economic"])
+    assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}
