@@ -6061,3 +6061,38 @@ def test_total_liquid_lists_every_parts_own_date_and_is_dated_at_the_oldest() ->
     assert any(p["part"].startswith("reserve:JOHN HANCOCK:acct-r2") for p in parts)
     dates = [p["as_of_date"] for p in parts if p["as_of_date"] is not None]
     assert total["as_of_date"] == min(dates)
+
+
+@pytest.mark.parametrize(
+    "schema_name",
+    ("report-data.schema.json", "control-panel-data.schema.json"),
+)
+def test_total_liquid_with_part_dates_validates_in_report_and_panel_schemas(
+    schema_name: str,
+) -> None:
+    """Kill test: the published projections accept the per-part dates (ruling F2); the
+    first AVAILABLE total liquid must not be refused by a closed aggregate definition."""
+
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas" / "portfolio" / schema_name).read_text(
+            encoding="utf-8"
+        )
+    )
+    node = {
+        "$ref": "#/$defs/custody_handoff_current_aggregate",
+        "$defs": schema["$defs"],
+    }
+    total = {
+        "as_of_date": "2026-09-30",
+        "components": ["reserve", "retained_excluded", "systematic"],
+        "current_value": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+        "part_dates": [
+            {"as_of_date": "2026-11-06", "part": "systematic"},
+            {"as_of_date": "2026-09-30", "part": "reserve:JOHN HANCOCK:account-x"},
+        ],
+        "reason": None,
+        "status": "AVAILABLE",
+    }
+    Draft202012Validator(node).validate(total)
+    with pytest.raises(ValidationError):
+        Draft202012Validator(node).validate({**total, "unknown_key": 1})
