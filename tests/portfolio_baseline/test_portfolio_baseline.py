@@ -6200,3 +6200,36 @@ def test_a_governed_outcome_types_the_row_and_never_declares_it_complete(
     assert "owner ruling 2026-11-17" in row["missing_interval_reason"]
     assert row["declared_start"] is None and row["declared_end"] is None
     assert not baseline._declares_complete(row, date(2026, 7, 30))
+
+
+def test_a_statement_provider_the_cycle_does_not_name_stays_an_explicit_gap() -> None:
+    """Guard: JOHN HANCOCK and COMPOSER are optional ledger providers; when the cycle does
+    not name them their accounts have no admission, so every event/position cell stays an
+    explicit RETAINED_NO_ACCEPTED_PROVIDER_PATH row and the fact claims stay PARTIAL."""
+
+    accounts = [
+        {"account_id": "acct-jh", "role": "INVESTMENT", "provider": "JOHN HANCOCK"},
+        {"account_id": "acct-composer", "role": "INVESTMENT", "provider": "COMPOSER"},
+    ]
+    as_of = date(2026, 11, 6)
+
+    matrix, _windows, _attribution = baseline._coverage_evidence(
+        accounts, [], [], [], [], [], [], [], as_of
+    )
+
+    rows = [
+        row
+        for row in matrix
+        if row["fact_type"] in {"flows", "transactions", "positions", "nav"}
+    ]
+    assert len(rows) == 8  # two accounts x four facts, none silently absent
+    for row in rows:
+        assert row["disposition"] == "RETAINED_NO_ACCEPTED_PROVIDER_PATH"
+        assert row["status"] == "NO_ACCEPTED_FACT_PATH"
+        assert row["record_count"] == 0
+    claims, _ = baseline._fact_coverage(
+        accounts, [], [], [], [], [], 0, as_of, coverage_matrix=matrix
+    )
+    by_fact = {claim["fact_type"]: claim for claim in claims}
+    for fact in ("flows", "transactions", "positions"):
+        assert by_fact[fact]["status"] != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
