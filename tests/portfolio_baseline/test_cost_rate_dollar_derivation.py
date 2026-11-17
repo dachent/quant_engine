@@ -79,6 +79,7 @@ def test_a_settled_management_rate_gives_annual_dollars_with_its_derivation() ->
         "rate_kind": "management_rate",
         "tier": "NON_QUALIFIED_FLAT",
         "unpriced_components": [],
+        "classified_components": [],
     }
     # the rate row stays visible
     assert volatis["fee_rates"]["tier"] == "NON_QUALIFIED_FLAT"
@@ -102,10 +103,25 @@ def test_a_rate_the_documentation_does_not_state_is_not_invented() -> None:
     assert "derived_annual_cost_usd" not in volatis
 
 
-def test_a_performance_rate_is_not_priced_as_a_share_of_the_sleeve() -> None:
+def test_an_in_nav_performance_fee_is_classified_never_priced() -> None:
     robuxio = _derive(_rows("NON_QUALIFIED_FLAT"))["robuxio"]
-    assert robuxio["derived_annual_cost_usd"] == "0"
-    assert robuxio["cost_derivation"]["unpriced_components"] == ["performance_rate"]
+    assert robuxio["derived_annual_cost_usd"] == "0"  # management part stays visible
+    derivation = robuxio["cost_derivation"]
+    assert derivation["unpriced_components"] == []
+    (item,) = derivation["classified_components"]
+    assert item["classification"] == "IN_NAV_NOT_BILLED"
+    assert item["component"] == "performance_rate"
+    assert item["rate"] == "0.3"
+    assert item["mechanism"] == "over the high-water mark"
+    assert item["reason"]
+
+
+def test_a_performance_fee_not_stated_inside_the_nav_stays_unpriced() -> None:
+    # Volatis qualified tier: 20% performance, placement not stated -> a real gap.
+    volatis = _derive(_rows("QUALIFIED_0_1M"))["volatis"]
+    assert volatis["cost_derivation"]["unpriced_components"] == ["performance_rate"]
+    assert volatis["cost_derivation"]["classified_components"] == []
+    assert baseline._costs_claim([volatis])["status"] == "PARTIAL"
 
 
 def test_a_strategy_without_a_sleeve_value_is_not_priced() -> None:
@@ -129,10 +145,67 @@ def test_the_costs_fact_is_complete_once_every_row_has_a_priced_amount() -> None
     )
 
 
-def test_the_costs_fact_stays_partial_while_a_performance_fee_is_unpriced() -> None:
+def test_the_costs_fact_counts_an_in_nav_classified_row_as_classified() -> None:
     rows = _derive(_rows("NON_QUALIFIED_FLAT"))
     claim = baseline._costs_claim([rows["volatis"], rows["robuxio"]])
-    assert claim["status"] == "PARTIAL"
+    assert claim["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+
+
+def _unknown(strategy: str) -> dict[str, Any]:
+    return {
+        "annual_external_cost_usd": None,
+        "cost_status": "unknown",
+        "strategy_id": strategy,
+    }
+
+
+def test_a_deprecated_history_only_strategy_is_excluded_with_the_policy_reason() -> None:
+    (row,) = baseline._classify_excluded_history_only_costs(
+        [_unknown("echotrade-growth-pivots")], AS_OF
+    )
+    classification = row["cost_classification"]
+    assert classification["classification"] == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
+    assert "2025-11-24" in classification["reason"]
+    assert classification["effective_date"] == "2025-11-25"
+    assert baseline._costs_claim([row])["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+
+
+def test_an_unknown_cost_of_a_live_strategy_is_not_excluded() -> None:
+    (row,) = baseline._classify_excluded_history_only_costs([_unknown("volatis")], AS_OF)
+    assert "cost_classification" not in row
+    assert baseline._costs_claim([row])["status"] == "PARTIAL"
+
+
+def test_a_de_minimis_exclusion_is_not_a_deprecation() -> None:
+    # composer is excluded from the HWM governor as immaterial, not deprecated
+    (row,) = baseline._classify_excluded_history_only_costs(
+        [_unknown("composer-holy-grail")], AS_OF
+    )
+    assert "cost_classification" not in row
+
+
+def test_the_exclusion_applies_only_from_its_effective_date() -> None:
+    (row,) = baseline._classify_excluded_history_only_costs(
+        [_unknown("echotrade-growth-pivots")], date(2025, 11, 24)
+    )
+    assert "cost_classification" not in row
+
+
+def test_a_priced_row_is_never_reclassified() -> None:
+    priced = {**_known("echotrade-growth-pivots", "10")}
+    (row,) = baseline._classify_excluded_history_only_costs([priced], AS_OF)
+    assert "cost_classification" not in row
+
+
+def test_a_classification_without_its_reason_does_not_count() -> None:
+    row = {
+        **_unknown("echotrade-growth-pivots"),
+        "cost_classification": {
+            "classification": "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+            "reason": "",
+        },
+    }
+    assert baseline._costs_claim([row])["status"] == "PARTIAL"
 
 
 def test_the_costs_fact_stays_partial_for_an_unpriced_rate_row() -> None:

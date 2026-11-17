@@ -131,6 +131,9 @@ COST_STATUS_DOCUMENTED_RATE: Final = "documented_rate_percent"
 COST_STATUS_TIER_UNSETTLED: Final = "documented_rate_tier_unsettled"
 FEE_TIER_UNSETTLED: Final = "TIER_UNSETTLED"
 COST_DERIVATION_METHOD: Final = "DERIVED_FROM_DOCUMENTED_RATE"
+# A cost that is not a billed dollar amount is classified, with its reason, not left as a gap.
+COST_CLASS_IN_NAV_NOT_BILLED: Final = "IN_NAV_NOT_BILLED"
+COST_CLASS_EXCLUDED_HISTORY_ONLY: Final = "EXCLUDED_DEPRECATED_HISTORY_ONLY"
 _FEE_PLACEMENTS: Final = frozenset(
     {"INSIDE_VEHICLE_NAV", "OUTSIDE_BILLED", "NOT_STATED_IN_DOCUMENTATION"}
 )
@@ -2394,6 +2397,7 @@ def _allocations_and_coverage(
     costs = _derive_rate_dollar_costs(
         costs, {key: item[0] for key, item in by_strategy.items()}, publication_date
     )
+    costs = _classify_excluded_history_only_costs(costs, publication_date)
     # The audit snapshot is sealed: these totals are compared with the audit's reported
     # total and with the materializer's own sum, so they are added as the audit added
     # them (see ``_snapshot_sum``), never exactly.
@@ -2441,11 +2445,27 @@ def _derive_rate_dollar_costs(
                         f"sleeve value of {item['strategy_id']} is negative"
                     )
                 rate = Decimal(tier_row["management_rate"])
-                unpriced = (
-                    ["performance_rate"]
-                    if tier_row["performance_rate"] not in (None, "0")
-                    else []
-                )
+                unpriced: list[str] = []
+                classified: list[dict[str, Any]] = []
+                if tier_row["performance_rate"] not in (None, "0"):
+                    if rates["placement"] == "INSIDE_VEHICLE_NAV":
+                        # charged inside the vehicle NAV: the strategy return is already
+                        # net of it, so it is no billed dollar cost; never rate x value
+                        classified.append(
+                            {
+                                "classification": COST_CLASS_IN_NAV_NOT_BILLED,
+                                "component": "performance_rate",
+                                "mechanism": tier_row["performance_mechanism"],
+                                "rate": tier_row["performance_rate"],
+                                "reason": (
+                                    "the documentation places the fee inside the vehicle "
+                                    "NAV; it is a share of gains, not of sleeve value, "
+                                    "and is not an external billed cost"
+                                ),
+                            }
+                        )
+                    else:
+                        unpriced.append("performance_rate")
                 item["derived_annual_cost_usd"] = decimal_text(rate * value)
                 item["cost_derivation"] = {
                     "as_of": as_of.isoformat(),
@@ -2455,7 +2475,44 @@ def _derive_rate_dollar_costs(
                     "rate_kind": "management_rate",
                     "tier": rates["tier"],
                     "unpriced_components": unpriced,
+                    "classified_components": classified,
                 }
+        carried.append(item)
+    return carried
+
+
+def _classify_excluded_history_only_costs(
+    costs: Sequence[Mapping[str, Any]], as_of: date
+) -> list[dict[str, Any]]:
+    """A cost row with no price whose strategy the governed policy excludes as a
+    deprecated or history-only record, effective by the cutoff, is a structural
+    exclusion from live costs (with the policy's own reason), not a gap."""
+
+    policy = _load_json(_HWM_POLICY_PATH, "hwm policy contract")
+    exclusions = {
+        str(row["strategy_id"]): row
+        for row in policy.get("material_perimeter", {}).get("exclusions", [])
+        if isinstance(row, dict) and "strategy_id" in row
+    }
+    carried: list[dict[str, Any]] = []
+    for row in costs:
+        item = dict(row)
+        excluded = exclusions.get(str(item["strategy_id"]))
+        reason = str(excluded.get("reason", "")) if excluded else ""
+        if (
+            excluded is not None
+            and item["annual_external_cost_usd"] is None
+            and item.get("derived_annual_cost_usd") is None
+            and not str(item.get("cost_status", "")).startswith("known")
+            and _date(excluded["effective_date"], "exclusion.effective_date") <= as_of
+            and ("deprecated" in reason.lower() or "history-only" in reason.lower())
+        ):
+            item["cost_classification"] = {
+                "classification": COST_CLASS_EXCLUDED_HISTORY_ONLY,
+                "effective_date": excluded["effective_date"],
+                "reason": reason,
+                "source": "contracts/portfolio-hwm-policy-v3.json",
+            }
         carried.append(item)
     return carried
 
@@ -4953,6 +5010,13 @@ def _costs_claim(costs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Costs are complete when every sleeve cost is a known or fully derived dollar amount."""
 
     def known(row: Mapping[str, Any]) -> bool:
+        classification = row.get("cost_classification")
+        if (
+            isinstance(classification, Mapping)
+            and classification.get("classification") == COST_CLASS_EXCLUDED_HISTORY_ONLY
+            and classification.get("reason")
+        ):
+            return True
         if str(row.get("cost_status", "")).startswith("known"):
             return row.get("annual_external_cost_usd") is not None
         derivation = row.get("cost_derivation")

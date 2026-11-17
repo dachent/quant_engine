@@ -145,6 +145,7 @@ def test_the_evidence_keys_stay_equal_across_producers() -> None:
     assert tuple(report.COST_EVIDENCE_KEYS) == tuple(attribution.COST_EVIDENCE_KEYS)
     assert tuple(report.COST_RATE_KEYS) == tuple(attribution.COST_RATE_KEYS)
     assert report.COST_RATE_KEYS == (
+        "cost_classification",
         "cost_derivation",
         "derived_annual_cost_usd",
         "fee_rates",
@@ -192,6 +193,7 @@ def test_a_derived_dollar_amount_is_named_with_its_rate_base_and_date() -> None:
         "rate_kind": "management_rate",
         "tier": "NON_QUALIFIED_FLAT",
         "unpriced_components": [],
+        "classified_components": [],
     }
     sentence = report.cost_rate_disclosure(row)
 
@@ -204,7 +206,7 @@ def test_a_derived_dollar_amount_is_named_with_its_rate_base_and_date() -> None:
     assert "not priced" not in sentence
 
 
-def test_an_unpriced_performance_rate_is_said_not_priced() -> None:
+def test_an_in_nav_performance_fee_is_stated_as_classified() -> None:
     row = _row(docs.robuxio_rates())
     row["derived_annual_cost_usd"] = "0"
     row["cost_derivation"] = {
@@ -214,10 +216,21 @@ def test_an_unpriced_performance_rate_is_said_not_priced() -> None:
         "rate": "0",
         "rate_kind": "management_rate",
         "tier": "SINGLE_RATE",
-        "unpriced_components": ["performance_rate"],
+        "unpriced_components": [],
+        "classified_components": [
+            {
+                "classification": "IN_NAV_NOT_BILLED",
+                "component": "performance_rate",
+                "mechanism": "over the high-water mark",
+                "rate": "0.3",
+                "reason": "inside the vehicle NAV",
+            }
+        ],
     }
+    sentence = report.cost_rate_disclosure(row)
     assert (
-        "performance rate is a share of gains, not of sleeve value, and is not priced"
-        in report.cost_rate_disclosure(row)
+        "performance rate 30% is IN_NAV_NOT_BILLED (charged inside the vehicle NAV, "
+        "not a billed dollar cost)" in sentence
     )
+    assert "not priced" not in sentence
 

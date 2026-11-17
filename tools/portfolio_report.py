@@ -1656,7 +1656,12 @@ COST_EVIDENCE_KEYS: Final = (
     "execution_cost",
 )
 # Present only on a percent-based cost row; equal to portfolio_attribution.COST_RATE_KEYS.
-COST_RATE_KEYS: Final = ("cost_derivation", "derived_annual_cost_usd", "fee_rates")
+COST_RATE_KEYS: Final = (
+    "cost_classification",
+    "cost_derivation",
+    "derived_annual_cost_usd",
+    "fee_rates",
+)
 
 
 def _plain_words(code: object) -> str:
@@ -1942,6 +1947,12 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
     basis = cost.get("cost_derivation")
     if derived is not None and isinstance(basis, Mapping):
         unpriced = basis.get("unpriced_components") or []
+        in_nav = [
+            item
+            for item in basis.get("classified_components") or []
+            if isinstance(item, Mapping)
+            and item.get("classification") == "IN_NAV_NOT_BILLED"
+        ]
         sentence += (
             f"; derived annual {basis.get('rate_kind', '').replace('_', ' ')} cost "
             f"${derived} ({basis.get('method')}): "
@@ -1953,6 +1964,12 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
                 "; "
                 + ", ".join(str(name).replace("_", " ") for name in unpriced)
                 + " is a share of gains, not of sleeve value, and is not priced"
+            )
+        for item in in_nav:
+            sentence += (
+                f"; {str(item.get('component')).replace('_', ' ')} "
+                f"{_percent_text(item.get('rate'))} is IN_NAV_NOT_BILLED "
+                "(charged inside the vehicle NAV, not a billed dollar cost)"
             )
         return f"{sentence}; no billed dollar amount is published."
     return f"{sentence}; no dollar cost is published."

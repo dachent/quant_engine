@@ -739,6 +739,13 @@
   {
    "file": "apps/portfolio-control-panel/app.js",
    "kinds": [
+    "universal"
+   ],
+   "text": "model-live observations remain authoritative from inception forward."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
     "universal",
     "coverage"
    ],
@@ -805,6 +812,13 @@
   {
    "file": "apps/portfolio-control-panel/app.js",
    "kinds": [
+    "universal"
+   ],
+   "text": "this result therefore equals the live-only history and is not described as a long-history result."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
     "count"
    ],
    "text": "{} factor {} excluded from this fit ({});"
@@ -858,6 +872,13 @@
     "universal"
    ],
    "text": "All twelve columns, one row per strategy"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Backtest + live changes strategy rows only and uses version-matched backtest history strictly before live inception by date, where the live end is the model's own live record for a strategy with an admitted model-live layer and the owner's account otherwise;"
   },
   {
    "file": "apps/portfolio-control-panel/index.html",
@@ -946,13 +967,6 @@
     "basis"
    ],
    "text": "Leave-one-out evidence for the four tactical sleeves"
-  },
-  {
-   "file": "apps/portfolio-control-panel/index.html",
-   "kinds": [
-    "universal"
-   ],
-   "text": "Backtest + live changes strategy rows only and uses version-matched backtest history strictly before live inception by date, where the live end is the model's own live record for a strategy with an admitted model-live layer and the owner's account otherwise;"
   },
   {
    "file": "apps/portfolio-control-panel/index.html",
@@ -1193,6 +1207,13 @@
     "universal"
    ],
    "text": "dates through {} after it carry no FX rate"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "basis"
+   ],
+   "text": "it is a share of gains, not of sleeve value, and is not an external billed cost"
   },
   {
    "file": "tools/portfolio_baseline.py",
@@ -2049,20 +2070,6 @@
     "epoch"
    ],
    "text": "report_epochs are the governed epochs the report's totals use;"
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
-    "universal"
-   ],
-   "text": "model-live observations remain authoritative from inception forward."
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
-    "universal"
-   ],
-   "text": "this result therefore equals the live-only history and is not described as a long-history result."
   }
  ]
 }

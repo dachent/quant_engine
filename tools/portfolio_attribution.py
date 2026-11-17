@@ -57,7 +57,12 @@ COST_EVIDENCE_KEYS: Final = (
     "execution_cost",
 )
 # Present only on a percent-based cost row (documented rates, no dollar amount).
-COST_RATE_KEYS: Final = ("cost_derivation", "derived_annual_cost_usd", "fee_rates")
+COST_RATE_KEYS: Final = (
+    "cost_classification",
+    "cost_derivation",
+    "derived_annual_cost_usd",
+    "fee_rates",
+)
 # After-tax cost is outside this engine's pre-tax reporting scope (owner record
 # OR-901-AFTER-TAX, evidence/releases/.../records/sprint-cost): no tax shield is claimed
 # on a subscription or a fund fee, and no tax-lot, tax-rate or realization input is
