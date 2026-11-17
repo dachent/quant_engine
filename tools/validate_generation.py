@@ -49,6 +49,7 @@ from acceptance.validate.checks import (  # noqa: E402
     findings_document,
     load_facts_sources,
     parse_strategy_basis,
+    plausibility as plausibility,
     rollup,
     run_checks,
     to_date,

@@ -19,7 +19,9 @@ from pathlib import Path
 import sys
 from typing import Any, Sequence
 
-from acceptance.validate.checks import plausibility
+# the rules are reached through the validator runner's existing acceptance import, so this
+# command adds no tools -> acceptance edge (check_architecture)
+from validate_generation import plausibility
 
 EXIT_OK, EXIT_BLOCKER, EXIT_ERROR, EXIT_NOT_READY = 0, 1, 2, 3
 

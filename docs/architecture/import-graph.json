@@ -129,6 +129,11 @@
       1
     ],
     [
+      "check_plausibility",
+      "validate_generation",
+      1
+    ],
+    [
       "gate_profile",
       "verify_release_restore",
       1
