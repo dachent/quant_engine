@@ -582,6 +582,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "id": "current-dependence-source",
         "source_paths": (
             _DEPENDENCE,
+            "tools/portfolio_adverse_loss.py",
             _PREPARATION,
             _TARGET_SERIES,
             "contracts/portfolio-dependence-policy-v1.json",
