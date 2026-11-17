@@ -128,11 +128,33 @@ def _fixture(
     *,
     evaluated_on: current.date = current.date(2026, 1, 3),
     epoch_hpr_receipts: list[dict[str, Any]] | None = None,
+    model_live: bool = False,
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     rows = _rows()
+    if model_live:
+        # alpha has an admitted model-live layer: its own record precedes the live
+        # selection and is never the account
+        rows.extend(
+            {
+                **next(item for item in rows if item["strategy_id"] == "alpha"),
+                "date": day,
+                "return": value,
+                "evidence_layer": "MODEL_LIVE",
+                "segment_id": "segment-alpha-model-live",
+                "mode_admission": "INCLUDE_MODEL_LIVE_RESEARCH",
+                "return_basis": "MODEL",
+            }
+            for day, value in (("2025-12-30", "0.03"), ("2025-12-31", "0.04"))
+        )
     identities = []
-    for strategy_id in ("alpha", "beta", "gamma"):
-        selected = [row for row in rows if row["strategy_id"] == strategy_id]
+    segment_ids = [
+        (strategy_id, f"segment-{strategy_id}")
+        for strategy_id in ("alpha", "beta", "gamma")
+    ]
+    if model_live:
+        segment_ids.append(("alpha", "segment-alpha-model-live"))
+    for strategy_id, segment_id in segment_ids:
+        selected = [row for row in rows if row["segment_id"] == segment_id]
         first = selected[0]
         identities.append(
             {
@@ -287,6 +309,8 @@ def _fixture(
         current._csv_content(current.SEGMENT_FIELDS, rows)
     )
     projected = [{field: row[field] for field in current.RETURN_FIELDS} for row in rows]
+    series_order = {"Alpha": 0, "Beta": 1, "Gamma": 2}
+    projected.sort(key=lambda row: (series_order[row["series_id"]], row["date"]))
     coverage_content = canonical_json_bytes(
         {"epoch_hpr_receipts": epoch_hpr_receipts or []}
     )
@@ -1019,9 +1043,12 @@ def test_current_dependence_builds_and_verifies_from_real_synthetic_authorities(
     # Moved again when the dependence source began projecting that prehistory
     # instead of dropping it: the hybrid mode had been live-only whatever it
     # was labelled, because only INCLUDE_SELECTED_LIVE segments were selected.
+    # Moved again when the source began carrying the admitted model-live segment:
+    # the real contract now pins the EU model-live identity, so its rows travel in
+    # the hybrid projection (and the synthetic returns shift with the series set).
     assert (
         receipt["returns_sha256"]
-        == "712e27bc20a1e5cd58ac8b51946cc3b6efede0a91881e39954008a28b3c87155"
+        == "56564a08bef340c1d2a18b0fb201ac939dc7a5f53a0be22651848b101088649f"
     )
     assert receipt["allocation_authority"] == {
         "as_of_date": "2026-01-02",
@@ -1191,3 +1218,70 @@ def test_current_dependence_unmocked_reader_negative_cases_kill_bypass_mutants(
             _assert_build_rejected(
                 allocation_fixture, "allocation catalog identity differs"
             )
+
+
+def test_packaged_dependence_carries_the_admitted_model_live_segment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill test: a strategy with an admitted model-live layer continues its backtest
+    with that record in the dependence source, and the verifier checks it."""
+
+    source, _contract, _policy = _fixture(tmp_path, monkeypatch, model_live=True)
+    returns = list(
+        csv.DictReader(io.StringIO((source / "returns.csv").read_text("utf-8")))
+    )
+    alpha = sorted(
+        (row for row in returns if row["series_id"] == "Alpha"),
+        key=lambda row: row["date"],
+    )
+    assert [row["evidence_layer"] for row in alpha] == [
+        "MODEL_LIVE",
+        "MODEL_LIVE",
+        "ACCOUNT_LIVE",
+        "ACCOUNT_LIVE",
+    ]
+    assert (
+        current.verify_packaged_source(
+            source,
+            contract_path=tmp_path / "contract.json",
+            policy_path=tmp_path / "policy.json",
+        )["verification"]
+        == "VALID"
+    )
+    # a tampered model-live row is refused
+    tampered = (source / "returns.csv").read_text("utf-8").replace("0.04", "0.05")
+    (source / "returns.csv").write_text(tampered, encoding="utf-8")
+    segments = (source / "segments.csv").read_text("utf-8").replace("0.04", "0.05")
+    (source / "segments.csv").write_text(segments, encoding="utf-8")
+    with pytest.raises(current.CurrentDependenceError):
+        current.verify_packaged_source(
+            source,
+            contract_path=tmp_path / "contract.json",
+            policy_path=tmp_path / "policy.json",
+        )
+
+
+def test_packaged_dependence_refuses_a_missing_model_live_segment_and_an_account_row_as_model_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill tests: an admitted model-live segment cannot be dropped, and account rows
+    cannot stand in for it."""
+
+    source, _contract, _policy = _fixture(tmp_path, monkeypatch, model_live=True)
+    kwargs = {
+        "contract_path": tmp_path / "contract.json",
+        "policy_path": tmp_path / "policy.json",
+    }
+    original = {name: (source / name).read_bytes() for name in ("segments.csv",)}
+    lines = original["segments.csv"].decode("utf-8").splitlines(keepends=True)
+    dropped = "".join(line for line in lines if "model-live" not in line)
+    (source / "segments.csv").write_text(dropped, encoding="utf-8")
+    with pytest.raises(current.CurrentDependenceError):
+        current.verify_packaged_source(source, **kwargs)
+    # the model-live rows relabelled as the account's own layer
+    relabelled = (
+        original["segments.csv"].decode("utf-8").replace("MODEL_LIVE", "ACCOUNT_LIVE")
+    )
+    (source / "segments.csv").write_text(relabelled, encoding="utf-8")
+    with pytest.raises(current.CurrentDependenceError):
+        current.verify_packaged_source(source, **kwargs)

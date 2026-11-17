@@ -778,6 +778,9 @@ def build_shared_history_source(
     history = plan_tests.history_tests
     history._install_synthetic_history_authority(monkeypatch)
     prepared = history._history_fixture(root / "history")
+    # this fixture proves account-source and HWM topology; the synthetic world has
+    # no model-live rows, so the model-live layers stay held as before the admission
+    history._hold_model_live_layers(prepared)
     if selected_outcomes is not None:
         contract = json.loads(prepared["contract_path"].read_bytes())
         contract["financial_outcomes"] = selected_outcomes
@@ -2081,7 +2084,9 @@ def build_decomposition_vertical(
     def hybrid_history_fixture(path: Path) -> dict[str, Any]:
         if prepared_history_fixture is not None:
             return prepared_history_fixture
-        return _install_hybrid_source(original_history_fixture(path))
+        fixture = original_history_fixture(path)
+        history._hold_model_live_layers(fixture)
+        return _install_hybrid_source(fixture)
 
     monkeypatch.setattr(history, "_history_fixture", hybrid_history_fixture)
     if prepared_history_fixture is not None:

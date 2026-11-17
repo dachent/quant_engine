@@ -702,6 +702,19 @@ def _verified_history(
                 f"admitted prehistory segment is absent: {segment_id}"
             )
         prehistory_by_strategy[strategy_id] = prehistory_rows
+    model_live_identities = _selected_model_live_identities_from(
+        expected_segments, required_ids
+    )
+    model_live_by_strategy: dict[str, list[dict[str, str]]] = {}
+    for identity in model_live_identities:
+        strategy_id = _text(identity.get("strategy_id"), "history strategy_id")
+        segment_id = _text(identity.get("segment_id"), "materialized segment_id")
+        model_live_rows = actual_by_id.get(segment_id)
+        if not model_live_rows:
+            raise CurrentDependenceError(
+                f"admitted model-live segment is absent: {segment_id}"
+            )
+        model_live_by_strategy[strategy_id] = model_live_rows
     for strategy in required_strategies:
         strategy_id = str(strategy["strategy_id"])
         live_identities = [
@@ -728,7 +741,7 @@ def _verified_history(
     # selection rather than only reaching returns.csv.
     selected_identities.extend(
         dict(expected_by_id[str(identity["segment_id"])])
-        for identity in prehistory_identities
+        for identity in (*prehistory_identities, *model_live_identities)
     )
     common_dates = set.intersection(
         *(
@@ -752,6 +765,7 @@ def _verified_history(
             )
         for row in (
             *prehistory_by_strategy.get(strategy_id, ()),
+            *model_live_by_strategy.get(strategy_id, ()),
             *live_by_strategy[strategy_id],
         ):
             if _day(row["date"], "history observation date") <= complete_through:
@@ -804,7 +818,7 @@ def _selected_history(
         )
     except Exception as exc:
         raise CurrentDependenceError(
-            "selected layered history authority differs"
+            f"selected layered history authority differs: {type(exc).__name__}: {exc}"
         ) from exc
     mode_status = _object(verified.get("mode_status"), "selected history mode status")
     for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
@@ -1194,6 +1208,45 @@ def _selected_prehistory_identities_from(
     return selected
 
 
+def _selected_model_live_identities_from(
+    identities: Sequence[Mapping[str, Any]], required_ids: Sequence[str]
+) -> list[dict[str, Any]]:
+    """The model's own live segment per strategy whose layer is admitted.
+
+    A strategy with an admitted model-live layer continues its backtest with that
+    record, never with the account; one without it has no such segment, which is
+    not an error.
+    """
+
+    selected: list[dict[str, Any]] = []
+    for strategy_id in required_ids:
+        matches = [
+            row
+            for row in identities
+            if row.get("strategy_id") == strategy_id
+            and row.get("mode_admission") == "INCLUDE_MODEL_LIVE_RESEARCH"
+        ]
+        if len(matches) > 1:
+            raise CurrentDependenceError(
+                "required dependence strategy has more than one admitted "
+                f"model-live segment: {strategy_id}"
+            )
+        selected.extend(dict(match) for match in matches)
+    return selected
+
+
+def _selected_model_live_identities(
+    contract: Mapping[str, Any], required_ids: Sequence[str]
+) -> list[dict[str, Any]]:
+    identities = _objects(
+        _object(contract.get("history_corrections"), "history corrections").get(
+            "materialized_segment_identities"
+        ),
+        "materialized segment identities",
+    )
+    return _selected_model_live_identities_from(identities, required_ids)
+
+
 def _packaged_projection(
     *,
     contract: Mapping[str, Any],
@@ -1213,9 +1266,14 @@ def _packaged_projection(
         )
     selected_identities = _selected_live_identities(contract, required_ids)
     prehistory_identities = _selected_prehistory_identities(contract, required_ids)
+    model_live_identities = _selected_model_live_identities(contract, required_ids)
     expected_by_id = {
         _text(row.get("segment_id"), "materialized segment_id"): row
-        for row in (*selected_identities, *prehistory_identities)
+        for row in (
+            *selected_identities,
+            *prehistory_identities,
+            *model_live_identities,
+        )
     }
     actual_by_id: dict[str, list[dict[str, str]]] = {}
     for row in segments:
@@ -1283,6 +1341,23 @@ def _packaged_projection(
             )
         prehistory_by_strategy[strategy_id] = prehistory_rows
 
+    model_live_by_strategy: dict[str, list[dict[str, str]]] = {}
+    for identity in model_live_identities:
+        strategy_id = _text(identity.get("strategy_id"), "history strategy_id")
+        segment_id = _text(identity.get("segment_id"), "materialized segment_id")
+        model_live_rows = actual_by_id.get(segment_id)
+        if not model_live_rows:
+            raise CurrentDependenceError(
+                f"admitted model-live segment is absent: {segment_id}"
+            )
+        if {row["evidence_layer"] for row in model_live_rows} != {"MODEL_LIVE"} or (
+            _return_identity(model_live_rows).get("sha256") != identity.get("sha256")
+        ):
+            raise CurrentDependenceError(
+                f"dependence model-live segment differs: {segment_id}"
+            )
+        model_live_by_strategy[strategy_id] = model_live_rows
+
     common_dates = set.intersection(
         *({row["date"] for row in live_by_strategy[item]} for item in required_ids)
     )
@@ -1300,6 +1375,7 @@ def _packaged_projection(
             )
         for row in (
             *prehistory_by_strategy.get(strategy_id, ()),
+            *model_live_by_strategy.get(strategy_id, ()),
             *live_by_strategy[strategy_id],
         ):
             if _day(row["date"], "dependence observation date") <= complete_through:
@@ -2066,6 +2142,7 @@ def verify_packaged_source(
                 (
                     *selected_identities,
                     *_selected_prehistory_identities(contract, required_ids),
+                    *_selected_model_live_identities(contract, required_ids),
                 ),
                 key=lambda row: (str(row["strategy_id"]), str(row["segment_id"])),
             ),

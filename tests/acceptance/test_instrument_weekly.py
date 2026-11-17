@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from acceptance.validate import checks
+from acceptance.validate import checks, trading_week
 
 SOURCE_ARTIFACT_ID = "input/portfolio-weekly-returns.json"
 CHECK = "dates.weekly_current_week"
@@ -46,7 +46,7 @@ def _context(
     week = current_week or {
         "week_start": week_start.isoformat(),
         "week_end": week_end.isoformat(),
-        "is_partial": anchor < week_end,
+        "is_partial": anchor < trading_week.last_trading_day_of_week(week_start),
         "default_visible": True,
         "data_through_date": source_as_of,
     }
@@ -164,3 +164,48 @@ def test_v14_a_source_older_than_the_previous_week_boundary_blocks(
     context = _context(tmp_path, cutoff=date(2026, 9, 21), source_as_of="2026-09-17")
     findings = _weekly(list(checks.check_weekly_current_week(context)))
     assert [finding.klass for finding in findings] == [checks.BLOCKER_AUTHORITY]
+
+
+def _friday_week(*, partial: bool) -> dict[str, Any]:
+    return {
+        "week_start": "2026-11-02",
+        "week_end": "2026-11-08",
+        "is_partial": partial,
+        "default_visible": True,
+        "data_through_date": "2026-11-06",
+    }
+
+
+def test_a_friday_cutoff_week_is_complete_for_the_validator(tmp_path: Path) -> None:
+    context = _context(
+        tmp_path,
+        cutoff=date(2026, 11, 6),
+        source_as_of="2026-11-06",
+        current_week=_friday_week(partial=False),
+    )
+
+    assert _weekly(list(checks.check_weekly_current_week(context))) == []
+
+
+def test_a_friday_cutoff_week_marked_partial_is_blocked(tmp_path: Path) -> None:
+    context = _context(
+        tmp_path,
+        cutoff=date(2026, 11, 6),
+        source_as_of="2026-11-06",
+        current_week=_friday_week(partial=True),
+    )
+    findings = _weekly(list(checks.check_weekly_current_week(context)))
+
+    assert [finding.klass for finding in findings] == [checks.BLOCKER_AUTHORITY]
+
+
+def test_a_wednesday_cutoff_week_must_stay_partial(tmp_path: Path) -> None:
+    week = {**_friday_week(partial=False), "data_through_date": "2026-11-04"}
+    context = _context(
+        tmp_path,
+        cutoff=date(2026, 11, 4),
+        source_as_of="2026-11-04",
+        current_week=week,
+    )
+
+    assert _weekly(list(checks.check_weekly_current_week(context)))
