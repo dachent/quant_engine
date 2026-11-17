@@ -21,6 +21,7 @@ from typing import Any, Final
 
 BACKTEST_LAYER: Final = "BACKTEST"
 SPAN_LAYER: Final = "ACCEPTED_SPAN"
+ACCOUNT_LAYER: Final = "ACCOUNT_LIVE"
 RULE_ID: Final = "underwriting_stressed_component_max_drawdown"
 STATEMENT: Final = (
     "1.25x prior / 1.5x live max drawdown, +5pp where live histor"
@@ -120,11 +121,21 @@ def _series_returns(
         for row in mine
         if row["evidence_layer"] == BACKTEST_LAYER
     ]
-    live = [
-        Decimal(row["return"])
-        for row in mine
-        if row["evidence_layer"] != BACKTEST_LAYER
-    ]
+    # One live path per date: where the account has a return it is the governed live
+    # return, the provider's model-live record fills the dates before it.  Summing both
+    # layers compounded every overlapping day twice (AI Factor: 0.160951 against 0.085878).
+    chosen: dict[tuple[str, bool], Mapping[str, str]] = {}
+    for row in mine:
+        layer = row["evidence_layer"]
+        if layer == BACKTEST_LAYER:
+            continue
+        key = (row["date"], layer == SPAN_LAYER)
+        held = chosen.get(key)
+        if held is None or (
+            layer == ACCOUNT_LAYER and held["evidence_layer"] != ACCOUNT_LAYER
+        ):
+            chosen[key] = row
+    live = [Decimal(chosen[key]["return"]) for key in sorted(chosen)]
     return backtest, live
 
 
