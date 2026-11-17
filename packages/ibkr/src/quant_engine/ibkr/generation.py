@@ -1235,8 +1235,8 @@ def _closed_accounts(
 ) -> list[dict[str, str]]:
     """The accounts the broker's own AccountInformation states as closed, with the closure date.
 
-    One date per account; a statement dated after the first one that states a closure date
-    must state it too (an account does not reopen inside the accepted statements).
+    One date per account.  A statement that states none is not a contradiction: AccountInformation
+    is as of the pull, and a pull made before the closure (a refresh of earlier days) is empty.
     """
 
     by_raw: dict[str, list[FlexDailyStatement]] = defaultdict(list)
@@ -1251,14 +1251,6 @@ def _closed_accounts(
         if len(dates) != 1:
             raise IbkrGenerationError(
                 "statements state different account closure dates"
-            )
-        first = next(item for item in ordered if item.account_date_closed is not None)
-        if any(
-            item.report_date > first.report_date and item.account_date_closed is None
-            for item in ordered
-        ):
-            raise IbkrGenerationError(
-                "an account closure date disappears from a later statement"
             )
         if raw_id not in crosswalk:
             continue

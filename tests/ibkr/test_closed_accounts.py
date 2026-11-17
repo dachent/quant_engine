@@ -55,7 +55,9 @@ def test_an_unparseable_date_closed_refuses(tmp_path: Path) -> None:
         _statement(tmp_path, date(2026, 1, 5), "not-a-date")
 
 
-def test_conflicting_or_vanishing_closure_dates_refuse(tmp_path: Path) -> None:
+def test_conflicting_closure_dates_refuse_and_an_earlier_pull_without_one_does_not(
+    tmp_path: Path,
+) -> None:
     a = _statement(tmp_path, date(2026, 1, 5), "20260105")
     b = dataclasses.replace(
         _statement(tmp_path, date(2026, 1, 6), "20260105"),  # type: ignore[type-var]
@@ -64,5 +66,6 @@ def test_conflicting_or_vanishing_closure_dates_refuse(tmp_path: Path) -> None:
     with pytest.raises(gen.IbkrGenerationError, match="different account closure"):
         gen._closed_accounts([a, b], {RAW: "account-x"})  # type: ignore[list-item]
     later_open = _statement(tmp_path, date(2026, 1, 7), None)
-    with pytest.raises(gen.IbkrGenerationError, match="disappears"):
-        gen._closed_accounts([a, later_open], {RAW: "account-x"})  # type: ignore[list-item]
+    assert gen._closed_accounts([a, later_open], {RAW: "account-x"}) == [  # type: ignore[list-item]
+        {"account_id": "account-x", "closed_date": "2026-01-05"}
+    ]
