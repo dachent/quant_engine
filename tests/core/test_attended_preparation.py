@@ -1686,6 +1686,7 @@ def test_stale_account_live_ledger_kind_rebuilds_retained_history(
             "history_corrections"
         ]["corrections"]
         if correction["evidence_layer"] == "MODEL_LIVE"
+        and correction["strategy_id"] not in history.PROVIDER_LIVE_PREHISTORY_STRATEGIES
     }
     hybrid = [
         {field: row[field] for field in fields}
