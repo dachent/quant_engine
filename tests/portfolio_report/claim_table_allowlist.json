@@ -160,6 +160,16 @@
    "file": "apps/portfolio-control-panel/app.js",
    "pattern": "^Money-weighted [(]on capital invested[)]: [{][}] over [{][}] days[{][}]$",
    "justification": "readout line built from the portfolio MWR block's own window_equivalent_cumulative, window_days and value; consistent by construction and recomputed in test_portfolio_twr_conventions and test_portfolio_totals (#904 item 1)"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "pattern": "^version-matched prehistory: provider-live before account start [(]no backtest[)]$",
+   "justification": "fixed label emitted only when the computed history status is ACCEPTED_PROVIDER_LIVE_PREHISTORY_NO_BACKTEST (provider-live segments strictly before account start, same version, no backtest segment); the status is derived from segments and kill-tested in the provider-live prehistory tests (PR 974)"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "pattern": "^Version-matched prehistory: provider-live before account start [(]no backtest[)][.]$",
+   "justification": "fixed label emitted only when the computed history status is ACCEPTED_PROVIDER_LIVE_PREHISTORY_NO_BACKTEST (provider-live segments strictly before account start, same version, no backtest segment); the status is derived from segments and kill-tested in the provider-live prehistory tests (PR 974)"
   }
  ]
 }
