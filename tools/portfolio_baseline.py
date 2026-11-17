@@ -5152,9 +5152,8 @@ def _calendar_gap_lines(calendar: Sequence[Mapping[str, Any]]) -> list[str]:
         if row.get("status") == "MISSING_ON_PROVIDER_OBSERVED_DATE" and row.get("date"):
             missing.setdefault(str(row["account_id"]), []).append(str(row["date"]))
     return [
-        f"{len(days)} NAV day(s) missing on provider-observed dates for account "
-        f"{account_id} ({provider}), {min(days)}..{max(days)}: no NAV observation "
-        "despite the provider reporting those dates"
+        f"{len(days)} NAV day(s) missing for account {account_id} ({provider}) "
+        f"between {min(days)} and {max(days)}, on dates the provider reported"
         for account_id, days in sorted(missing.items())
         for provider in [
             next(
