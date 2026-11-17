@@ -2026,6 +2026,7 @@ def _provider_ledger_facts(
     legacy_securities: Sequence[Mapping[str, Any]],
     baseline_as_of: date,
     retained_excluded_accounts: Collection[str] = (),
+    reserve_nav_accounts: Collection[str] = (),
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -2064,9 +2065,14 @@ def _provider_ledger_facts(
         accepted: list[dict[str, Any]] = []
         for item in _objects(catalog.get(name), f"provider-ledger.{name}"):
             account_id = _text(item.get("account_id"), f"{name}.account_id")
-            if (
-                account_id not in accepted_accounts
-                or item.get("mapping_status") != "MAPPED"
+            if account_id not in accepted_accounts:
+                continue
+            if item.get("mapping_status") != "MAPPED" and not (
+                # A reserve-pool account's NAV is an account total: it needs no
+                # strategy interval, only the AUTHORITATIVE admission window below.
+                name == "nav_observations"
+                and account_id in reserve_nav_accounts
+                and item.get("mapping_reason") == "MAPPING_NO_ACTIVE_INTERVAL"
             ):
                 continue
             day_value = item.get("as_of_date") or item.get("event_date")
@@ -6796,6 +6802,7 @@ def build_catalog(
             securities,
             as_of,
             retained_excluded_accounts=_retained_excluded_accounts(assignments, as_of),
+            reserve_nav_accounts=set(_reserve_accounts(assignments, as_of)),
         )
         provider_admissions = _objects(
             provider_catalog.get("admissions"), "provider-ledger.admissions"

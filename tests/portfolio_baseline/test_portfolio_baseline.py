@@ -6096,3 +6096,54 @@ def test_total_liquid_with_part_dates_validates_in_report_and_panel_schemas(
     Draft202012Validator(node).validate(total)
     with pytest.raises(ValidationError):
         Draft202012Validator(node).validate({**total, "unknown_key": 1})
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    (("MAPPING_NO_ACTIVE_INTERVAL", ("45", "2026-07-29")), ("OTHER_REASON", None)),
+)
+def test_reserve_account_total_nav_needs_no_strategy_interval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    expected: tuple[str, str] | None,
+) -> None:
+    """Refresh kill test: a reserve-pool account's later AUTHORITATIVE NAV that the ledger
+    left UNMAPPED (no active strategy interval) is its account total and is admitted;
+    an UNMAPPED row for any other reason is still not."""
+
+    spec_path, spec = _spec(tmp_path, reserve_accounts=("account-schwab-b",))
+    row = {
+        **_ledger_nav("account-schwab-b", "schwab", "2026-07-29", "45"),
+        "mapping_status": "UNMAPPED",
+        "mapping_reason": reason,
+    }
+    root, ref = _provider_ledger_generation(
+        tmp_path,
+        catalog_schema_version=2,
+        nav_observations=[row],
+        admissions=[_ledger_admission("account-schwab-b", "schwab", "AUTHORITATIVE")],
+    )
+    spec["roots"]["provider-ledger"] = str(root)
+    spec["schema_version"] = 3
+    spec["provider_ledger"] = ref
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(
+        baseline,
+        "_hwm_policy_exclusions",
+        lambda: (
+            RETIRED_EXCLUSIONS
+            | {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)}
+        ),
+    )
+
+    catalog, _, _ = baseline.build_catalog(spec_path)
+
+    members = {
+        m["account_id"]: m for m in catalog["current_capital"]["reserve"]["members"]
+    }
+    member = members["account-schwab-b"]
+    if expected is None:
+        assert member["as_of_date"] != "2026-07-29"
+    else:
+        assert (member["value"]["value"], member["as_of_date"]) == expected
