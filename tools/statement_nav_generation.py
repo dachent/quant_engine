@@ -651,6 +651,17 @@ def build_generation(
             "out_of_boundary": [
                 "statement points only: no value is admitted between two period ends",
                 "live-page balances are post-statement evidence and are not admitted",
+                *(
+                    [
+                        "positions are fund-level: the self-directed brokerage bucket "
+                        "(about 90% of the balance) has no security detail in the plan "
+                        "statement",
+                        "flows and transactions are period aggregates dated at the "
+                        "period end; the statement gives no day within the quarter",
+                    ]
+                    if provider == "john_hancock"
+                    else []
+                ),
             ],
             "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
         },
