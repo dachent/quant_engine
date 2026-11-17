@@ -3411,7 +3411,7 @@
       const pts = line.points.filter((point) => point.value != null);
       const live = perfLiveStart(line);
       const years = (pts[pts.length - 1].time - pts[0].time) / (365 * PERF_DAY);
-      const annual = years >= 1 && pts[0].value > 0 ? ` · ${perfPercent(Math.pow(pts[pts.length - 1].value / pts[0].value, 1 / years))} a year` : " · under 1 year, not annualised";
+      const annual = years >= 1 && pts[0].value > 0 ? ` · ${perfPercent(Math.pow(pts[pts.length - 1].value / pts[0].value, 1 / years))} a year` : " · under 1 year, not annualized";
       return `${perfDate(pts[0].time)} → ${perfDate(pts[pts.length - 1].time)}${annual}${live ? ` · live from ${perfDate(live.time)}, live ${perfPercent(1 + live.liveReturn)}` : ""}`;
     };
     $("#perf-returns-legend").innerHTML = rebased.map((line) => `<button type="button" class="perf-legend-item${perfHidden.has(line.key) ? " is-off" : ""}" data-perf-series="${safe(line.key)}" aria-pressed="${!perfHidden.has(line.key)}"><i style="background:${line.color}"></i>${safe(line.name)} <b>${latest(line) != null ? perfPercent(latest(line)) : "—"}</b><span class="perf-chip-window">${safe(windowText(line))}</span></button>`).join("")

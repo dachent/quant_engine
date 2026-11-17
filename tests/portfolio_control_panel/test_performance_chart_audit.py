@@ -446,7 +446,7 @@ def test_chips_print_a_yearly_rate_over_a_year_and_say_so_under_one(
     short = _text(
         _run(tmp_path, _payload(), ['perfZoom = "3m"']), "#perf-returns-legend"
     )
-    assert "under 1 year, not annualised" in short
+    assert "under 1 year, not annualized" in short
 
 
 def test_ytd_is_a_zoom_on_both_charts(tmp_path: Path) -> None:

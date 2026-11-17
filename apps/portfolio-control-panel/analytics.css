@@ -1397,7 +1397,7 @@ details.orthogonal-data { margin-top: 12px; }
 
 /* Performance charts: window per series, explicit limited-zoom state. */
 .perf-legend-item .perf-chip-window { display: block; width: 100%; margin-left: 16px; font-size: 11px; font-weight: 400; color: var(--text-soft); text-align: left; }
-.segment.is-limited::after { content: "\00a0\2022"; color: #f2bb62; }
+.segment.is-limited::after { content: " •"; color: #f2bb62; }
 #perf-window-note, #perf-value-window-note { margin: 6px 0 8px; }
 @media (max-width: 760px) { .perf-controls { gap: 8px; } .perf-legend-item .perf-chip-window { margin-left: 0; } }
 
