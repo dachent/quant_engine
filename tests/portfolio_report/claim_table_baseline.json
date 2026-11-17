@@ -293,6 +293,13 @@
    "kinds": [
     "universal"
    ],
+   "text": "Governs readiness · {} · 1.25x prior / 1.5x live max drawdown +5pp, all strategies lose simultaneously;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
    "text": "HWM remains blocked until the boundaries agree"
   },
   {
@@ -1328,6 +1335,13 @@
   {
    "file": "tools/portfolio_control_panel.py",
    "kinds": [
+    "universal"
+   ],
+   "text": "Readiness is governed by the correlation-one adverse-loss bound (1.25x prior / 1.5x live max drawdown +5pp, all strategies lose simultaneously;"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
     "epoch",
     "coverage"
    ],
@@ -1353,6 +1367,13 @@
     "universal"
    ],
    "text": "no provider, broker, order, or deployment connection exists."
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "the adverse loss fractions are computed by the audit rule (1.25x prior / 1.5x live max drawdown +5pp, all strategies lose simultaneously;"
   },
   {
    "file": "tools/portfolio_control_panel.py",
