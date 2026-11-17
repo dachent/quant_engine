@@ -1957,7 +1957,7 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
             item
             for item in basis.get("classified_components") or []
             if isinstance(item, Mapping)
-            and item.get("classification") == "CONTINGENT_ON_REDEMPTION"
+            and item.get("classification") == "EVENT_FEE_NOT_ANNUAL"
         ]
         sentence += (
             f"; derived annual {basis.get('rate_kind', '').replace('_', ' ')} cost "
@@ -1980,7 +1980,7 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
         for item in contingent:
             sentence += (
                 f"; {str(item.get('component')).replace('_', ' ')} "
-                f"{_percent_text(item.get('rate'))} is CONTINGENT_ON_REDEMPTION "
+                f"{_percent_text(item.get('rate'))} is EVENT_FEE_NOT_ANNUAL "
                 "(billed when units are redeemed, not an annual cost)"
             )
         return f"{sentence}; billed dollar amount: not published."
@@ -2046,7 +2046,10 @@ def _cutoff_cost_rate(
     }
     if amount_text is None:
         result["cost_rate_reason"] = (
-            "the cost is a documented percent rate; no dollar amount is published"
+            "the cost is a documented percent rate; its derived annual amount is carried beside the rate"
+            if cost.get("derived_annual_cost_usd") is not None
+            and result["fees_status"] == FEES_STATUS_DOCUMENTED_RATE
+            else "the cost is a documented percent rate; no dollar amount is published"
             if result["fees_status"] == FEES_STATUS_DOCUMENTED_RATE
             else "no annual cost amount is evidenced"
         )

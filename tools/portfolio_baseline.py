@@ -134,7 +134,7 @@ COST_DERIVATION_METHOD: Final = "DERIVED_FROM_DOCUMENTED_RATE"
 # A cost that is not a billed dollar amount is classified, with its reason, not left as a gap.
 COST_CLASS_IN_NAV_NOT_BILLED: Final = "IN_NAV_NOT_BILLED"
 COST_CLASS_EXCLUDED_HISTORY_ONLY: Final = "EXCLUDED_DEPRECATED_HISTORY_ONLY"
-COST_CLASS_CONTINGENT_ON_REDEMPTION: Final = "CONTINGENT_ON_REDEMPTION"
+COST_CLASS_EVENT_FEE_NOT_ANNUAL: Final = "EVENT_FEE_NOT_ANNUAL"
 _FEE_PLACEMENTS: Final = frozenset(
     {"INSIDE_VEHICLE_NAV", "OUTSIDE_BILLED", "NOT_STATED_IN_DOCUMENTATION"}
 )
@@ -2459,11 +2459,13 @@ def _derive_rate_dollar_costs(
             tier_row = next(r for r in rates["tier_table"] if r["tier"] == rates["tier"])
             found_value = values.get(str(item["strategy_id"]))
             value = found_value[0] if found_value is not None else None
-            if (
-                tier_row["management_rate"] is not None
-                and found_value is not None
-                and found_value[1] == as_of
-            ):
+            if found_value is not None and found_value[1] != as_of:
+                raise BaselineValidationError(
+                    f"the sleeve value of {item['strategy_id']} is dated "
+                    f"{found_value[1].isoformat()}, not the {as_of.isoformat()} "
+                    "cutoff: it cannot be the base of a derived cost"
+                )
+            if tier_row["management_rate"] is not None and found_value is not None:
                 assert value is not None
                 if value < 0:
                     raise BaselineValidationError(
@@ -2497,7 +2499,7 @@ def _derive_rate_dollar_costs(
                     # event cost with no annual run rate, never assumed to occur
                     classified.append(
                         {
-                            "classification": COST_CLASS_CONTINGENT_ON_REDEMPTION,
+                            "classification": COST_CLASS_EVENT_FEE_NOT_ANNUAL,
                             "component": "redemption_fee",
                             "placement": redemption["placement"],
                             "rate": redemption["rate"],

@@ -120,7 +120,7 @@ def test_an_in_nav_performance_fee_is_classified_never_priced() -> None:
         for part in derivation["classified_components"]
         if part["component"] == "redemption_fee"
     )
-    assert redemption["classification"] == "CONTINGENT_ON_REDEMPTION"
+    assert redemption["classification"] == "EVENT_FEE_NOT_ANNUAL"
     assert redemption["rate"] == "0.005"
     assert redemption["placement"] == "OUTSIDE_BILLED"
 
@@ -133,10 +133,10 @@ def test_a_performance_fee_not_stated_inside_the_nav_stays_unpriced() -> None:
     assert baseline._costs_claim([volatis])["status"] == "PARTIAL"
 
 
-def test_a_value_dated_before_the_cutoff_is_never_the_base() -> None:
+def test_a_value_dated_before_the_cutoff_is_refused_as_the_base() -> None:
     stale = {"volatis": (VOLATIS_VALUE, date(2026, 8, 16))}
-    out = baseline._derive_rate_dollar_costs(_rows("NON_QUALIFIED_FLAT"), stale, AS_OF)
-    assert all("derived_annual_cost_usd" not in row for row in out)
+    with pytest.raises(baseline.BaselineValidationError, match="not the 2026-09-17"):
+        baseline._derive_rate_dollar_costs(_rows("NON_QUALIFIED_FLAT"), stale, AS_OF)
 
 
 def _capital(value: str, day: str, status: str = "AVAILABLE") -> dict[str, Any]:
