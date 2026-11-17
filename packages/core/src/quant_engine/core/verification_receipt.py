@@ -882,24 +882,8 @@ def run_with_receipt(
 
 
 _SAFE_CLASSES = {
-    ("builtins", name)
-    for name in (
-        "dict",
-        "list",
-        "tuple",
-        "set",
-        "frozenset",
-        "bytes",
-        "bytearray",
-        "str",
-        "int",
-        "float",
-        "bool",
-        "complex",
-        "slice",
-        "range",
-    )
-} | {
+    # Containers and numbers are pickle opcodes and never reach find_class; a builtin
+    # callable (bytes, range, ...) would let a forged REDUCE allocate unbounded memory.
     ("collections", "OrderedDict"),
     ("decimal", "Decimal"),
     ("datetime", "date"),
@@ -971,7 +955,7 @@ def reuse_render(
     read-set is re-hashed unchanged and the sidecar digest matches.
     """
 
-    if not render_reuse_enabled():
+    if not render_reuse_enabled() or os.environ.get(MODE_ENV) == "off":
         return compute()
     state_root = Path(os.environ[RENDER_STATE_ENV])
     identity = {

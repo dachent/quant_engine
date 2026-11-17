@@ -670,3 +670,28 @@ def test_a_forged_sidecar_with_a_matching_receipt_digest_never_executes(world):
     result = v.run()
     assert _FORGED_MARKER["ran"] is False
     assert result["total"] == 3 and v.live == 2 and v.reused == []
+
+
+def test_restricted_loader_refuses_builtin_callables_and_off_mode_computes_live(
+    world, monkeypatch
+):
+    import pickle
+
+    class _Bytes:
+        def __reduce__(self):
+            return (bytes, (10,))
+
+    with pytest.raises(pickle.UnpicklingError):
+        vr._restricted_loads(pickle.dumps(_Bytes(), protocol=4))
+    assert vr._restricted_loads(pickle.dumps({"a": (b"x", [1, 2.5, None])})) == {
+        "a": (b"x", [1, 2.5, None])
+    }
+    monkeypatch.setenv(vr.RENDER_REUSE_ENV, "provisional")
+    monkeypatch.setenv(vr.RENDER_STATE_ENV, str(world["state"]))
+    monkeypatch.setenv(vr.MODE_ENV, "off")
+    calls = []
+    for _ in range(2):
+        vr.reuse_render(
+            "x", [], {}, repo_root=world["repo"], compute=lambda: calls.append(1)
+        )
+    assert len(calls) == 2 and not list(world["state"].rglob("*"))
