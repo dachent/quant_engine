@@ -1394,3 +1394,20 @@ details.orthogonal-data { margin-top: 12px; }
 .owner-item { margin: 8px 0; padding-left: 10px; border-left: 3px solid #888; }
 .owner-item.owner-real { border-left-color: #d9534f; }
 .owner-item.owner-accepted { border-left-color: #c9a227; }
+
+/* Performance charts: window per series, explicit limited-zoom state. */
+.perf-legend-item .perf-chip-window { display: block; width: 100%; margin-left: 16px; font-size: 11px; font-weight: 400; color: var(--text-soft); text-align: left; }
+.segment.is-limited::after { content: " •"; color: #f2bb62; }
+#perf-window-note, #perf-value-window-note { margin: 6px 0 8px; }
+@media (max-width: 760px) { .perf-controls { gap: 8px; } .perf-legend-item .perf-chip-window { margin-left: 0; } }
+
+/* Performance charts: touch-safe tooltip, focus, folded definitions. */
+.perf-svg:focus-visible { outline: 2px solid var(--accent, #5cc8c0); outline-offset: 2px; }
+.perf-tooltip { max-height: 280px; overflow: auto; }
+.perf-tip-later { margin-top: 4px; font-size: 11px; color: var(--text-soft); }
+.perf-legend-item.is-closed { opacity: .65; }
+.perf-definitions { margin-top: 6px; }
+.perf-definitions summary { cursor: pointer; color: var(--text-soft); }
+@media (max-width: 760px) {
+  .perf-tooltip { position: static; max-width: none; width: 100%; max-height: 200px; margin-top: 6px; }
+}
