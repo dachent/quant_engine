@@ -1974,3 +1974,61 @@ def test_the_closure_tolerance_and_the_native_row_rules(tmp_path: Path) -> None:
         == "NATIVE_CUTOFF_ROW_REPEATS_PRIOR_DAY"
     )
     assert verdict(prior) == "NO_NATIVE_CUTOFF_ROW"
+
+
+def _repeat_verdict(
+    tmp_path: Path,
+    holdings: dict[str, Any],
+    native: Decimal,
+    closes: dict[str, Decimal],
+) -> tuple[str, Decimal]:
+    run_dir = tmp_path / "run"
+    account = "account-0000000000000001"
+    (run_dir / "raw/balances.historical").mkdir(parents=True, exist_ok=True)
+    history = {"6/12/2031": {"AccountValue": float(native)}}
+    history["6/13/2031"] = {
+        "AccountValue": float(native)
+    }  # the cutoff row repeats the day before
+    (run_dir / f"raw/balances.historical/{account}.json").write_text(
+        json.dumps({"histories": history}), encoding="utf-8"
+    )
+    out = ingest._liquidation_values(
+        run_dir, CUTOFF, holdings, _crosswalk(), closes, [account]
+    )
+    return str(out[account]["closure"]), out[account]["value"]
+
+
+def test_a_repeating_native_row_proves_only_what_the_holdings_reproduce(
+    tmp_path: Path,
+) -> None:
+    """The proof is the holdings-derived value agreeing with the native balance: a repeat
+    that agrees proves a cash-only account (value = its cash) and a non-cash account
+    alike, and a repeat that the holdings do not reproduce proves nothing."""
+
+    close = Decimal(OFFICIAL_CLOSE)
+    closes = {"SYN1": close}
+    cash_only = _holdings()
+    cash_only["accounts"][0]["groupedPositions"] = [
+        group
+        for group in cash_only["accounts"][0]["groupedPositions"]
+        if group["securityType"] == 9
+    ]
+    # cash only: the value is its 12.50 of cash, and an agreeing repeat proves it
+    assert _repeat_verdict(tmp_path / "a", cash_only, Decimal("12.5"), closes) == (
+        "CLOSED",
+        Decimal("12.5"),
+    )
+    # the same repeat at a balance the cash does not reproduce proves nothing
+    assert _repeat_verdict(tmp_path / "b", cash_only, Decimal("99.5"), closes) == (
+        "NATIVE_CUTOFF_ROW_REPEATS_PRIOR_DAY",
+        Decimal("12.5"),
+    )
+    # a non-cash account is proved only because its priced holdings reproduce the repeat
+    held = Decimal(4) * close + Decimal("12.5")
+    assert _repeat_verdict(tmp_path / "c", _holdings(), held, closes) == (
+        "CLOSED",
+        held,
+    )
+    assert _repeat_verdict(tmp_path / "d", _holdings(), held + 1, closes)[0] == (
+        "NATIVE_CUTOFF_ROW_REPEATS_PRIOR_DAY"
+    )
