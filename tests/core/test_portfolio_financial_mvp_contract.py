@@ -4932,3 +4932,30 @@ def test_an_admitted_model_live_source_needs_a_real_freshness_bound() -> None:
         contract_tool.FinancialMvpContractError, match="no freshness bound"
     ):
         _validate(zero)
+
+
+def test_materialized_identities_follow_the_model_live_split() -> None:
+    """Kill tests: the pinned segment identities agree with the corrections they
+    materialize. The AI backtest ends before model-live inception and the overlap
+    starts at it; the EU model-live segment is pinned (static rows in the governed
+    strategy-backtests generation); the AI model-live segment is deliberately not (its
+    rows are the release ledger's, which the contract cannot name)."""
+
+    contract = _contract()
+    identities = {
+        row["segment_id"]: row
+        for row in contract["history_corrections"]["materialized_segment_identities"]
+    }
+    ai_backtest = _history_correction(contract, "p123-ai-backtest-candidate")
+    ai_model = _history_correction(contract, "p123-ai-model-live")
+    eu_model = _history_correction(contract, "p123-eu-model-live")
+    backtest = identities["p123-ai-factor:backtest"]
+    overlap = identities["p123-ai-factor:backtest-not-admitted"]
+    assert backtest["observed_end"] == ai_backtest["interval"]["observed_end"]
+    assert backtest["observed_end"] < ai_model["interval"]["observed_start"]
+    assert overlap["observed_start"] == ai_model["interval"]["observed_start"]
+    model_live = identities["p123-eu:model-live"]
+    assert model_live["observed_start"] == eu_model["interval"]["observed_start"]
+    assert model_live["evidence_layer"] == "MODEL_LIVE"
+    assert model_live["mode_admission"] == "INCLUDE_MODEL_LIVE_RESEARCH"
+    assert "p123-ai-factor:model-live" not in identities

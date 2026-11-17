@@ -1114,6 +1114,11 @@ def _layered_history_targets(
     }
 
 
+# Longest calendar gap tolerated between consecutive lane observations: a long weekend
+# plus a holiday, never a skipped session run.
+_LANE_MAX_GAP_DAYS = 4
+
+
 def _series_path_sha256(rows: Sequence[Mapping[str, object]]) -> str:
     """sha256 of a ``[{date, return}]`` path, as ``strategy_basis.series_sha256`` seals it."""
 
@@ -1257,11 +1262,13 @@ def _account_basis_lanes(
                 {
                     "date": row["date"],
                     "return": row["return"],
-                    "evidence_layer": "BACKTEST",
+                    "evidence_layer": row["evidence_layer"],
                 }
                 for row in selected_projection
                 if row["series_id"] == series_id
-                and row["evidence_layer"] == "BACKTEST"
+                # the model's own live record is the research series' live end; it
+                # carries the lane from the backtest to the account, never skipped
+                and row["evidence_layer"] in {"BACKTEST", "MODEL_LIVE"}
                 and row["date"] < parent_start
             )
         lane_rows.extend(
@@ -1272,6 +1279,14 @@ def _account_basis_lanes(
             }
             for row in parent
         )
+        lane_days = [date.fromisoformat(str(row["date"])) for row in lane_rows]
+        if evidence_mode == "LIVE_PLUS_BACKTEST" and any(
+            (later - earlier).days > _LANE_MAX_GAP_DAYS
+            for earlier, later in zip(
+                sorted(lane_days), sorted(lane_days)[1:], strict=False
+            )
+        ):
+            raise CurrentPlanError(f"account-basis lane has a hole: {strategy_id}")
         lanes[series_id] = {
             "account_id": parent_account,
             "basis": strategy_basis_disclosure.ACCOUNT_BASIS_FALLBACK,

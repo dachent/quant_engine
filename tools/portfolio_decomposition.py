@@ -4301,7 +4301,9 @@ def _account_basis_coverage(
     if window_end is not None:
         limit = _day(window_end, "account-basis window end")
         rows = [row for row in rows if row.day <= limit]
-    live = [row for row in rows if row.evidence_layer != "BACKTEST"]
+    # the lane's own account observations; backtest and model-live rows are its
+    # research prehistory
+    live = [row for row in rows if row.evidence_layer == "ACCOUNT_LIVE"]
     figures: dict[str, str | None] = {
         "target_cumulative_return": None,
         "target_current_drawdown": None,

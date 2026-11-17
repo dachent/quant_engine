@@ -759,3 +759,79 @@ def test_a_model_live_research_series_never_carries_the_account() -> None:
             [_row("MODEL_LIVE", "2026-01-06"), _row("ACCOUNT_LIVE", "2026-01-05")],
             "LIVE_PLUS_BACKTEST",
         )
+
+
+def _weekdays(first: str, last: str) -> list[str]:
+    day = __import__("datetime").date.fromisoformat(first)
+    end = __import__("datetime").date.fromisoformat(last)
+    result = []
+    while day <= end:
+        if day.weekday() < 5:
+            result.append(day.isoformat())
+        day += __import__("datetime").timedelta(days=1)
+    return result
+
+
+def _ai_shaped_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, skip: tuple[str, str] | None = None
+) -> dict[str, Any]:
+    """AI shape: backtest to 2025-05-09, model live from 2025-05-12, account from 2026-01-22."""
+
+    monkeypatch.setattr(
+        planner, "_account_basis_lane_label", lambda **_kwargs: "account basis"
+    )
+    catalog = tmp_path / "ledger.json"
+    catalog.write_text(
+        json.dumps(
+            {
+                "strategy_returns": [
+                    {
+                        "strategy_id": AI,
+                        "evidence_layer": "ACCOUNT_LIVE",
+                        "date": day,
+                        "return": "0.001",
+                    }
+                    for day in _weekdays("2026-01-22", "2026-01-30")
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    projection = [
+        _row("BACKTEST", day) for day in _weekdays("2025-05-05", "2025-05-09")
+    ] + [
+        _row("MODEL_LIVE", day)
+        for day in _weekdays("2025-05-12", "2026-01-21")
+        if not (skip and skip[0] <= day <= skip[1])
+    ]
+    return planner._account_basis_lanes(
+        manifest=_lane_manifest(),
+        planned_series={SERIES: AI},
+        selected_projection=projection,
+        evidence_mode="LIVE_PLUS_BACKTEST",
+        provider_ledger_catalog_path=catalog,
+    )
+
+
+def test_the_account_lane_of_a_model_live_strategy_is_continuous_across_the_model_live_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill test (reproduces the reviewed defect): the lane joined the backtest to the
+    account across the whole model-live period, skipping its sessions and compounding
+    the jump into published figures."""
+
+    lane = _ai_shaped_lane(tmp_path, monkeypatch)[SERIES]
+    rows = lane["rows"]
+    layers = [row["evidence_layer"] for row in rows]
+    assert set(layers) == {"BACKTEST", "MODEL_LIVE", "ACCOUNT_LIVE"}
+    # every model-live session between the backtest and the account is in the lane
+    assert layers.count("MODEL_LIVE") == len(_weekdays("2025-05-12", "2026-01-21"))
+    days = [__import__("datetime").date.fromisoformat(row["date"]) for row in rows]
+    assert max((later - earlier).days for earlier, later in zip(days, days[1:])) <= 4
+
+
+def test_the_account_lane_refuses_a_hole_between_its_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(planner.CurrentPlanError, match="account-basis lane has a hole"):
+        _ai_shaped_lane(tmp_path, monkeypatch, skip=("2025-08-01", "2025-08-29"))
