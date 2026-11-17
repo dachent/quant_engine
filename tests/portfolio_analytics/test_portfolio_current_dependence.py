@@ -1238,3 +1238,29 @@ def test_packaged_dependence_carries_the_admitted_model_live_segment(
             contract_path=tmp_path / "contract.json",
             policy_path=tmp_path / "policy.json",
         )
+
+
+def test_packaged_dependence_refuses_a_missing_model_live_segment_and_an_account_row_as_model_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill tests: an admitted model-live segment cannot be dropped, and account rows
+    cannot stand in for it."""
+
+    source, _contract, _policy = _fixture(tmp_path, monkeypatch, model_live=True)
+    kwargs = {
+        "contract_path": tmp_path / "contract.json",
+        "policy_path": tmp_path / "policy.json",
+    }
+    original = {name: (source / name).read_bytes() for name in ("segments.csv",)}
+    lines = original["segments.csv"].decode("utf-8").splitlines(keepends=True)
+    dropped = "".join(line for line in lines if "model-live" not in line)
+    (source / "segments.csv").write_text(dropped, encoding="utf-8")
+    with pytest.raises(current.CurrentDependenceError):
+        current.verify_packaged_source(source, **kwargs)
+    # the model-live rows relabelled as the account's own layer
+    relabelled = (
+        original["segments.csv"].decode("utf-8").replace("MODEL_LIVE", "ACCOUNT_LIVE")
+    )
+    (source / "segments.csv").write_text(relabelled, encoding="utf-8")
+    with pytest.raises(current.CurrentDependenceError):
+        current.verify_packaged_source(source, **kwargs)
