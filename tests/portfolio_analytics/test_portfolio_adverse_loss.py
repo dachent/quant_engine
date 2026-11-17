@@ -43,6 +43,20 @@ def _drawdown_rows(
     ]
 
 
+def _live_rows(series_id: str, drawdown: str, count: int = 30) -> list[dict[str, str]]:
+    """``count`` live observations (the rule's minimum is 30), the last of which draws down."""
+    flat = [
+        {
+            "series_id": series_id,
+            "date": f"2026-01-{day:02d}",
+            "return": "0",
+            "evidence_layer": "ACCOUNT_LIVE",
+        }
+        for day in range(1, count)
+    ]
+    return flat + _drawdown_rows(series_id, "ACCOUNT_LIVE", drawdown, "2026-02-02")
+
+
 def _rows(
     policy: dict[str, Any],
     live: dict[str, str | None],
@@ -52,9 +66,7 @@ def _rows(
     for series in policy["series"]:
         sid, strategy = series["series_id"], series["strategy_id"]
         if live.get(strategy) is not None:
-            rows += _drawdown_rows(
-                sid, "ACCOUNT_LIVE", str(live[strategy]), "2026-02-02"
-            )
+            rows += _live_rows(sid, str(live[strategy]))
         # EU and VTMA require their backtest layer; a small one leaves the audit loss unchanged
         bt = (backtest or {}).get(
             strategy, "0.01" if series["backtest_layer_required"] else None
@@ -202,3 +214,22 @@ def test_an_accepted_span_compounds_into_the_live_drawdown() -> None:
     assert _loss(without, "qsi") == Decimal("0.59125")
     assert _loss(with_span, "qsi") > Decimal("0.75")
     assert _loss(with_span, "tt-portfolio") == _loss(without, "tt-portfolio")
+
+
+def test_the_uplift_follows_live_existence_not_a_copied_flag() -> None:
+    robuxio = next(s for s in POLICY["series"] if s["strategy_id"] == "robuxio-crypto")
+    assert robuxio["platform_only_history"] is False
+    rows = [
+        r
+        for r in _rows(POLICY, AUDIT_LIVE_MDD)
+        if r["series_id"] != robuxio["series_id"]
+    ]
+    sid = robuxio["series_id"]
+    # below the minimum the live history is missing: 1.25 x 0.352 + 5pp
+    thin = rule.restate_policy(POLICY, rows + _live_rows(sid, "0.1103", count=29))
+    assert _loss(thin, "robuxio-crypto") == Decimal("0.49")
+    # at the minimum it exists: the uplift goes, 1.25 x 0.352
+    full = rule.restate_policy(POLICY, rows + _live_rows(sid, "0.1103", count=30))
+    assert _loss(full, "robuxio-crypto") == Decimal("0.44")
+    # Volatis stays platform-only whatever its observation count
+    assert _loss(full, "volatis-strategy") == Decimal("0.535")

@@ -4541,7 +4541,7 @@ def _policy_constant_sensitivity(
         "statement": (
             "The dependence allocation weights are "
             "owner-approved policy constants (PORT-DEPENDENCE-1), not restated; the "
-            "adverse loss fractions are computed by the audit rule (1.25x prior / 1.5x live max drawdown +5pp, all strategies lose simultaneously; not a statistical confidence bound) "
+            "adverse loss fractions are computed by the audit rule (1.25x prior / 1.5x live max drawdown, +5pp where live history is missing or platform-only; all strategies lose simultaneously; not a statistical confidence bound) "
             "from the governed series. "
             "Shown beside them: the same central-case and adverse-loss-bound losses "
             "with the weights replaced by the restated current-capital weights of "
@@ -11737,7 +11737,7 @@ def _panel_data(
                 "performance, HWM, or readiness conclusion is accepted."
                 if not performance_lineage_available
                 else (
-                    "Readiness is governed by the correlation-one adverse-loss bound (1.25x prior / 1.5x live max drawdown +5pp, all strategies lose simultaneously; not a statistical confidence bound); "
+                    "Readiness is governed by the correlation-one adverse-loss bound (1.25x prior / 1.5x live max drawdown, +5pp where live history is missing or platform-only; all strategies lose simultaneously; not a statistical confidence bound); "
                     "the measured-dependence central case is descriptive and does not govern readiness. "
                     "Canonical report admitted NAV now covers "
                     + (", ".join(admitted_nav_names) or "no included-perimeter sleeves")

@@ -131,6 +131,7 @@
         "audit_input",
         "cap",
         "live_multiplier",
+        "minimum_live_observations",
         "platform_only_uplift",
         "prior_multiplier",
         "rule_id",
@@ -142,6 +143,7 @@
         "live_multiplier": {"const": "1.5"},
         "platform_only_uplift": {"const": "0.05"},
         "cap": {"const": "1"},
+        "minimum_live_observations": {"const": "30"},
         "statement": {"$ref": "#/$defs/nonempty"},
         "audit_input": {
           "type": "object",

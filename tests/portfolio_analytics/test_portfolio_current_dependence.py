@@ -208,6 +208,7 @@ def _fixture(
             "live_multiplier": "1.5",
             "platform_only_uplift": "0.05",
             "cap": "1",
+            "minimum_live_observations": "0",
             "statement": "synthetic",
             "audit_input": {
                 "file": "synthetic.csv",

@@ -23,8 +23,8 @@ BACKTEST_LAYER: Final = "BACKTEST"
 SPAN_LAYER: Final = "ACCEPTED_SPAN"
 RULE_ID: Final = "underwriting_stressed_component_max_drawdown"
 STATEMENT: Final = (
-    "1.25x prior / 1.5x live max drawdown +5pp, all strategies lose simultaneously; "
-    "not a statistical confidence bound"
+    "1.25x prior / 1.5x live max drawdown, +5pp where live histor"
+    "y is missing or platform-only; all strategies lose simultaneously; not a statistical confidence bound"
 )
 _PLACES: Final = Decimal("0.000000000001")
 
@@ -71,6 +71,7 @@ def rule_parameters(policy: Mapping[str, Any]) -> dict[str, Decimal]:
             "live_multiplier",
             "platform_only_uplift",
             "cap",
+            "minimum_live_observations",
         )
     }
 
@@ -183,7 +184,8 @@ def restate_policy(
             else None,
             backtest=backtest_mdd,
             live=live_mdd,
-            platform_only=bool(row["platform_only_history"]) or not live,
+            platform_only=bool(row["platform_only_history"])
+            or len(live) < parameters["minimum_live_observations"],
             parameters=parameters,
         )
         audit = _decimal(

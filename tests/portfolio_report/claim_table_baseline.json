@@ -293,7 +293,7 @@
    "kinds": [
     "universal"
    ],
-   "text": "Governs readiness · {} · 1.25x prior / 1.5x live max drawdown +5pp, all strategies lose simultaneously;"
+   "text": "Governs readiness · {} · 1.25x prior / 1.5x live max drawdown, +5pp where live history is missing or platform-only;"
   },
   {
    "file": "apps/portfolio-control-panel/app.js",
@@ -1337,7 +1337,7 @@
    "kinds": [
     "universal"
    ],
-   "text": "Readiness is governed by the correlation-one adverse-loss bound (1.25x prior / 1.5x live max drawdown +5pp, all strategies lose simultaneously;"
+   "text": "Readiness is governed by the correlation-one adverse-loss bound (1.25x prior / 1.5x live max drawdown, +5pp where live history is missing or platform-only;"
   },
   {
    "file": "tools/portfolio_control_panel.py",
@@ -1373,7 +1373,7 @@
    "kinds": [
     "universal"
    ],
-   "text": "the adverse loss fractions are computed by the audit rule (1.25x prior / 1.5x live max drawdown +5pp, all strategies lose simultaneously;"
+   "text": "the adverse loss fractions are computed by the audit rule (1.25x prior / 1.5x live max drawdown, +5pp where live history is missing or platform-only;"
   },
   {
    "file": "tools/portfolio_control_panel.py",
