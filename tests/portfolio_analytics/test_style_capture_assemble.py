@@ -114,3 +114,43 @@ def test_a_group_without_its_raw_counterpart_is_refused(tmp_path: Path) -> None:
     (capture / "yahoo-style-spy-history.json").unlink()
     with pytest.raises(assemble.StyleAssembleError, match="raw counterpart"):
         assemble.assemble(capture, tmp_path / "out")
+
+
+def test_one_ticker_can_be_reissued_from_a_later_capture(tmp_path: Path) -> None:
+    """Sector source: only BIL (monthly payer) needed the later capture."""
+
+    first = tmp_path / "first"
+    first.mkdir()
+    _write_group(first, "spy", "SPY", monthly=False)
+    _write_group(first, "bil", "BIL", monthly=True, last_dividend=False)
+    # build a base source by hand from the spy group plus an unposted BIL
+    spy = json.loads((first / "yahoo-style-spy-history_adjusted.json").read_text())
+    bil_old = json.loads((first / "yahoo-style-bil-history_adjusted.json").read_text())
+    source = {**spy, "tickers": ["SPY", "BIL"], "rows": spy["rows"] + bil_old["rows"]}
+    base_path = tmp_path / "base-source.json"
+    base_path.write_text(json.dumps(source))
+    later = tmp_path / "later"
+    later.mkdir()
+    _write_group(later, "bil", "BIL", monthly=True)
+    manifest = assemble.reissue_with_ticker(
+        base_path,
+        tmp_path / "unused.manifest.json",
+        later / "yahoo-style-bil-history_adjusted.json",
+        tmp_path / "out",
+    )
+    out = json.loads((tmp_path / "out" / "base-source.json").read_text())
+    assert out["tickers"] == ["SPY", "BIL"]
+    assert sum(1 for r in out["rows"] if r["Ticker"] == "SPY") == 120
+    assert sum(1 for r in out["rows"] if r["Ticker"] == "BIL") == 120
+    assert manifest["capture"]["groups"]["base-source.json"]["replaced_ticker"] == "BIL"
+    # a replacement whose raw file lacks the latest distribution is refused
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    _write_group(bad, "bil", "BIL", monthly=True, last_dividend=False)
+    with pytest.raises(assemble.StyleAssembleError, match="no distribution recorded"):
+        assemble.reissue_with_ticker(
+            base_path,
+            tmp_path / "unused.manifest.json",
+            bad / "yahoo-style-bil-history_adjusted.json",
+            tmp_path / "out2",
+        )

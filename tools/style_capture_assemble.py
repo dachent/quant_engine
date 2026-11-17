@@ -151,3 +151,90 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def reissue_with_ticker(
+    base_source: Path,
+    base_manifest: Path,
+    replacement_adjusted: Path,
+    out_dir: Path,
+) -> dict[str, Any]:
+    """Replace one ticker's rows of an assembled source by a later capture of that ticker.
+
+    Used when a single monthly payer (BIL, the cash proxy) of an otherwise valid source
+    lacks a late distribution and a full re-capture of the other tickers is not needed
+    (quarterly payers had no ex-date in the gap).  The raw counterpart of the
+    replacement must pass the month-aware dividend check, and both inputs are recorded
+    by hash in the new manifest.
+    """
+
+    source = _load(base_source)
+    replacement = _load(replacement_adjusted)
+    tickers = [str(item) for item in replacement["tickers"]]
+    if len(tickers) != 1 or tickers[0] not in source["tickers"]:
+        raise StyleAssembleError("replacement must be one ticker of the base source")
+    ticker = tickers[0]
+    raw_path = replacement_adjusted.with_name(
+        replacement_adjusted.name.replace("_adjusted", "")
+    )
+    if not raw_path.is_file():
+        raise StyleAssembleError(f"raw counterpart missing: {raw_path.name}")
+    check_monthly_payers([_load(raw_path)])
+    if replacement.get("dataset") != "history_adjusted" or (
+        replacement.get("columns") != source["columns"]
+    ):
+        raise StyleAssembleError("replacement dataset or columns differ")
+    kept = [row for row in source["rows"] if row.get("Ticker") != ticker]
+    rows = [*kept, *replacement["rows"]]
+    groups = {
+        base_source.name: {
+            "sha256": hashlib.sha256(base_source.read_bytes()).hexdigest(),
+            "source_run_id": str(source["source_run_id"]),
+            "replaced_ticker": ticker,
+        },
+        replacement_adjusted.name: {
+            "sha256": hashlib.sha256(replacement_adjusted.read_bytes()).hexdigest(),
+            "source_run_id": str(replacement["source_run_id"]),
+        },
+    }
+    run_id = hashlib.sha256(
+        json.dumps(groups, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    new_source = {**source, "source_run_id": run_id, "rows": rows}
+    content = (json.dumps(new_source, separators=(",", ":")) + "\n").encode()
+    per_ticker: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        entry = per_ticker.setdefault(
+            str(row["Ticker"]),
+            {"observed_start": row["Date"], "observed_end": row["Date"], "rows": 0},
+        )
+        entry["rows"] += 1
+        entry["observed_start"] = min(entry["observed_start"], row["Date"])
+        entry["observed_end"] = max(entry["observed_end"], row["Date"])
+    manifest = {
+        "schema_version": 1,
+        "source_run_id": run_id,
+        "request": {"dataset": "history_adjusted", "tickers": source["tickers"]},
+        "artifact": {
+            "name": base_source.name,
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        },
+        "coverage": {
+            "claim": "PARTIAL",
+            "missing_tickers": [],
+            "observed_tickers": sorted(per_ticker),
+            "per_ticker": dict(sorted(per_ticker.items())),
+        },
+        "capture": {
+            "builder": "tools/style_capture_assemble.py reissue_with_ticker",
+            "carried": [],
+            "groups": groups,
+        },
+    }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / base_source.name).write_bytes(content)
+    (out_dir / f"{base_source.name}.manifest.json").write_bytes(
+        (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+    )
+    return manifest
