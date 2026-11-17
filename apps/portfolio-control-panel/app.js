@@ -3149,6 +3149,7 @@
     return { width, height: narrow ? Math.round((base.height || 340) * 0.76) : (base.height || 340), left: narrow ? Math.min(base.left || 52, 46) : (base.left || 52), right: narrow ? 10 : 14, top: 10, bottom: 28 };
   }
   function perfTimeTicks(from, to, plotPx) {
+    if (!(to > from)) return [{ time: from, label: perfEdgeLabel(from), anchor: "middle" }];
     const span = Math.max(1, to - from);
     const days = span / PERF_DAY;
     const interior = Math.max(1, Math.floor(plotPx / 100) - 1);
@@ -3518,7 +3519,7 @@
     perfSyncZoomButtons(windows);
     $$("[data-perf-axis]").forEach((button) => { const active = button.dataset.perfAxis === effectiveAxis; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); button.disabled = own; button.title = own ? "The own-start view spans each line's full history and always uses a log axis" : ""; });
     $$("[data-perf-mode]").forEach((button) => { const active = button.dataset.perfMode === built.mode; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); });
-    $$("[data-perf-basis]").forEach((button) => { const active = button.dataset.perfBasis === perfBasis; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); button.disabled = !maxView; button.title = maxView ? "" : "The basis applies to the Max view only"; });
+    $$("[data-perf-basis]").forEach((button) => { const active = maxView && button.dataset.perfBasis === perfBasis; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); button.disabled = !maxView; button.title = maxView ? "" : "The basis applies to the Max view only"; });
   }
 
   // T1: an equation label ("... residual R = memo M (gloss) +T cash left ...") keeps every term and drops only the
@@ -3736,7 +3737,7 @@
     if (!perfResizeBound && typeof window.addEventListener === "function") {
       perfResizeBound = true;
       let pending = null;
-      window.addEventListener("resize", () => { clearTimeout(pending); pending = setTimeout(() => { if ($("#perf-returns-chart")?.clientWidth) { renderPerformanceReturns(); renderPerformanceValue(); } }, 150); });
+      window.addEventListener("resize", () => { clearTimeout(pending); pending = setTimeout(() => { if ($("#perf-returns-chart")?.clientWidth) { renderPerformanceReturns(); renderPerformanceValue(); } else dirtyViews.add("performance"); }, 150); });
     }
     $$("[data-perf-value-zoom]").forEach((button) => { button.onclick = () => { perfValueZoom = button.dataset.perfValueZoom; renderPerformanceValue(); }; });
   }

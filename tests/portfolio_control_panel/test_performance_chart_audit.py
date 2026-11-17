@@ -851,3 +851,27 @@ def test_origin_names_from_before_the_producer_rename_do_not_change_the_live_sta
     dom = _run(tmp_path, payload, ['perfZoom = "Max"'])
     assert dom["#perf-returns-chart"]["innerHTML"].count("live evidence starts") == 3
     assert "dashed = live" not in _text(dom, "#perf-returns-note")
+
+
+def test_a_one_date_axis_has_one_label(tmp_path: Path) -> None:
+    ticks = _eval(tmp_path, "perfTimeTicks(1735689600000, 1735689600000, 600)")
+    assert len(ticks) == 1 and ticks[0]["label"] == "Jan 1, 2025"
+    one_day = _payload()
+    slices = one_day["performance_tab"]["slices"]
+    slices["dates"] = slices["dates"][:1]
+    for row in slices["rows"]:
+        row["nav_cents"] = row["nav_cents"][:1]
+    slices["benchmarks"][0]["nav_cents"] = slices["benchmarks"][0]["nav_cents"][:1]
+    dom = _run(tmp_path, one_day, [])
+    xs, _ys = _axis(dom["#perf-value-chart"]["innerHTML"])
+    assert len(xs) == 1
+
+
+def test_the_basis_control_only_reports_a_basis_while_max_is_selected() -> None:
+    source = (PANEL_ROOT / "app.js").read_text(encoding="utf-8")
+    assert "const active = maxView && button.dataset.perfBasis === perfBasis;" in source
+
+
+def test_a_resize_while_the_view_is_hidden_marks_it_for_a_fresh_render() -> None:
+    source = (PANEL_ROOT / "app.js").read_text(encoding="utf-8")
+    assert 'else dirtyViews.add("performance");' in source
