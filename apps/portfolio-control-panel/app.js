@@ -2147,15 +2147,22 @@
       return `<div class="callout callout-warning"><strong>Evidence composition:</strong> This legacy analysis does not declare live-versus-backtest row composition. No backtest-history claim is made.${safe(rejectedBucketNote(row))}</div>`;
     }
     const liveCount = Number(composition.live_observations || 0);
+    const liveWord = liveEndWord(composition);
     const backtestCount = Number(composition.backtest_observations_used || 0);
     const rejectedOverlap = Number(composition.overlapping_backtest_observations_rejected || 0);
     const noMatchedPrehistory = selectedFactorEvidenceMode === "LIVE_PLUS_BACKTEST" && backtestCount === 0;
     const detail = noMatchedPrehistory
-      ? "No accepted version-matched backtest observations exist before live inception; this result therefore equals the live-only history and is not described as a long-history result."
+      ? `No accepted version-matched backtest observations exist before ${liveWord} inception; this result therefore equals the ${liveWord === "live" ? "live-only" : "model-live"} history and is not described as a long-history result.`
       : selectedFactorEvidenceMode === "LIVE_PLUS_BACKTEST"
         ? "Accepted version-matched backtest observations end before live inception; live observations remain authoritative from inception forward."
         : "Only accepted live observations enter this result; backtest observations are excluded.";
-    return `<div class="callout ${noMatchedPrehistory ? "callout-warning" : "callout-neutral"}"><strong>Evidence composition:</strong> ${integer.format(liveCount)} live + ${integer.format(backtestCount)} backtest observations · live inception ${formatDateHtml(composition.live_inception)} · ${statusText(composition.status)}. ${safe(detail)}${rejectedOverlap ? ` ${integer.format(rejectedOverlap)} overlapping backtest observations were rejected because live evidence has precedence.` : ""}${safe(rejectedBucketNote(row))}</div>`;
+    return `<div class="callout ${noMatchedPrehistory ? "callout-warning" : "callout-neutral"}"><strong>Evidence composition:</strong> ${integer.format(liveCount)} ${liveWord} + ${integer.format(backtestCount)} backtest observations · ${liveWord} inception ${formatDateHtml(composition.live_inception)} · ${statusText(composition.status)}. ${safe(detail)}${rejectedOverlap ? ` ${integer.format(rejectedOverlap)} overlapping backtest observations were rejected because live evidence has precedence.` : ""}${safe(rejectedBucketNote(row))}</div>`;
+  }
+
+  // The live end of a research series is the owner's account, or the model's own live record where
+  // the strategy has an admitted model-live layer; the word printed must say which.
+  function liveEndWord(composition) {
+    return composition && composition.live_evidence_layer === "MODEL_LIVE" ? "model live" : "live";
   }
 
   function factorCoverageText(row) {
@@ -2537,7 +2544,7 @@
       const betas = row.exposures.map((item) => `${item.factor_id} β ${decimal(item.beta ?? item.exposure)}`).join(" · ") || "—";
       const composition = row.series_composition || {};
       const compositionText = composition.status
-        ? `${integer.format(composition.live_observations || 0)} live + ${integer.format(composition.backtest_observations_used || 0)} backtest<span class="cell-secondary">${safe(humanStatus(composition.status))} · inception ${formatDateHtml(composition.live_inception)}</span>`
+        ? `${integer.format(composition.live_observations || 0)} ${liveEndWord(composition)} + ${integer.format(composition.backtest_observations_used || 0)} backtest<span class="cell-secondary">${safe(humanStatus(composition.status))} · inception ${formatDateHtml(composition.live_inception)}</span>`
         : row.status === "UNAVAILABLE" ? `No composition: series unavailable<span class="cell-secondary">No backtest-history claim</span>` : `Undeclared legacy composition<span class="cell-secondary">No backtest-history claim</span>`;
       const coverageText = factorCoverageText(row);
       return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(sourceState(row))}${providerCoverage}</td><td>${statusText(modelState(row))}<span class="cell-secondary">${statusText(decision)}</span></td><td>${safe(row.source_label || "—")}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(betas)}</td><td>${compositionText}</td><td><span class="cell-primary">${safe(row.coverage?.observed_start || "—")}–${safe(row.coverage?.observed_end || "—")}</span><span class="cell-secondary">${safe(coverageText)}</span></td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${alphaFigure(row, row.alpha?.net_annualized)}<span class="cell-secondary">${alphaEvidenceHtml(row, " · ")}</span></td><td>${statusText(row.alpha?.gross_status || row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · "))}</td></tr>`;
@@ -2607,7 +2614,7 @@
     const composition = (series) => {
       const item = dependence.series_composition?.[series];
       if (!item) return "";
-      return `${item.strategy_version} · live inception ${item.live_inception || "—"} · ${integer.format(item.live_observations || 0)} live · ${integer.format(item.backtest_observations_used || 0)} backtest used · ${integer.format(item.backtest_observations_excluded_at_or_after_live_inception || 0)} overlapping backtest excluded`;
+      return `${item.strategy_version} · ${liveEndWord(item)} inception ${item.live_inception || "—"} · ${integer.format(item.live_observations || 0)} ${liveEndWord(item)} · ${integer.format(item.backtest_observations_used || 0)} backtest used · ${integer.format(item.backtest_observations_excluded_at_or_after_live_inception || 0)} overlapping backtest excluded`;
     };
     const compositionBlock = dependence.series_composition?.[left] && dependence.series_composition?.[right]
       ? `<div class="callout callout-neutral"><strong>${safe(shortSeries(left))}</strong>: ${safe(composition(left))}<br /><strong>${safe(shortSeries(right))}</strong>: ${safe(composition(right))}</div>`
