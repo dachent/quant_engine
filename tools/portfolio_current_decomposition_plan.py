@@ -507,7 +507,13 @@ def _layered_history_targets(
     selected_admissions = (
         {"INCLUDE_SELECTED_LIVE"}
         if evidence_mode == "LIVE_ONLY"
-        else {"INCLUDE_SELECTED_LIVE", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+        else {
+            "INCLUDE_SELECTED_LIVE",
+            "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+            # an admitted model-live layer continues the backtest; the account is
+            # never part of that research series
+            "INCLUDE_MODEL_LIVE_RESEARCH",
+        }
     )
     for strategy_id, series_id in planned:
         coverage_row = coverage_by_strategy.get(strategy_id)
@@ -561,6 +567,17 @@ def _layered_history_targets(
                 {"INCLUDE_SELECTED_LIVE"} if live_only_fallback else selected_admissions
             )
         ]
+        if evidence_mode == "LIVE_PLUS_BACKTEST" and any(
+            summary.get("evidence_layer") == "MODEL_LIVE"
+            for summary in selected_summaries
+        ):
+            # the account is not part of the research series of a strategy with an
+            # admitted model-live layer, whatever its own LIVE_ONLY admission says
+            selected_summaries = [
+                summary
+                for summary in selected_summaries
+                if summary.get("evidence_layer") != "ACCOUNT_LIVE"
+            ]
         if not selected_summaries:
             raise CurrentPlanError(
                 f"layered history has no selected segment for {strategy_id}"
@@ -583,14 +600,25 @@ def _layered_history_targets(
             _integer(summary.get("return_observations"), "segment observations", 1)
             for summary in selected_summaries
         )
+        # The live end of a research series: the account for a strategy without a
+        # model-live layer, the model's own live record for one with it admitted.
+        live_layer = (
+            "MODEL_LIVE"
+            if any(
+                summary.get("evidence_layer") == "MODEL_LIVE"
+                for summary in selected_summaries
+            )
+            else "ACCOUNT_LIVE"
+        )
         live_summaries = [
             summary
             for summary in selected_summaries
-            if summary.get("evidence_layer") == "ACCOUNT_LIVE"
+            if summary.get("evidence_layer") == live_layer
         ]
         if not live_summaries:
             raise CurrentPlanError(
-                f"layered history has no selected account-live segment for {strategy_id}"
+                f"layered history has no selected {live_layer.lower().replace('_', '-')} "
+                f"segment for {strategy_id}"
             )
         for summary in live_summaries:
             source_id = _text(summary.get("source_id"), "live source_id")
@@ -613,7 +641,7 @@ def _layered_history_targets(
             source_age_dispositions.append(
                 {
                     **age,
-                    "evidence_layer": "ACCOUNT_LIVE",
+                    "evidence_layer": live_layer,
                     "source_id": source_id,
                     "strategy_id": strategy_id,
                 }
@@ -630,7 +658,7 @@ def _layered_history_targets(
             "backtest_observations_used": backtest_observations,
             "evidence_mode": evidence_mode,
             "expected_observations": expected_observations,
-            "live_evidence_layer": "ACCOUNT_LIVE",
+            "live_evidence_layer": live_layer,
             "live_inception": min(
                 _text(summary.get("observed_start"), "live observed_start")
                 for summary in live_summaries
@@ -652,7 +680,15 @@ def _layered_history_targets(
                     else (
                         "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
                         if no_matched_prehistory
-                        else "AVAILABLE_LIVE_PLUS_BACKTEST"
+                        else (
+                            (
+                                "AVAILABLE_BACKTEST_PREHISTORY_PLUS_MODEL_LIVE"
+                                if backtest_observations
+                                else "AVAILABLE_MODEL_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+                            )
+                            if live_layer == "MODEL_LIVE"
+                            else "AVAILABLE_LIVE_PLUS_BACKTEST"
+                        )
                     )
                 )
             ),
@@ -666,7 +702,7 @@ def _layered_history_targets(
     allowed_layers = (
         {"ACCOUNT_LIVE"}
         if evidence_mode == "LIVE_ONLY"
-        else {"ACCOUNT_LIVE", "BACKTEST"}
+        else {"ACCOUNT_LIVE", "BACKTEST", "MODEL_LIVE"}
     )
     selected_projection = [
         row
@@ -1078,6 +1114,11 @@ def _layered_history_targets(
     }
 
 
+# Longest calendar gap tolerated between consecutive lane observations: a long weekend
+# plus a holiday, never a skipped session run.
+_LANE_MAX_GAP_DAYS = 4
+
+
 def _series_path_sha256(rows: Sequence[Mapping[str, object]]) -> str:
     """sha256 of a ``[{date, return}]`` path, as ``strategy_basis.series_sha256`` seals it."""
 
@@ -1175,7 +1216,19 @@ def _account_basis_lanes(
             ),
             key=lambda row: row["date"],
         )
-        if _series_path_sha256(live) != identity.get("series_sha256"):
+        if any(
+            row["series_id"] == series_id and row["evidence_layer"] == "MODEL_LIVE"
+            for row in selected_projection
+        ):
+            # The research series of a strategy with an admitted model-live layer is
+            # backtest then the model's own live record; the sleeve restatement
+            # seals the account's live rows, which that series never carries.  The
+            # sealed rows are checked in the mode that does select them.
+            if live:
+                raise CurrentPlanError(
+                    f"research series of a model-live strategy carries the account: {strategy_id}"
+                )
+        elif _series_path_sha256(live) != identity.get("series_sha256"):
             raise CurrentPlanError(
                 f"selected live rows differ from the restated history: {strategy_id}"
             )
@@ -1209,11 +1262,13 @@ def _account_basis_lanes(
                 {
                     "date": row["date"],
                     "return": row["return"],
-                    "evidence_layer": "BACKTEST",
+                    "evidence_layer": row["evidence_layer"],
                 }
                 for row in selected_projection
                 if row["series_id"] == series_id
-                and row["evidence_layer"] == "BACKTEST"
+                # the model's own live record is the research series' live end; it
+                # carries the lane from the backtest to the account, never skipped
+                and row["evidence_layer"] in {"BACKTEST", "MODEL_LIVE"}
                 and row["date"] < parent_start
             )
         lane_rows.extend(
@@ -1224,6 +1279,14 @@ def _account_basis_lanes(
             }
             for row in parent
         )
+        lane_days = [date.fromisoformat(str(row["date"])) for row in lane_rows]
+        if evidence_mode == "LIVE_PLUS_BACKTEST" and any(
+            (later - earlier).days > _LANE_MAX_GAP_DAYS
+            for earlier, later in zip(
+                sorted(lane_days), sorted(lane_days)[1:], strict=False
+            )
+        ):
+            raise CurrentPlanError(f"account-basis lane has a hole: {strategy_id}")
         lanes[series_id] = {
             "account_id": parent_account,
             "basis": strategy_basis_disclosure.ACCOUNT_BASIS_FALLBACK,
@@ -1232,7 +1295,9 @@ def _account_basis_lanes(
                 facts=facts,
                 block=block_value,
                 sleeve_account_id=str(identity.get("account_id")),
-                cutoff=str(live[-1]["date"]),
+                # the research series of a model-live strategy selects no account
+                # row, so its lane runs to the end of the account series itself
+                cutoff=str((live or parent)[-1]["date"]),
             ),
             "ledger_catalog_sha256": catalog_sha256,
             "parent_series_sha256": _series_path_sha256(parent),

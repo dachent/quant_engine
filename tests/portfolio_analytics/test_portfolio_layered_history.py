@@ -981,6 +981,39 @@ def synthetic_history_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_synthetic_history_authority(monkeypatch)
 
 
+def _hold_eu_model_live(
+    contract: dict[str, Any], correction_ids: tuple[str, ...] = ("p123-eu-model-live",)
+) -> None:
+    """The synthetic world carries no EU designer-model rows: hold that layer.
+
+    The real contract admits the EU model-live layer from the strategy-backtests
+    generation, which carries its rows. Most fixtures here have no such bundle, so
+    they keep the layer declared but not admitted, as before the admission.
+    """
+
+    for correction in contract["history_corrections"]["corrections"]:
+        if correction["correction_id"] in correction_ids:
+            correction["capture"] = {
+                "as_of": None,
+                "capture_defect": "SYNTHETIC_FIXTURE_CARRIES_NO_EU_MODEL_LIVE_ROWS",
+                "generation_id": None,
+                "generation_sha256": None,
+                "status": "NOT_CAPTURED",
+            }
+            correction["mode_admission"]["LIVE_PLUS_BACKTEST"] = "REQUIRED_NOT_READY"
+            correction["readiness"] = "REQUIRED_NOT_READY"
+            correction["blockers"] = [964]
+
+
+def _hold_model_live_layers(fixture: dict[str, Any]) -> None:
+    """Hold both model-live layers in the fixture contract, then rebind identities."""
+
+    held = json.loads(fixture["contract_path"].read_bytes())
+    _hold_eu_model_live(held, ("p123-ai-model-live", "p123-eu-model-live"))
+    _write_json(fixture["contract_path"], held)
+    _refresh_materialized_segment_identities(fixture)
+
+
 def _history_fixture(tmp_path: Path) -> dict[str, Any]:
     as_of = "2026-01-10"
     contract = json.loads(
@@ -1587,6 +1620,7 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         identity["strategy_version"] = (
             version_refs.get(identity["strategy_id"]) or "UNRESOLVED"
         )
+    _hold_eu_model_live(contract)
     _write_json(contract_path, contract)
 
     fixture = {
@@ -3785,6 +3819,8 @@ def test_unadmitted_model_live_keeps_the_account_out_and_the_strategy_not_ready(
     tmp_path: Path, synthetic_history_authority: None
 ) -> None:
     fixture = _history_fixture(tmp_path)
+    # the real contract admits the AI layer; this test holds it to see the refusal
+    _hold_model_live_layers(fixture)
     artifacts, manifest_content = _build(fixture)
 
     hybrid = _p123_ai_hybrid(artifacts, "live-plus-backtest.csv")
@@ -5156,6 +5192,7 @@ def test_layered_history_does_not_admit_pre_live_p123_ai_without_product_version
     synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
+    _hold_model_live_layers(fixture)
     returns_path = fixture["portfolio123_returns_path"]
     pq.write_table(
         pa.Table.from_pylist(
@@ -5435,6 +5472,9 @@ def _qsi_revision_fixture(tmp_path: Path) -> tuple[dict[str, Any], Path, Path]:
     _update_source_generation(
         contract, "strategy-backtests", seed_generation_path, "2026-09-17"
     )
+    # this fixture proves the QSI revision, at an as-of long after the synthetic
+    # model-live rows end; the model-live layers stay held here
+    _hold_eu_model_live(contract, ("p123-ai-model-live", "p123-eu-model-live"))
     _write_json(fixture["contract_path"], contract)
     fixture.update(
         {
@@ -6704,3 +6744,69 @@ def test_qsi_revision_reconstruction_never_counts_model_live_rows_as_backtest() 
     assert {row["evidence_layer"] for row in selected} == {"BACKTEST"}
     # a series that is entirely model-live has no backtest to reconstruct
     assert target_series._bundle_backtest_rows(rows[1:2], "EU [P123]") == []
+
+
+def test_admitted_ai_model_live_layer_reaches_the_research_series_never_the_account(
+    tmp_path: Path, synthetic_history_authority: None
+) -> None:
+    """Kill test: with the layer admitted, the model book rows (not the account's)
+    carry the research series, and the reason is no longer the missing layer."""
+
+    fixture = _history_fixture(tmp_path)
+    artifacts, _manifest = _build(fixture)
+
+    hybrid = _p123_ai_hybrid(artifacts, "live-plus-backtest.csv")
+    layers = {row["evidence_layer"] for row in hybrid}
+    assert "MODEL_LIVE" in layers
+    assert "ACCOUNT_LIVE" not in layers
+    # the fixture's model book rows (live-ai, MODEL_LIVE), not the account rows
+    live = [row for row in hybrid if row["evidence_layer"] == "MODEL_LIVE"]
+    assert [row["date"] for row in live] == [
+        "2026-01-05",
+        "2026-01-06",
+        "2026-01-07",
+        "2026-01-08",
+    ]
+    coverage = json.loads(artifacts["coverage.json"])
+    ai = next(
+        row for row in coverage["strategies"] if row["strategy_id"] == "p123-ai-factor"
+    )
+    assert (
+        ai["modes"]["LIVE_PLUS_BACKTEST"].get("reason")
+        != "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED"
+    )
+
+
+def _days(*iso: str) -> list[Any]:
+    return [date.fromisoformat(item) for item in iso]
+
+
+def test_model_live_coverage_accepts_a_layer_that_reaches_the_cutoff_without_a_hole() -> (
+    None
+):
+    target_series._require_model_live_coverage(
+        "p123-ai-factor",
+        _days("2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06"),
+        date(2026, 11, 6),
+        date(2026, 11, 3),
+    )
+
+
+@pytest.mark.parametrize(
+    ("days", "account_start", "message"),
+    [
+        (_days("2026-10-01", "2026-10-02"), date(2026, 10, 2), "stop short"),
+        (_days("2026-09-01", "2026-09-30", "2026-11-06"), date(2026, 11, 1), "hole"),
+        (_days("2026-11-05", "2026-11-06"), date(2026, 11, 1), "after the account"),
+    ],
+)
+def test_model_live_coverage_refuses_a_short_a_holed_or_late_layer(
+    days: list[Any], account_start: Any, message: str
+) -> None:
+    """Kill tests: the layer must reach the cutoff, have no hole, and begin no later
+    than the account."""
+
+    with pytest.raises(TargetSeriesError, match=message):
+        target_series._require_model_live_coverage(
+            "p123-ai-factor", days, date(2026, 11, 6), account_start
+        )
