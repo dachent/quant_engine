@@ -183,6 +183,7 @@ jobs:
           tools/check_release_closure.py
           tools/codex_scope_guard.py
           tools/merge_readiness.py
+          tools/portfolio_adverse_loss.py
           tools/portfolio_attribution.py
           tools/portfolio_attribution_returns.py
           tools/portfolio_current_dependence.py
