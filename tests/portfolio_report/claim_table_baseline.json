@@ -1835,6 +1835,13 @@
   {
    "file": "tools/portfolio_report.py",
    "kinds": [
+    "basis"
+   ],
+   "text": "derived annual {} cost ${} ({}): {} of ${} sleeve value as of {}"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
     "coverage"
    ],
    "text": "governed HWM complete date is not the value-basis bound"
@@ -1845,6 +1852,13 @@
     "universal"
    ],
    "text": "instrument and venue dimensions remain explicitly unassessed."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "basis"
+   ],
+   "text": "is a share of gains, not of sleeve value, and is not priced"
   },
   {
    "file": "tools/portfolio_report.py",
@@ -1874,6 +1888,13 @@
     "universal"
    ],
    "text": "no benchmark-relative comparison is computed against the owner-selected benchmark."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "no billed dollar amount is published."
   },
   {
    "file": "tools/portfolio_report.py",
