@@ -37,7 +37,7 @@ from quant_engine.core import (
 )
 from quant_engine.core.contracts import canonical_json_bytes
 
-SPEC_SCHEMA_VERSION = 1
+SPEC_SCHEMA_VERSION = 2
 CATALOG_SCHEMA_VERSION = 1
 ADAPTER_VERSION = "0.1.0"
 PROVIDERS = {
@@ -141,7 +141,9 @@ def parse_john_hancock(text: str) -> dict[str, Any]:
         "opening": opening_value,
         "closing": closing_value,
         "items": items,
-        "labelled_items": _jh_labelled_items(lines, items),
+        "labelled_items": _jh_labelled_items(
+            lines, items, opening_value, closing_value
+        ),
         "holdings": _jh_holdings(text, closing_value),
         "closure_residual": opening_value + sum(items, _ZERO) - closing_value,
     }
@@ -156,8 +158,42 @@ _JH_ITEM_LABELS = (
 )
 
 
+def _jh_check_fund_split(
+    positioned: list[tuple[int, Decimal]],
+    items: list[Decimal],
+    opening: Decimal,
+    closing: Decimal,
+    labels: list[str],
+) -> None:
+    """Tie each amount to its own label through the printed fund split.
+
+    The activity table prints one value column per fund.  The left (index fund) column
+    lists, in row order, the opening value, one value per row and the closing value; the
+    right (brokerage) column prints the matching values, zeros sometimes omitted.  Row i's
+    amount minus its left-column value must therefore be zero or a printed right-column
+    value: swapping two amounts breaks that, which a count of labels alone would not see.
+    """
+
+    left = [value for start, value in positioned if start < 60]
+    right = {value for start, value in positioned if 60 <= start < 120}
+    if len(left) < len(items) + 2:
+        raise StatementGenerationError("John Hancock fund columns not recognised")
+    column = left[: len(items) + 2]
+    rows = [("opening balance", opening), *zip(labels, items, strict=True)]
+    rows.append(("closing balance", closing))
+    for (name, amount), printed in zip(rows, column, strict=True):
+        remainder = amount - printed
+        if remainder != _ZERO and remainder not in right:
+            raise StatementGenerationError(
+                f"John Hancock {name} amount is not the sum of its printed fund split"
+            )
+
+
 def _jh_labelled_items(
-    lines: list[str], items: list[Decimal]
+    lines: list[str],
+    items: list[Decimal],
+    opening: Decimal,
+    closing: Decimal,
 ) -> list[tuple[str, Decimal]]:
     """The statement's own row labels, in page order, paired with the ordered items.
 
@@ -184,6 +220,15 @@ def _jh_labelled_items(
         raise StatementGenerationError(
             "John Hancock activity labels differ from the activity items"
         )
+    end = next(
+        (i for i, line in enumerate(lines) if "Fee Definition" in line), len(lines)
+    )
+    positioned = [
+        (match.start(), _money(match.group()))
+        for line in lines[first:end]
+        for match in re.finditer(_MONEY, line)
+    ]
+    _jh_check_fund_split(positioned, items, opening, closing, labels)
     return list(zip(labels, items, strict=True))
 
 
@@ -397,8 +442,10 @@ def _load_spec(path: Path) -> dict[str, Any]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StatementGenerationError("spec is not valid UTF-8 JSON") from exc
     keys = {
+        "account_history_start",
         "as_of_date",
         "baseline",
+        "census_account_ids",
         "coverage_end",
         "coverage_start",
         "crosswalk",
@@ -523,15 +570,56 @@ def _composer_table_closure(
         "addition": cash["addition"] - total(rows["income"]) - positive,
         "subtraction": cash["subtraction"] - (deposits - positive),
     }
+    start, end = parsed["period_start"], parsed["period_end"]
+    for table in ("income", "fees", "trades", "deposits"):
+        for row in rows[table]:
+            if not start <= datetime.strptime(row["date"], "%m/%d/%Y").date() <= end:
+                raise StatementGenerationError(
+                    f"{statement_id}: a {table} row is dated outside the statement period"
+                )
+    half_cent = Decimal("0.005")
+    for row in rows["trades"]:
+        quantity, price, amount = (
+            Decimal(row["quantity"]),
+            Decimal(row["price"]),
+            Decimal(row["amount"]),
+        )
+        buy = row["side"] == "buy"
+        if (buy and (quantity <= 0 or amount >= 0)) or (
+            not buy and (quantity >= 0 or amount <= 0)
+        ):
+            raise StatementGenerationError(
+                f"{statement_id}: a trade row's side contradicts its quantity or amount"
+            )
+        if (
+            abs(abs(quantity) * price - abs(amount))
+            > abs(quantity) * half_cent + half_cent
+        ):
+            raise StatementGenerationError(
+                f"{statement_id}: a trade row's quantity times price differs from its amount"
+            )
+    symbols = [row["symbol"] for row in rows["holdings"]]
+    if len(set(symbols)) != len(symbols):
+        raise StatementGenerationError(f"{statement_id}: a holding is listed twice")
+    for row in rows["holdings"]:
+        quantity, price, value = (
+            Decimal(row["quantity"]),
+            Decimal(row["price"].replace(",", "")),
+            Decimal(row["market_value"]),
+        )
+        if abs(quantity * price - value) > abs(quantity) * half_cent + half_cent:
+            raise StatementGenerationError(
+                f"{statement_id}: a holding's quantity times price differs from its value"
+            )
     for name, value in residuals.items():
         if value != _ZERO:
             raise StatementGenerationError(
                 f"{statement_id}: statement {name} table differs from its summary "
                 f"by {value}"
             )
-    # each holding row is shown rounded to the cent: the sum may differ by a cent a row
+    # each holding row is shown rounded to the cent: the sum may differ by half a cent a row
     rounding = position_sum - summary_holdings
-    if abs(rounding) > Decimal("0.01") * max(len(rows["holdings"]), 1):
+    if abs(rounding) > Decimal("0.005") * max(len(rows["holdings"]), 1):
         raise StatementGenerationError(
             f"{statement_id}: holdings table differs from the account summary "
             f"by {rounding}"
@@ -543,7 +631,18 @@ def _composer_table_closure(
 
 
 def _us_date(text: str) -> str:
-    return datetime.strptime(text, "%m/%d/%Y").date().isoformat()
+    try:
+        return datetime.strptime(text, "%m/%d/%Y").date().isoformat()
+    except ValueError as exc:
+        raise StatementGenerationError(
+            f"statement row date is invalid: {text!r}"
+        ) from exc
+
+
+def _unique_records(rows: Sequence[Mapping[str, object]], what: str) -> None:
+    identifiers = [str(row["record_id"]) for row in rows]
+    if len(set(identifiers)) != len(identifiers):
+        raise StatementGenerationError(f"{what} record identifiers are not unique")
 
 
 def _composer_security(
@@ -658,6 +757,12 @@ def _composer_activity(
                     "source_record_id": f"{statement_id}:holding:{row['symbol']}",
                 }
             )
+    for rows, what in (
+        (flows, "flow"),
+        (positions, "position"),
+        (transactions, "transaction"),
+    ):
+        _unique_records(rows, what)
     return {
         "flows": flows,
         "positions": positions,
@@ -759,6 +864,12 @@ def _john_hancock_activity(
                     "source_record_id": f"{window['statement_id']}:{slug}",
                 }
             )
+    for rows, what in (
+        (flows, "flow"),
+        (positions, "position"),
+        (transactions, "transaction"),
+    ):
+        _unique_records(rows, what)
     return {
         "flows": flows,
         "positions": positions,
@@ -790,6 +901,17 @@ def build_generation(
     internal = _text(crosswalk[0]["internal_account_id"], "internal_account_id")
     if re.fullmatch(r"account-[0-9a-f]{16}", internal) is None:
         raise StatementGenerationError("internal account ID is invalid")
+    census_ids = spec["census_account_ids"]
+    if (
+        not isinstance(census_ids, list)
+        or not census_ids
+        or any(not isinstance(item, str) for item in census_ids)
+        or internal not in census_ids
+    ):
+        raise StatementGenerationError("internal account is not a census account")
+    history_start = _date(spec["account_history_start"], "account_history_start")
+    if history_start > coverage_start:
+        raise StatementGenerationError("account history starts after the coverage")
     identity = _text(spec["identity"], "identity")
 
     artifacts: list[SourceArtifact] = []
@@ -914,6 +1036,16 @@ def build_generation(
             )[0]
             if begin != Decimal(str(prior["cash_ending"])):
                 raise StatementGenerationError("Composer cash does not chain")
+    known_gaps: list[str] = (
+        [
+            f"statements from {history_start.isoformat()} to "
+            f"{(coverage_start - timedelta(days=1)).isoformat()} are not captured: "
+            "the account existed before the first statement, so earlier balances and "
+            "flows (including its funding) are outside this generation"
+        ]
+        if history_start < coverage_start
+        else []
+    )
     baseline = dict(spec["baseline"])
     if baseline != {"statement_count": len(windows)}:
         raise StatementGenerationError("statement count differs from accepted baseline")
@@ -952,7 +1084,7 @@ def build_generation(
         "continuity_breaks": breaks,
         "coverage": {
             "cadence": meta["cadence"],
-            "known_gaps": [],
+            "known_gaps": known_gaps,
             "observed_end": coverage_end.isoformat(),
             "observed_start": coverage_start.isoformat(),
             "out_of_boundary": [
@@ -970,7 +1102,7 @@ def build_generation(
                     else []
                 ),
             ],
-            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+            "status": "PARTIAL" if known_gaps else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
         },
         "nav_observations": nav_observations,
         "reconciliation": {
@@ -999,7 +1131,11 @@ def build_generation(
         as_of_date=generation_as_of,
         adapter=AdapterIdentity(str(meta["adapter"]), ADAPTER_VERSION),
         coverage=CoverageClaim(
-            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            status=(
+                CoverageStatus.PARTIAL
+                if known_gaps
+                else CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+            ),
             boundary=(
                 f"{len(windows)} {meta['cadence'].lower()}ly statements, "
                 f"{coverage_start.isoformat()} through {coverage_end.isoformat()}"
@@ -1007,11 +1143,11 @@ def build_generation(
             fact_types=(
                 "nav_observations",
                 "statement_windows",
-                *sorted(key for key in activity if activity[key]),
+                *sorted({key for key in activity if activity[key]} | {"flows"}),
             ),
             observed_start=coverage_start,
             observed_end=coverage_end,
-            known_gaps=(),
+            known_gaps=tuple(known_gaps),
         ),
         artifacts=(*artifacts, normalized),
         verification=VerificationStatus.VERIFIED,

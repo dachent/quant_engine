@@ -22,6 +22,15 @@ def _money(value: str) -> str:
     return f"${value}"
 
 
+def _composer_trade_row(month: int, year: int, amount: str) -> str:
+    """A trade row whose side, quantity and price agree with its signed amount."""
+
+    value = Decimal(amount.replace("$", ""))
+    quantity = (abs(value) / Decimal(60)).quantize(Decimal("0.000000001"))
+    side, signed = ("buy", quantity) if value < 0 else ("sell", -quantity)
+    return f"{month:02d}/15/{year} Trade Entry {side} XLE {signed} $60.00 {amount} $ --"
+
+
 def _composer_text(
     year: int,
     month: int,
@@ -63,7 +72,7 @@ def _composer_text(
                     "Transaction",
                     "Trade Date Entry Type Side Symbol Description Quantity Price "
                     "Amount Commission",
-                    f"{month:02d}/15/{year} Trade Entry buy XLE 0.001 $60.00 {trade} $ --",
+                    _composer_trade_row(month, year, trade),
                 ]
                 if trade != "$ --"
                 else []
@@ -78,6 +87,20 @@ _JH_LABELS = (
     "Roth 401(k) Contribution",
     "General Administrative Charge",
 )
+
+
+def _jh_fund_rows(opening: str, items: list[str], closing: str, fund: str) -> list[str]:
+    def number(value: str) -> Decimal:
+        return Decimal(value.replace(",", ""))
+
+    def row(left: Decimal, right: Decimal) -> str:
+        first, second = f"{left:,.2f}", f"{right:,.2f}"
+        return " " * 46 + first + " " * (29 - len(first)) + second
+
+    rows = [row(Decimal(fund), number(opening) - Decimal(fund))]
+    rows += [row(number(item), Decimal("0.00")) for item in items]
+    rows.append(row(Decimal(fund), number(closing) - Decimal(fund)))
+    return rows
 
 
 def _jh_text(
@@ -106,6 +129,9 @@ def _jh_text(
         f"Balance as of {start:%B} {start.day}, {start.year}",
         *labels,
         f"Net Asset Value as of {end:%B} {end.day}, {end.year}",
+        # one value per fund column and row: opening, the items, closing
+        *_jh_fund_rows(opening, items, closing, fund),
+        "Fee Definition(s)",
     ]
     return "\n".join(lines)
 
@@ -129,6 +155,8 @@ def _spec(
     *,
     external: str,
     coverage: tuple[str, str],
+    history: str | None = None,
+    census: list[str] | None = None,
 ) -> Path:
     sources = []
     for statement_id, end, text in statements:
@@ -148,8 +176,10 @@ def _spec(
                 }
             )
     spec = {
+        "account_history_start": coverage[0] if history is None else history,
         "as_of_date": "2026-11-06",
         "baseline": {"statement_count": len(statements)},
+        "census_account_ids": [ACCOUNT] if census is None else census,
         "coverage_end": coverage[1],
         "coverage_start": coverage[0],
         "crosswalk": [
@@ -158,7 +188,7 @@ def _spec(
         "identity": PLAN,
         "provider": provider,
         "roots": {"statements": str(tmp_path / "statements")},
-        "schema_version": 1,
+        "schema_version": 2,
         "sources": sources,
     }
     path = tmp_path / f"spec-{provider}.json"
@@ -648,3 +678,147 @@ def test_composer_refuses_holdings_that_do_not_match_the_account_summary(
 
     with pytest.raises(gen.StatementGenerationError, match="holdings table differs"):
         gen.build_generation(_composer(tmp_path, **{"1": february}))
+
+
+def _march_with(tmp_path: Path, **kwargs: Any) -> Path:
+    march = _composer_text(
+        2026,
+        3,
+        begin="2.80",
+        trade="-$0.06",
+        ending="2.74",
+        long="1,031.20",
+        total="1,033.94",
+    )
+    for old, new in kwargs.get("replace", []):
+        march = march.replace(old, new)
+    return _composer(
+        tmp_path,
+        **{
+            "1": _composer_text(
+                2026, 2, begin="2.80", ending="2.80", long="1,006.48", total="1,009.28"
+            ),
+            "2": march,
+        },
+    )
+
+
+def test_composer_holdings_tolerance_is_half_a_cent_per_row(tmp_path: Path) -> None:
+    """P1-1: rounding to the cent costs at most 0.005 a row; five cents on one row is refused."""
+
+    ok = _composer(tmp_path)
+    gen.build_generation(ok)  # the real fixture rounds to 0.00
+    short = tmp_path / "short"
+    short.mkdir()
+    bad = _composer_text(
+        2026, 2, begin="2.80", ending="2.80", long="1,006.48", total="1,009.28"
+    ).replace(
+        "XLE SELECT SECTOR SPDR TR 1.000000000 $1,006.48 $1,006.48",
+        "XLE SELECT SECTOR SPDR TR 1.000000000 $1,006.53 $1,006.53",
+    )
+    with pytest.raises(gen.StatementGenerationError, match="holdings table differs"):
+        gen.build_generation(_composer(short, **{"1": bad}))
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    (
+        # P1-2: a row dated outside its statement month, a swapped side, a changed quantity
+        (
+            "03/15/2026 Trade Entry buy",
+            "04/15/2026 Trade Entry buy",
+            "outside the statement period",
+        ),
+        (
+            "03/15/2026 Trade Entry buy XLE",
+            "03/15/2026 Trade Entry sell XLE",
+            "side contradicts",
+        ),
+        ("XLE 0.001000000 ", "XLE 0.01 ", "quantity times price"),
+    ),
+)
+def test_composer_trade_rows_are_checked_against_period_side_and_price(
+    tmp_path: Path, old: str, new: str, message: str
+) -> None:
+    january = _composer_text(
+        2026,
+        1,
+        begin="2.86",
+        trade="-$0.06",
+        ending="2.80",
+        long="1,087.10",
+        total="1,089.90",
+    ).replace(
+        old.replace("03/15", "01/15"),
+        new.replace("03/15", "01/15").replace("04/15", "02/15"),
+    )
+    with pytest.raises(gen.StatementGenerationError, match=message):
+        gen.build_generation(_composer(tmp_path, **{"0": january}))
+
+
+def test_composer_refuses_a_holding_listed_twice(tmp_path: Path) -> None:
+    february = (
+        _composer_text(
+            2026, 2, begin="2.80", ending="2.80", long="1,006.48", total="1,009.28"
+        )
+        + "\nXLE SELECT SECTOR SPDR TR 1.000000000 $1,006.48 $1,006.48 $1,006.48 $0.00 $1,006.48"
+    )
+    with pytest.raises(gen.StatementGenerationError, match="listed twice"):
+        gen.build_generation(_composer(tmp_path, **{"1": february}))
+
+
+def test_john_hancock_amount_swapped_between_labels_is_refused() -> None:
+    """P1-3: the printed fund split ties each amount to its own label."""
+
+    text = _jh_text(
+        date(2026, 1, 1),
+        date(2026, 3, 31),
+        opening="1,000.00",
+        items=["30.00", "-20.00"],
+        closing="1,010.00",
+    )
+    lines = text.split("\n")
+    swap_a = next(i for i, l in enumerate(lines) if l.strip().startswith("30.00"))
+    swap_b = next(i for i, l in enumerate(lines) if l.strip().startswith("-20.00"))
+    lines[swap_a], lines[swap_b] = lines[swap_b], lines[swap_a]
+    # the ordered items (long rows) keep their order; only the printed fund column swaps
+    with pytest.raises(gen.StatementGenerationError, match="fund split"):
+        gen.parse_john_hancock("\n".join(lines))
+
+
+def test_internal_account_must_be_a_census_account(tmp_path: Path) -> None:
+    """P1-4: the generation is bound to an accepted census account, not any id."""
+
+    spec = _jh(tmp_path)
+    data = json.loads(spec.read_text())
+    data["census_account_ids"] = ["account-ffffffffffffffff"]
+    spec.write_text(json.dumps(data))
+    with pytest.raises(gen.StatementGenerationError, match="census account"):
+        gen.build_generation(spec)
+
+
+def test_statements_that_start_after_the_account_did_are_partial_not_complete(
+    tmp_path: Path,
+) -> None:
+    """P1-5: an account that existed before its first captured statement is PARTIAL with a
+    named gap; the funding and earlier history are outside the generation."""
+
+    complete, _m, _b = gen.build_generation(_jh(tmp_path))
+    assert complete["coverage"]["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    other = tmp_path / "partial"
+    other.mkdir()
+    spec = _jh(other)
+    data = json.loads(spec.read_text())
+    data["account_history_start"] = "2025-09-22"
+    spec.write_text(json.dumps(data))
+
+    catalog, manifest, _bytes = gen.build_generation(spec)
+
+    assert catalog["coverage"]["status"] == "PARTIAL"
+    assert catalog["coverage"]["known_gaps"] == [
+        "statements from 2025-09-22 to 2025-12-31 are not captured: the account existed "
+        "before the first statement, so earlier balances and flows (including its "
+        "funding) are outside this generation"
+    ]
+    assert list(manifest.coverage.known_gaps) == catalog["coverage"]["known_gaps"]
+    assert "flows" in manifest.coverage.fact_types  # zero flows is a verified result
