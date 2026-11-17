@@ -118,9 +118,22 @@ def _jh_text(
     labels = labels if labels is not None else list(_JH_LABELS[: len(items)])
     closing_value = Decimal(closing.replace(",", ""))
     bucket = f"{closing_value - Decimal(fund):,.2f}"
+    amounts = dict(
+        zip(labels, (Decimal(item.replace(",", "")) for item in items), strict=False)
+    )
+    market = amounts.get("Gain/Loss", Decimal(0)) + amounts.get(
+        "Dividends/Interest", Decimal(0)
+    )
+    contribution = amounts.get("Roth 401(k) Contribution", Decimal(0))
     lines = [
         f"STATEMENT PERIOD: {start:%m/%d/%Y} - {end:%m/%d/%Y}   {PLAN}",
         f"Opening Balance   $ {opening}",
+        *(
+            [f"Participant Contributions   $ {contribution:,.2f}"]
+            if contribution
+            else []
+        ),
+        *([f"Change in Market Value   $ {market:,.2f}"] if market else []),
         f"Closing Balance   ${closing}",
         f"Participant Contributions    500 Index Fund    ${fund}   10.00% 10%",
         f"Closing Total    Brokerage Account    ${bucket}   90.00% 90%",
@@ -155,8 +168,8 @@ def _spec(
     *,
     external: str,
     coverage: tuple[str, str],
-    history: str | None = None,
-    census: list[str] | None = None,
+    census_start: str | None = None,
+    census_accounts: list[dict[str, Any]] | None = None,
 ) -> Path:
     sources = []
     for statement_id, end, text in statements:
@@ -175,11 +188,32 @@ def _spec(
                     **_write(tmp_path / "statements", name, body),
                 }
             )
+    alias = "John Hancock" if provider == "john_hancock" else "Composer"
+    census = {
+        "accounts": census_accounts
+        if census_accounts is not None
+        else [
+            {
+                "account_id": ACCOUNT,
+                "aliases": [alias],
+                "role": "INVESTMENT",
+            }
+        ],
+        "assignments": [
+            {"account_id": ACCOUNT, "effective_start": census_start},
+        ],
+    }
+    census_bytes = json.dumps(census).encode()
+    census_path = tmp_path / f"census-{provider}.json"
+    census_path.write_bytes(census_bytes)
     spec = {
-        "account_history_start": coverage[0] if history is None else history,
         "as_of_date": "2026-11-06",
         "baseline": {"statement_count": len(statements)},
-        "census_account_ids": [ACCOUNT] if census is None else census,
+        "census_catalog": {
+            "path": str(census_path),
+            "sha256": hashlib.sha256(census_bytes).hexdigest(),
+            "size_bytes": len(census_bytes),
+        },
         "coverage_end": coverage[1],
         "coverage_start": coverage[0],
         "crosswalk": [
@@ -234,7 +268,11 @@ def _composer(tmp_path: Path, **override: Any) -> Path:
 
 
 def _jh(
-    tmp_path: Path, *, residual: bool = False, second_opening: str = "1,010.00"
+    tmp_path: Path,
+    *,
+    residual: bool = False,
+    second_opening: str = "1,010.00",
+    **spec_kwargs: Any,
 ) -> Path:
     quarters = [
         (
@@ -269,6 +307,7 @@ def _jh(
         statements,
         external="FSN-401K-PLAN",
         coverage=("2026-01-01", "2026-06-30"),
+        **spec_kwargs,
     )
 
 
@@ -282,8 +321,8 @@ def test_composer_points_are_the_statement_totals_and_identity_closes(
         "2026-02-28": "1009.28",
         "2026-03-31": "1034.00",
     }
-    assert manifest.coverage.status.value == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
-    assert catalog["coverage"]["known_gaps"] == []  # type: ignore[index]
+    assert manifest.coverage.status.value == "PARTIAL"
+    assert len(catalog["coverage"]["known_gaps"]) == 1  # type: ignore[index, arg-type]
 
 
 def test_latest_on_or_before_is_the_cutoff_rule(tmp_path: Path) -> None:
@@ -392,7 +431,7 @@ def test_john_hancock_points_and_carried_difference(tmp_path: Path) -> None:
     assert catalog["continuity_breaks"] == [  # type: ignore[comparison-overlap]
         {"statement_id": "jh-2026q2", "opening_minus_prior_closing": "-10.00"}
     ]
-    assert catalog["coverage"]["known_gaps"] == []  # type: ignore[index]
+    assert len(catalog["coverage"]["known_gaps"]) == 1  # type: ignore[index, arg-type]
 
 
 def test_john_hancock_refuses_opening_plus_items_not_equal_closing(
@@ -778,47 +817,153 @@ def test_john_hancock_amount_swapped_between_labels_is_refused() -> None:
         closing="1,010.00",
     )
     lines = text.split("\n")
-    swap_a = next(i for i, l in enumerate(lines) if l.strip().startswith("30.00"))
-    swap_b = next(i for i, l in enumerate(lines) if l.strip().startswith("-20.00"))
+    swap_a = next(i for i, row in enumerate(lines) if row.strip().startswith("30.00"))
+    swap_b = next(i for i, row in enumerate(lines) if row.strip().startswith("-20.00"))
     lines[swap_a], lines[swap_b] = lines[swap_b], lines[swap_a]
     # the ordered items (long rows) keep their order; only the printed fund column swaps
     with pytest.raises(gen.StatementGenerationError, match="fund split"):
         gen.parse_john_hancock("\n".join(lines))
 
 
-def test_internal_account_must_be_a_census_account(tmp_path: Path) -> None:
-    """P1-4: the generation is bound to an accepted census account, not any id."""
+def test_internal_account_must_be_a_pinned_census_account(tmp_path: Path) -> None:
+    """P1-4: the account is read from a hash-pinned census catalog, not from the spec."""
 
     spec = _jh(tmp_path)
     data = json.loads(spec.read_text())
-    data["census_account_ids"] = ["account-ffffffffffffffff"]
+    census = json.loads(Path(data["census_catalog"]["path"]).read_text())
+    census["accounts"][0]["account_id"] = "account-ffffffffffffffff"
+    raw = json.dumps(census).encode()
+    Path(data["census_catalog"]["path"]).write_bytes(raw)
+    data["census_catalog"]["sha256"] = hashlib.sha256(raw).hexdigest()
+    data["census_catalog"]["size_bytes"] = len(raw)
     spec.write_text(json.dumps(data))
-    with pytest.raises(gen.StatementGenerationError, match="census account"):
+    with pytest.raises(gen.StatementGenerationError, match="not a census account"):
         gen.build_generation(spec)
 
-
-def test_statements_that_start_after_the_account_did_are_partial_not_complete(
-    tmp_path: Path,
-) -> None:
-    """P1-5: an account that existed before its first captured statement is PARTIAL with a
-    named gap; the funding and earlier history are outside the generation."""
-
-    complete, _m, _b = gen.build_generation(_jh(tmp_path))
-    assert complete["coverage"]["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
-    other = tmp_path / "partial"
+    # a census file whose bytes differ from the pin is refused
+    other = tmp_path / "pinned"
     other.mkdir()
     spec = _jh(other)
     data = json.loads(spec.read_text())
-    data["account_history_start"] = "2025-09-22"
+    data["census_catalog"]["sha256"] = "0" * 64
     spec.write_text(json.dumps(data))
+    with pytest.raises(gen.StatementGenerationError, match="differs from its pin"):
+        gen.build_generation(spec)
 
-    catalog, manifest, _bytes = gen.build_generation(spec)
+    # an account of another provider is refused
+    third = tmp_path / "wrong-provider"
+    third.mkdir()
+    spec = _jh(
+        third,
+        census_accounts=[
+            {"account_id": ACCOUNT, "aliases": ["Composer"], "role": "INVESTMENT"}
+        ],
+    )
+    with pytest.raises(gen.StatementGenerationError, match="not this provider"):
+        gen.build_generation(spec)
+
+
+def test_a_first_statement_with_a_balance_makes_the_generation_partial(
+    tmp_path: Path,
+) -> None:
+    """P1-5: partiality is derived from the statement bytes (a non-zero opening) and the
+    census start, never from a value the spec asserts."""
+
+    catalog, manifest, _bytes = gen.build_generation(_jh(tmp_path))
 
     assert catalog["coverage"]["status"] == "PARTIAL"
     assert catalog["coverage"]["known_gaps"] == [
-        "statements from 2025-09-22 to 2025-12-31 are not captured: the account existed "
-        "before the first statement, so earlier balances and flows (including its "
-        "funding) are outside this generation"
+        "statements before 2026-01-01 are not captured: the first captured statement "
+        "opens with a non-zero balance; earlier balances and flows, including the "
+        "account's funding, are outside this generation"
     ]
     assert list(manifest.coverage.known_gaps) == catalog["coverage"]["known_gaps"]
     assert "flows" in manifest.coverage.fact_types  # zero flows is a verified result
+
+
+def test_a_new_account_with_a_zero_opening_and_no_earlier_census_start_is_complete(
+    tmp_path: Path,
+) -> None:
+    text = _jh_text(
+        date(2026, 1, 1),
+        date(2026, 3, 31),
+        opening="0.00",
+        items=["4.00", "6.00"],
+        closing="10.00",
+        fund="4.00",
+    )
+    spec = _spec(
+        tmp_path,
+        "john_hancock",
+        [("jh-2026q1", date(2026, 3, 31), text)],
+        external="FSN-401K-PLAN",
+        coverage=("2026-01-01", "2026-03-31"),
+        census_start="2026-01-01",
+    )
+
+    catalog, _manifest, _bytes = gen.build_generation(spec)
+
+    assert catalog["coverage"]["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert catalog["coverage"]["known_gaps"] == []
+
+
+def test_a_census_start_before_the_first_statement_is_a_named_gap(
+    tmp_path: Path,
+) -> None:
+    text = _jh_text(
+        date(2026, 1, 1),
+        date(2026, 3, 31),
+        opening="0.00",
+        items=["4.00", "6.00"],
+        closing="10.00",
+        fund="4.00",
+    )
+    spec = _spec(
+        tmp_path,
+        "john_hancock",
+        [("jh-2026q1", date(2026, 3, 31), text)],
+        external="FSN-401K-PLAN",
+        coverage=("2026-01-01", "2026-03-31"),
+        census_start="2025-09-22",
+    )
+
+    catalog, _manifest, _bytes = gen.build_generation(spec)
+
+    assert catalog["coverage"]["status"] == "PARTIAL"
+    assert (
+        "census records the account before the first statement"
+        in (catalog["coverage"]["known_gaps"][0])
+    )
+    assert "(census account start 2025-09-22)" in catalog["coverage"]["known_gaps"][0]
+
+
+def test_john_hancock_label_text_swapped_with_columns_aligned_is_refused() -> None:
+    """P1-1: swapping two label texts leaves the numbers aligned, but the plan prints its
+    rows in a fixed order, so the swap is out of order and refused."""
+
+    text = _jh_text(
+        date(2026, 1, 1),
+        date(2026, 3, 31),
+        opening="1,000.00",
+        items=["30.00", "-20.00", "500.00", "-8.00"],
+        closing="1,502.00",
+        labels=[
+            "Gain/Loss",
+            "Administrative Fee",
+            "Roth 401(k) Contribution",
+            "General Administrative Charge",
+        ],
+    )
+    gen.parse_john_hancock(text)  # the genuine order parses
+    for swap in (
+        ("Gain/Loss", "Roth 401(k) Contribution"),
+        ("Administrative Fee", "General Administrative Charge"),
+    ):
+        swapped = text
+        swapped = (
+            swapped.replace(swap[0], "@@")
+            .replace(swap[1], swap[0])
+            .replace("@@", swap[1])
+        )
+        with pytest.raises(gen.StatementGenerationError, match="fixed row order"):
+            gen.parse_john_hancock(swapped)

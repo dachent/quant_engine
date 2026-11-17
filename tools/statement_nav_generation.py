@@ -189,6 +189,38 @@ def _jh_check_fund_split(
             )
 
 
+def _jh_check_summary(
+    lines: list[str], labels: list[str], items: list[Decimal]
+) -> None:
+    """The page-1 summary prints the contribution and the market change as totals: the
+    rows labelled as such must add up to values printed there."""
+
+    first = next(
+        (i for i, line in enumerate(lines) if line.startswith("Opening Balance")), None
+    )
+    last = next(
+        (i for i, line in enumerate(lines) if line.startswith("Closing Balance")), None
+    )
+    if first is None or last is None or last < first:
+        raise StatementGenerationError("John Hancock summary rows not recognised")
+    printed = {
+        _money(token.replace(" ", ""))
+        for line in lines[first : last + 1]
+        for token in re.findall(r"-?\$?\s*-?[\d,]+\.\d\d", line[:85])
+    }
+    amounts = dict(zip(labels, items, strict=True))
+    groups = {
+        "contribution": amounts.get("Roth 401(k) Contribution", _ZERO),
+        "market change": amounts.get("Gain/Loss", _ZERO)
+        + amounts.get("Dividends/Interest", _ZERO),
+    }
+    for name, value in groups.items():
+        if value != _ZERO and value not in printed:
+            raise StatementGenerationError(
+                f"John Hancock {name} rows do not add up to the printed summary total"
+            )
+
+
 def _jh_labelled_items(
     lines: list[str],
     items: list[Decimal],
@@ -220,15 +252,21 @@ def _jh_labelled_items(
         raise StatementGenerationError(
             "John Hancock activity labels differ from the activity items"
         )
-    end = next(
-        (i for i, line in enumerate(lines) if "Fee Definition" in line), len(lines)
-    )
+    end = next((i for i, line in enumerate(lines) if "Fee Definition" in line), None)
+    if end is None:
+        raise StatementGenerationError("John Hancock activity table end not recognised")
+    order = [_JH_ITEM_LABELS.index(label) for label in labels]
+    if order != sorted(set(order)):
+        raise StatementGenerationError(
+            "John Hancock activity labels are not in the plan's fixed row order"
+        )
     positioned = [
         (match.start(), _money(match.group()))
         for line in lines[first:end]
         for match in re.finditer(_MONEY, line)
     ]
     _jh_check_fund_split(positioned, items, opening, closing, labels)
+    _jh_check_summary(lines, labels, items)
     return list(zip(labels, items, strict=True))
 
 
@@ -442,10 +480,9 @@ def _load_spec(path: Path) -> dict[str, Any]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StatementGenerationError("spec is not valid UTF-8 JSON") from exc
     keys = {
-        "account_history_start",
         "as_of_date",
         "baseline",
-        "census_account_ids",
+        "census_catalog",
         "coverage_end",
         "coverage_start",
         "crosswalk",
@@ -573,7 +610,7 @@ def _composer_table_closure(
     start, end = parsed["period_start"], parsed["period_end"]
     for table in ("income", "fees", "trades", "deposits"):
         for row in rows[table]:
-            if not start <= datetime.strptime(row["date"], "%m/%d/%Y").date() <= end:
+            if not start <= date.fromisoformat(_us_date(row["date"])) <= end:
                 raise StatementGenerationError(
                     f"{statement_id}: a {table} row is dated outside the statement period"
                 )
@@ -628,6 +665,46 @@ def _composer_table_closure(
         **{name: _dec(value) for name, value in residuals.items()},
         "holdings_rounding_residual": _dec(rounding),
     }
+
+
+def _census_account_start(pin: object, account_id: str, label: str) -> date | None:
+    """The account's start in the pinned census (provenance) catalog, or None if it has none.
+
+    The catalog must be the pinned bytes, carry the account as an INVESTMENT account whose
+    alias names this provider, and the start is the earliest dated assignment of the account.
+    """
+
+    if not isinstance(pin, dict) or set(pin) != {"path", "sha256", "size_bytes"}:
+        raise StatementGenerationError("census catalog pin has wrong keys")
+    try:
+        raw = Path(str(pin["path"])).read_bytes()
+    except OSError as exc:
+        raise StatementGenerationError("census catalog is unreadable") from exc
+    if (
+        hashlib.sha256(raw).hexdigest() != pin["sha256"]
+        or len(raw) != pin["size_bytes"]
+    ):
+        raise StatementGenerationError("census catalog differs from its pin")
+    try:
+        catalog = json.loads(raw)
+        accounts = catalog["accounts"]
+        assignments = catalog["assignments"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise StatementGenerationError("census catalog shape differs") from exc
+    matches = [item for item in accounts if item.get("account_id") == account_id]
+    if len(matches) != 1:
+        raise StatementGenerationError("internal account is not a census account")
+    account = matches[0]
+    provider = label.replace("_", " ")
+    aliases = [str(alias).split("|")[0].strip().upper() for alias in account["aliases"]]
+    if account.get("role") != "INVESTMENT" or provider not in aliases:
+        raise StatementGenerationError("census account is not this provider's account")
+    starts = [
+        _date(item["effective_start"], "census assignment start")
+        for item in assignments
+        if item.get("account_id") == account_id and item.get("effective_start")
+    ]
+    return min(starts) if starts else None
 
 
 def _us_date(text: str) -> str:
@@ -901,17 +978,9 @@ def build_generation(
     internal = _text(crosswalk[0]["internal_account_id"], "internal_account_id")
     if re.fullmatch(r"account-[0-9a-f]{16}", internal) is None:
         raise StatementGenerationError("internal account ID is invalid")
-    census_ids = spec["census_account_ids"]
-    if (
-        not isinstance(census_ids, list)
-        or not census_ids
-        or any(not isinstance(item, str) for item in census_ids)
-        or internal not in census_ids
-    ):
-        raise StatementGenerationError("internal account is not a census account")
-    history_start = _date(spec["account_history_start"], "account_history_start")
-    if history_start > coverage_start:
-        raise StatementGenerationError("account history starts after the coverage")
+    census_start = _census_account_start(
+        spec["census_catalog"], internal, str(meta["label"])
+    )
     identity = _text(spec["identity"], "identity")
 
     artifacts: list[SourceArtifact] = []
@@ -974,6 +1043,7 @@ def build_generation(
             opening, closing = parsed["cash"]["beginning"], parsed["holdings"]["total"]
             rows = parsed["rows"]
             detail = {
+                "cash_beginning": _dec(parsed["cash"]["beginning"]),
                 "cash_ending": _dec(parsed["cash"]["ending"]),
                 "cash_residual": _dec(parsed["cash_residual"]),
                 "long_market_value": _dec(parsed["holdings"]["long"]),
@@ -1036,16 +1106,30 @@ def build_generation(
             )[0]
             if begin != Decimal(str(prior["cash_ending"])):
                 raise StatementGenerationError("Composer cash does not chain")
-    known_gaps: list[str] = (
-        [
-            f"statements from {history_start.isoformat()} to "
-            f"{(coverage_start - timedelta(days=1)).isoformat()} are not captured: "
-            "the account existed before the first statement, so earlier balances and "
-            "flows (including its funding) are outside this generation"
-        ]
-        if history_start < coverage_start
-        else []
+    first = windows[0]
+    opened_before = (
+        Decimal(str(first["opening"])) != _ZERO
+        if provider == "john_hancock"
+        else Decimal(str(first["cash_beginning"])) != _ZERO
     )
+    known_gaps: list[str] = []
+    if opened_before or (census_start is not None and census_start < coverage_start):
+        known_gaps.append(
+            "statements before "
+            f"{coverage_start.isoformat()} are not captured: "
+            + (
+                "the first captured statement opens with a non-zero balance"
+                if opened_before
+                else "the census records the account before the first statement"
+            )
+            + (
+                f" (census account start {census_start.isoformat()})"
+                if census_start is not None
+                else ""
+            )
+            + "; earlier balances and flows, including the account's funding, "
+            "are outside this generation"
+        )
     baseline = dict(spec["baseline"])
     if baseline != {"statement_count": len(windows)}:
         raise StatementGenerationError("statement count differs from accepted baseline")
