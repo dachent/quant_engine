@@ -106,6 +106,9 @@ def _check_dividend_record(
     ]
     # every calendar month between the window's first and the capture's last month
     # carries a distribution; January alone may not (the year-end one goes ex in Dec).
+    # Limit: a capture whose LAST month is December is not held to the two-in-December
+    # rule (a Dec 20+ capture missing Dec 1-3 passes); the November release capture
+    # cannot reach it.
     # Limit: a payer that starts going ex in January in a new rate regime would hide a
     # missed January ex-date here; only the 52-day gap check covers that, partly.
     paid_months = {(day.year, day.month) for day in paid}
