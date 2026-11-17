@@ -230,3 +230,28 @@ def _cfg() -> dict[str, Any]:
         "run_label": "r4-tiny",
         "schema_version": 1,
     }
+
+
+def test_sector_kind_covers_the_sector_bundle_tickers() -> None:
+    config = y.build_config("sector", CUTOFF, "R3")
+    tickers = [s for g in config["groups"] for s in g["symbols"]]
+    assert sorted(tickers) == sorted(
+        [
+            "XLC",
+            "XLY",
+            "XLP",
+            "XLE",
+            "XLF",
+            "XLV",
+            "XLI",
+            "XLB",
+            "XLRE",
+            "XLK",
+            "XLU",
+            "BIL",
+        ]
+    )
+    assert y.run_id("R3", "sector", 2) == "R3-SECTOR-2"
+    assert y.config_sha256(config) == y.config_sha256(
+        y.build_config("sector", CUTOFF, "R3")
+    )

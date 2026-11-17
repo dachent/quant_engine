@@ -68,9 +68,21 @@ STYLE_GROUPS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
     ("style-crypto-btc", "2014-09-17", ("BTC-USD",), "every_day"),
     ("style-crypto-eth", "2017-11-09", ("ETH-USD",), "every_day"),
 )
+SECTOR_GROUPS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
+    (
+        "sector-spdrs-2000",
+        "2000-01-01",
+        ("XLY", "XLP", "XLE", "XLF", "XLV", "XLI", "XLB", "XLK", "XLU"),
+        "weekday",
+    ),
+    ("sector-xlre", "2015-10-08", ("XLRE",), "weekday"),
+    ("sector-xlc", "2018-06-19", ("XLC",), "weekday"),
+    ("sector-bil", "2007-05-30", ("BIL",), "weekday"),
+)
 KINDS: Mapping[str, tuple[tuple[str, str, tuple[str, ...], str], ...]] = {
     "base": BASE_GROUPS,
     "style": STYLE_GROUPS,
+    "sector": SECTOR_GROUPS,
 }
 MONTHLY_PAYERS = ("BIL", "HYG", "IEF", "LQD", "TLT")
 CRYPTO = ("BTC-USD", "ETH-USD")
@@ -370,7 +382,9 @@ def run_kind(
 def _kinds(value: str) -> list[str]:
     kinds = [k for k in value.split(",") if k]
     if not kinds or any(k not in KINDS for k in kinds):
-        raise argparse.ArgumentTypeError("kinds must be base, style or base,style")
+        raise argparse.ArgumentTypeError(
+            "kinds must be a comma list of base, style, sector"
+        )
     return kinds
 
 
