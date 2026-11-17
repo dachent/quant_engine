@@ -450,6 +450,7 @@ def _schwab_world(**over: Any) -> dict[str, Any]:
             },  # cash only
         ],
         "positions": [],
+        "empty_accounts": [SCH],
         "start": S_FREEZE,
         "end": S_END,
     }
@@ -474,6 +475,7 @@ def _schwab_run(world: dict[str, Any]) -> dict[str, Any]:
         as_of_date=S_END,
         positions=world["positions"],
         transactions=world["transactions"],
+        empty_position_accounts=world["empty_accounts"],
     )[0]
 
 
@@ -500,6 +502,18 @@ def test_a_frozen_nav_with_no_later_security_activity_proves_an_empty_position_s
         ("starts_before_freeze", "INTERVAL_STARTS_AT_OR_AFTER_FREEZE"),
         ("nav_stops_before_declared_end", "NAV_OBSERVED_TO_DECLARED_END"),
         ("unavailable_nav", "NAV_FROZEN_UNBROKEN"),
+        (
+            "catalog_does_not_list_the_account",
+            "POSITION_SET_POSITIVELY_EMPTY_IN_PROVIDER_CATALOG",
+        ),
+        (
+            "catalog_lists_another_account",
+            "POSITION_SET_POSITIVELY_EMPTY_IN_PROVIDER_CATALOG",
+        ),
+        (
+            "nothing_but_the_frozen_nav",
+            "POSITION_SET_POSITIVELY_EMPTY_IN_PROVIDER_CATALOG",
+        ),
     ],
 )
 def test_each_way_an_empty_position_set_could_pass_vacuously_is_refused(
@@ -532,6 +546,15 @@ def test_each_way_an_empty_position_set_could_pass_vacuously_is_refused(
         world["nav"] = {d: v for d, v in world["nav"].items() if d <= date(2026, 3, 20)}
     elif variant == "unavailable_nav":
         world["nav"][date(2026, 3, 9)] = None
+    elif variant == "catalog_does_not_list_the_account":
+        world["empty_accounts"] = []
+    elif variant == "catalog_lists_another_account":
+        world["empty_accounts"] = ["account-other"]
+    elif variant == "nothing_but_the_frozen_nav":
+        # transactions and positions emptied: absence alone is not proof
+        world["transactions"] = []
+        world["positions"] = []
+        world["empty_accounts"] = []
     row = _schwab_run(world)
     assert row["status"] == ec.CLOSURE_FAILED
     assert expected in _failed(row)

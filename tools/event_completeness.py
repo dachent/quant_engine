@@ -18,7 +18,7 @@ Closure ``IBKR_CHANGE_IN_NAV_FLOW_TIE_OUT`` (flows): over the declared interval
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -295,6 +295,7 @@ def _evaluate_schwab_empty(
     positions: Sequence[Mapping[str, Any]],
     transactions: Sequence[Mapping[str, Any]],
     as_of_date: date,
+    empty_position_accounts: Collection[str] = (),
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """The position set is empty from the settled day to the cutoff.
 
@@ -378,6 +379,14 @@ def _evaluate_schwab_empty(
         and _day(p["as_of_date"], "position as_of_date") >= floor
     ]
     record("NO_POSITION_ROWS_SINCE_LAST_SECURITY_ACTIVITY", len(stale_positions))
+    # absence of position rows proves nothing where the provider's position snapshot does not
+    # cover the account (an account holding securities may be missing from it too): the provider
+    # catalog must positively list the account as holding no position (its liquidation value
+    # closed to the native cash balance with no holdings)
+    record(
+        "POSITION_SET_POSITIVELY_EMPTY_IN_PROVIDER_CATALOG",
+        0 if account in set(empty_position_accounts) else 1,
+    )
     return checks, []
 
 
@@ -512,6 +521,7 @@ def evaluate(
     as_of_date: date,
     positions: Sequence[Mapping[str, Any]] = (),
     transactions: Sequence[Mapping[str, Any]] = (),
+    empty_position_accounts: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """One row per declaration: ``DECLARED_COMPLETE`` only if every closure check passes."""
 
@@ -553,6 +563,7 @@ def evaluate(
                 positions,
                 transactions,
                 as_of_date,
+                empty_position_accounts,
             )
         else:
             checks, proven_ids = _evaluate_ibkr_flows(
