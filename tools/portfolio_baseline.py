@@ -6428,6 +6428,7 @@ def _statement_reserve_facts(
 def _bind_statement_accounts(
     facts: Mapping[str, Sequence[Mapping[str, Any]]],
     accounts: Sequence[Mapping[str, Any]],
+    retained_excluded_accounts: Collection[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Re-key statement NAV points and admissions onto the census account of the provider.
 
@@ -6447,6 +6448,13 @@ def _bind_statement_accounts(
         if len(ids) != 1:
             raise BaselineValidationError(
                 "statement reserve provider does not name exactly one census account"
+            )
+        if row.get("role") == "EXCLUDED_IMMATERIAL" and ids[0] not in (
+            retained_excluded_accounts
+        ):
+            # bound anywhere else it would vanish from, or double into, the capital view
+            raise BaselineValidationError(
+                "statement excluded account is not a retained-excluded census account"
             )
         rebind[str(row["account_id"])] = ids[0]
 
@@ -6573,7 +6581,9 @@ def build_catalog(
                 spec["statement_reserves"], as_of
             )
             statement_nav, statement_admissions = _bind_statement_accounts(
-                statement_facts, accounts
+                statement_facts,
+                accounts,
+                _retained_excluded_accounts(assignments, as_of),
             )
             nav = [*nav, *statement_nav]
             provider_admissions = [*provider_admissions, *statement_admissions]

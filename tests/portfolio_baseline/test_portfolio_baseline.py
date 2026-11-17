@@ -5878,7 +5878,7 @@ def test_statement_reserve_pin_carrying_a_role_is_read(tmp_path: Path) -> None:
         "role": "EXCLUDED_IMMATERIAL",
     }
     facts = baseline._statement_reserve_facts([pin], date(2026, 9, 17))
-    assert facts["excluded"], facts
+    assert facts["nav"], facts
 
 
 def test_statement_reserve_pin_with_a_misspelled_key_is_refused(tmp_path: Path) -> None:
@@ -5960,7 +5960,6 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
     spec["provider_ledger"] = ref
     spec["statement_reserves"] = [
         _statement_pin(tmp_path, "c", "JOHN_HANCOCK", "RESERVE"),
-        _statement_pin(tmp_path, "d", "COMPOSER", "EXCLUDED_IMMATERIAL"),
     ]
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
 
@@ -5979,3 +5978,43 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
     assert [r["status"] for r in jh_calendar] == ["STATEMENT_CADENCE_NAV_OBSERVATIONS"]
     assert members["account-jh"]["authority"] == "AUTHORITATIVE"
     assert members["account-jh"]["as_of_date"] == "2026-06-30"
+
+
+def test_statement_excluded_point_binds_to_the_retained_member_and_counts_once(
+    tmp_path: Path,
+) -> None:
+    """Kill test (#900 Composer): the point lands on the census retained-excluded member
+    account, so the retained-excluded value is that point exactly once (no extra statement
+    addend) and the independent recompute agrees; bound elsewhere it is refused."""
+
+    pin = _statement_pin(tmp_path, "d", "COMPOSER", "EXCLUDED_IMMATERIAL")
+    facts = baseline._statement_reserve_facts([pin], date(2026, 9, 17))
+    assert facts["excluded"] == []
+    census = [{"account_id": "acct-z1", "provider": "COMPOSER", "role": "INVESTMENT"}]
+    nav, _ = baseline._bind_statement_accounts(facts, census, {"acct-z1"})
+    assert [r["account_id"] for r in nav] == ["acct-z1"]
+    with pytest.raises(baseline.BaselineValidationError, match="retained-excluded"):
+        baseline._bind_statement_accounts(facts, census, {"acct-other"})
+
+    case = _cc_case()
+    case["provider_admissions"] = [
+        row for row in case["provider_admissions"] if row["account_id"] != "acct-r1"
+    ] + [
+        _cc_admission("acct-r1", "AUTHORITATIVE"),
+        _cc_admission("acct-r2", "AUTHORITATIVE"),
+    ]
+    case["nav"].append(_cc_nav("acct-r2", "2026-09-17", "10"))
+    # e1 carries 5; z1 (the census Composer member) had no NAV until the bound point
+    case["nav"].append(_cc_nav("acct-z1", "2026-09-01", "20", source_key="manual"))
+    block = baseline._build_current_capital(**case)
+    assert block["retained_excluded"]["status"] == "AVAILABLE"
+    assert block["retained_excluded"]["current_value"]["value"] == "25"
+    rows = baseline._current_capital_checks(
+        block,
+        assignments=case["assignments"],
+        nav=case["nav"],
+        provider_admissions=case["provider_admissions"],
+    )
+    assert {r["check_id"]: r for r in rows}["capital-identity-at-cutoff"][
+        "status"
+    ] == "PASS"
