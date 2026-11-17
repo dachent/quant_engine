@@ -7,7 +7,7 @@ not turn unavailable evidence into estimates or authorize trades.
 
 The expanded strategy-underwriting output is produced by the control-panel
 builder under `PORT-UNDERWRITE-1`. There is no manually maintained strategy
-scorecard. Every cycle derives the nine rows again from the hash-bound report,
+scorecard. Every cycle derives the seven rows again from the hash-bound report,
 factor/style/sector/industry generations, dynamic replication, dependence,
 weekly returns, and the underwriting policy.
 
@@ -411,7 +411,7 @@ the governed provider ledger, whole, at the release as-of date.
 Run the panel verifier against the candidate emitted by the vertical build.
 Acceptance requires:
 
-- nine strategy-underwriting rows and exactly five separate evidence layers;
+- seven strategy-underwriting rows (the REQUIRED current strategies) and exactly five separate evidence layers;
 - `automatic_drop_authority`, `allocation_authority`,
   `readiness_gate_effect`, and `execution_authority` all equal to `NONE`;
 - exact gap identity: total gap equals causally bound components plus unresolved
@@ -451,7 +451,7 @@ future cycle.
 First run browser capture for all nine views at 1440x900, 1024x768, and 390x844.
 Inspect every screenshot and require clean console, request, overflow, clipping,
 and visual-lint evidence. Confirm that Data health shows the complete fact
-matrix and that Factors shows the selection boundary and all nine underwriting
+matrix and that Factors shows the selection boundary and all seven underwriting
 rows.
 
 Only after the data build, semantic verification, automated tests, and visual

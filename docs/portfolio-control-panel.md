@@ -148,8 +148,10 @@ without preserving stale calculations or hard-coded operator conclusions.
   excess or long-short returns; strategy, ETF style, sector, industry, and core
   benchmark rows retain their declared total-return or proxy basis.
 - Layered strategy underwriting is recomputed under `PORT-UNDERWRITE-1` for
-  all nine retained registry records: seven REQUIRED active current strategies,
-  Echo as `DEPRECATED_HISTORY_ONLY`, and Composer as `IMMATERIAL_EXCLUDED`.
+  the seven REQUIRED active current strategies (the underwriting rows; the panel
+  refuses a row set that differs from them). The nine retained registry records
+  also include Echo as `DEPRECATED_HISTORY_ONLY` and Composer as
+  `IMMATERIAL_EXCLUDED`, which have no underwriting row.
   Authoritative design, exact-version backtest,
   provider/model live, account live, and implementation reconciliation remain
   separate. The result combines long-history statistical membership,

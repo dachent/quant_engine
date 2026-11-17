@@ -135,7 +135,7 @@
     if (/_INFERRED_FLOW_TIMING$/.test(text)) return "neutral";
     if (/(^|_)NOT_VALIDATED$/.test(text)) return STATUS_TONES.NOT_VALIDATED;
     if (/FAIL|UNAVAILABLE|UNMAPPED|DO_NOT|BLOCK|NONE|NOT_AUTOMATABLE|INCOMPLETE|NO_ACCEPTED_FACT_PATH/.test(text)) return "danger";
-    if (/PARTIAL|INFERRED|UNKNOWN|CONDITIONAL|FROZEN|DIAGNOSTIC|NOT_READY|UPPER_BOUND/.test(text)) return "warning";
+    if (/PARTIAL|INFERRED|UNKNOWN|CONDITIONAL|FROZEN|DIAGNOSTIC|NOT_READY|UPPER_BOUND|BREACH/.test(text)) return "warning";
     if (/PASS|AVAILABLE|COMPLETE|PUBLISHED|VERIFIED/.test(text)) return "positive";
     if (/RESERVE|ZERO RISK|EXCLUDED_DE_MINIMIS/.test(text)) return "reserve";
     return "neutral";
@@ -1999,16 +1999,19 @@
 
   function renderUnderwriting() {
     const underwriting = data.strategy_underwriting;
+    // A shortfall is where evidence does not exist (a structural limit or a pending pull), not a defect of the panel:
+    // all strategies covered is positive, anything less is informational and the per-row columns name each reason.
+    const underwritingTone = (count) => (underwriting?.counts && count === underwriting.counts.strategies ? "positive" : "neutral");
     if (!underwriting?.rows?.length) {
       $("#underwriting-boundary").innerHTML = `<strong>Underwriting unavailable.</strong> This snapshot predates the governed layered-underwriting contract.`;
       $("#underwriting-table").innerHTML = tableMarkup([["Status"]], [emptyRow(1, "No governed strategy underwriting")]);
       return;
     }
     renderKpis("#underwriting-kpis", [
-      ["Authoritative designs", `${underwriting.counts.authoritative_design}/${underwriting.counts.strategies}`, "Unverified archetypes stay inferred", underwriting.counts.authoritative_design === underwriting.counts.strategies ? "positive" : "warning"],
-      ["Version-matched long history", `${underwriting.counts.version_matched_long_history}/${underwriting.counts.strategies}`, "Backtest plus live; exact strategy version required", underwriting.counts.version_matched_long_history ? "positive" : "warning"],
-      ["Model/account gaps", `${underwriting.counts.quantified_model_account_gap}/${underwriting.counts.strategies}`, "Exact-common-date totals; causes remain separate", underwriting.counts.quantified_model_account_gap ? "warning" : "danger"],
-      ["Regime comparisons", `${underwriting.counts.empirical_regime_comparison}/${underwriting.counts.strategies}`, "Pre-live thresholds and version-matched empirical range", underwriting.counts.empirical_regime_comparison ? "positive" : "warning"],
+      ["Authoritative designs", `${underwriting.counts.authoritative_design}/${underwriting.counts.strategies}`, "Unverified archetypes stay inferred", underwritingTone(underwriting.counts.authoritative_design)],
+      ["Version-matched long history", `${underwriting.counts.version_matched_long_history}/${underwriting.counts.strategies}`, "Backtest plus live; exact strategy version required", underwritingTone(underwriting.counts.version_matched_long_history)],
+      ["Model/account gaps", `${underwriting.counts.quantified_model_account_gap}/${underwriting.counts.strategies}`, "Exact-common-date totals; causes remain separate", underwritingTone(underwriting.counts.quantified_model_account_gap)],
+      ["Regime comparisons", `${underwriting.counts.empirical_regime_comparison}/${underwriting.counts.strategies}`, "Pre-live thresholds and version-matched empirical range", underwritingTone(underwriting.counts.empirical_regime_comparison)],
     ]);
     $("#underwriting-boundary").innerHTML = `<strong>${safe(underwriting.policy_id)}</strong> · policy <code>${safe(underwriting.policy_sha256.slice(0, 14))}…</code> · evidence layers are never silently concatenated. Long-history membership requires an exact version match; implementation fidelity uses account-live exact-common-date evidence. Regime underwriting admits complete accepted-calendar weeks only; partial first, last, and current weeks are excluded. Regime results are observable behavior diagnostics, not proof of hidden strategy logic. Allocation effect <strong>${safe(underwritingEffects("allocation_effect").join(" / ") || "not declared")}</strong> and execution effect <strong>${safe(underwritingEffects("execution_effect").join(" / ") || "not declared")}</strong> on every row; automatic drop, readiness, and order authority are policy-fixed at <strong class="policy-text" title="Policy statement; the payload carries no field for it">NONE</strong>.`;
     const rows = underwriting.rows.map((row) => {
@@ -2110,7 +2113,7 @@
         <td data-label="Long-history statistical membership">${statusText(history.status)}<span class="cell-secondary">Matched backtest ${integer.format(history.matched_backtest_observations)} · live aligned ${number(history.live_aligned_observations) == null ? "not published" : integer.format(history.live_aligned_observations)} · hybrid aligned ${number(history.hybrid_aligned_observations) == null ? "not published" : integer.format(history.hybrid_aligned_observations)}</span><span class="cell-secondary">Net alpha, live fit: ${underwritingAlpha(history.live_net_alpha, history.live_net_alpha_status, history.live_net_alpha_context)} · fit including backtest: ${underwritingAlpha(history.hybrid_net_alpha, history.hybrid_net_alpha_status, history.hybrid_net_alpha_context)}; sealed holdout R² live ${pct(history.live_holdout_predicted_r_squared)} · full ${pct(history.hybrid_holdout_predicted_r_squared)}</span></td>
         <td data-label="Model versus account">${gapMarkup}</td>
         <td data-label="Regime behavior">${statusText(regimes.status)}<span class="cell-secondary">${safe(benchmark)} · ${integer.format(regimes.threshold_history_weeks)} pre-live threshold weeks · lower tail ${pct(regimes.lower_tail_threshold)} · high absolute return ${pct(regimes.high_absolute_return_threshold)}</span>${regimeRows || '<span class="cell-secondary">No eligible regime rows</span>'}</td>
-        <td data-label="Portfolio fit / leave-one-out">${statusText(fit.portfolio_fit_status)}<span class="cell-secondary">${safe(fit.cluster_label || "No governed cluster")} · cluster weight ${pct(fit.cluster_allocation_weight)}${weightBasisSuffix(fit.cluster_weight_basis, fit.cluster_allocation_weight)} · pair range ${decimal(fit.cluster_observed_pair_correlation_minimum)}–${decimal(fit.cluster_observed_pair_correlation_maximum)}</span><span class="cell-secondary">Strategy weight ${pct(fit.strategy_systematic_weight)}${weightBasisSuffix(fit.strategy_weight_basis, fit.strategy_systematic_weight)} · correlation-one contribution ${pct(fit.strategy_correlation_one_loss_contribution)} (${pct(fit.strategy_share_of_correlation_one_loss)} of loss) · leave-one-out loss ${pct(fit.leave_one_out_correlation_one_loss)}</span></td>
+        <td data-label="Portfolio fit / leave-one-out">${statusText(fit.portfolio_fit_status)}${/BREACH/.test(String(fit.portfolio_fit_status || fit.cluster_budget_status)) ? '<span class="cell-secondary">A risk-budget result computed from the evidence shown, not a data gap</span>' : ""}<span class="cell-secondary">${safe(fit.cluster_label || "No governed cluster")} · cluster weight ${pct(fit.cluster_allocation_weight)}${weightBasisSuffix(fit.cluster_weight_basis, fit.cluster_allocation_weight)} · pair range ${decimal(fit.cluster_observed_pair_correlation_minimum)}–${decimal(fit.cluster_observed_pair_correlation_maximum)}</span><span class="cell-secondary">Strategy weight ${pct(fit.strategy_systematic_weight)}${weightBasisSuffix(fit.strategy_weight_basis, fit.strategy_systematic_weight)} · correlation-one contribution ${pct(fit.strategy_correlation_one_loss_contribution)} (${pct(fit.strategy_share_of_correlation_one_loss)} of loss) · leave-one-out loss ${pct(fit.leave_one_out_correlation_one_loss)}</span></td>
         <td data-label="Advisory disposition">${statusText(disposition.action)}<span class="cell-secondary">${safe((disposition.reasons || []).map(humanStatus).join(" · "))}</span><span class="cell-secondary">Drop authority ${safe(disposition.drop_decision_status)} · allocation ${safe(disposition.allocation_effect)} · execution ${safe(disposition.execution_effect)}</span></td>
       </tr>`;
     });
