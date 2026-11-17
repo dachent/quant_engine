@@ -1066,3 +1066,20 @@ def test_a_config_key_no_stage_reads_does_not_rebind_it_but_a_referenced_one_doe
         break
     else:
         pytest.skip("the first stage references no scalar config key")
+
+
+def test_release_driver_stages_never_inherit_the_provisional_render_reuse_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = {
+        "QE_RENDER_REUSE": "provisional",
+        "QE_RENDER_STATE_ROOT": "C:/somewhere",
+        "KEEP": "1",
+    }
+    driver.scrub_render_reuse(env)
+    assert env == {"KEEP": "1"}
+    source = Path(driver.__file__).read_text(encoding="utf-8")
+    # the stage launcher applies it to the environment every stage child receives
+    assert source.index("scrub_render_reuse(env)") < source.index(
+        'rc = _launch(run, stage["id"], record, argv, log, log, env)'
+    )

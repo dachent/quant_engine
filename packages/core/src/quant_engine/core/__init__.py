@@ -1,6 +1,7 @@
 """Minimal provenance and generation envelope for quant_engine."""
 
 from quant_engine.core.verification_receipt import MODE_ENV as RECEIPT_MODE_ENV
+from quant_engine.core.verification_receipt import RENDER_REUSE_ENV, RENDER_STATE_ENV
 from quant_engine.core.verification_receipt import reuse_render
 from quant_engine.core.stage_timing import (
     TIMING_LOG_ENV as STAGE_TIMING_LOG_ENV,
@@ -221,6 +222,8 @@ __all__ = [
     "CODE_IDENTITY_TREE_SCHEME",
     "timed_call",
     "RECEIPT_MODE_ENV",
+    "RENDER_REUSE_ENV",
+    "RENDER_STATE_ENV",
     "reuse_render",
     "STAGE_TIMING_LOG_ENV",
     "summarize_stage_timing",
