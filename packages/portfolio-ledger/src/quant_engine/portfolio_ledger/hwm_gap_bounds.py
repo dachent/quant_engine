@@ -222,18 +222,33 @@ PENDING_OWNER_ACCEPTANCE: Final = "PENDING_OWNER_ACCEPTANCE"
 ACCEPTANCE_SCHEMA: Final = "portfolio-hwm-owner-acceptance/1"
 
 
+#: sha256 of the owner's acceptance record.  The record is pinned here so a hand edit
+#: of the file cannot flip a status: changing it needs a reviewed change to this line.
+OWNER_ACCEPTANCE_RECORD_SHA256: Final = (
+    "978df59ae7e6933e60224442f3d6d912fb60a3eff756107d4f14244306d82e69"
+)
+
+
+def _four_places(value: Any) -> str | None:
+    try:
+        return format(Decimal(str(value)).quantize(Decimal("0.0001")), "f")
+    except (InvalidOperation, ValueError):
+        return None
+
+
 def hwm_financial_acceptance(
     document: Mapping[str, Any] | None, proof: Mapping[str, Any]
 ) -> str:
     """The one acceptance state of a governed HWM proof, from the owner's record.
 
     ``OWNER_ACCEPTED`` only when the record names this policy, carries the decision,
-    and states exactly what this proof is: the same ``complete_through``, the same
-    point count, the same index (4 decimals), and every recorded missing daily date
-    is absent from the proof's index path (a recorded gap the path does not have is
-    not what was accepted).  A proof that differs in any of them is not covered and
-    reads pending, so a later release that changes the index is never accepted
-    silently.  The state is computed here once; every surface prints this value.
+    and states exactly what this proof is: the same policy sha256, ``complete_through``
+    (which is also the last index day), point count, index, high-water mark and
+    maximum drawdown (4 decimals), and every recorded missing daily date is a day on
+    the index path (the path is daily; a missing source day is filled by its span
+    return).  A proof that differs in any of them is not covered and reads pending,
+    so a later release that changes the index is never accepted silently.  The state
+    is computed here once; every surface prints this value.
     """
 
     if not (
@@ -245,30 +260,25 @@ def hwm_financial_acceptance(
         return PENDING_OWNER_ACCEPTANCE
     accepted = document.get("accepted")
     path = proof.get("index_path")
-    recorded = (
-        accepted.get("missing_daily_points") if isinstance(accepted, Mapping) else None
-    )
-    if (
-        not isinstance(accepted, Mapping)
-        or not isinstance(path, list)
-        or not isinstance(recorded, list)
-        or not recorded
-    ):
+    if not isinstance(accepted, Mapping) or not isinstance(path, list) or not path:
         return PENDING_OWNER_ACCEPTANCE
-    try:
-        index = format(
-            Decimal(str(proof["current_index"])).quantize(Decimal("0.0001")), "f"
-        )
-    except (InvalidOperation, KeyError):
+    recorded = accepted.get("missing_daily_points")
+    if not isinstance(recorded, list) or not recorded:
         return PENDING_OWNER_ACCEPTANCE
-    present = {str(p.get("as_of")) for p in path if isinstance(p, Mapping)}
+    days = [str(p.get("as_of")) for p in path if isinstance(p, Mapping)]
     if (
-        accepted.get("complete_through") == proof.get("complete_through")
+        accepted.get("policy_sha256") == proof.get("policy_sha256")
+        and accepted.get("complete_through") == proof.get("complete_through")
+        and days
+        and days[-1] == proof.get("complete_through")
         and accepted.get("index_points") == len(path)
-        and accepted.get("current_index_4dp") == index
+        and accepted.get("current_index_4dp")
+        == _four_places(proof.get("current_index"))
+        and accepted.get("current_hwm_4dp") == _four_places(proof.get("current_hwm"))
+        and accepted.get("maximum_drawdown_4dp")
+        == _four_places(proof.get("maximum_drawdown"))
         and all(
-            isinstance(p, Mapping) and str(p.get("date")) not in present
-            for p in recorded
+            isinstance(p, Mapping) and str(p.get("date")) in set(days) for p in recorded
         )
     ):
         return OWNER_ACCEPTED
@@ -280,10 +290,15 @@ def apply_hwm_owner_acceptance(
 ) -> dict[str, Any]:
     """The proof with its acceptance state, and the record's digest when accepted."""
 
-    state = hwm_financial_acceptance(json.loads(record_bytes), proof)
+    digest = hashlib.sha256(record_bytes).hexdigest()
+    state = (
+        hwm_financial_acceptance(json.loads(record_bytes), proof)
+        if digest == OWNER_ACCEPTANCE_RECORD_SHA256
+        else PENDING_OWNER_ACCEPTANCE
+    )
     out = {**proof, "financial_acceptance": state}
     if state == OWNER_ACCEPTED:
-        out["owner_acceptance_sha256"] = hashlib.sha256(record_bytes).hexdigest()
+        out["owner_acceptance_sha256"] = digest
     return out
 
 

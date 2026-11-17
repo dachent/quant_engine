@@ -412,20 +412,20 @@ def _record() -> dict[str, Any]:
 
 
 def _accepted_shape_proof(**over: Any) -> dict[str, Any]:
-    """A proof shaped exactly as the record states: 753 points, none on the gap dates."""
+    """A proof shaped as the producer emits it: one point per calendar day, 753 points
+    through 2026-11-06, the three missing source days present (filled by span returns)."""
 
     from datetime import date, timedelta
 
-    days: list[str] = []
-    day = date(2024, 10, 15)
-    while len(days) < 753:
-        if day.isoformat() not in RECORD_DATES:
-            days.append(day.isoformat())
-        day += timedelta(days=1)
+    days = [(date(2024, 10, 15) + timedelta(days=n)).isoformat() for n in range(753)]
+    assert days[-1] == "2026-11-06" and all(d in days for d in RECORD_DATES)
     proof: dict[str, Any] = {
         "policy_id": "PORT-HWM-4",
+        "policy_sha256": _record()["accepted"]["policy_sha256"],
         "complete_through": "2026-11-06",
         "current_index": "160.6296892786988",
+        "current_hwm": "183.54270000",
+        "maximum_drawdown": "-0.32026",
         "index_path": [{"as_of": d} for d in days],
     }
     proof.update(over)
@@ -441,16 +441,18 @@ def test_the_record_accepts_exactly_what_it_states() -> None:
 
     record = _record()
     assert hwm_financial_acceptance(record, _accepted_shape_proof()) == OWNER_ACCEPTED
+    path = _accepted_shape_proof()["index_path"]
     # KILL: anything the record does not state is pending.
     for over in (
         {"complete_through": "2026-11-09"},
         {"current_index": "160.7000"},
-        {"index_path": _accepted_shape_proof()["index_path"][:-1]},
+        {"current_hwm": "999"},
+        {"maximum_drawdown": "-0.9"},
+        {"policy_sha256": "0" * 64},
         {"policy_id": "PORT-HWM-3"},
-        {
-            "index_path": _accepted_shape_proof()["index_path"][:-1]
-            + [{"as_of": RECORD_DATES[0]}]
-        },
+        {"index_path": path[:-1]},  # 752 points, path ends before complete_through
+        {"index_path": [p for p in path if p["as_of"] != RECORD_DATES[0]]},
+        {"index_path": [*path, {"as_of": "2026-11-09"}]},  # path past complete_through
     ):
         assert (
             hwm_financial_acceptance(record, _accepted_shape_proof(**over))
@@ -471,18 +473,30 @@ def test_the_record_accepts_exactly_what_it_states() -> None:
     )
 
 
-def test_the_acceptance_emits_the_record_digest_only_when_accepted() -> None:
-    from quant_engine.portfolio_ledger import apply_hwm_owner_acceptance
+def test_the_acceptance_emits_the_record_digest_and_a_hand_edit_flips_nothing() -> None:
+    from quant_engine.portfolio_ledger import (
+        OWNER_ACCEPTANCE_RECORD_SHA256,
+        apply_hwm_owner_acceptance,
+    )
 
     raw = RECORD_PATH.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == OWNER_ACCEPTANCE_RECORD_SHA256
     accepted = apply_hwm_owner_acceptance(_accepted_shape_proof(), raw)
     assert accepted["financial_acceptance"] == "OWNER_ACCEPTED"
-    assert accepted["owner_acceptance_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert accepted["owner_acceptance_sha256"] == OWNER_ACCEPTANCE_RECORD_SHA256
     pending = apply_hwm_owner_acceptance(
         _accepted_shape_proof(complete_through="2026-11-09"), raw
     )
     assert pending["financial_acceptance"] == "PENDING_OWNER_ACCEPTANCE"
     assert "owner_acceptance_sha256" not in pending
+    # KILL: a hand-edited record (still self-consistent) is not the pinned record.
+    edited = json.loads(raw)
+    edited["accepted"]["index_points"] = 752
+    tampered = apply_hwm_owner_acceptance(
+        _accepted_shape_proof(index_path=_accepted_shape_proof()["index_path"][:-1]),
+        json.dumps(edited).encode("utf-8"),
+    )
+    assert tampered["financial_acceptance"] == "PENDING_OWNER_ACCEPTANCE"
 
 
 @pytest.mark.parametrize("compute", [_report, _panel])

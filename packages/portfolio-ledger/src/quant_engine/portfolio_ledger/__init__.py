@@ -11,6 +11,7 @@ from quant_engine.portfolio_ledger.allocation import (
 )
 
 from quant_engine.portfolio_ledger.hwm_gap_bounds import (
+    OWNER_ACCEPTANCE_RECORD_SHA256,
     OWNER_ACCEPTED,
     PENDING_OWNER_ACCEPTANCE,
     apply_hwm_owner_acceptance,
@@ -144,6 +145,7 @@ __version__ = "0.2.0"
 __all__ = [
     "run_observation_identity",
     "assess_gap_bounds_document",
+    "OWNER_ACCEPTANCE_RECORD_SHA256",
     "OWNER_ACCEPTED",
     "PENDING_OWNER_ACCEPTANCE",
     "apply_hwm_owner_acceptance",
