@@ -5481,7 +5481,7 @@ def _coverage_evidence(
             if excluded:
                 missing_reason += (
                     f"; provider ledger {fact_type} for this account: {excluded} "
-                    "carry no strategy attribution and are excluded from the accepted records"
+                    "lack a strategy attribution and are left out of the accepted records"
                 )
             matrix.append(
                 {
