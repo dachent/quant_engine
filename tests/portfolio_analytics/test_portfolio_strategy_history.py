@@ -1675,6 +1675,8 @@ def test_eu_refresh_refuses_a_seed_that_already_has_live_rows(tmp_path: Path) ->
                 tmp_path / "designer-again", [*_EU_BACKTEST, *_EU_LIVE]
             ),
             as_of_date="2026-11-06",
+        )
+
 
 def _fund_csv(path: Path, rows: list[tuple[str, str]]) -> Path:
     path.write_text(
