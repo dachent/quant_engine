@@ -164,12 +164,14 @@ def _adverse_loss_module() -> Any:
 
 
 def _restated_policy(
-    policy: Mapping[str, Any], projection: Sequence[Mapping[str, str]]
+    policy: Mapping[str, Any],
+    projection: Sequence[Mapping[str, str]],
+    spans: Mapping[str, Sequence[Mapping[str, str]]] | None = None,
 ) -> dict[str, Any]:
     """The policy with each adverse loss fraction computed by its rule from the governed series."""
     module = _adverse_loss_module()
     try:
-        return dict(module.restate_policy(policy, projection))
+        return dict(module.restate_policy(policy, projection, spans))
     except module.AdverseLossError as exc:
         raise CurrentDependenceError(f"adverse loss rule: {exc}") from exc
 
@@ -1534,7 +1536,7 @@ def build_source(
             evaluated_on=evaluated_on,
             selected=selected,
         )
-    policy = _restated_policy(policy, projection)
+    policy = _restated_policy(policy, projection, accepted_spans)
     policy_series = _objects(policy.get("series"), "dependence policy series")
     unknown_span_series = set(accepted_spans) - {
         str(row["series_id"]) for row in policy_series

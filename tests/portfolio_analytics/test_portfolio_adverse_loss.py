@@ -187,3 +187,18 @@ def test_the_policy_schema_pins_the_rule_parameters() -> None:
         props[k]["const"]
         for k in ("prior_multiplier", "live_multiplier", "platform_only_uplift", "cap")
     ] == ["1.25", "1.5", "0.05", "1"]
+
+
+def test_an_accepted_span_compounds_into_the_live_drawdown() -> None:
+    rows = _rows(POLICY, AUDIT_LIVE_MDD)
+    spans = {
+        "QSI": [
+            {"start_date": "2026-03-01", "end_date": "2026-03-05", "return": "-0.5"}
+        ]
+    }
+    without = rule.restate_policy(POLICY, rows)
+    with_span = rule.restate_policy(POLICY, rows, spans)
+    # 1.5 x the 50% span drawdown, well above the 1.25 x 0.473 prior term
+    assert _loss(without, "qsi") == Decimal("0.59125")
+    assert _loss(with_span, "qsi") > Decimal("0.75")
+    assert _loss(with_span, "tt-portfolio") == _loss(without, "tt-portfolio")

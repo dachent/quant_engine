@@ -20,6 +20,7 @@ from decimal import ROUND_HALF_UP, Decimal, localcontext
 from typing import Any, Final
 
 BACKTEST_LAYER: Final = "BACKTEST"
+SPAN_LAYER: Final = "ACCEPTED_SPAN"
 RULE_ID: Final = "underwriting_stressed_component_max_drawdown"
 STATEMENT: Final = (
     "1.25x prior / 1.5x live max drawdown +5pp, all strategies lose simultaneously; "
@@ -126,8 +127,33 @@ def _series_returns(
     return backtest, live
 
 
+def _with_spans(
+    rows: Sequence[Mapping[str, str]],
+    spans: Mapping[str, Sequence[Mapping[str, str]]] | None,
+) -> list[Mapping[str, str]]:
+    """The rows plus each accepted multi-day span as one live step at its end date.
+
+    A span replaces a gap in the daily rows and compounds into the drawdown as one return;
+    the trough inside it is unknown, so the step is a floor on the loss, never an overstatement.
+    """
+    out: list[Mapping[str, str]] = list(rows)
+    for series_id, items in (spans or {}).items():
+        out.extend(
+            {
+                "series_id": series_id,
+                "date": item["end_date"],
+                "return": item["return"],
+                "evidence_layer": SPAN_LAYER,
+            }
+            for item in items
+        )
+    return out
+
+
 def restate_policy(
-    policy: Mapping[str, Any], rows: Sequence[Mapping[str, str]]
+    policy: Mapping[str, Any],
+    rows: Sequence[Mapping[str, str]],
+    spans: Mapping[str, Sequence[Mapping[str, str]]] | None = None,
 ) -> dict[str, Any]:
     """The policy with each series' ``adverse_loss_fraction`` computed by the rule from ``rows``.
 
@@ -136,6 +162,7 @@ def restate_policy(
     and the computed inputs are recorded under ``adverse_loss_basis`` for display beside it.
     """
     parameters = rule_parameters(policy)
+    rows = _with_spans(rows, spans)
     series = policy.get("series")
     if not isinstance(series, list):
         raise AdverseLossError("dependence policy series is absent")
@@ -156,7 +183,7 @@ def restate_policy(
             else None,
             backtest=backtest_mdd,
             live=live_mdd,
-            platform_only=bool(row["platform_only_history"]),
+            platform_only=bool(row["platform_only_history"]) or not live,
             parameters=parameters,
         )
         audit = _decimal(
