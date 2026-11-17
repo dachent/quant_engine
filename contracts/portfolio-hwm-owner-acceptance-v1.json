@@ -1,0 +1,10 @@
+{
+  "change_rule": "A later release that materially changes the index is flagged to the owner.",
+  "decided_on": "2026-11-17",
+  "decision": "OWNER_ACCEPTED",
+  "disclosure": "Two missing daily points are filled by span returns.",
+  "measure": "HIGH_WATER_MARK_INDEX_DRAWDOWN",
+  "policy_id": "PORT-HWM-4",
+  "ruling": "OWNER-RULINGS-2026-11-17 O1",
+  "schema": "portfolio-hwm-owner-acceptance/1"
+}

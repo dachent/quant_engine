@@ -215,6 +215,40 @@ def proof_covers_spans(
     )
 
 
+OWNER_ACCEPTED: Final = "OWNER_ACCEPTED"
+PENDING_OWNER_ACCEPTANCE: Final = "PENDING_OWNER_ACCEPTANCE"
+OWNER_ACCEPTED_BASIS: Final = "PORT-HWM-4_GOVERNED_OWNER_ACCEPTED"
+ACCEPTANCE_SCHEMA: Final = "portfolio-hwm-owner-acceptance/1"
+
+
+def hwm_financial_acceptance(document: Mapping[str, Any] | None, policy_id: str) -> str:
+    """The one acceptance state of a governed HWM policy, from the owner's record.
+
+    ``OWNER_ACCEPTED`` only when a record of the supported schema names this very
+    policy and carries the decision; anything else is pending.  The state is read
+    here once; every surface prints this value and no surface states its own.
+    """
+
+    if (
+        isinstance(document, Mapping)
+        and document.get("schema") == ACCEPTANCE_SCHEMA
+        and document.get("policy_id") == policy_id
+        and document.get("decision") == OWNER_ACCEPTED
+    ):
+        return OWNER_ACCEPTED
+    return PENDING_OWNER_ACCEPTANCE
+
+
+def numerical_from_accepted_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
+    """The numeric HWM of an owner-accepted governed proof (one source, one status)."""
+
+    out = numerical_from_governed_proof(proof, {"input_sha256": "", "strategies": {}})
+    out.pop("hwm_gap_bound")
+    out["hwm_numerical_basis"] = OWNER_ACCEPTED_BASIS
+    out["hwm_governed_receipt_sha256"] = proof["receipt_sha256"]
+    return out
+
+
 def numerical_from_governed_proof(
     proof: Mapping[str, Any], assessment: Mapping[str, Any]
 ) -> dict[str, Any]:

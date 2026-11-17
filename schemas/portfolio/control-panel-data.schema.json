@@ -225,7 +225,7 @@
                 "current_hwm": { "$ref": "#/$defs/decimal" },
                 "current_index": { "$ref": "#/$defs/decimal" },
                 "evaluated_on": { "type": "string", "format": "date" },
-                "financial_acceptance": { "const": "PENDING_OWNER_ACCEPTANCE" },
+                "financial_acceptance": { "enum": ["PENDING_OWNER_ACCEPTANCE", "OWNER_ACCEPTED"] },
                 "kpi": {
                   "type": "object",
                   "additionalProperties": false,
@@ -234,7 +234,7 @@
                     "value": { "$ref": "#/$defs/decimal" },
                     "hwm": { "$ref": "#/$defs/decimal" },
                     "drawdown": { "$ref": "#/$defs/decimal" },
-                    "label": { "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" },
+                    "label": { "enum": ["Governed PORT-HWM-4 candidate, pending owner acceptance", "Governed PORT-HWM-4 high-water mark, owner accepted; two missing daily points are filled by span returns"] },
                     "perimeter": { "type": "string", "minLength": 1 },
                     "return_basis": { "type": "string", "minLength": 1 },
                     "index_points": { "type": "integer", "minimum": 0 },
@@ -267,13 +267,13 @@
                     }
                   }
                 },
-                "label": { "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" },
+                "label": { "enum": ["Governed PORT-HWM-4 candidate, pending owner acceptance", "Governed PORT-HWM-4 high-water mark, owner accepted; two missing daily points are filled by span returns"] },
                 "maximum_drawdown": { "$ref": "#/$defs/decimal" },
                 "not_accepted_reason": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
                 "not_accepted_register": { "const": "E2" },
                 "policy_id": { "const": "PORT-HWM-4" },
                 "receipt_sha256": { "$ref": "#/$defs/hash" },
-                "status": { "const": "CANDIDATE_PENDING_OWNER_ACCEPTANCE" }
+                "status": { "enum": ["CANDIDATE_PENDING_OWNER_ACCEPTANCE", "OWNER_ACCEPTED"] }
               }
             }
           ]
@@ -699,7 +699,8 @@
         "hwm_current_drawdown": { "$ref": "#/$defs/decimal" },
         "hwm_maximum_drawdown": { "$ref": "#/$defs/decimal" },
         "hwm_gap_bound": { "type": "object" },
-        "hwm_numerical_basis": { "const": "PORT-HWM-4_GOVERNED_WITH_BOUNDED_MISSING_POINTS" },
+        "hwm_numerical_basis": { "enum": ["PORT-HWM-4_GOVERNED_WITH_BOUNDED_MISSING_POINTS", "PORT-HWM-4_GOVERNED_OWNER_ACCEPTED"] },
+        "hwm_governed_receipt_sha256": { "$ref": "#/$defs/hash" },
         "hwm_numerical_status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
         "hwm_numerical_reason": { "type": "string", "minLength": 1 },
         "nav_coverage": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
@@ -4541,7 +4542,7 @@
       "properties": {
         "schema_version": { "const": 1 },
         "status": { "const": "AVAILABLE" },
-        "financial_acceptance": { "const": "PENDING_OWNER_ACCEPTANCE" },
+        "financial_acceptance": { "enum": ["PENDING_OWNER_ACCEPTANCE", "OWNER_ACCEPTED"] },
         "assurance_profile": { "type": "string", "minLength": 1 },
         "policy_id": { "const": "PORT-HWM-4" },
         "policy_sha256": { "$ref": "#/$defs/hash" },

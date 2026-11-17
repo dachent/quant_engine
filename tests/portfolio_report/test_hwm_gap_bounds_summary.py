@@ -401,3 +401,75 @@ def test_the_pinned_bounds_name_every_hashed_evidence_input() -> None:
     evidence = document["evidence_sha256"]
     assert len(evidence) == 5
     assert all(len(v) == 64 and int(v, 16) >= 0 for v in evidence.values())
+
+
+ACCEPTED_PROOF: dict[str, Any] = {**PROOF, "financial_acceptance": "OWNER_ACCEPTED"}
+
+
+def test_the_pinned_owner_acceptance_names_the_governed_policy() -> None:
+    """Owner ruling O1 (2026-11-17): one acceptance state, read from the pinned record."""
+
+    from quant_engine.portfolio_ledger import OWNER_ACCEPTED, hwm_financial_acceptance
+
+    document = json.loads(
+        (
+            REPOSITORY_ROOT / "contracts" / "portfolio-hwm-owner-acceptance-v1.json"
+        ).read_bytes()
+    )
+    assert hwm_financial_acceptance(document, "PORT-HWM-4") == OWNER_ACCEPTED
+    # KILL: another policy, another schema, or no record is never an acceptance.
+    assert hwm_financial_acceptance(document, "PORT-HWM-3") == (
+        "PENDING_OWNER_ACCEPTANCE"
+    )
+    assert hwm_financial_acceptance({**document, "schema": "x"}, "PORT-HWM-4") == (
+        "PENDING_OWNER_ACCEPTANCE"
+    )
+    assert hwm_financial_acceptance(
+        {**document, "decision": "PENDING"}, "PORT-HWM-4"
+    ) == ("PENDING_OWNER_ACCEPTANCE")
+    assert hwm_financial_acceptance(None, "PORT-HWM-4") == "PENDING_OWNER_ACCEPTANCE"
+
+
+@pytest.mark.parametrize("compute", [_report, _panel])
+def test_an_owner_accepted_proof_is_the_one_numeric_hwm(
+    compute: Any, tmp_path: Path
+) -> None:
+    """Accepted index: summary AVAILABLE from the proof even with no envelope inputs."""
+
+    result = compute(tmp_path, proof=ACCEPTED_PROOF, range_high="0.95")
+    assert result["hwm_numerical_status"] == "AVAILABLE"
+    assert result["hwm_numerical_basis"] == "PORT-HWM-4_GOVERNED_OWNER_ACCEPTED"
+    assert result["hwm_index"] == "1.125"
+    assert "hwm_numerical_reason" not in result
+    assert result["hwm_governed_receipt_sha256"] == "f" * 64
+
+
+def test_report_and_panel_agree_when_accepted(tmp_path: Path) -> None:
+    assert _report(tmp_path, proof=ACCEPTED_PROOF) == _panel(
+        tmp_path, proof=ACCEPTED_PROOF
+    )
+
+
+def test_the_panel_candidate_states_the_acceptance_and_keeps_the_disclosure() -> None:
+    receipts = _receipts()
+    for state, status in (
+        ("OWNER_ACCEPTED", "OWNER_ACCEPTED"),
+        ("PENDING_OWNER_ACCEPTANCE", "CANDIDATE_PENDING_OWNER_ACCEPTANCE"),
+    ):
+        proof = {
+            **PROOF,
+            "financial_acceptance": state,
+            "policy_id": "PORT-HWM-4",
+            "maximum_drawdown": "-0.10",
+            "current_hwm": "117.0",
+            "evaluated_on": "2026-09-03",
+            "return_basis": "AS_HELD",
+        }
+        candidate = panel._hwm_candidate(proof, {"policy_id": "PORT-HWM-4"}, receipts)
+        assert candidate is not None
+        assert candidate["status"] == status
+        assert candidate["financial_acceptance"] == state
+        assert candidate["kpi"]["label"] == candidate["label"]
+        assert len(candidate["kpi"]["missing_daily_points"]) == len(DAYS)
+    assert "owner accepted" in panel.HWM_ACCEPTED_LABEL
+    assert "filled by span returns" in panel.HWM_ACCEPTED_LABEL

@@ -73,7 +73,10 @@ from quant_engine.portfolio_ledger import (
     validate_as_held_hwm_receipt_generation_binding,
 )
 from quant_engine.portfolio_ledger import (
+    OWNER_ACCEPTED,
     assess_gap_bounds_document,
+    hwm_financial_acceptance,
+    numerical_from_accepted_proof,
     numerical_from_governed_proof,
     proof_covers_spans,
 )
@@ -229,6 +232,11 @@ ACCOUNT_MANIFEST_INDEPENDENT_VERIFICATION_SCHEMA = (
 )
 HWM_POLICY = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
+)
+_HWM_OWNER_ACCEPTANCE = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-hwm-owner-acceptance-v1.json"
 )
 _HWM_GAP_BOUNDS = (
     Path(__file__).resolve().parents[1]
@@ -4967,6 +4975,13 @@ def _compute_panel_numerical_hwm(
     def _unavailable(reason: str) -> dict[str, Any]:
         return {"hwm_numerical_status": "UNAVAILABLE", "hwm_numerical_reason": reason}
 
+    if (
+        governed_proof is not None
+        and governed_proof.get("status") == "AVAILABLE"
+        and governed_proof.get("financial_acceptance") == OWNER_ACCEPTED
+    ):
+        return numerical_from_accepted_proof(governed_proof)
+
     hpr_receipts = _objects(
         list(epoch_hpr_receipts)
         if epoch_hpr_receipts is not None
@@ -5271,7 +5286,9 @@ def _panel_governed_hwm_proof(
     return {
         "schema_version": 1,
         "status": accepted["status"],
-        "financial_acceptance": "PENDING_OWNER_ACCEPTANCE",
+        "financial_acceptance": hwm_financial_acceptance(
+            json.loads(_HWM_OWNER_ACCEPTANCE.read_bytes()), accepted["policy_id"]
+        ),
         "assurance_profile": accepted["assurance_profile"],
         "policy_id": accepted["policy_id"],
         "policy_sha256": accepted["policy_sha256"],
@@ -10074,6 +10091,10 @@ def _lens_is_source_qualified(rows: Sequence[Mapping[str, Any]]) -> bool:
 
 
 HWM_CANDIDATE_LABEL: Final = "Governed PORT-HWM-4 candidate, pending owner acceptance"
+HWM_ACCEPTED_LABEL: Final = (
+    "Governed PORT-HWM-4 high-water mark, owner accepted; "
+    "two missing daily points are filled by span returns"
+)
 
 
 HWM_CANDIDATE_PERIMETER: Final = "SYSTEMATIC_EX_RESERVE"
@@ -10141,15 +10162,20 @@ def _hwm_candidate(
 
     if proof is None or proof.get("status") != "AVAILABLE":
         return None
-    if proof.get("financial_acceptance") != "PENDING_OWNER_ACCEPTANCE":
+    acceptance = proof.get("financial_acceptance")
+    if acceptance not in ("PENDING_OWNER_ACCEPTANCE", OWNER_ACCEPTED):
         raise ControlPanelValidationError(
             "governed HWM proof carries an unexpected financial acceptance state"
         )
+    accepted = acceptance == OWNER_ACCEPTED
+    label = HWM_ACCEPTED_LABEL if accepted else HWM_CANDIDATE_LABEL
     unaccepted = hwm_summary.get("hwm_numerical_status", "UNAVAILABLE") == "UNAVAILABLE"
     path = proof.get("index_path")
     index_path = path if isinstance(path, list) else []
     return {
-        "status": "CANDIDATE_PENDING_OWNER_ACCEPTANCE",
+        "status": "OWNER_ACCEPTED"
+        if accepted
+        else "CANDIDATE_PENDING_OWNER_ACCEPTANCE",
         "policy_id": proof["policy_id"],
         "current_drawdown": proof["current_drawdown"],
         "maximum_drawdown": proof["maximum_drawdown"],
@@ -10163,14 +10189,14 @@ def _hwm_candidate(
         ),
         "not_accepted_register": "E2",
         "receipt_sha256": proof["receipt_sha256"],
-        "label": HWM_CANDIDATE_LABEL,
+        "label": label,
         "kpi": {
             "value": _hwm_kpi_text(proof["current_index"], "HWM current index"),
             "hwm": _hwm_kpi_text(proof["current_hwm"], "HWM current high-water mark"),
             "drawdown": _hwm_kpi_text(
                 proof["current_drawdown"], "HWM current drawdown"
             ),
-            "label": HWM_CANDIDATE_LABEL,
+            "label": label,
             "perimeter": HWM_CANDIDATE_PERIMETER,
             "return_basis": proof["return_basis"],
             "index_points": len(index_path),
