@@ -2023,17 +2023,18 @@ def build_generation(
     # cash, closed against its native balance) and no non-cash position row holds cash only:
     # that is the account's structure, not a missing observation.
     positioned_accounts = {str(item["account_id"]) for item in positions}
-    cash_only_count = (
-        sum(
-            1
+    cash_only_accounts = (
+        sorted(
+            str(item["account_id"])
             for item in current_accounts
             if _object(item["liquidation_value"], "liquidation_value")["status"]
             == "AVAILABLE"
             and str(item["account_id"]) not in positioned_accounts
         )
         if current_accounts is not None
-        else 0
+        else []
     )
+    cash_only_count = len(cash_only_accounts)
     structure_reported = (
         current_accounts is not None and current_balance_available_count > 0
     )
@@ -2129,6 +2130,13 @@ def build_generation(
                 else {}
             ),
         },
+        # the accounts whose proved liquidation value leaves no holding: positive evidence that
+        # their position set is empty (absence of rows alone proves nothing)
+        **(
+            {"empty_position_account_ids": cash_only_accounts}
+            if structure_reported and cash_only_accounts
+            else {}
+        ),
         "journal_counterparty_crosswalk": _journal_counterparty_crosswalk(crosswalk),
         "nav_observations": nav,
         "positions": positions,
