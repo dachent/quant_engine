@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/decision-policy.schema.json",
+  "title": "Portfolio decision policy",
+  "description": "The numbers the Decision page applies: drawdown zones, rebalance bands, strategy status thresholds, stress rule, target-weight method and caps, allowed data ages. Edited by the owner in one file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_id",
+    "status",
+    "authority",
+    "limit",
+    "rebalance_band",
+    "status_rule",
+    "stress_rule",
+    "targets",
+    "data_ages",
+    "display"
+  ],
+  "$defs": {
+    "decimal": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"}
+  },
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "policy_id": {"const": "PORT-DECISION-1"},
+    "status": {"type": "string", "minLength": 1},
+    "authority": {"type": "string", "minLength": 1},
+    "owner_set_default_note": {"type": "string"},
+    "limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["drawdown_limit", "normal_below", "measure", "acceptance", "zones", "breach_action"],
+      "properties": {
+        "drawdown_limit": {"$ref": "#/$defs/decimal"},
+        "normal_below": {"$ref": "#/$defs/decimal"},
+        "measure": {"type": "string"},
+        "acceptance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ruling", "accepted_on", "note"],
+          "properties": {
+            "ruling": {"type": "string"},
+            "accepted_on": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+            "note": {"type": "string"}
+          }
+        },
+        "zones": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["NORMAL", "NO_NEW_RISK", "LIMIT_BREACH"],
+          "properties": {
+            "NORMAL": {"type": "string"},
+            "NO_NEW_RISK": {"type": "string"},
+            "LIMIT_BREACH": {"type": "string"}
+          }
+        },
+        "breach_action": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reduce_each_strategy_by", "owner_set", "note"],
+          "properties": {
+            "kind": {"enum": ["UNSET", "REDUCE_EACH_STRATEGY"]},
+            "reduce_each_strategy_by": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+            "owner_set": {"type": "boolean"},
+            "note": {"type": "string"}
+          }
+        }
+      }
+    },
+    "rebalance_band": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["absolute_points", "relative_to_target", "rule"],
+      "properties": {
+        "absolute_points": {"$ref": "#/$defs/decimal"},
+        "relative_to_target": {"$ref": "#/$defs/decimal"},
+        "rule": {"const": "LARGER_OF"}
+      }
+    },
+    "status_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ratio", "ratio_basis", "ratio_basis_choices", "bands"],
+      "properties": {
+        "ratio": {"type": "string"},
+        "ratio_basis": {"enum": ["CURRENT_DRAWDOWN", "WORST_LIVE_DRAWDOWN"]},
+        "ratio_basis_choices": {"type": "array", "items": {"type": "string"}},
+        "bands": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "status", "action"],
+            "properties": {
+              "from": {"$ref": "#/$defs/decimal"},
+              "status": {"type": "string", "minLength": 1},
+              "action": {"type": "string", "minLength": 1},
+              "sell_fraction": {"$ref": "#/$defs/decimal"}
+            }
+          }
+        }
+      }
+    },
+    "stress_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "prior_multiplier",
+        "live_multiplier",
+        "platform_only_addition",
+        "cap",
+        "backtest_counts_as_loss_evidence",
+        "backtest_ruling",
+        "platform_only_strategies",
+        "prior_worst_drawdown",
+        "dependency"
+      ],
+      "properties": {
+        "label": {"type": "string", "minLength": 1},
+        "prior_multiplier": {"$ref": "#/$defs/decimal"},
+        "live_multiplier": {"$ref": "#/$defs/decimal"},
+        "platform_only_addition": {"$ref": "#/$defs/decimal"},
+        "cap": {"$ref": "#/$defs/decimal"},
+        "backtest_counts_as_loss_evidence": {"type": "boolean"},
+        "backtest_ruling": {"type": "string"},
+        "platform_only_strategies": {"type": "array", "items": {"type": "string"}},
+        "prior_worst_drawdown": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["value", "source"],
+            "properties": {
+              "value": {"$ref": "#/$defs/decimal"},
+              "source": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "dependency": {"type": "string"}
+      }
+    },
+    "targets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "blend_to_equal",
+        "max_strategy_weight",
+        "max_strategy_weight_owner_set",
+        "max_cluster_weight",
+        "max_cluster_weight_owner_set",
+        "clusters_from"
+      ],
+      "properties": {
+        "method": {"type": "string"},
+        "blend_to_equal": {"$ref": "#/$defs/decimal"},
+        "max_strategy_weight": {"$ref": "#/$defs/decimal"},
+        "max_strategy_weight_owner_set": {"type": "boolean"},
+        "max_cluster_weight": {"$ref": "#/$defs/decimal"},
+        "max_cluster_weight_owner_set": {"type": "boolean"},
+        "clusters_from": {"type": "string"}
+      }
+    },
+    "data_ages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis", "allowed_days", "allowed_days_owner_set", "inactive_sources"],
+      "properties": {
+        "basis": {"type": "string"},
+        "allowed_days": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "allowed_days_owner_set": {"type": "boolean"},
+        "inactive_sources": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "display": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dollar_rounding", "change_threshold_points"],
+      "properties": {
+        "dollar_rounding": {"$ref": "#/$defs/decimal"},
+        "change_threshold_points": {"$ref": "#/$defs/decimal"}
+      }
+    }
+  }
+}

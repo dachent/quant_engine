@@ -632,6 +632,7 @@
     return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
   };
   const VIEW_TITLES = {
+    decision: "Decision",
     command: "Portfolio",
     capital: "Allocation & lifecycle",
     risk: "Performance & HWM",
@@ -748,6 +749,66 @@
         return `${entry.strategy_name || entry.strategy_id} is counted gross: sleeve ${currencyExact(margin.gross_sleeve_nav_usd)}, margin and unallocated cash ${currencyExact(line.value_usd)}, equity ${currencyExact(margin.net_equivalent_usd)}`;
       });
     return parts.length ? ` · Capital basis: ${parts.join("; ")}` : "";
+  }
+
+  // Decision page: the first tab. Every word of status, zone and action comes from the
+  // producer's decision block; nothing here decides what a number means.
+  function renderDecision() {
+    const root = $("#decision-root");
+    const block = data.decision;
+    if (!root) return;
+    if (!block) { root.innerHTML = '<p class="dec-missing">The decision block is not in this payload: treat every limit as unchecked.</p>'; return; }
+    const num = (value) => (value == null ? null : Number(value));
+    const dp = (value, digits = 1) => (value == null ? "—" : `${(num(value) * 100).toFixed(digits)}%`);
+    const ratio = (value) => (value == null ? "—" : num(value).toFixed(2));
+    const usd = (value) => (value == null ? "—" : money.format(num(value)));
+    const tone = (value) => `dec-tone dec-${safe(value || "muted")}`;
+    const p = block.portfolio;
+    const limitPct = num(p.limit) * 100;
+    const meterMax = Math.max(limitPct * 1.25, num(p.drawdown) * 100 * 1.1);
+    const at = (value) => `${Math.min(100, (num(value) * 100) / meterMax * 100).toFixed(1)}%`;
+    const execute = block.actions.execute.map((item) => `<li><strong>${safe(item.text)}</strong><span>${safe(item.reason)}</span></li>`).join("");
+    const held = block.actions.held_back.map((item) => `<li><strong>${safe(item.text)}</strong><span>${safe(item.reason)} ${safe(item.held_because)}</span></li>`).join("");
+    const sources = block.sources.map((row) => `<li class="${tone(row.tone)}"><span class="dec-src">${safe(row.source)}</span><span>${safe(formatDate(row.data_date))}</span><span>${safe(row.age_days)} days old${row.allowed_days == null ? "" : `, allowed ${safe(row.allowed_days)}`}</span><span class="dec-pill ${tone(row.tone)}">${safe(row.state)}</span></li>`).join("");
+    const clusters = block.clusters.map((row) => `<li><strong>${safe(row.label)}</strong><span>${safe(row.members.join(", "))}</span><span>Weight ${dp(row.weight)}${row.weight_cap == null ? "" : ` (cap ${dp(row.weight_cap, 0)})`} <span class="${tone(row.weight_tone)}">${safe(row.weight_state)}</span></span><span>Stress loss ${dp(row.stress_loss)}, ${dp(row.stress_share, 0)} of the total <span class="${tone(row.stress_tone)}">${safe(row.stress_vs_limit)}</span></span></li>`).join("");
+    const track = (item, label) => {
+      if (!item) return `<div><dt>${label}</dt><dd>—</dd></div>`;
+      const model = item.model_return == null ? "model not in this payload" : `model ${dp(item.model_return)}, gap ${safe(item.gap_points)} points`;
+      return `<div><dt>${label}</dt><dd>Account ${dp(item.account_return)}; ${model}</dd></div>`;
+    };
+    const cards = block.strategies.map((row) => {
+      const since = row.tracking.since_start;
+      const sinceText = since
+        ? `Account ${safe(since.account_return_points)}% against model ${safe(since.model_return_points)}%, gap ${safe(since.gap_points)} points (${usd(since.gap_usd)}) from ${safe(formatDate(since.start))} to ${safe(formatDate(since.end))}${since.ends_at_cutoff ? "" : " (window ends before the cutoff)"}; ${safe(since.evidence)}`
+        : "—";
+      const next = row.next_status ? `${safe(row.next_status)} at ${ratio(row.next_status_at)}` : "";
+      const act = row.action ? (row.action.text ? safe(row.action.text) : `Held: about ${usd(row.action.usd)}`) : "No action";
+      return `<article class="dec-card"><header><h4>${safe(row.name)}</h4><span class="dec-pill ${tone(row.status_tone)}">${safe(row.status)}</span></header>
+        <dl>
+          <div><dt>Weight, target</dt><dd>${dp(row.weight)} now, ${dp(row.target)} target, band ±${safe(row.band_points)} points <span class="${tone(row.band_tone)}">${safe(row.band_label)}</span></dd></div>
+          <div><dt>Share of stress loss</dt><dd>${dp(row.stress_share, 0)} (loss ${dp(row.stress_loss_fraction)} of its value)</dd></div>
+          <div><dt>Live drawdown over prior worst</dt><dd>${dp(row.live_drawdown_now)} over ${dp(row.prior_worst_drawdown)} = ${ratio(row.drawdown_ratio)} ${next ? `(${next})` : ""}; worst live ${dp(row.live_drawdown_worst)}</dd></div>
+          ${track(row.tracking.last_week, "Account vs model, last week")}
+          ${track(row.tracking.four_weeks, "Account vs model, 4 weeks")}
+          <div><dt>Account vs model, since start</dt><dd>${sinceText}</dd></div>
+          <div><dt>Financing</dt><dd>${row.financing.annual_cost_rate == null ? "cost rate not in payload" : `${dp(row.financing.annual_cost_rate)} a year in costs`}${row.financing.levered ? ", levered" : ""}</dd></div>
+          <div><dt>Action</dt><dd>${act}</dd></div>
+        </dl><p class="dec-rule">${safe(row.status_action)}</p></article>`;
+    }).join("");
+    const changes = block.changes.items.length ? block.changes.items.map((item) => `<li>${safe(item)}</li>`).join("") : `<li>${block.changes.status === "COMPARED" ? "No change since the last decision page." : "No earlier decision page to compare with."}</li>`;
+    const placeholders = block.policy.placeholders.length ? `<p class="dec-note">Placeholder values, not yet set by the owner: ${safe(block.policy.placeholders.join(", "))}. Edit contracts/portfolio-decision-policy-v1.json.</p>` : "";
+    root.innerHTML = `
+      <section class="dec-hero ${tone(p.zone_tone)}"><div class="dec-headline">${safe(block.actions.headline)}</div>
+        <div class="dec-meter" role="img" aria-label="Drawdown ${dp(p.drawdown)} against a limit of ${dp(p.limit, 0)}"><span class="dec-fill" style="width:${at(p.drawdown)}"></span><span class="dec-tick" style="left:${at(p.normal_below)}"></span><span class="dec-tick dec-limit" style="left:${at(p.limit)}"></span></div>
+        <div class="dec-meter-key"><span>Drawdown from the high-water mark ${dp(p.drawdown)}</span><span>${safe(p.zone_label)}: ${safe(p.zone_rule)}</span><span>Limit ${dp(p.limit, 0)}, ${safe(p.headroom_points)} points of headroom</span></div>
+        <p class="dec-note">Measure: ${safe(p.measure_acceptance.ruling)}, accepted ${safe(formatDate(p.measure_acceptance.accepted_on))}. Worst drawdown on record ${dp(p.worst_drawdown)}.</p></section>
+      <section class="dec-block"><h3>Actions this week</h3>${execute ? `<ul class="dec-list">${execute}</ul>` : '<p class="dec-none">No action.</p>'}${held ? `<h4>Held back by the rules</h4><ul class="dec-list">${held}</ul>` : ""}</section>
+      <section class="dec-block"><h3>Data dates</h3><ul class="dec-sources">${sources}</ul><p class="dec-note">Evaluated on ${safe(formatDate(block.evaluated_on))}; panel cutoff ${safe(formatDate(block.as_of))}.</p></section>
+      <section class="dec-block"><h3>Stress loss</h3><p class="dec-big">${dp(p.stress_loss)} of capital, about ${usd(p.stress_loss_usd)}</p><p class="dec-note">${safe(p.stress_rule)} The policy constant published earlier reads ${dp(p.published_policy_constant_stress)}.</p><ul class="dec-list">${clusters}</ul></section>
+      <section class="dec-block"><h3>Strategies</h3><div class="dec-cards">${cards}</div></section>
+      <section class="dec-block"><h3>What changed since last week</h3><ul class="dec-list">${changes}</ul></section>
+      ${placeholders}
+      <p class="dec-note">Policy ${safe(block.policy.policy_id)}, file digest ${safe(block.policy.sha256.slice(0, 12))}. No agent places trades.</p>`;
   }
 
   function renderCommand() {
@@ -3718,6 +3779,7 @@
   // ===== END model-vs-actual =====
 
   const viewRenderers = {
+    decision: renderDecision,
     command: renderCommand,
     capital: renderCapital,
     risk: renderRisk,
@@ -3958,7 +4020,7 @@
     $$('.segment').forEach((button) => button.setAttribute("aria-pressed", String(button.classList.contains("is-active"))));
     window.addEventListener("hashchange", () => {
       try {
-        setView(location.hash.slice(1) || "command", false);
+        setView(location.hash.slice(1) || "decision", false);
       } catch (error) {
         showAppError(error);
       }
@@ -4075,7 +4137,7 @@
       populateContextControls();
       bindEvents(); bindEmbeddedDownloads();
       const requested = location.hash.slice(1);
-      if (!setView($(viewSelector(requested)) ? requested : "command", false)) return;
+      if (!setView($(viewSelector(requested)) ? requested : "decision", false)) return;
       prepareScrollableTableRegions();
       $("#loading-state").hidden = true;
       $("#app").dataset.appState = "ready";

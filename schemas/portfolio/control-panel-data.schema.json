@@ -199,6 +199,53 @@
         "total_liquid": { "enum": ["AVAILABLE", "NOT_READY_AT_CUTOFF"] }
       }
     },
+    "decision": {
+      "description": "The Decision page block: what the owner's policy file implies this week, computed from payload fields only (tools/portfolio_decision.py).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "policy", "as_of", "evaluated_on", "capital_usd", "sources", "portfolio", "clusters", "strategies", "actions", "changes"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "policy": {"type": "object", "required": ["policy_id", "sha256", "placeholders"]},
+        "as_of": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "evaluated_on": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "capital_usd": {"type": "string"},
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "object", "required": ["source", "data_date", "age_days", "allowed_days", "state"]}
+        },
+        "portfolio": {
+          "type": "object",
+          "required": ["measure", "measure_acceptance", "drawdown", "worst_drawdown", "limit", "headroom_points", "zone", "zone_rule", "stress_loss", "stress_loss_usd", "stress_rule", "published_policy_constant_stress"]
+        },
+        "clusters": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "object", "required": ["cluster_id", "label", "members", "weight", "weight_state", "stress_loss", "stress_share", "stress_vs_limit"]}
+        },
+        "strategies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["strategy_id", "name", "value_usd", "weight", "target", "band_points", "band_state", "stress_loss_fraction", "stress_share", "live_drawdown_now", "live_drawdown_worst", "prior_worst_drawdown", "drawdown_ratio", "status", "status_action", "tracking", "financing", "action"]
+          }
+        },
+        "actions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["headline", "execute", "held_back", "no_action"],
+          "properties": {
+            "headline": {"type": "string"},
+            "execute": {"type": "array"},
+            "held_back": {"type": "array"},
+            "no_action": {"type": "boolean"}
+          }
+        },
+        "changes": {"type": "object", "required": ["status", "items"]}
+      }
+    },
     "advisory": {
       "type": "object",
       "additionalProperties": false,

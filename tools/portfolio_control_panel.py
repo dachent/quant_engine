@@ -51,6 +51,7 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.core import inventory_identity
+import portfolio_decision
 import series_label
 import sleeve_disclosures
 import strategy_basis_lens_moves
@@ -254,6 +255,17 @@ ECONOMIC_DRIVER_CLUSTERS = (
     Path(__file__).resolve().parents[1]
     / "contracts"
     / "portfolio-economic-driver-clusters-v1.json"
+)
+DECISION_POLICY: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-decision-policy-v1.json"
+)
+DECISION_POLICY_SCHEMA: Final = (
+    Path(__file__).resolve().parents[1]
+    / "schemas"
+    / "portfolio"
+    / "decision-policy.schema.json"
 )
 STRATEGY_UNDERWRITING_POLICY = (
     Path(__file__).resolve().parents[1]
@@ -12068,6 +12080,38 @@ def _panel_data(
     return panel_data
 
 
+def _decision_block(data: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Apply the decision policy to the finished payload (a pure function of both).
+
+    A payload that lacks the blocks the decision reads (an older or partial one) gets no
+    ``decision`` key and the panel says so; any other refusal stops the build.
+    """
+
+    policy_bytes, policy_sha256 = _read_snapshot(DECISION_POLICY, "decision policy")
+    schema_bytes, _schema_sha256 = _read_snapshot(
+        DECISION_POLICY_SCHEMA, "decision policy schema"
+    )
+    try:
+        from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+
+        policy = _json_from_bytes(policy_bytes, "decision policy")
+        errors = sorted(
+            Draft202012Validator(_json_from_bytes(schema_bytes, "schema")).iter_errors(
+                policy
+            ),
+            key=str,
+        )
+        if errors:
+            raise ControlPanelValidationError(
+                f"decision policy violates its schema: {errors[0].message}"
+            )
+        return portfolio_decision.build_decision(data, policy, policy_sha256)
+    except portfolio_decision.DecisionInputsMissing:
+        return None
+    except portfolio_decision.DecisionError as exc:
+        raise ControlPanelValidationError(f"decision block refused: {exc}") from exc
+
+
 def _financial_mvp_module() -> Any:
     """Load the repository financial source binder used at the panel boundary."""
 
@@ -13424,6 +13468,11 @@ def _rendered_files(
     # The orthogonal risk shares are re-derived from the decomposition lenses and the
     # governed invested capital the payload already holds; the block is optional.
     data["orthogonal_risk_attribution"] = build_orthogonal_risk_attribution(data)
+    # The Decision page block: what the owner's policy file implies this week, from
+    # fields the payload already holds. No fit, no other source.
+    decision_block = _decision_block(data)
+    if decision_block is not None:
+        data["decision"] = decision_block
     wire_data = _panel_wire_form(data)
     _validate_panel_data_schema(
         wire_data,
