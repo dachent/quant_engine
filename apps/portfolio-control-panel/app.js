@@ -1509,7 +1509,9 @@
     const hwmGateOpen = data.advisory.hwm_numerical_status === "AVAILABLE" && hwmCandidate && !hwmCandidate.not_accepted_reason;
     const hwmOwnerAccepted = hwmCandidate?.financial_acceptance === "OWNER_ACCEPTED";
     const hwmNotAccepted = hwmOwnerAccepted
-      ? `Numeric HWM available, ${hwmAcceptanceWords}. Governed ${hwmCandidate.policy_id || "HWM"} high-water mark; ${(hwmCandidate.kpi?.missing_daily_points || []).length} missing daily point(s) filled by span returns`
+      ? (data.advisory.hwm_numerical_status === "AVAILABLE"
+        ? `Numeric HWM available, ${hwmAcceptanceWords}. Governed ${hwmCandidate.policy_id || "HWM"} high-water mark; ${(hwmCandidate.kpi?.missing_daily_points || []).length} missing daily point(s) filled by span returns`
+        : `Governed ${hwmCandidate.policy_id || "HWM"} high-water mark, ${hwmAcceptanceWords}; ${(hwmCandidate.kpi?.missing_daily_points || []).length} missing daily point(s) filled by span returns. The legacy PORT-HWM-3 envelope check reads ${humanStatus(data.advisory.hwm_numerical_reason).toLowerCase()} and is not the source of this number`)
       : hwmGateOpen
       ? `Numeric HWM available${data.hwm_summary?.hwm_gap_bound ? " with a stated bound on every missing daily point" : ""}. Governed ${hwmCandidate.policy_id || "HWM"} candidate shown, ${hwmAcceptanceWords}`
       : hwmCandidate
