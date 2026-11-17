@@ -270,5 +270,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+def price_series(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[date, tuple[Decimal, Decimal]]]:
+    """Public entry: ``{ticker: {day: (close, dividend)}}`` from raw capture rows."""
+
+    return _series(rows)
+
+
+def check_dividend_record(
+    ticker: str, prices: Mapping[date, tuple[Decimal, Decimal]]
+) -> None:
+    """Public entry to the month-aware dividend record check (raises BaseProxyError)."""
+
+    _check_dividend_record(ticker, prices)
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
