@@ -28,6 +28,7 @@ import zlib
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping, Sequence, cast
 
 from quant_engine.core import check_entry_interpreter
+from quant_engine.core import last_nyse_trading_day
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -4111,6 +4112,11 @@ def _suppress_unmatched_strategy_performance(
         row["benchmark_comparison_disposition"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["provider_comparison_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["provider_comparison_disposition"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+        if "implementation_gap_status" in row:
+            # derived from the withheld comparison evidence: withdrawn with it
+            row["implementation_gap_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+            row["implementation_gap_basis"] = None
+            row["implementation_gap_audit_status"] = None
         suppressed.append(row)
     return suppressed
 
@@ -7069,7 +7075,9 @@ def _weekly_return_analysis(
             or current_week.get("week_start") != week_start.isoformat()
             or current_week.get("week_end") != week_end.isoformat()
             or current_week.get("data_through_date") != as_of.isoformat()
-            or current_week.get("is_partial") is not (as_of < week_end)
+            # partial only while data stops before the last NYSE trading day of the week
+            or current_week.get("is_partial")
+            is not (as_of < last_nyse_trading_day(week_start + timedelta(days=4)))
             or not isinstance(weekly.get("weeks"), list)
             or week_start.isoformat() not in weekly["weeks"]
         ):
@@ -8994,6 +9002,171 @@ def _implementation_contract_context(
     return context
 
 
+def _gap_signature(
+    correlation: float | None,
+    beta: float | None,
+    tracking_error: float | None,
+    gap_policy: Mapping[str, Any],
+) -> str:
+    if (
+        correlation is not None
+        and beta is not None
+        and tracking_error is not None
+        and correlation
+        >= _finite_float(
+            gap_policy.get("path_aligned_minimum_correlation"),
+            "path_aligned_minimum_correlation",
+        )
+        and _finite_float(
+            gap_policy.get("path_aligned_beta_minimum"),
+            "path_aligned_beta_minimum",
+        )
+        <= beta
+        <= _finite_float(
+            gap_policy.get("path_aligned_beta_maximum"),
+            "path_aligned_beta_maximum",
+        )
+        and tracking_error
+        <= _finite_float(
+            gap_policy.get("path_aligned_maximum_tracking_error_annualized"),
+            "path_aligned_maximum_tracking_error_annualized",
+        )
+    ):
+        return "PATH_ALIGNED_PERSISTENT_LEVEL_DIFFERENCE"
+    if correlation is not None and correlation >= _finite_float(
+        gap_policy.get("partial_path_minimum_correlation"),
+        "partial_path_minimum_correlation",
+    ):
+        return "PARTIAL_PATH_DIVERGENCE"
+    return "MATERIAL_PATH_DIVERGENCE"
+
+
+PROXY_RECONSTRUCTED_STATUS = "DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV"
+PROXY_RECONCILIATION_STATUSES = frozenset(
+    {PROXY_RECONSTRUCTED_STATUS, "TESTED_EXACT_COMMON_DATES"}
+)
+RECONSTRUCTED_PROXY_COMPARISON_STATUS = (
+    "RECONSTRUCTED_PROXY_DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV"
+)
+
+
+def _reconstructed_proxy_reference(
+    implementation: object,
+) -> dict[str, Any] | None:
+    """The tested account-versus-model reconciliation of a strategy with no provider comparison.
+
+    A strategy whose only model is the reconstructed replica (no provider-published
+    series) still has an exact-common-date account-versus-model return reconciliation in
+    its implementation contract (a status such as DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV
+    or TESTED_EXACT_COMMON_DATES, never an UNAVAILABLE one).  That total is a real, labelled
+    gap: it is used only when no provider comparison exists, and it is named a reconstructed
+    proxy, never a provider comparison.
+    """
+
+    if not isinstance(implementation, Mapping):
+        return None
+    metrics = implementation.get("return_reconciliation")
+    if not isinstance(metrics, Mapping):
+        return None
+    if metrics.get("status") not in PROXY_RECONCILIATION_STATUSES:
+        return None
+    observations = metrics.get("observations")
+    if (
+        not isinstance(observations, int)
+        or isinstance(observations, bool)
+        or observations <= 0
+    ):
+        return None
+    if any(
+        metrics.get(key) is None
+        for key in (
+            "account_cumulative_return",
+            "model_cumulative_return",
+            "account_minus_model_cumulative",
+        )
+    ):
+        return None
+    try:
+        account = float(metrics["account_cumulative_return"])
+        model = float(metrics["model_cumulative_return"])
+        difference = float(metrics["account_minus_model_cumulative"])
+    except (TypeError, ValueError):
+        return None
+    if abs((account - model) - difference) > 1e-9:
+        return None
+    return dict(metrics)
+
+
+def _reconstructed_proxy_gap_underwriting(
+    strategy: Mapping[str, Any],
+    gap_policy: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+    strategy_name: str,
+) -> dict[str, Any]:
+    """The labelled gap against the reconstructed model (no provider comparison exists)."""
+
+    total_gap = _finite_float(
+        metrics.get("account_minus_model_cumulative"),
+        f"reconstructed proxy gap {strategy_name}",
+    )
+    correlation = _optional_float(
+        metrics.get("daily_return_correlation"), f"proxy correlation {strategy_name}"
+    )
+    beta = _optional_float(metrics.get("beta_to_model"), f"proxy beta {strategy_name}")
+    tracking_error = _optional_float(
+        metrics.get("annualized_tracking_error"),
+        f"proxy tracking error {strategy_name}",
+    )
+    import portfolio_cash_drag
+    import portfolio_report as reporter
+
+    unresolved_causes = [
+        "REFERENCE_IS_RECONSTRUCTED_PROXY_NOT_PROVIDER_PUBLISHED",
+        "REFERENCE_VERSION_COMPATIBILITY_NOT_PROVEN",
+    ]
+    if strategy.get("cash_drag_status") != portfolio_cash_drag.STATUS_EVIDENCED:
+        unresolved_causes.append("COMPLETE_DAILY_ACCOUNT_CASH_PATH_UNAVAILABLE")
+    if strategy.get("fees_status") != reporter.FEES_STATUS_EVIDENCED:
+        unresolved_causes.append("ACCOUNT_BOUND_FEE_PATH_INCOMPLETE")
+    unresolved_causes.extend(
+        [
+            "ORDER_TIMING_AND_FILL_ATTRIBUTION_UNAVAILABLE",
+            "SLIPPAGE_AND_TRADE_LEVEL_CAUSAL_ATTRIBUTION_UNAVAILABLE",
+        ]
+    )
+    return {
+        "status": "QUANTIFIED_TOTAL_CAUSAL_COMPONENTS_UNRESOLVED",
+        "comparison_status": RECONSTRUCTED_PROXY_COMPARISON_STATUS,
+        "observed_start": metrics.get("observed_start"),
+        "observed_end": metrics.get("observed_end"),
+        "observations": metrics.get("observations"),
+        "reference_cumulative_return": _number_text(
+            _finite_float(
+                metrics.get("model_cumulative_return"),
+                f"proxy model return {strategy_name}",
+            )
+        ),
+        "account_cumulative_return": _number_text(
+            _finite_float(
+                metrics.get("account_cumulative_return"),
+                f"proxy account return {strategy_name}",
+            )
+        ),
+        "total_gap": _number_text(total_gap),
+        "causally_bound_components": [],
+        "unresolved_residual": _number_text(total_gap),
+        "reconciliation_error": _number_text(0.0),
+        "signature": _gap_signature(correlation, beta, tracking_error, gap_policy),
+        "beta": None if beta is None else _number_text(beta),
+        "correlation": None if correlation is None else _number_text(correlation),
+        "tracking_error_annualized": (
+            None if tracking_error is None else _number_text(tracking_error)
+        ),
+        "unresolved_causes": unresolved_causes,
+        "cost_boundary": gap_policy.get("subscription_cost_rule"),
+    }
+
+
 def _model_account_gap_underwriting(
     strategy: Mapping[str, Any], gap_policy: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -9035,6 +9208,11 @@ def _model_account_gap_underwriting(
             }
     comparison_status = str(strategy.get("provider_comparison_status") or "UNAVAILABLE")
     available = comparison_status.startswith("DESCRIPTIVE_EXACT_DATE")
+    proxy = None if available else _reconstructed_proxy_reference(implementation)
+    if proxy is not None:
+        return _reconstructed_proxy_gap_underwriting(
+            strategy, gap_policy, proxy, strategy_name
+        )
     total_gap = (
         _optional_float(
             strategy.get("provider_cumulative_gap"),
@@ -9064,40 +9242,11 @@ def _model_account_gap_underwriting(
         if available
         else None
     )
-    if not available:
-        signature = "UNAVAILABLE_NO_ACCEPTED_MODEL_OR_PROVIDER_COMPARISON"
-    elif (
-        correlation is not None
-        and beta is not None
-        and tracking_error is not None
-        and correlation
-        >= _finite_float(
-            gap_policy.get("path_aligned_minimum_correlation"),
-            "path_aligned_minimum_correlation",
-        )
-        and _finite_float(
-            gap_policy.get("path_aligned_beta_minimum"),
-            "path_aligned_beta_minimum",
-        )
-        <= beta
-        <= _finite_float(
-            gap_policy.get("path_aligned_beta_maximum"),
-            "path_aligned_beta_maximum",
-        )
-        and tracking_error
-        <= _finite_float(
-            gap_policy.get("path_aligned_maximum_tracking_error_annualized"),
-            "path_aligned_maximum_tracking_error_annualized",
-        )
-    ):
-        signature = "PATH_ALIGNED_PERSISTENT_LEVEL_DIFFERENCE"
-    elif correlation is not None and correlation >= _finite_float(
-        gap_policy.get("partial_path_minimum_correlation"),
-        "partial_path_minimum_correlation",
-    ):
-        signature = "PARTIAL_PATH_DIVERGENCE"
-    else:
-        signature = "MATERIAL_PATH_DIVERGENCE"
+    signature = (
+        "UNAVAILABLE_NO_ACCEPTED_MODEL_OR_PROVIDER_COMPARISON"
+        if not available
+        else _gap_signature(correlation, beta, tracking_error, gap_policy)
+    )
     unresolved_causes: list[str] = []
     if available:
         if (
@@ -9679,6 +9828,9 @@ def _strategy_underwriting(
             recommendation_reasons.extend(
                 ["MODEL_ACCOUNT_GAP_AT_OR_BELOW_MINUS_FIVE_PERCENT", gap["signature"]]
             )
+            if gap.get("comparison_status") == RECONSTRUCTED_PROXY_COMPARISON_STATUS:
+                # the reference is the reconstructed replica, not a provider series: say so in the advice
+                recommendation_reasons.append("REFERENCE_IS_RECONSTRUCTED_PROXY")
         elif portfolio_fit_status == "CLUSTER_BUDGET_BREACH":
             advisory_action = "REVIEW_SHARED_CLUSTER_BUDGET_NOT_PROVIDER_LABEL"
             recommendation_reasons.append("SHARED_ECONOMIC_DRIVER_CLUSTER_BREACH")
