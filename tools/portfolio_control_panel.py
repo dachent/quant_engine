@@ -259,6 +259,11 @@ STRATEGY_UNDERWRITING_POLICY = (
     / "contracts"
     / "portfolio-strategy-underwriting-v1.json"
 )
+STRATEGY_RETURN_SOURCES_CONTRACT = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "strategy-return-sources-v1.json"
+)
 DEFAULT_TEMPLATE_ROOT = (
     Path(__file__).resolve().parents[1] / "apps" / "portfolio-control-panel"
 )
@@ -9422,6 +9427,75 @@ def _regime_underwriting(
     }
 
 
+def _text_list(value: object, field_name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ControlPanelValidationError(f"{field_name} must be a list")
+    return [_text(item, field_name) for item in value]
+
+
+def _strategy_concepts(
+    underwriting_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """One concept record per current strategy, read from the governed return-sources contract.
+
+    The record carries the contract's own words (mechanism, persistence, alternative
+    explanation, falsification tests, confidence); nothing is composed here.  A strategy the
+    contract does not describe gets `concept: null`, never an invented archetype.  Design
+    evidence, weight and accounts stay on the strategy and underwriting rows the renderer
+    already holds.
+    """
+
+    contract, _content, contract_hash = _json_snapshot(
+        STRATEGY_RETURN_SOURCES_CONTRACT, "strategy return sources"
+    )
+    entries = {
+        str(item.get("strategy_id")): item
+        for item in _objects(contract.get("strategies"), "strategy return sources")
+    }
+    rows: list[dict[str, Any]] = []
+    for underwriting in underwriting_rows:
+        strategy_id = _text(underwriting.get("strategy_id"), "concept strategy_id")
+        entry = entries.get(strategy_id)
+        concept: dict[str, Any] | None = None
+        if entry is not None:
+            concept = {
+                "mechanism": _text(entry.get("mechanism"), f"{strategy_id} mechanism"),
+                "persistence": _text(
+                    entry.get("persistence"), f"{strategy_id} persistence"
+                ),
+                "alternative_explanation": _text(
+                    entry.get("alternative_explanation"),
+                    f"{strategy_id} alternative explanation",
+                ),
+                "falsification": _text_list(
+                    entry.get("falsification"), f"{strategy_id} falsification"
+                ),
+                "confidence": _text(
+                    entry.get("confidence"), f"{strategy_id} confidence"
+                ),
+                "source_status": (
+                    "NO_IDENTIFIED_SOURCE"
+                    if entry.get("no_identified_source") is True
+                    else "IDENTIFIED_SOURCE"
+                ),
+            }
+        rows.append(
+            {
+                "strategy_id": strategy_id,
+                "strategy_name": _text(
+                    underwriting.get("strategy_name"), f"{strategy_id} name"
+                ),
+                "concept": concept,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "source_artifact": "contracts/strategy-return-sources-v1.json",
+        "source_sha256": contract_hash,
+        "rows": rows,
+    }
+
+
 def _strategy_underwriting(
     strategies: Sequence[Mapping[str, Any]],
     decomposition_lenses: Mapping[str, Any],
@@ -11890,6 +11964,7 @@ def _panel_data(
         "replication_analysis": accepted_replication,
         "strategies": strategies,
         "strategy_underwriting": strategy_underwriting,
+        "strategy_concepts": _strategy_concepts(strategy_underwriting["rows"]),
         "hwm_summary": hwm_summary,
         "hybrid_mode_gate": hybrid_mode_gate,
         "leverage_disclosures": list(report["leverage_disclosures"]),

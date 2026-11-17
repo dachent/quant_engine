@@ -736,6 +736,7 @@
     "hwm_governed_proof": { "$ref": "#/$defs/governed_hwm_proof" },
     "performance_tab": { "$ref": "#/$defs/performance_tab" },
     "model_vs_actual": { "$ref": "#/$defs/model_vs_actual" },
+    "strategy_concepts": { "$ref": "#/$defs/strategy_concepts" },
     "vendor_gap_fills": { "$ref": "#/$defs/vendor_gap_fills" },
     "orthogonal_risk_attribution": { "$ref": "#/$defs/orthogonal_risk_attribution" },
     "limitations": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
@@ -3665,6 +3666,53 @@
               "vendor_span_return": { "$ref": "#/$defs/decimal" },
               "span_basis_difference": { "$ref": "#/$defs/decimal" },
               "closure_residual": { "$ref": "#/$defs/decimal" }
+            }
+          }
+        }
+      }
+    },
+    "strategy_concepts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_artifact", "source_sha256", "rows"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "source_artifact": { "type": "string", "minLength": 1 },
+        "source_sha256": { "$ref": "#/$defs/hash" },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["strategy_id", "strategy_name", "concept"],
+            "properties": {
+              "strategy_id": { "type": "string", "minLength": 1 },
+              "strategy_name": { "type": "string", "minLength": 1 },
+              "concept": {
+                "oneOf": [
+                  { "type": "null" },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "mechanism",
+                      "persistence",
+                      "alternative_explanation",
+                      "falsification",
+                      "confidence",
+                      "source_status"
+                    ],
+                    "properties": {
+                      "mechanism": { "type": "string", "minLength": 1 },
+                      "persistence": { "type": "string", "minLength": 1 },
+                      "alternative_explanation": { "type": "string", "minLength": 1 },
+                      "falsification": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                      "confidence": { "type": "string", "minLength": 1 },
+                      "source_status": { "enum": ["NO_IDENTIFIED_SOURCE", "IDENTIFIED_SOURCE"] }
+                    }
+                  }
+                ]
+              }
             }
           }
         }
