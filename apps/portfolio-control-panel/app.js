@@ -255,7 +255,7 @@
     if (basis === "VERIFIED_IMPLEMENTATION_RECONCILIATION") line = "Verified implementation reconciliation";
     else if (basis === "EXACT_DATE_PROVIDER_COMPARISON") line = `Exact-date provider comparison · ${integer.format(row.provider_comparison_observations || 0)} observations${row.provider_comparison_version_compatibility === "UNRESOLVED" ? " · version compatibility unresolved" : ""}`;
     else if (basis === "NO_COMPARATOR_ADMITTED") line = row.provider_comparison_disposition || null;
-    const audit = row.implementation_gap_audit_status ? ` title="Retained audit token: ${safe(row.implementation_gap_audit_status)}"` : "";
+    const audit = row.implementation_gap_audit_status ? ` title="Retained audit status: ${safe(row.implementation_gap_audit_status)}"` : "";
     return `<span${audit}>${statusText(row.implementation_gap_status)}</span>${line ? `<span class="cell-secondary">${safe(line)}</span>` : ""}`;
   };
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;

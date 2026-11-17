@@ -45,7 +45,7 @@ def test_the_retained_audit_token_is_only_a_tooltip(tmp_path: Path) -> None:
     html = _cell_html(dom, "#portfolio-implementation-table")
     flat = _flat(dom, "#portfolio-implementation-table")
 
-    assert 'title="Retained audit token: not_same_vintage"' in html
+    assert 'title="Retained audit status: not_same_vintage"' in html
     assert "Not same vintage" not in flat
     assert "Verified implementation reconciliation" in flat
     assert re.search(r'status-text positive">Tested<', html)
