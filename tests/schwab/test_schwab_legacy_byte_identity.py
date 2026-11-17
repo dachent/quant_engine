@@ -30,11 +30,14 @@ RETAINED_SPEC = (
     RETAINED
     / "source-runs/r21-schwab-0917-official/schwab-generation-spec-official.json"
 )
-# Recorded from the pre-change generation.py; prefixes keep fixture digests short.
+# F81B_* were recorded from the pre-change generation.py.  The synthetic fixture's
+# snapshot has every liquidation value proved, so its catalog now reports structure
+# (coverage.out_of_boundary) apart from known gaps; its digests were re-recorded for that
+# change.  A generation without a proved balance still rebuilds byte for byte.
 F81B_ID_PREFIX = "f81b1f733a5b53c9e6b303c3"
 F81B_CATALOG_PREFIX = "36ae762f16c69b54b4e6946917432ddebb37bbb0bd8775f5"
-FIXTURE_ID_PREFIX = "742dc96c9f8e9036ec38759e"
-FIXTURE_CATALOG_PREFIX = "d6edfc9b2e4cc7bc1b1e69484533e72c63fb9a2f73a16514"
+FIXTURE_ID_PREFIX = "0d6e7b2ad243ee244f2171d8"
+FIXTURE_CATALOG_PREFIX = "f4c43ad2ab0643996dd24292484b417d6692df922820bb89"
 
 
 def _fixture_module() -> object:

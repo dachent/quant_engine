@@ -2034,6 +2034,9 @@ def build_generation(
         if current_accounts is not None
         else 0
     )
+    structure_reported = (
+        current_accounts is not None and current_balance_available_count > 0
+    )
     known_gaps = (
         *(
             ("current account and position snapshot is not present",)
@@ -2066,6 +2069,11 @@ def build_generation(
         ),
         "two account histories contain documented intraday restatements",
         *(
+            ()
+            if structure_reported
+            else ("Investor Checking is outside the accepted brokerage boundary",)
+        ),
+        *(
             (
                 f"manual_export_partial:"
                 f"{txn_partial_gap['window_start']}-{txn_partial_gap['window_end']}"
@@ -2093,18 +2101,27 @@ def build_generation(
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
         "coverage": {
             "known_gaps": list(known_gaps),
-            "out_of_boundary": [
-                "Investor Checking is outside the accepted brokerage boundary",
-                *(
-                    (
-                        f"{cash_only_count} accepted accounts hold cash only: no "
-                        "non-cash position row exists for them (liquidation value "
-                        "proved against the native balance)",
-                    )
-                    if cash_only_count
-                    else ()
-                ),
-            ],
+            # a generation whose balances are proved reports structure apart from missing
+            # observations; earlier generations (no proved balance) keep their catalogs
+            # byte for byte
+            **(
+                {
+                    "out_of_boundary": [
+                        "Investor Checking is outside the accepted brokerage boundary",
+                        *(
+                            (
+                                f"{cash_only_count} accepted accounts hold cash only: "
+                                "no non-cash position row exists for them (liquidation "
+                                "value proved against the native balance)",
+                            )
+                            if cash_only_count
+                            else ()
+                        ),
+                    ]
+                }
+                if structure_reported
+                else {}
+            ),
             "status": "PARTIAL",
             **(
                 {"transaction_history": transaction_history_coverage}
