@@ -832,3 +832,24 @@ def test_the_scope_separates_measurements_from_policy_constants() -> None:
         "dependence_conservative_loss_bound",
     )
     assert not set(strategy_basis.NOT_RESTATED) & set(strategy_basis.POLICY_CONSTANTS)
+
+
+def test_a_package_citing_another_history_generation_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill test: the selected-path verifier rebuilds the source from the selected
+    layered-history generation, so a package that cites any other generation (the
+    structural guard for the model-live segment it carries) is refused."""
+
+    from test_portfolio_current_dependence import _rewrite_bundle
+
+    fixture = _selected(tmp_path, monkeypatch, restated=False)
+    package = _package(tmp_path, _build(fixture))
+    assert _verify(fixture, package)["verification"] == "VALID"
+    receipt = json.loads((package / "dependence-source.json").read_text("utf-8"))
+    receipt["history_authority"]["generation_id"] = "9" * 64
+    with pytest.raises(
+        current.CurrentDependenceError,
+        match="selected dependence receipt authority differs",
+    ):
+        _verify(fixture, _rewrite_bundle(package, receipt))

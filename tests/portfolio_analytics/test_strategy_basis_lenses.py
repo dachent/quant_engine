@@ -299,6 +299,20 @@ def test_the_hybrid_plan_of_an_unadmitted_model_live_strategy_is_its_live_series
     declared sleeve path) instead of refusing, and without a backtest prehistory.
     """
 
+    # the real contract admits the AI layer; hold it for this test, in the builder
+    # and in the verifier the plan runs
+    verifier = planner._layered_history_module()
+    monkeypatch.setattr(planner, "_layered_history_module", lambda: verifier)
+    for module in (target_series, verifier):
+        original = module._model_live_layers
+
+        def held(corrections: Any, _original: Any = original) -> Any:
+            return {
+                strategy: (start, False)
+                for strategy, (start, _admitted) in _original(corrections).items()
+            }
+
+        monkeypatch.setattr(module, "_model_live_layers", held)
     artifacts, manifest = _restated(world)
     coverage = json.loads(artifacts["coverage.json"])
     ai = next(row for row in coverage["strategies"] if row["strategy_id"] == AI)
@@ -506,7 +520,8 @@ def test_the_hybrid_lane_splits_the_backtest_at_the_parent_start_not_the_sleeve_
     sleeve = strategy_basis.rows_from_sleeve_facts(_bytes(_facts()), AI)
     parent = _ledger_rows(world)
     assert parent[0]["date"] < sleeve[0]["date"]
-    backtest_days = ["2025-12-30", "2025-12-31", parent[0]["date"]]
+    # the last two backtest sessions precede the account by no more than a long weekend
+    backtest_days = ["2025-12-31", "2026-01-02", parent[0]["date"]]
     assert backtest_days[-1] < sleeve[0]["date"]
     projection = [
         {
@@ -534,8 +549,8 @@ def test_the_hybrid_lane_splits_the_backtest_at_the_parent_start_not_the_sleeve_
     )
     rows = lanes[SERIES]["rows"]
     assert [r["date"] for r in rows if r["evidence_layer"] == "BACKTEST"] == [
-        "2025-12-30",
         "2025-12-31",
+        "2026-01-02",
     ]
     assert [r["date"] for r in rows if r["evidence_layer"] == "ACCOUNT_LIVE"] == [
         r["date"] for r in parent
@@ -646,3 +661,178 @@ def test_without_a_lane_there_is_no_split_margin(tmp_path: Path) -> None:
     target, days = _write_sources(root)
     result, _, _ = decomposition.build_decomposition(_spec(root, target, days), root)
     assert "split_margin" not in result["model_results"][0]["coverage"]
+
+
+def test_the_hybrid_plan_of_an_admitted_model_live_strategy_is_backtest_then_model_live(
+    world: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill test: an admitted model-live layer is the live end of the plan, never
+    the account, and the plan no longer refuses for lack of an account segment."""
+
+    from test_portfolio_layered_history import _admit_p123_ai_model_live
+
+    import test_portfolio_layered_history as layered
+
+    # the world builds in immutable-generation mode; identity refresh must too
+    monkeypatch.setattr(layered, "_build", lambda _fixture: _build(world))
+    _admit_p123_ai_model_live(world["fixture"])
+    from test_portfolio_layered_history import _synthetic_current_admission
+
+    # the contract changed, so the admission it binds is recomputed for build and plan
+    admitted = _synthetic_current_admission(world["fixture"])
+    monkeypatch.setattr(
+        target_series, "_current_source_admission_authority", lambda **_: admitted
+    )
+    # the sleeve restatement is declared: the hybrid plan must not seal-check the
+    # account rows it does not carry
+    artifacts, manifest = _restated(world)
+    result = _plan(
+        world,
+        monkeypatch,
+        artifacts,
+        manifest,
+        mode="LIVE_PLUS_BACKTEST",
+        admission=admitted,
+    )
+    composition = result["composition"][SERIES]
+    assert composition["status"] == "AVAILABLE_BACKTEST_PREHISTORY_PLUS_MODEL_LIVE"
+    assert composition["live_evidence_layer"] == "MODEL_LIVE"
+    assert composition["backtest_observations_used"] > 0
+    primary = [row for row in result["rows"] if row["series_id"] == SERIES]
+    assert {row["evidence_layer"] for row in primary} == {"BACKTEST", "MODEL_LIVE"}
+    # the account lane still rides beside the research series
+    assert {row["evidence_layer"] for row in composition["account_basis"]["rows"]} >= {
+        "ACCOUNT_LIVE"
+    }
+
+
+def _lane_manifest() -> dict[str, Any]:
+    return {
+        "strategy_basis_restatement": {
+            "sleeve_facts": json.dumps({"parent_account_id": "parent"}),
+            "strategies": [
+                {
+                    "series_id": SERIES,
+                    "strategy_id": AI,
+                    "series_sha256": "0" * 64,
+                    "account_id": "sleeve",
+                }
+            ],
+        }
+    }
+
+
+def _lanes(rows: list[dict[str, str]], mode: str) -> Any:
+    return planner._account_basis_lanes(
+        manifest=_lane_manifest(),
+        planned_series={SERIES: AI},
+        selected_projection=rows,
+        evidence_mode=mode,
+        provider_ledger_catalog_path=None,
+    )
+
+
+def _row(layer: str, day: str) -> dict[str, str]:
+    return {
+        "series_id": SERIES,
+        "date": day,
+        "evidence_layer": layer,
+        "return": "0.01",
+    }
+
+
+def test_the_sleeve_seal_is_kept_where_account_rows_are_selected() -> None:
+    """Kill test: in LIVE_ONLY the account rows must be the sealed sleeve rows."""
+
+    with pytest.raises(
+        planner.CurrentPlanError, match="selected live rows differ from the restated"
+    ):
+        _lanes([_row("ACCOUNT_LIVE", "2026-01-05")], "LIVE_ONLY")
+
+
+def test_a_model_live_research_series_never_carries_the_account() -> None:
+    """Kill test: a hybrid projection of a model-live strategy with an account row
+    is refused, where the seal check does not apply."""
+
+    with pytest.raises(planner.CurrentPlanError, match="carries the account"):
+        _lanes(
+            [_row("MODEL_LIVE", "2026-01-06"), _row("ACCOUNT_LIVE", "2026-01-05")],
+            "LIVE_PLUS_BACKTEST",
+        )
+
+
+def _weekdays(first: str, last: str) -> list[str]:
+    day = __import__("datetime").date.fromisoformat(first)
+    end = __import__("datetime").date.fromisoformat(last)
+    result = []
+    while day <= end:
+        if day.weekday() < 5:
+            result.append(day.isoformat())
+        day += __import__("datetime").timedelta(days=1)
+    return result
+
+
+def _ai_shaped_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, skip: tuple[str, str] | None = None
+) -> dict[str, Any]:
+    """AI shape: backtest to 2025-05-09, model live from 2025-05-12, account from 2026-01-22."""
+
+    monkeypatch.setattr(
+        planner, "_account_basis_lane_label", lambda **_kwargs: "account basis"
+    )
+    catalog = tmp_path / "ledger.json"
+    catalog.write_text(
+        json.dumps(
+            {
+                "strategy_returns": [
+                    {
+                        "strategy_id": AI,
+                        "evidence_layer": "ACCOUNT_LIVE",
+                        "date": day,
+                        "return": "0.001",
+                    }
+                    for day in _weekdays("2026-01-22", "2026-01-30")
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    projection = [
+        _row("BACKTEST", day) for day in _weekdays("2025-05-05", "2025-05-09")
+    ] + [
+        _row("MODEL_LIVE", day)
+        for day in _weekdays("2025-05-12", "2026-01-21")
+        if not (skip and skip[0] <= day <= skip[1])
+    ]
+    return planner._account_basis_lanes(
+        manifest=_lane_manifest(),
+        planned_series={SERIES: AI},
+        selected_projection=projection,
+        evidence_mode="LIVE_PLUS_BACKTEST",
+        provider_ledger_catalog_path=catalog,
+    )
+
+
+def test_the_account_lane_of_a_model_live_strategy_is_continuous_across_the_model_live_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill test (reproduces the reviewed defect): the lane joined the backtest to the
+    account across the whole model-live period, skipping its sessions and compounding
+    the jump into published figures."""
+
+    lane = _ai_shaped_lane(tmp_path, monkeypatch)[SERIES]
+    rows = lane["rows"]
+    layers = [row["evidence_layer"] for row in rows]
+    assert set(layers) == {"BACKTEST", "MODEL_LIVE", "ACCOUNT_LIVE"}
+    # every model-live session between the backtest and the account is in the lane
+    assert layers.count("MODEL_LIVE") == len(_weekdays("2025-05-12", "2026-01-21"))
+    days = [__import__("datetime").date.fromisoformat(row["date"]) for row in rows]
+    assert max((later - earlier).days for earlier, later in zip(days, days[1:])) <= 4
+
+
+def test_the_account_lane_refuses_a_hole_between_its_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(planner.CurrentPlanError, match="account-basis lane has a hole"):
+        _ai_shaped_lane(tmp_path, monkeypatch, skip=("2025-08-01", "2025-08-29"))
