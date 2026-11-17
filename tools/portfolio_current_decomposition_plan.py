@@ -1203,7 +1203,19 @@ def _account_basis_lanes(
             ),
             key=lambda row: row["date"],
         )
-        if _series_path_sha256(live) != identity.get("series_sha256"):
+        if any(
+            row["series_id"] == series_id and row["evidence_layer"] == "MODEL_LIVE"
+            for row in selected_projection
+        ):
+            # The research series of a strategy with an admitted model-live layer is
+            # backtest then the model's own live record; the sleeve restatement
+            # seals the account's live rows, which that series never carries.  The
+            # sealed rows are checked in the mode that does select them.
+            if live:
+                raise CurrentPlanError(
+                    f"research series of a model-live strategy carries the account: {strategy_id}"
+                )
+        elif _series_path_sha256(live) != identity.get("series_sha256"):
             raise CurrentPlanError(
                 f"selected live rows differ from the restated history: {strategy_id}"
             )
@@ -1260,7 +1272,9 @@ def _account_basis_lanes(
                 facts=facts,
                 block=block_value,
                 sleeve_account_id=str(identity.get("account_id")),
-                cutoff=str(live[-1]["date"]),
+                # the research series of a model-live strategy selects no account
+                # row, so its lane runs to the end of the account series itself
+                cutoff=str((live or parent)[-1]["date"]),
             ),
             "ledger_catalog_sha256": catalog_sha256,
             "parent_series_sha256": _series_path_sha256(parent),

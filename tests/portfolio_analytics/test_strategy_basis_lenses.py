@@ -683,7 +683,9 @@ def test_the_hybrid_plan_of_an_admitted_model_live_strategy_is_backtest_then_mod
     monkeypatch.setattr(
         target_series, "_current_source_admission_authority", lambda **_: admitted
     )
-    artifacts, manifest = _build(world)
+    # the sleeve restatement is declared: the hybrid plan must not seal-check the
+    # account rows it does not carry
+    artifacts, manifest = _restated(world)
     result = _plan(
         world,
         monkeypatch,
@@ -698,3 +700,7 @@ def test_the_hybrid_plan_of_an_admitted_model_live_strategy_is_backtest_then_mod
     assert composition["backtest_observations_used"] > 0
     primary = [row for row in result["rows"] if row["series_id"] == SERIES]
     assert {row["evidence_layer"] for row in primary} == {"BACKTEST", "MODEL_LIVE"}
+    # the account lane still rides beside the research series
+    assert {row["evidence_layer"] for row in composition["account_basis"]["rows"]} >= {
+        "ACCOUNT_LIVE"
+    }
