@@ -6106,7 +6106,14 @@ def _closure_row(
         "declared_end": "2026-07-30",
         "checks": checks,
         "proven_record_ids": proven or [],
-        **({"proven_records": records} if records is not None else {}),
+        "proven_records": (
+            records
+            if records is not None
+            else [
+                {"record_id": rid, "event_date": "2026-02-01", "amount": "1"}
+                for rid in proven or []
+            ]
+        ),
     }
 
 
@@ -6357,3 +6364,36 @@ def test_an_accepted_record_without_a_date_cannot_sit_inside_a_complete_row() ->
     row = _matrix_row(None, [_accepted("t-1"), undated], proof)
     assert row["status"] != "DECLARED_COMPLETE"
     assert "1 accepted records carry no date" in row["missing_interval_reason"]
+
+
+def test_a_closure_row_without_proven_records_never_declares_complete() -> None:
+    row = _closure_row("DECLARED_COMPLETE", proven=["t-1"])
+    del row["proven_records"]  # a catalog built before the rows carried them
+    proof = {("account-reserve", "transactions"): row}
+    matrix = _matrix_row(None, [_accepted("t-1")], proof)
+    assert matrix["status"] != "DECLARED_COMPLETE"
+    assert "carries no proven records" in matrix["missing_interval_reason"]
+
+
+def test_records_before_the_declared_start_in_covered_time_refuse_completeness() -> (
+    None
+):
+    row = _closure_row("DECLARED_COMPLETE", proven=["t-1"])
+    row["checks"].append(
+        {
+            "check": "NO_FLOWS_BEFORE_DECLARED_START_WITH_STATEMENT_COVERAGE",
+            "status": "PASS",
+            "failures": 0,
+            "statement_days_before_start": 3,
+        }
+    )
+    proof = {("account-reserve", "transactions"): row}
+    early = [_accepted("t-1"), _accepted("t-0", "2025-12-01")]
+    refused = _matrix_row(None, early, proof)
+    assert refused["status"] != "DECLARED_COMPLETE"
+    assert "lie in time the statements covered" in refused["missing_interval_reason"]
+    # no statement day before the start: the earlier record is disclosed, not refused
+    row["checks"][-1]["statement_days_before_start"] = 0
+    disclosed = _matrix_row(None, early, proof)
+    assert disclosed["status"] == "DECLARED_COMPLETE"
+    assert "outside the declaration" in disclosed["missing_interval_reason"]

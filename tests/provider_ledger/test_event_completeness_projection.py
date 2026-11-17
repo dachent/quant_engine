@@ -136,3 +136,20 @@ def test_a_typed_outcome_reaches_the_catalog_with_its_verified_evidence(
     row = _catalog(staged, tmp_path)["event_completeness"][0]
     assert row["status"] == "CAPTURED_NOT_ADMITTED" and row["fact_type"] == "positions"
     ledger.verify_candidate(spec_path, str(staged["generation_id"]))
+
+
+def test_a_provider_catalog_cannot_name_another_providers_account() -> None:
+    catalog = {"accounts": [{"account_id": "account-own"}]}
+    own = ledger._own_account_items(
+        "ibkr",
+        catalog,
+        [{"account_id": "account-own", "closed_date": "2026-01-01"}],
+        "account_id",
+    )
+    assert len(own) == 1
+    with pytest.raises(ledger.ProviderLedgerError, match="outside its own accounts"):
+        ledger._own_account_items(
+            "ibkr", catalog, [{"account_id": "account-other"}], "account_id"
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="outside its own accounts"):
+        ledger._own_account_items("schwab", catalog, ["account-other"], None)

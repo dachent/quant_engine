@@ -5537,8 +5537,6 @@ def _coverage_evidence(
                 proven_rows = proof.get("proven_records")
 
                 def keyed(item: Mapping[str, Any]) -> tuple[str, ...]:
-                    if proven_rows is None:
-                        return (str(item.get("record_id")),)
                     amount = item.get(amount_field)
                     return (
                         str(item.get("record_id")),
@@ -5552,20 +5550,37 @@ def _coverage_evidence(
                     if item.get(date_field) and lo <= str(item[date_field]) <= hi
                 )
                 undated = sum(1 for item in accepted if not item.get(date_field))
+                proven_keys: Counter[tuple[str, ...]] = Counter(
+                    (
+                        str(row["record_id"]),
+                        str(row["event_date"]),
+                        str(row["amount"]),
+                    )
+                    for row in (proven_rows or [])
+                )
+                before_start = sum(
+                    1
+                    for item in accepted
+                    if item.get(date_field) and str(item[date_field]) < lo
+                )
+                covered_before = any(
+                    check.get("check")
+                    == "NO_FLOWS_BEFORE_DECLARED_START_WITH_STATEMENT_COVERAGE"
+                    and int(check.get("statement_days_before_start") or 0) > 0
+                    for check in proof.get("checks", [])
+                )
                 if proven_rows is None:
-                    proven_keys: Counter[tuple[str, ...]] = Counter(
-                        (str(x),) for x in proof.get("proven_record_ids", [])
+                    # a closure row without the proven (id, date, amount) records cannot be
+                    # compared: refused, never reduced to ids alone
+                    proof_gap = f"; ledger closure {proof['closure']} row carries no proven records"
+                elif before_start and covered_before:
+                    # accepted records dated before the declared start, where the statements
+                    # already covered that time, sit in covered history outside the claim
+                    proof_gap = (
+                        f"; {before_start} accepted records dated before the declared start "
+                        f"{proof['declared_start']} lie in time the statements covered"
                     )
-                else:
-                    proven_keys = Counter(
-                        (
-                            str(row["record_id"]),
-                            str(row["event_date"]),
-                            str(row["amount"]),
-                        )
-                        for row in proven_rows
-                    )
-                if excluded or undated or accepted_keys != proven_keys:
+                elif excluded or undated or accepted_keys != proven_keys:
                     proof_gap = (
                         f"; ledger closure {proof['closure']} proved the provider event stream "
                         f"but the accepted records differ: "

@@ -11172,6 +11172,31 @@ def _generation_as_of_date(
 
 
 @_catalog_decimal_context
+def _own_account_items(
+    provider_id: str,
+    catalog: Mapping[str, Any],
+    items: Sequence[Any],
+    key: str | None,
+) -> list[Any]:
+    """Catalog-level account facts (closure dates, empty position sets) of one provider.
+
+    Each item must name an account of the same provider catalog: a provider cannot assert a
+    closure or an empty position set for another provider's account.
+    """
+
+    own = {
+        str(account["account_id"])
+        for account in _objects(catalog.get("accounts", []), f"{provider_id}.accounts")
+    }
+    for item in items:
+        account_id = str(item[key] if key is not None else item)
+        if account_id not in own:
+            raise ProviderLedgerError(
+                f"{provider_id} catalog names an account outside its own accounts: {account_id}"
+            )
+    return list(items)
+
+
 def build_catalog(
     spec_path: Path,
 ) -> tuple[dict[str, Any], GenerationManifest, bytes, bytes]:
@@ -11378,16 +11403,26 @@ def build_catalog(
                     str(item["account_id"]): _day(
                         item["closed_date"], "closed_accounts.closed_date"
                     )
-                    for catalog_ in catalogs.values()
-                    for item in _objects(
-                        catalog_.get("closed_accounts", []), "closed_accounts"
+                    for provider_id_, catalog_ in catalogs.items()
+                    for item in _own_account_items(
+                        provider_id_,
+                        catalog_,
+                        _objects(
+                            catalog_.get("closed_accounts", []), "closed_accounts"
+                        ),
+                        "account_id",
                     )
                 },
                 empty_position_accounts=sorted(
                     {
                         str(account_id)
-                        for catalog_ in catalogs.values()
-                        for account_id in catalog_.get("empty_position_account_ids", [])
+                        for provider_id_, catalog_ in catalogs.items()
+                        for account_id in _own_account_items(
+                            provider_id_,
+                            catalog_,
+                            list(catalog_.get("empty_position_account_ids", [])),
+                            None,
+                        )
                     }
                 ),
             )
