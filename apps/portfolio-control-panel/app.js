@@ -3175,6 +3175,19 @@
     }).map((tick) => ({ ...tick, anchor: "middle" }));
     return [{ time: from, label: perfEdgeLabel(from), anchor: "start" }, ...kept, { time: to, label: perfEdgeLabel(to), anchor: "end" }];
   }
+  // Linear ticks with at least four gridlines: of the nice steps, the one giving the count nearest the target within four to nine.
+  function perfTicksMin(low, high, count = 5) {
+    const span = high - low || 1;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(span / count)));
+    let best = null;
+    for (const factor of [0.1, 0.2, 0.25, 0.5, 1, 2, 2.5, 5, 10]) {
+      const step = factor * magnitude;
+      const ticks = [];
+      for (let value = Math.ceil(low / step) * step; value <= high + step * 1e-9; value += step) ticks.push(Number(value.toFixed(10)));
+      if (ticks.length >= 4 && ticks.length <= 9 && (!best || Math.abs(ticks.length - count) < Math.abs(best.length - count))) best = ticks;
+    }
+    return best || perfTicks(low, high, count);
+  }
   // Log-axis ticks: powers of two while few, decades otherwise, never more than eight.
   function perfLogAxisTicks(low, high) {
     for (const base of [2, 10]) {
@@ -3189,12 +3202,12 @@
   const perfPercent = (value) => { const percent = (value - 1) * 100; const text = Math.abs(percent) >= 100000 ? perfCompact.format(percent) : percent.toFixed(1); return `${percent > 0 ? "+" : ""}${text}%`; };
   const perfIsLive = (origin) => origin == null || origin === "ACCOUNT_LIVE";
   // First live week of a line that has earlier non-live weeks (backtest or model); null when it is live throughout.
-  function perfLiveStart(line) {
+  function perfLiveStart(line, startByEnd) {
     const pts = line.points.filter((point) => point.value != null);
     const index = pts.findIndex((point) => perfIsLive(point.origin));
     if (index <= 0 || !pts.slice(0, index).some((point) => !perfIsLive(point.origin))) return null;
     const latest = pts[pts.length - 1].value;
-    return { time: pts[index].time, value: pts[index].value, liveReturn: latest / pts[index - 1].value - 1 };
+    return { time: startByEnd?.get(pts[index].time) ?? pts[index - 1].time, value: pts[index - 1].value, liveReturn: latest / pts[index - 1].value - 1 };
   }
   // The window each zoom really shows: the later of the requested start and the group anchor.
   function perfWindows(built) {
@@ -3203,7 +3216,7 @@
     const anchor = anchorIndex ?? 0;
     return PERF_ZOOMS.map(([label, days]) => {
       const requestedTime = days == null ? null : days === "ytd" ? Date.UTC(new Date(lastTime).getUTCFullYear(), 0, 1) : lastTime - days * PERF_DAY;
-      const requested = requestedTime == null ? 0 : Math.max(0, starts.findIndex((time) => time >= requestedTime));
+      const requested = requestedTime == null ? 0 : (starts.findIndex((time) => time >= requestedTime) < 0 ? starts.length - 1 : starts.findIndex((time) => time >= requestedTime));
       const baseIndex = Math.max(requested, anchor);
       return { label, days, baseIndex, start: starts[baseIndex], limited: requestedTime != null && anchor > requested, requestedDays: requestedTime == null ? null : Math.round((lastTime - requestedTime) / PERF_DAY), spanDays: Math.round((lastTime - starts[baseIndex]) / PERF_DAY) };
     });
@@ -3323,6 +3336,7 @@
       return;
     }
     const { starts, ends } = built;
+    const startByEnd = new Map(ends.map((end, index) => [end, starts[index]]));
     const windows = perfWindows(built);
     const current = windows.find((item) => item.label === perfZoom) || windows[windows.length - 1];
     const maxView = current.label === "Max";
@@ -3352,14 +3366,14 @@
     const x = (time) => left + (time - from) / Math.max(1, lastTime - from) * (width - left - right);
     const y = (value) => top + (1 - ((logScale ? Math.log(value) : value) - yLow) / Math.max(1e-9, yHigh - yLow)) * (height - top - bottom);
     const yCount = Math.max(4, Math.floor((height - top - bottom) / 48));
-    const yTicks = (logScale ? (high / low < 3 ? perfTicks(low * 0.98, high * 1.02, yCount) : perfLogAxisTicks(low * 0.98, high * 1.02)) : perfTicks(Math.max(0, yLow), yHigh, yCount)).filter((tick) => tick > 0);
+    const yTicks = (logScale ? (high / low < 12 ? perfTicksMin(low * 0.98, high * 1.02, yCount) : perfLogAxisTicks(low * 0.98, high * 1.02)) : perfTicksMin(Math.max(0, yLow), yHigh, yCount)).filter((tick) => tick > 0);
     const xTicks = perfTimeTicks(from, lastTime, width - left - right);
     const grid = yTicks.map((tick) => `<line x1="${left}" x2="${width - right}" y1="${y(tick).toFixed(1)}" y2="${y(tick).toFixed(1)}" stroke="currentColor" stroke-opacity="${tick === 1 ? 0.4 : 0.14}"${tick === 1 ? ' stroke-dasharray="4 3"' : ""}></line><text class="chart-label axis-label" x="2" y="${(y(tick) + 4).toFixed(1)}">${perfTickLabel(tick)}</text>`).join("")
       + xTicks.map((tick) => `<text class="chart-label axis-label" text-anchor="${tick.anchor}" x="${x(tick.time).toFixed(1)}" y="${height - 8}">${safe(tick.label)}</text>`).join("");
     const paths = visibleLines.map((line) => perfSegments(line.points).map((segment) => `<polyline fill="none" stroke="${line.color}" stroke-width="${line.kind === "portfolio" ? 2.6 : 1.8}"${segment.style.dash ? ` stroke-dasharray="${segment.style.dash}"` : ""}${line.kind === "benchmark" ? ' stroke-opacity=".85"' : ""} points="${segment.points.map((point) => `${x(point.time).toFixed(1)},${y(point.value).toFixed(1)}`).join(" ")}"></polyline>`).join("")).join("");
     // A dot where a line's live evidence begins, after backtest or model weeks.
     const liveMarkers = visibleLines.map((line) => {
-      const live = perfLiveStart(line);
+      const live = perfLiveStart(line, startByEnd);
       return live ? `<circle cx="${x(live.time).toFixed(1)}" cy="${y(live.value).toFixed(1)}" r="3.4" fill="${line.color}" stroke="#081018" stroke-width="1"><title>${safe(line.name)}: live evidence starts ${safe(perfDate(live.time))}</title></circle>` : "";
     }).join("");
     const latest = (line) => line.points.filter((point) => point.value != null).at(-1)?.value;
@@ -3409,7 +3423,7 @@
     // Each chip says which weeks its percentage covers, and the live-only share for a line with earlier backtest weeks.
     const windowText = (line) => {
       const pts = line.points.filter((point) => point.value != null);
-      const live = perfLiveStart(line);
+      const live = perfLiveStart(line, startByEnd);
       const years = (pts[pts.length - 1].time - pts[0].time) / (365 * PERF_DAY);
       const annual = years >= 1 && pts[0].value > 0 ? ` · ${perfPercent(Math.pow(pts[pts.length - 1].value / pts[0].value, 1 / years))} a year` : " · under 1 year, not annualized";
       return `${perfDate(pts[0].time)} → ${perfDate(pts[pts.length - 1].time)}${annual}${live ? ` · live from ${perfDate(live.time)}, live ${perfPercent(1 + live.liveReturn)}` : ""}`;
@@ -3534,7 +3548,7 @@
     const zoom = PERF_VALUE_ZOOMS.find(([label]) => label === perfValueZoom);
     const peakTotal = Math.max(...table.map((row) => row.total));
     const firstMeaningful = table.find((row) => row.total >= peakTotal * PERF_VALUE_MIN_SHARE) || table[0];
-    const requestedFrom = zoom?.[1] == null ? null : zoom[1] === "ytd" ? Date.UTC(new Date(lastTime).getUTCFullYear(), 0, 1) : lastTime - zoom[1] * PERF_DAY;
+    const requestedFrom = zoom?.[1] == null ? null : zoom[1] === "ytd" ? Date.UTC(new Date(lastTime).getUTCFullYear() - 1, 11, 31) : lastTime - zoom[1] * PERF_DAY;
     const from = requestedFrom == null ? firstMeaningful.time : Math.max(table[0].time, requestedFrom);
     const rows = table.filter((row) => row.time >= from);
     // A slice that is $0 in every row of the window is left out of the stack, the tooltip and the legend.
@@ -3626,7 +3640,9 @@
     }
     const basesText = basesParts.join(" · ");
     const windowReturn = perfValueZoom === "Max" && published && number(published.cumulative_return) != null ? Number(published.cumulative_return) : !path.length ? null : perfValueZoom === "Max" ? perfIndexReturn(path, perfTime(path[0].as_of), lastTime) : perfIndexReturn(path, from, lastTime);
-    $("#perf-value-readout").innerHTML = `<div class="perf-readout"><div><span>Systematic portfolio value</span><b>${currency(end.total)}</b><small>${safe(formatDate(end.date))}, reserve excluded</small></div><div><span>Change in value, ${safe(perfValueZoom)}</span><b>${currency(end.total - first.total)}</b><small>includes deposits and withdrawals</small></div><div><span>Time-weighted return, ${safe(perfValueZoom)}</span><b>${windowReturn == null ? "—" : pct(windowReturn)}</b><small>${windowReturn == null ? "no governed index in this snapshot" : `${safe(proofLabel)}, levered net NAV basis`}${summedText ? `<br>${safe(summedText)}` : ""}${basesText ? `<br>${safe(basesText)}` : ""}</small></div></div>`;
+    const twrStart = perfValueZoom === "Max" ? (published?.window_start || path[0]?.as_of || null) : perfDate(from);
+    const twrStartText = windowReturn != null && twrStart ? `from ${safe(formatDate(String(twrStart).slice(0, 10)))}${String(twrStart).slice(0, 10) !== perfDate(first.time) ? " (not the start of the value change beside it)" : ""}; ` : "";
+    $("#perf-value-readout").innerHTML = `<div class="perf-readout"><div><span>Systematic portfolio value</span><b>${currency(end.total)}</b><small>${safe(formatDate(end.date))}, reserve excluded</small></div><div><span>Change in value, ${safe(perfValueZoom)}</span><b>${currency(end.total - first.total)}</b><small>${safe(perfDate(first.time))} to ${safe(perfDate(end.time))}; includes deposits and withdrawals</small></div><div><span>Time-weighted return, ${safe(perfValueZoom)}</span><b>${windowReturn == null ? "—" : pct(windowReturn)}</b><small>${twrStartText}${windowReturn == null ? "no governed index in this snapshot" : `${safe(proofLabel)}, levered net NAV basis`}${summedText ? `<br>${safe(summedText)}` : ""}${basesText ? `<br>${safe(basesText)}` : ""}</small></div></div>`;
     const benchmarkGapDays = (item) => {
       const first = table.findIndex((row, position) => row.time >= from && item.dollars[position] > 0);
       return first < 0 ? 0 : table.filter((row, position) => position > first && row.time >= from && !(item.dollars[position] > 0)).length;

@@ -260,7 +260,7 @@ def _number(label: str) -> float:
     return float(match.group(1).replace(",", "")) * scale
 
 
-ZOOMS = ["1m", "3m", "6m", "1y", "3y", "Max"]
+ZOOMS = ["1m", "3m", "6m", "YTD", "1y", "3y", "Max"]
 
 
 def test_time_ticks_are_calendar_aware_with_exact_edges_and_no_repeats(
@@ -317,13 +317,22 @@ def test_max_is_the_common_window_on_a_linear_axis_without_huge_ticks(
     assert len(xs) == len(set(xs))
     note = _text(dom, "#perf-returns-note")
     assert "Common window" in note and "group anchor" in note
-    legend = _text(dom, "#perf-returns-legend")
-    assert "345" not in legend  # no compounded-from-2007 percentages
-    # every chip covers the same common window
-    windows = set(re.findall(r"(\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})", legend))
-    assert (
-        len({start for start, _end in windows}) <= 2
-    )  # live-from dates aside, one rebase start per line group
+    chips = re.findall(
+        r"<button[^>]*perf-legend-item.*?</button>",
+        dom["#perf-returns-legend"]["innerHTML"],
+        flags=re.S,
+    )
+    texts = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", chip)) for chip in chips]
+    assert len(texts) == 6
+    # every chip covers the same common window, and none is a compounded-from-the-past percentage
+    starts = {
+        re.search(r"([0-9]{4}-[0-9]{2}-[0-9]{2}) → ", text).group(1) for text in texts
+    }
+    assert starts == {_week_start(300)}
+    assert all(
+        abs(float(re.search(r"[+-][0-9.]+(?=%)", text).group(0))) < 1000
+        for text in texts
+    )
 
 
 def test_own_start_view_is_explicit_log_with_few_ticks_and_windows_on_every_chip(
@@ -352,6 +361,14 @@ def test_each_chip_names_its_window_and_the_live_share_of_a_backtest_line(
         r"Gamma [^A-Z]*?(\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})([^A-Z]*)", legend
     )
     assert gamma and "live from" not in gamma.group(3)  # live throughout: no marker
+    # The live start is the first day of the first live week (week index 260 and 310 of the grid),
+    # the same day the live return is measured from, not that week's end.
+    assert f"live from {_week_start(260)}" in legend
+    assert f"live from {_week_start(310)}" in legend
+
+
+def _week_start(index: int) -> str:
+    return (FIRST_MONDAY + timedelta(days=7 * index)).isoformat()
 
 
 def test_a_dot_marks_where_live_evidence_begins(tmp_path: Path) -> None:
@@ -360,6 +377,8 @@ def test_a_dot_marks_where_live_evidence_begins(tmp_path: Path) -> None:
     assert (
         html.count("live evidence starts") == 2
     )  # Alpha and Beta; Gamma is live throughout
+    assert f"live evidence starts {_week_start(260)}" in html
+    assert f"live evidence starts {_week_start(310)}" in html
 
 
 def test_one_year_and_three_year_differ_when_the_anchor_allows(tmp_path: Path) -> None:
@@ -378,13 +397,11 @@ def test_every_zoom_has_unique_axis_labels_and_edge_dates_on_both_charts(
     tmp_path: Path,
 ) -> None:
     for zoom in ZOOMS:
-        value_zoom = "Max" if zoom in ("3y", "Max") else zoom
+        value_zoom = "Max" if zoom == "3y" else zoom
         dom = _run(
             tmp_path,
             _payload(),
-            [
-                f'perfZoom = "{zoom}"; perfValueZoom = "{value_zoom if value_zoom in ("1w", "1m", "3m", "6m", "1y", "Max") else "Max"}"'
-            ],
+            [f'perfZoom = "{zoom}"; perfValueZoom = "{value_zoom}"'],
         )
         for selector in ("#perf-returns-chart", "#perf-value-chart"):
             xs, _ys = _axis(dom[selector]["innerHTML"])
@@ -594,3 +611,51 @@ def test_benchmark_days_without_a_value_are_named(tmp_path: Path) -> None:
     assert "3 days in this window have no benchmark value" in _text(
         dom, "#perf-value-legend"
     )
+
+
+def test_value_chart_ytd_starts_on_the_prior_year_last_day(tmp_path: Path) -> None:
+    # The trailing table and the producer measure year to date from the prior year's last day.
+    payload = _payload()
+    slices = payload["performance_tab"]["slices"]
+    first = date(2024, 11, 1)
+    slices["dates"] = [(first + timedelta(days=i)).isoformat() for i in range(140)]
+    dom = _run(tmp_path, payload, ['perfValueZoom = "YTD"'])
+    assert _text(dom, "#perf-value-window-note").startswith("YTD: 2024-12-31 to ")
+
+
+def test_the_readout_states_where_the_value_change_and_the_return_each_start(
+    tmp_path: Path,
+) -> None:
+    payload = _payload()
+    payload["hwm_governed_proof"] = {
+        "financial_acceptance": "PENDING_OWNER_ACCEPTANCE",
+        "index_path": [
+            {"as_of": "2025-01-01", "index": "100"},
+            {"as_of": "2025-11-17", "index": "110"},
+        ],
+    }
+    dom = _run(tmp_path, payload, ['perfValueZoom = "Max"'])
+    readout = _text(dom, "#perf-value-readout")
+    assert "2025-07-01 to 2025-11-17; includes deposits and withdrawals" in readout
+    assert "from Jan 1, 2025 (not the start of the value change beside it)" in readout
+
+
+def test_linear_ticks_always_give_at_least_four_gridlines(tmp_path: Path) -> None:
+    for low, high in ((0.95, 2.1), (1.0, 2.0), (0.8, 1.45), (0.0, 0.3)):
+        ticks = _eval(tmp_path, f"perfTicksMin({low}, {high}, 5)")
+        assert 4 <= len(ticks) <= 9, (low, high, ticks)
+        assert ticks == sorted(ticks) and all(
+            low - 1e-9 <= t <= high + 1e-9 for t in ticks
+        )
+
+
+def test_a_ytd_start_after_the_last_week_clamps_to_the_last_week(
+    tmp_path: Path,
+) -> None:
+    index = _eval(
+        tmp_path,
+        "perfWindows({ starts: [Date.UTC(2025,11,22), Date.UTC(2025,11,29)], "
+        "ends: [Date.UTC(2025,11,28), Date.UTC(2026,0,4)], anchorIndex: 0 })"
+        ".find((item) => item.label === 'YTD').baseIndex",
+    )
+    assert index == 1

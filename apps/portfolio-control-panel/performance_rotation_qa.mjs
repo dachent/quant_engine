@@ -50,7 +50,9 @@ const probe = (selector) => {
     if (!(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top)) overlaps += 1;
   }
   const clippedLeft = xs.filter((item) => item.rect.left < box.left - 1 || item.rect.right > box.right + 1).length;
-  return { x: xs.map((item) => item.text), y: ys.map((item) => item.text), overlaps, clippedLeft, minFont: Math.min(...labels.map((item) => item.size)), viewBoxWidth: vb.width, boxWidth: box.width, overflowX: document.documentElement.scrollWidth > innerWidth };
+  const baseline = svg.querySelector('line[stroke-dasharray="4 3"]');
+  const starts = [...svg.querySelectorAll("polyline:not(.perf-cursor)")].map((line) => line.getAttribute("points").trim().split(/\s+/)[0].split(",").map(Number));
+  return { baselineY: baseline ? Number(baseline.getAttribute("y1")) : null, starts, x: xs.map((item) => item.text), y: ys.map((item) => item.text), overlaps, clippedLeft, minFont: Math.min(...labels.map((item) => item.size)), viewBoxWidth: vb.width, boxWidth: box.width, overflowX: document.documentElement.scrollWidth > innerWidth };
 };
 const yNumber = (text) => { const match = /^([\d,.]+)([KMBT]?)$/.exec(text); return match ? parseFloat(match[1].replace(/,/g, "")) * ({ "": 1, K: 1e3, M: 1e6, B: 1e9, T: 1e12 })[match[2]] : NaN; };
 
@@ -61,7 +63,16 @@ function check(state, measured, { own = false } = {}) {
   if (measured.overlaps > 0) fail(`${measured.overlaps} overlapping x tick labels`);
   if (new Set(measured.x).size !== measured.x.length) fail(`repeated x tick labels: ${measured.x.join(" | ")}`);
   if (measured.x.length < 2 || !EDGE_DATE.test(measured.x[0]) || !EDGE_DATE.test(measured.x.at(-1))) fail(`x axis does not show exact start and end dates: ${measured.x.join(" | ")}`);
-  if (measured.y.length > 10) fail(`${measured.y.length} y tick labels`);
+  if (measured.y.length > 10 || measured.y.length < 4) fail(`${measured.y.length} y tick labels (need 4 to 10)`);
+  // Comparable views rebase every line to 1.00 at the left edge: the dashed baseline exists and each line starting there starts on it.
+  if (!own && check.rebased) {
+    if (measured.baselineY == null) fail("no 1.00 baseline");
+    else {
+      const left = Math.min(...measured.starts.map((point) => point[0]));
+      const off = measured.starts.filter((point) => Math.abs(point[0] - left) < 0.6 && Math.abs(point[1] - measured.baselineY) > 0.8);
+      if (off.length) fail(`${off.length} lines do not start on the 1.00 baseline`);
+    }
+  }
   if (!own && Math.max(...measured.y.map(yNumber).filter(Number.isFinite)) > yBound) fail(`y tick above ${yBound}: ${measured.y.join(" | ")}`);
   if (measured.minFont < 9) fail(`axis text renders at ${measured.minFont.toFixed(1)} px`);
   if (measured.clippedLeft > 0) fail("x tick label outside the chart box");
@@ -96,7 +107,18 @@ for (const [viewport, width, height] of VIEWPORTS) {
           const button = page.locator(`[data-perf-axis="${axis}"]`);
           if (await button.isEnabled()) await button.click();
           const state = `${viewport}/${mode}/${zoom}/${basis}/${axis}`;
-          check(state, await page.evaluate(probe, "#perf-returns-chart"), { own: basis === "own" });
+          check.rebased = true;
+          const measured = await page.evaluate(probe, "#perf-returns-chart");
+          check(state, measured, { own: basis === "own" });
+          check.rebased = false;
+          // The window line and the chart's first date label agree on the start.
+          if (basis === "common") {
+            const note = await page.$eval("#perf-window-note", (node) => node.textContent);
+            const noteStart = /(?:starts |: )([0-9]{4}-[0-9]{2}-[0-9]{2})/.exec(note)?.[1];
+            const edge = /^([A-Z][a-z]{2}) ([0-9]{1,2}), ([0-9]{4})$/.exec(measured.x[0]);
+            const edgeIso = edge ? `${edge[3]}-${String(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].indexOf(edge[1]) + 1).padStart(2, "0")}-${edge[2].padStart(2, "0")}` : null;
+            if (!noteStart || noteStart !== edgeIso) violations.push({ state, message: `window line start ${noteStart} differs from the first axis date ${edgeIso}` });
+          }
           const chips = await page.$$eval("#perf-returns-legend button.perf-legend-item", (nodes) => nodes.map((node) => node.textContent.replace(/\s+/g, " ").trim()));
           if (!chips.length || chips.some((chip) => !chip.includes("→"))) violations.push({ state, message: `legend chip without a window: ${chips.filter((chip) => !chip.includes("→")).join(" ; ") || "no chips"}` });
           if (axis === "linear" && basis === "common") notes[`${viewport}/${mode}`][zoom] = await page.$eval("#perf-window-note", (node) => node.textContent.trim());

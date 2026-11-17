@@ -4,14 +4,6 @@
   {
    "file": "apps/portfolio-control-panel/app.js",
    "kinds": [
-    "universal",
-    "epoch"
-   ],
-   "text": ": the first week every strategy line has data (set by {})."
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
     "universal"
    ],
    "text": "A first-funded-day flow is used as opening basis only when predecessor continuity proves it;"
@@ -340,14 +332,6 @@
   {
    "file": "apps/portfolio-control-panel/app.js",
    "kinds": [
-    "universal",
-    "epoch"
-   ],
-   "text": "Max view, log axis: each line is rebased to 1.00 at the start of its own first week{};"
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
     "universal"
    ],
    "text": "Measured · compatible exact-date evidence only"
@@ -569,13 +553,6 @@
    "kinds": [
     "universal"
    ],
-   "text": "The Max view spans the full history and always uses a log axis"
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
-    "universal"
-   ],
    "text": "The computed alpha, betas, contributions, and residuals remain visible for forensic review, but the sealed-holdout gate excludes them from portfolio-manager conclusions."
   },
   {
@@ -643,13 +620,6 @@
     "coverage"
    ],
    "text": "Unavailable for this evidence mode: {}."
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
-    "epoch"
-   ],
-   "text": "a line draws nothing before its own first week.{}{}{} {}"
   },
   {
    "file": "apps/portfolio-control-panel/app.js",
