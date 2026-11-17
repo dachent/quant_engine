@@ -6,10 +6,12 @@ validator expectation E2 ("hwm_summary is not AVAILABLE, so NOT_READY") clears o
 these hold, each recomputed here from the bytes and never read from a builder's stated flag:
 
 * the governed proof is AVAILABLE and states ``financial_acceptance == OWNER_ACCEPTED``;
+* the proof's ``owner_acceptance_sha256`` is the sha256 of the record file's bytes (the content pin);
 * the owner's record (``contracts/portfolio-hwm-owner-acceptance-v1.json``) names the same
   policy, carries the decision, and states exactly this proof: the same ``complete_through``,
-  the same index-point count, the same index to four decimals, and the same missing daily
-  points, none of which is a point of the proof's own path;
+  the same index-point count, the same policy sha256, the same index, high-water mark and
+  maximum drawdown to four decimals, and the same missing daily points, each a day of the
+  proof's own (span-filled, daily) path whose last day is complete_through;
 * the panel's missing daily points are exactly the recorded ones;
 * every recorded missing point has exactly one bound in ``contracts/portfolio-hwm-gap-bounds-v1.json``
   from an admitted origin whose upper end (range high x (1 + max(closure error, tolerance)),
@@ -79,6 +81,7 @@ def verify_acceptance(
     panel_missing: Sequence[Mapping[str, Any]] | None,
     record: Mapping[str, Any] | None,
     bounds: Mapping[str, Any] | None,
+    record_sha256: str | None = None,
 ) -> list[str]:
     """Reasons the acceptance does NOT cover this proof; empty means E2 may clear."""
 
@@ -91,6 +94,10 @@ def verify_acceptance(
     if not isinstance(record, Mapping):
         return ["the owner acceptance record is absent or unreadable"]
     reasons: list[str] = []
+    if record_sha256 is None or proof.get("owner_acceptance_sha256") != record_sha256:
+        reasons.append(
+            "the proof's owner_acceptance_sha256 is not the sha256 of the record's bytes"
+        )
     if record.get("schema") != ACCEPTANCE_SCHEMA:
         reasons.append("the record has another schema")
     if record.get("decision") != OWNER_ACCEPTED:
@@ -110,19 +117,34 @@ def verify_acceptance(
         reasons.append("complete_through differs from the record")
     if accepted.get("index_points") != (len(path) if isinstance(path, list) else None):
         reasons.append("the index point count differs from the record")
-    index = _dec(proof.get("current_index"))
-    if index is None or format(index.quantize(Decimal("0.0001")), "f") != str(
-        accepted.get("current_index_4dp")
+    last = (
+        path[-1].get("as_of")
+        if isinstance(path, list) and path and isinstance(path[-1], Mapping)
+        else None
+    )
+    if last != proof.get("complete_through"):
+        reasons.append("the last day of the path is not complete_through")
+    if accepted.get("policy_sha256") != proof.get("policy_sha256"):
+        reasons.append("the record's policy sha256 differs from the proof's")
+    for stated, record_key in (
+        ("current_index", "current_index_4dp"),
+        ("current_hwm", "current_hwm_4dp"),
+        ("maximum_drawdown", "maximum_drawdown_4dp"),
     ):
-        reasons.append("the index to 4 decimals differs from the record")
+        value = _dec(proof.get(stated))
+        if value is None or format(value.quantize(Decimal("0.0001")), "f") != str(
+            accepted.get(record_key)
+        ):
+            reasons.append(f"{stated} to 4 decimals differs from the record")
     recorded = accepted.get("missing_daily_points")
     if not isinstance(recorded, list) or not recorded:
         return reasons + ["the record states no missing daily points"]
     recorded_keys = {_point_key(p) for p in recorded if isinstance(p, Mapping)}
     if len(recorded_keys) != len(recorded):
         reasons.append("the recorded missing points repeat or are malformed")
-    if any(date in path_dates for _, date in recorded_keys):
-        reasons.append("a recorded missing day is a point of the proof's own path")
+    if any(date not in path_dates for _, date in recorded_keys):
+        # the governed path is daily and span-fills a missing day, so it must contain it
+        reasons.append("a recorded missing day is not a point of the proof's own path")
     shown = {_point_key(p) for p in (panel_missing or ()) if isinstance(p, Mapping)}
     if shown != recorded_keys:
         reasons.append("the panel's missing daily points differ from the record")
