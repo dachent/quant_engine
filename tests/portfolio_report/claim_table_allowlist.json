@@ -165,6 +165,11 @@
    "file": "apps/portfolio-control-panel/app.js",
    "pattern": "^(Every series is switched off[.]|Own-start view, log axis: each line is rebased|Common window: every line is rebased|history before it is not drawn here|: the first week every strategy line has data|a line draws nothing before its own first week|Own start: each line from its own first week|[{][}] is limited by the group anchor|Limited by group anchor: starts|The own-start view spans each line|The basis applies to the Max view only|No week starts on or after|[{][}] has no full week yet|[{][}]: no week starts on or after)",
    "justification": "performance-chart state text describing the view the reader selected (basis, zoom, empty selection); true by the control state and exercised in test_performance_chart_audit.py and the Chromium rotation, with dates and day counts printed from the payload's own week grid and group anchor through the placeholders"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "pattern": "^[{][}] NAV day[(]s[)] missing on provider-observed dates for account",
+   "justification": "known-gap disclosure line composed from the calendar rows it names (count, account, provider, first/last date); true by construction and it reports a gap, so it makes no completeness claim to test"
   }
  ]
 }

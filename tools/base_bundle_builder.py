@@ -50,6 +50,7 @@ from typing import Any, Final, Mapping, Sequence
 import zipfile
 
 import base_proxy_factors
+from quant_engine.core import check_entry_interpreter
 
 MODES: Final = ("live_only", "live_plus_backtest")
 CASH: Final = "BIL"
@@ -1024,6 +1025,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--compare", type=Path, help="reference bundle to compare against"
     )
     args = parser.parse_args(argv)
+    refused = check_entry_interpreter("the base bundle builder", "base-bundle-builder")
+    if refused is not None:
+        return refused
     try:
         inputs = load_config(
             args.config,

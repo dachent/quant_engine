@@ -2589,7 +2589,13 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
     left ``reconciliation_checks``; the builder version went 1.2.0 -> 1.3.0; R2.1 then added the per-strategy execution_cost block and the optional cost evidence, 1.3.0 -> 1.4.0; the costs fact then counts derived and classified cost rows, 1.4.0 -> 1.5.0: only the manifest hash moved, the catalog bytes of this fixture did not).
     ``test_allocations_stay_byte_identical_to_the_dated_audit_snapshot`` proves
     that nothing else moved: undoing exactly those changes reproduces the
-    previous catalog hash ``fde46f73...``."""
+    previous catalog hash ``fde46f73...``.
+
+    Moved again when the nav fact claim began disclosing calendar
+    MISSING_ON_PROVIDER_OBSERVED_DATE days: with the reserve refresh (the ledger NAV rows
+    admitted for reserve-pool accounts) the fixture's account-schwab-b has one provider-observed
+    day (2026-07-02) with no NAV observation, so fact_coverage[nav].known_gaps gained exactly one
+    line; nothing else in the catalog differs (catalog 9be761a4... -> 98205cbc...)."""
     spec_path, _spec_data = _spec(tmp_path)
     output_root = tmp_path / "private-output"
     evidence = baseline.stage_baseline(spec_path, output_root)
@@ -2599,11 +2605,11 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
     assert b'"hwm_inputs"' not in catalog_bytes
     assert (
         hashlib.sha256(catalog_bytes).hexdigest()
-        == "9be761a40d9b6254edb8091a2dd4a76a4e0c2e0507f45db3674dabd26a5d9c72"
+        == "98205cbcba50d8306d6091a473d16e2db04b51301fbfc37ae448a96d3896d6fd"
     )
     assert (
         hashlib.sha256(manifest_bytes).hexdigest()
-        == "a6d7957118fa52ebbc29cc8d64005da7ed885b700b0f0d889bf99158a49abca9"
+        == "e6878ea7afe4fc9f8b01f64d71397ceec3938984462902ff64cc775d1484d92b"
     )
 
 
@@ -4232,6 +4238,22 @@ def test_allocations_stay_byte_identical_to_the_dated_audit_snapshot(
     legacy["costs"] = [
         {key: value for key, value in row.items() if key != "execution_cost"}
         for row in catalog["costs"]
+    ]
+    # The nav fact claim later began disclosing calendar days missing on provider-observed
+    # dates (a known_gaps line, present here because the reserve refresh admits the fixture's
+    # account-schwab-b ledger rows): that line is the only difference it adds.
+    legacy["fact_coverage"] = [
+        {
+            **row,
+            "known_gaps": [
+                gap
+                for gap in row.get("known_gaps", [])
+                if "NAV day(s) missing on provider-observed dates" not in gap
+            ],
+        }
+        if "known_gaps" in row
+        else row
+        for row in catalog["fact_coverage"]
     ]
     assert (
         hashlib.sha256(canonical_json_bytes(legacy)).hexdigest()
