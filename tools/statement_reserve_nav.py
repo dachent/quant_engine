@@ -111,7 +111,14 @@ def statement_reserve_facts(
             }
         )
     return {
-        "accounts": [{"account_id": account_id, "provider": account.get("provider")}],
+        "accounts": [
+            {
+                "account_id": account_id,
+                "base_currency": "USD",
+                "provider": account.get("provider"),
+                "role": role,
+            }
+        ],
         "assignments": [
             {
                 "account_id": account_id,

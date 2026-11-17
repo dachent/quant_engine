@@ -5882,3 +5882,82 @@ def test_statement_reserve_pin_with_a_misspelled_key_is_refused(tmp_path: Path) 
     }
     with pytest.raises(baseline.BaselineValidationError, match="unknown key"):
         baseline._statement_reserve_facts([pin], date(2026, 9, 17))
+
+
+def test_statement_reserve_account_carries_a_role_into_calendar_statuses(
+    tmp_path: Path,
+) -> None:
+    """Kill test: the merged reserve account must pass `_calendar_statuses` (it keys on `role`)."""
+
+    account = "account-" + "c" * 16
+    catalog = {
+        "catalog_schema_version": 1,
+        "accounts": [{"account_id": account, "provider": "JOHN HANCOCK"}],
+        "nav_observations": [
+            {
+                "account_id": account,
+                "as_of_date": "2026-09-30",
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
+                "record_id": "jh:2026-09-30",
+            }
+        ],
+    }
+    raw = json.dumps(catalog).encode()
+    path = tmp_path / "catalog.json"
+    path.write_bytes(raw)
+    pin = {
+        "path": str(path),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+        "role": "RESERVE",
+    }
+    facts = baseline._statement_reserve_facts([pin], date(2026, 11, 6))
+    assert [a["role"] for a in facts["accounts"]] == ["RESERVE"]
+    assert baseline._calendar_statuses(facts["accounts"], facts["nav"], {}) == []
+
+
+def test_statement_reserve_and_excluded_accounts_build_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """End to end: both pin roles, in the real catalog shape, through `build_catalog`."""
+
+    spec_path, spec = _spec(tmp_path)
+    root, ref = _provider_ledger_generation(tmp_path, catalog_schema_version=2)
+    spec["roots"]["provider-ledger"] = str(root)
+    spec["schema_version"] = 3
+    spec["provider_ledger"] = ref
+    pins = []
+    for letter, provider, role in (
+        ("c", "JOHN HANCOCK", "RESERVE"),
+        ("d", "COMPOSER", "EXCLUDED_IMMATERIAL"),
+    ):
+        account = "account-" + letter * 16
+        catalog = {
+            "catalog_schema_version": 1,
+            "accounts": [{"account_id": account, "provider": provider}],
+            "nav_observations": [
+                {
+                    "account_id": account,
+                    "as_of_date": "2026-06-30",
+                    "nav": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
+                    "record_id": f"{letter}:2026-06-30",
+                }
+            ],
+        }
+        raw = json.dumps(catalog).encode()
+        path = tmp_path / f"statement-{letter}.json"
+        path.write_bytes(raw)
+        pins.append(
+            {
+                "path": str(path),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "size_bytes": len(raw),
+                "role": role,
+            }
+        )
+    spec["statement_reserves"] = pins
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    catalog, _, _ = baseline.build_catalog(spec_path)
+
+    assert "account-" + "c" * 16 in {a["account_id"] for a in catalog["accounts"]}
