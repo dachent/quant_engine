@@ -137,8 +137,20 @@ HISTORY_CORRECTION_LAYERS: Final = {
         {"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"}
     ),
     "tt-portfolio": frozenset({"ACCOUNT_LIVE", "BACKTEST"}),
-    "volatis-strategy": frozenset({"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"}),
+    "volatis-strategy": frozenset(
+        {"ACCOUNT_LIVE", "BACKTEST", "MODEL_LIVE", "PROVIDER_LIVE"}
+    ),
 }
+# A second, explicit way a MODEL_LIVE-labelled layer reaches the research series:
+# the provider's own published fund value strictly BEFORE the account was funded
+# (no backtest exists), then the account continues in the same series.  It is not
+# the p123 model-live shape (backtest, then model live, account never in it) and
+# the two admissions cannot be exchanged: each strategy uses exactly one.
+PROVIDER_LIVE_PREHISTORY_ADMISSION: Final = "INCLUDE_PROVIDER_LIVE_PREHISTORY"
+PROVIDER_LIVE_PREHISTORY_STRATEGIES: Final = frozenset({"volatis-strategy"})
+# The provider publishes the fund value every 5 calendar days; prehistory must hand
+# over to the account within one such interval.
+PROVIDER_LIVE_PREHISTORY_MAX_GAP_DAYS: Final = 5
 HISTORY_POLICY_ID: Final = "PORT-HISTORY-TRUTH-2"
 HISTORY_POLICY_VERSION: Final = 2
 # Two series kinds, never mixed: the research series is BACKTEST strictly before
@@ -3965,6 +3977,7 @@ def _validate_history_corrections(
         } or admission not in {
             "EXCLUDE_COMPARISON_ONLY",
             "INCLUDE_MODEL_LIVE_RESEARCH",
+            PROVIDER_LIVE_PREHISTORY_ADMISSION,
             "INCLUDE_SELECTED_LIVE",
             "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
             "REQUIRED_NOT_READY_OVERLAP",
@@ -3978,7 +3991,15 @@ def _validate_history_corrections(
             )
         # Each owner layer has exactly one admission: the account is the selected
         # live path, the model's own record is the research series' live leg.
-        if (layer == "MODEL_LIVE") != (admission == "INCLUDE_MODEL_LIVE_RESEARCH"):
+        owns_prehistory = strategy_id in PROVIDER_LIVE_PREHISTORY_STRATEGIES
+        if (layer == "MODEL_LIVE") != (
+            admission
+            == (
+                PROVIDER_LIVE_PREHISTORY_ADMISSION
+                if owns_prehistory
+                else "INCLUDE_MODEL_LIVE_RESEARCH"
+            )
+        ):
             raise FinancialMvpContractError(
                 f"materialized history segment model-live authority differs: {segment_id}"
             )
@@ -4002,6 +4023,8 @@ def _validate_history_corrections(
     }
     account_live_starts: dict[str, date] = {}
     model_live_starts: dict[str, date] = {}
+    prehistory_rows: dict[str, tuple[bool, date | None, date | None, str | None]] = {}
+    account_version_refs: dict[str, str | None] = {}
     funding_dates: dict[str, date] = {}
     rows = _objects(policy["corrections"], "history_corrections.corrections")
     for row in rows:
@@ -4258,6 +4281,7 @@ def _validate_history_corrections(
                         f"account-live observations precede funding: {correction_id}"
                     )
                 account_live_starts[strategy_id] = account_live_start
+                account_version_refs[strategy_id] = version_ref
                 funding_dates[strategy_id] = funding_date
         elif funding_status != "NOT_APPLICABLE" or any(
             value is not None for value in (funding_date, account_live_start)
@@ -4289,7 +4313,12 @@ def _validate_history_corrections(
             raise FinancialMvpContractError(
                 f"provider history was relabeled into an accepted mode: {correction_id}"
             )
-        has_model_live_layer = "MODEL_LIVE" in HISTORY_CORRECTION_LAYERS[strategy_id]
+        owns_prehistory = strategy_id in PROVIDER_LIVE_PREHISTORY_STRATEGIES
+        # The account stays out of the research series only for the p123 shape.
+        has_model_live_layer = (
+            "MODEL_LIVE" in HISTORY_CORRECTION_LAYERS[strategy_id]
+            and not owns_prehistory
+        )
         if (
             layer == "ACCOUNT_LIVE"
             and funding_status == "EVIDENCED"
@@ -4315,11 +4344,16 @@ def _validate_history_corrections(
                 raise FinancialMvpContractError(
                     f"model-live entered LIVE_ONLY: {correction_id}"
                 )
-            if hybrid not in {"INCLUDE_MODEL_LIVE_RESEARCH", "REQUIRED_NOT_READY"}:
+            admitted_token = (
+                PROVIDER_LIVE_PREHISTORY_ADMISSION
+                if owns_prehistory
+                else "INCLUDE_MODEL_LIVE_RESEARCH"
+            )
+            if hybrid not in {admitted_token, "REQUIRED_NOT_READY"}:
                 raise FinancialMvpContractError(
                     f"model-live research admission differs: {correction_id}"
                 )
-            if hybrid == "INCLUDE_MODEL_LIVE_RESEARCH" and (
+            if hybrid == admitted_token and (
                 capture_status != "CAPTURED_GOVERNED"
                 or version_status != "EVIDENCED"
                 or compatibility != "EXACT_MATCH"
@@ -4347,7 +4381,17 @@ def _validate_history_corrections(
                 raise FinancialMvpContractError(
                     f"model-live lacks an inception date: {correction_id}"
                 )
-            model_live_starts[strategy_id] = observed_start
+            if owns_prehistory:
+                # not a model-live inception: the backtest hand-over rules of the
+                # p123 shape do not apply to it
+                prehistory_rows[strategy_id] = (
+                    hybrid == PROVIDER_LIVE_PREHISTORY_ADMISSION,
+                    observed_start,
+                    observed_end,
+                    version_ref,
+                )
+            else:
+                model_live_starts[strategy_id] = observed_start
         if layer == "BACKTEST":
             if live_only != "NOT_APPLICABLE":
                 raise FinancialMvpContractError(
@@ -4530,6 +4574,38 @@ def _validate_history_corrections(
         ):
             raise FinancialMvpContractError(
                 f"backtest is not strictly before live inception: {row['correction_id']}"
+            )
+
+    for strategy_id, (
+        admitted,
+        prehistory_start,
+        prehistory_end,
+        prehistory_version,
+    ) in prehistory_rows.items():
+        if not admitted:
+            continue
+        account_start = account_live_starts.get(strategy_id)
+        if (
+            account_start is None
+            or prehistory_start is None
+            or prehistory_end is None
+            or prehistory_end >= account_start
+        ):
+            raise FinancialMvpContractError(
+                "provider-live prehistory is not strictly before the account: "
+                f"{strategy_id}"
+            )
+        if (
+            account_start - prehistory_end
+        ).days > PROVIDER_LIVE_PREHISTORY_MAX_GAP_DAYS:
+            raise FinancialMvpContractError(
+                "provider-live prehistory leaves a gap before the account: "
+                f"{strategy_id}"
+            )
+        if prehistory_version != account_version_refs.get(strategy_id):
+            raise FinancialMvpContractError(
+                "provider-live prehistory version differs from the account path: "
+                f"{strategy_id}"
             )
 
     for strategy_id, funding_date in funding_dates.items():

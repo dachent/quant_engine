@@ -3036,6 +3036,62 @@
     "disposition_reason": "The two provider curves are equality evidence for one economic path. They are not duplicate return series and are not relabeled as backtest.",
     "readiness": "READY",
     "blockers": []
+   },
+   {
+    "correction_id": "volatis-model-live",
+    "strategy_id": "volatis-strategy",
+    "source_id": "quantbase-account-generation",
+    "evidence_layer": "MODEL_LIVE",
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_QUANTBASE_PUBLIC_FUND_SERIES_BEFORE_ACCOUNT_FUNDING"
+    },
+    "capture": {
+     "status": "NOT_CAPTURED",
+     "capture_defect": "PUBLIC_FUND_SERIES_NOT_IN_THE_COMMITTED_GENERATION_ADMITTED_AT_THE_NEXT_QUANTBASE_GENERATION",
+     "generation_id": null,
+     "generation_sha256": null,
+     "as_of": null
+    },
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7",
+     "compatibility": "EXACT_MATCH",
+     "authority": "SAME_PROVIDER_FUND_PATH_AS_THE_OWNER_ACCOUNT"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2023-10-18",
+     "observed_end": "2024-10-12",
+     "effective_start": null,
+     "effective_end": null
+    },
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "MODEL_LIVE_IS_NOT_OWNER_FUNDING"
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "NOT_APPLICABLE",
+     "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"
+    },
+    "source_receipts": [
+     {
+      "artifact_role": "quantbase-generation-manifest",
+      "artifact_selector": "generations/d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe/generation.json",
+      "authority_root": "QUANTBASE",
+      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c"
+     }
+    ],
+    "disposition_reason": "The provider's own fund value before the owner funded the account (the vendor's live out-of-sample track; its backtest is not published). It enters the research series as provider-live prehistory strictly before account start, then the account continues; it is never a backtest and never part of the my-live series.",
+    "readiness": "REQUIRED_NOT_READY",
+    "blockers": [
+     967
+    ]
    }
   ]
  },
