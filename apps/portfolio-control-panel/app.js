@@ -122,9 +122,10 @@
     NOT_VALIDATED: "warning",
     VALIDATED: "positive",
     tested: "positive",
-    not_testable: "warning",
-    partial_only: "warning",
-    not_same_vintage: "warning",
+    // A structural limitation (no comparator exists) is information, not a defect.
+    not_testable: "neutral",
+    partial_only: "neutral",
+    not_same_vintage: "neutral",
   });
   function toneForStatus(status = "") {
     if (Object.hasOwn(STATUS_TONES, String(status))) return STATUS_TONES[String(status)];
@@ -134,7 +135,7 @@
     if (/_INFERRED_FLOW_TIMING$/.test(text)) return "neutral";
     if (/(^|_)NOT_VALIDATED$/.test(text)) return STATUS_TONES.NOT_VALIDATED;
     if (/FAIL|UNAVAILABLE|UNMAPPED|DO_NOT|BLOCK|NONE|NOT_AUTOMATABLE|INCOMPLETE|NO_ACCEPTED_FACT_PATH/.test(text)) return "danger";
-    if (/PARTIAL|INFERRED|UNKNOWN|CONDITIONAL|FROZEN|DIAGNOSTIC|NOT_READY|UPPER_BOUND/.test(text)) return "warning";
+    if (/PARTIAL|INFERRED|UNKNOWN|CONDITIONAL|FROZEN|DIAGNOSTIC|NOT_READY|UPPER_BOUND|BREACH/.test(text)) return "warning";
     if (/PASS|AVAILABLE|COMPLETE|PUBLISHED|VERIFIED/.test(text)) return "positive";
     if (/RESERVE|ZERO RISK|EXCLUDED_DE_MINIMIS/.test(text)) return "reserve";
     return "neutral";
@@ -247,6 +248,20 @@
     return kind && window.days_basis ? `${kind}, days ${operatorText(window.days_basis)}` : kind;
   };
   const statusText = (status) => `<span class="status-text ${toneForStatus(status)}">${safe(humanStatus(status))}</span>`;
+  // The report derives the account-versus-model status from the row's own evidence (`implementation_gap_basis`); the
+  // retained audit token is provenance only and is shown in the tooltip.  A row with no comparator says so in the
+  // payload's own words and is not painted as a defect.
+  // A reconstructed replica is a diagnostic reference, never a provider-published series: say so beside the status.
+  const proxyReference = (row) => row.implementation_reconciliation?.return_reconciliation?.status === "DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV";
+  const implementationGapMarkup = (row) => {
+    const basis = row.implementation_gap_basis;
+    let line = null;
+    if (basis === "VERIFIED_IMPLEMENTATION_RECONCILIATION") line = `Verified implementation reconciliation${proxyReference(row) ? " · reference is a reconstructed proxy, not a provider series" : ""}`;
+    else if (basis === "EXACT_DATE_PROVIDER_COMPARISON") line = `Exact-date provider comparison · ${integer.format(row.provider_comparison_observations || 0)} observations${row.provider_comparison_version_compatibility === "UNRESOLVED" ? " · version compatibility unresolved" : ""}`;
+    else if (basis === "NO_COMPARATOR_ADMITTED") line = row.provider_comparison_disposition || null;
+    const audit = row.implementation_gap_audit_status ? ` title="Retained audit status: ${safe(row.implementation_gap_audit_status)}"` : "";
+    return `<span${audit}>${statusText(row.implementation_gap_status)}</span>${line ? `<span class="cell-secondary">${safe(line)}</span>` : ""}`;
+  };
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;
   const renderKpis = (selector, items) => { $(selector).innerHTML = items.map((item) => kpi(...item)).join(""); };
   const emptyRow = (columns, message = "No matching rows") => `<tr><td colspan="${columns}" class="cell-secondary">${safe(message)}</td></tr>`;
@@ -345,7 +360,9 @@
       // N55 (general): `provider_comparison_reason` is the not-ready reason surface for
       // ANY comparison path, not a benchmark-only or N55-only field; render it beside the
       // disposition whenever the report publishes one.
-      return `${statusText(status)}<span class="cell-secondary">${safe(row.provider_comparison_disposition || "Model live vs My live comparison not published")}</span>${row.provider_comparison_reason ? `<span class="cell-secondary">${safe(row.provider_comparison_reason)}</span>` : ""}`;
+      const head = row.implementation_gap_basis ? statusText(row.implementation_gap_status) : statusText(status);
+      const verified = row.implementation_gap_basis === "VERIFIED_IMPLEMENTATION_RECONCILIATION" ? `<span class="cell-secondary">Verified implementation reconciliation${proxyReference(row) ? " · reference is a reconstructed proxy, not a provider series" : ""}</span>` : "";
+      return `${head}${verified}<span class="cell-secondary">${safe(row.provider_comparison_disposition || "Model live vs My live comparison not published")}</span>${row.provider_comparison_reason ? `<span class="cell-secondary">${safe(row.provider_comparison_reason)}</span>` : ""}`;
     }
     // A5: `provider_annualization.label` already encodes basis/window (and "(<1 year)"
     // when short); render it beside the annualized figure it describes.
@@ -804,7 +821,7 @@
     $("#operator-queue").innerHTML = Array.isArray(operatorItems) ? operatorItems.join("") : operatorItems;
     const implementationRows = currentStrategies().map((row) => {
       const factor = factorModelSummary(row.strategy_name);
-      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td>${statusText(row.implementation_gap_status)}</td><td>${safe(costLabel(row))}${costComponentsMarkup(row)}</td><td>${statusText(factor.state)}<span class="cell-secondary">${safe(factor.note)}</span></td></tr>`;
+      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td>${implementationGapMarkup(row)}</td><td>${safe(costLabel(row))}${costComponentsMarkup(row)}</td><td>${statusText(factor.state)}<span class="cell-secondary">${safe(factor.note)}</span></td></tr>`;
     });
     $("#portfolio-implementation-table").innerHTML = tableMarkup([["Strategy"], ["Source evidence"], ["Implementation gap (account vs model)"], ["Cost"], ["Factor model"]], implementationRows, evidenceCaption("Implementation, costs, and model readiness"));
     const constructionPoints = performanceLineageMismatch
@@ -1826,7 +1843,7 @@
     const gapOther = [...currentStrategies().filter((row) => row.implementation_gap_status !== "tested").reduce((map, row) => map.set(row.implementation_gap_status || "UNAVAILABLE", (map.get(row.implementation_gap_status || "UNAVAILABLE") || 0) + 1), new Map())];
     const knownCost = currentStrategies().filter((row) => String(row.cost_status).startsWith("known")).length;
     renderKpis("#signal-kpis", [
-      ["Implementation gap tested", `${gapTested}/${data.counts.strategies}`, gapOther.length ? `Provider versus account evidence; not tested: ${gapOther.map(([status, count]) => `${humanStatus(status).toLowerCase()} ${integer.format(count)}`).join(", ")}` : "Provider versus account evidence"],
+      ["Implementation gap tested", `${gapTested}/${data.counts.strategies}`, gapOther.length ? `Account versus model or provider evidence; not tested: ${gapOther.map(([status, count]) => `${humanStatus(status).toLowerCase()} ${integer.format(count)}`).join(", ")}` : "Account versus model or provider evidence"],
       ["Known cost status", `${knownCost}/${data.counts.strategies}`, "Unknown stays disclosed", "warning"],
       ["Reconciliations passed", `${data.counts.reconciliation_passed}/${data.counts.reconciliation_checks}`, "Accepted report checks"],
       ["Automated action", advisoryExecutionEffect(), advisoryExecutionEffectNote(), "reserve"],
@@ -1986,16 +2003,19 @@
 
   function renderUnderwriting() {
     const underwriting = data.strategy_underwriting;
+    // A shortfall is where evidence does not exist (a structural limit or a pending pull), not a defect of the panel:
+    // all strategies covered is positive, anything less is informational and the per-row columns name each reason.
+    const underwritingTone = (count) => (underwriting?.counts && count === underwriting.counts.strategies ? "positive" : "neutral");
     if (!underwriting?.rows?.length) {
       $("#underwriting-boundary").innerHTML = `<strong>Underwriting unavailable.</strong> This snapshot predates the governed layered-underwriting contract.`;
       $("#underwriting-table").innerHTML = tableMarkup([["Status"]], [emptyRow(1, "No governed strategy underwriting")]);
       return;
     }
     renderKpis("#underwriting-kpis", [
-      ["Authoritative designs", `${underwriting.counts.authoritative_design}/${underwriting.counts.strategies}`, "Unverified archetypes stay inferred", underwriting.counts.authoritative_design === underwriting.counts.strategies ? "positive" : "warning"],
-      ["Version-matched long history", `${underwriting.counts.version_matched_long_history}/${underwriting.counts.strategies}`, "Backtest plus live; exact strategy version required", underwriting.counts.version_matched_long_history ? "positive" : "warning"],
-      ["Model/account gaps", `${underwriting.counts.quantified_model_account_gap}/${underwriting.counts.strategies}`, "Exact-common-date totals; causes remain separate", underwriting.counts.quantified_model_account_gap ? "warning" : "danger"],
-      ["Regime comparisons", `${underwriting.counts.empirical_regime_comparison}/${underwriting.counts.strategies}`, "Pre-live thresholds and version-matched empirical range", underwriting.counts.empirical_regime_comparison ? "positive" : "warning"],
+      ["Authoritative designs", `${underwriting.counts.authoritative_design}/${underwriting.counts.strategies}`, "Unverified archetypes stay inferred", underwritingTone(underwriting.counts.authoritative_design)],
+      ["Version-matched long history", `${underwriting.counts.version_matched_long_history}/${underwriting.counts.strategies}`, "Backtest plus live; exact strategy version required", underwritingTone(underwriting.counts.version_matched_long_history)],
+      ["Model/account gaps", `${underwriting.counts.quantified_model_account_gap}/${underwriting.counts.strategies}`, "Exact-common-date totals; causes remain separate", underwritingTone(underwriting.counts.quantified_model_account_gap)],
+      ["Regime comparisons", `${underwriting.counts.empirical_regime_comparison}/${underwriting.counts.strategies}`, "Pre-live thresholds and version-matched empirical range", underwritingTone(underwriting.counts.empirical_regime_comparison)],
     ]);
     $("#underwriting-boundary").innerHTML = `<strong>${safe(underwriting.policy_id)}</strong> · policy <code>${safe(underwriting.policy_sha256.slice(0, 14))}…</code> · evidence layers are never silently concatenated. Long-history membership requires an exact version match; implementation fidelity uses account-live exact-common-date evidence. Regime underwriting admits complete accepted-calendar weeks only; partial first, last, and current weeks are excluded. Regime results are observable behavior diagnostics, not proof of hidden strategy logic. Allocation effect <strong>${safe(underwritingEffects("allocation_effect").join(" / ") || "not declared")}</strong> and execution effect <strong>${safe(underwritingEffects("execution_effect").join(" / ") || "not declared")}</strong> on every row; automatic drop, readiness, and order authority are policy-fixed at <strong class="policy-text" title="Policy statement; the payload carries no field for it">NONE</strong>.`;
     const rows = underwriting.rows.map((row) => {
@@ -2097,7 +2117,7 @@
         <td data-label="Long-history statistical membership">${statusText(history.status)}<span class="cell-secondary">Matched backtest ${integer.format(history.matched_backtest_observations)} · live aligned ${number(history.live_aligned_observations) == null ? "not published" : integer.format(history.live_aligned_observations)} · hybrid aligned ${number(history.hybrid_aligned_observations) == null ? "not published" : integer.format(history.hybrid_aligned_observations)}</span><span class="cell-secondary">Net alpha, live fit: ${underwritingAlpha(history.live_net_alpha, history.live_net_alpha_status, history.live_net_alpha_context)} · fit including backtest: ${underwritingAlpha(history.hybrid_net_alpha, history.hybrid_net_alpha_status, history.hybrid_net_alpha_context)}; sealed holdout R² live ${pct(history.live_holdout_predicted_r_squared)} · full ${pct(history.hybrid_holdout_predicted_r_squared)}</span></td>
         <td data-label="Model versus account">${gapMarkup}</td>
         <td data-label="Regime behavior">${statusText(regimes.status)}<span class="cell-secondary">${safe(benchmark)} · ${integer.format(regimes.threshold_history_weeks)} pre-live threshold weeks · lower tail ${pct(regimes.lower_tail_threshold)} · high absolute return ${pct(regimes.high_absolute_return_threshold)}</span>${regimeRows || '<span class="cell-secondary">No eligible regime rows</span>'}</td>
-        <td data-label="Portfolio fit / leave-one-out">${statusText(fit.portfolio_fit_status)}<span class="cell-secondary">${safe(fit.cluster_label || "No governed cluster")} · cluster weight ${pct(fit.cluster_allocation_weight)}${weightBasisSuffix(fit.cluster_weight_basis, fit.cluster_allocation_weight)} · pair range ${decimal(fit.cluster_observed_pair_correlation_minimum)}–${decimal(fit.cluster_observed_pair_correlation_maximum)}</span><span class="cell-secondary">Strategy weight ${pct(fit.strategy_systematic_weight)}${weightBasisSuffix(fit.strategy_weight_basis, fit.strategy_systematic_weight)} · correlation-one contribution ${pct(fit.strategy_correlation_one_loss_contribution)} (${pct(fit.strategy_share_of_correlation_one_loss)} of loss) · leave-one-out loss ${pct(fit.leave_one_out_correlation_one_loss)}</span></td>
+        <td data-label="Portfolio fit / leave-one-out">${statusText(fit.portfolio_fit_status)}${/BREACH/.test(String(fit.portfolio_fit_status || fit.cluster_budget_status)) ? '<span class="cell-secondary">A risk-budget result computed from the evidence shown, not a data gap</span>' : ""}<span class="cell-secondary">${safe(fit.cluster_label || "No governed cluster")} · cluster weight ${pct(fit.cluster_allocation_weight)}${weightBasisSuffix(fit.cluster_weight_basis, fit.cluster_allocation_weight)} · pair range ${decimal(fit.cluster_observed_pair_correlation_minimum)}–${decimal(fit.cluster_observed_pair_correlation_maximum)}</span><span class="cell-secondary">Strategy weight ${pct(fit.strategy_systematic_weight)}${weightBasisSuffix(fit.strategy_weight_basis, fit.strategy_systematic_weight)} · correlation-one contribution ${pct(fit.strategy_correlation_one_loss_contribution)} (${pct(fit.strategy_share_of_correlation_one_loss)} of loss) · leave-one-out loss ${pct(fit.leave_one_out_correlation_one_loss)}</span></td>
         <td data-label="Advisory disposition">${statusText(disposition.action)}<span class="cell-secondary">${safe((disposition.reasons || []).map(humanStatus).join(" · "))}</span><span class="cell-secondary">Drop authority ${safe(disposition.drop_decision_status)} · allocation ${safe(disposition.allocation_effect)} · execution ${safe(disposition.execution_effect)}</span></td>
       </tr>`;
     });
@@ -2807,11 +2827,18 @@
       return;
     }
     const query = weeklySearch.toLowerCase();
-    const rows = weekly.series.filter((row) => (selectedWeeklyGroup === "ALL" || row.display_groups.includes(selectedWeeklyGroup)) && (!query || `${row.display_name} ${row.series_id} ${row.source_key}`.toLowerCase().includes(query)));
+    const queryMatch = (row) => !query || `${row.display_name} ${row.series_id} ${row.source_key}`.toLowerCase().includes(query);
+    const groupRows = weekly.series.filter((row) => (selectedWeeklyGroup === "ALL" || row.display_groups.includes(selectedWeeklyGroup)) && queryMatch(row));
+    // The strategy view also pins the benchmarks the performance charts compare against (the payload names them), so the
+    // owner sees them under the strategy rows without switching group; a pinned row is labelled as such.
+    const pinnedIds = new Set(Array.isArray(data.performance_tab?.benchmarks) ? data.performance_tab.benchmarks.map((item) => item.series_id) : []);
+    const pinnedRows = selectedWeeklyGroup === "STRATEGY" ? weekly.series.filter((row) => pinnedIds.has(row.series_id) && !groupRows.includes(row) && queryMatch(row)) : [];
+    const pinnedSet = new Set(pinnedRows);
+    const rows = [...groupRows, ...pinnedRows];
     const weeks = weeklyVisibleWeeks();
     const missingCells = rows.reduce((count, row) => count + weeks.filter((week) => weeklyValue(row, week) == null).length, 0);
     renderKpis("#weekly-kpis", [
-      ["Visible series", String(rows.length), weeklyGroupLabels[selectedWeeklyGroup] || selectedWeeklyGroup],
+      ["Visible series", String(rows.length), `${weeklyGroupLabels[selectedWeeklyGroup] || selectedWeeklyGroup}${pinnedRows.length ? ` + ${pinnedRows.length} pinned benchmark${pinnedRows.length === 1 ? "" : "s"}` : ""}`],
       ["Displayed weeks", String(weeks.length), selectedWeeklyWindow === "full" ? `Full-history page ${weeklyPage + 1}` : `Latest ${selectedWeeklyWindow}`],
       ["Unavailable cells", String(missingCells), "Missing is never zero", missingCells ? "warning" : "positive"],
       performanceLineageMismatch && selectedWeeklyGroup === "STRATEGY"
@@ -2819,7 +2846,7 @@
         : ["Strategy evidence", humanStatus(selectedWeeklyMode), selectedWeeklyMode === "LIVE_ONLY" ? "Authoritative default" : "Version-matched pre-live backtest", selectedWeeklyMode === "LIVE_ONLY" ? "positive" : "warning"],
     ]);
     const header = `<thead><tr><th scope="col">Series / basis</th>${weeks.map((week) => `<th scope="col"><span class="weekly-date">${safe(week.slice(5))}</span><span class="cell-secondary">${safe(week.slice(0, 4))}</span></th>`).join("")}</tr></thead>`;
-    const body = rows.map((row) => `<tr><th scope="row"><span class="cell-primary">${safe(row.display_name)}</span><span class="cell-secondary">${safe(humanStatus(row.return_basis))} · ${safe(humanStatus(String(row.source_key || "").replaceAll("-", "_")))}</span></th>${weeks.map((week) => {
+    const body = rows.map((row) => `<tr><th scope="row"><span class="cell-primary">${safe(row.display_name)}</span><span class="cell-secondary">${safe(humanStatus(row.return_basis))} · ${safe(humanStatus(String(row.source_key || "").replaceAll("-", "_")))}${pinnedSet.has(row) ? " · pinned benchmark" : ""}</span></th>${weeks.map((week) => {
       const value = weeklyValue(row, week);
       const meta = weeklyMeta(row, week);
       const numeric = value == null ? null : Number(value);
@@ -2829,7 +2856,8 @@
     }).join("")}</tr>`).join("");
     const currentWeek = weekly.current_week || {};
     const currentWeekVisible = weeks.includes(currentWeek.week_start);
-    const partialLabel = currentWeekVisible && currentWeek.is_partial === true
+    const currentWeekCellPartial = currentWeekVisible && rows.some((row) => weeklyMeta(row, currentWeek.week_start)?.coverageStatus === "PARTIAL_BOUNDARY");
+    const partialLabel = currentWeekVisible && (currentWeek.is_partial === true || currentWeekCellPartial)
       ? ` · PARTIAL · data through ${safe(currentWeek.data_through_date || "unavailable")}`
       : "";
     $("#weekly-table").innerHTML = `<table class="weekly-table"><caption>Weekly returns${partialLabel}; absent cells are unavailable, not zero</caption>${header}<tbody>${body || `<tr><td colspan="${weeks.length + 1}">No series match the current filter.</td></tr>`}</tbody></table>`;
