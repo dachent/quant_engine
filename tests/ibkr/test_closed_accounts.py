@@ -112,6 +112,17 @@ def test_a_statement_pulled_after_the_closure_must_state_it(tmp_path: Path) -> N
         gen._closed_accounts([closed, later], XWALK)
 
 
+def test_an_undated_post_closure_statement_without_a_pull_day_refuses(
+    tmp_path: Path,
+) -> None:
+    closed = _statement(
+        tmp_path, date(2026, 1, 5), "20260105", generated=date(2026, 9, 1)
+    )
+    unknown_pull = _statement(tmp_path, date(2026, 1, 6), None, generated=None)
+    with pytest.raises(gen.IbkrGenerationError, match="pulled after the stated"):
+        gen._closed_accounts([closed, unknown_pull], XWALK)
+
+
 def test_value_or_activity_after_the_stated_closure_refuses(tmp_path: Path) -> None:
     closed = _statement(tmp_path, date(2026, 1, 5), "20260105")
     funded = _statement(tmp_path, date(2026, 1, 6), "20260105", nav="5000")

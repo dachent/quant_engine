@@ -1268,8 +1268,8 @@ def _closed_accounts(
         for item in ordered:
             if (
                 item.account_date_closed is None
-                and item.when_generated is not None
-                and item.when_generated > closed
+                and item.report_date > closed
+                and (item.when_generated is None or item.when_generated > closed)
             ):
                 raise IbkrGenerationError(
                     "a statement pulled after the stated account closure date does not state it"
