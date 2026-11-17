@@ -8830,6 +8830,15 @@ def _factor_row_for_strategy(
     return None
 
 
+# Version-matched prehistory that is the provider's own live record before the
+# account was funded (no backtest exists): counted as long history, never labelled
+# as a backtest.
+PROVIDER_LIVE_PREHISTORY_TOKEN: Final = (
+    "ACCEPTED_PROVIDER_LIVE_PREHISTORY_BEFORE_ACCOUNT_START"
+)
+LONG_HISTORY_PROVIDER_LIVE_STATUS: Final = (
+    "AVAILABLE_VERSION_MATCHED_PROVIDER_LIVE_PREHISTORY_BEFORE_ACCOUNT_START"
+)
 LONG_HISTORY_MEMBERSHIP_RULE: Final = (
     "H2_ACCEPTED_HISTORY_AND_ELIGIBLE_LIVE_PLUS_BACKTEST"
 )
@@ -8868,7 +8877,8 @@ def _version_matched_history_observations(
         )
         return used if used > 0 else None
     if (
-        status != "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+        status
+        not in {"ACCEPTED_FOR_ECONOMIC_INFERENCE", PROVIDER_LIVE_PREHISTORY_TOKEN}
         or strategy.get("live_plus_backtest_status") != "ELIGIBLE_ACCEPTED_HISTORY"
     ):
         return None
@@ -9540,7 +9550,12 @@ def _strategy_underwriting(
         history_members = _version_matched_history_observations(strategy, hybrid_factor)
         matched_backtest_observations = history_members or 0
         long_history_status = (
-            "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE"
+            (
+                LONG_HISTORY_PROVIDER_LIVE_STATUS
+                if strategy.get("history_compatibility_status")
+                == PROVIDER_LIVE_PREHISTORY_TOKEN
+                else "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE"
+            )
             if history_members is not None
             else "UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
         )
@@ -9679,7 +9694,10 @@ def _strategy_underwriting(
         elif portfolio_fit_status == "CLUSTER_BUDGET_BREACH":
             advisory_action = "REVIEW_SHARED_CLUSTER_BUDGET_NOT_PROVIDER_LABEL"
             recommendation_reasons.append("SHARED_ECONOMIC_DRIVER_CLUSTER_BREACH")
-        elif long_history_status != "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE":
+        elif long_history_status not in {
+            "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE",
+            LONG_HISTORY_PROVIDER_LIVE_STATUS,
+        }:
             advisory_action = (
                 "RETAIN_MONITORING_INSUFFICIENT_LONG_HISTORY_FOR_DROP_DECISION"
             )
@@ -9885,6 +9903,16 @@ def _strategy_underwriting(
                 "long_history": {
                     "status": long_history_status,
                     "matched_backtest_observations": matched_backtest_observations,
+                    **(
+                        {
+                            "prehistory_label": (
+                                "version-matched prehistory: provider-live before "
+                                "account start (no backtest)"
+                            )
+                        }
+                        if long_history_status == LONG_HISTORY_PROVIDER_LIVE_STATUS
+                        else {}
+                    ),
                     "membership_rule": LONG_HISTORY_MEMBERSHIP_RULE,
                     "lens_statistics_source": {
                         "lens_id": "ECONOMIC_FACTOR",
@@ -9985,7 +10013,10 @@ def _strategy_underwriting(
                 ),
                 "version_matched_long_history": sum(
                     row["long_history"]["status"]
-                    == "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE"
+                    in {
+                        "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE",
+                        LONG_HISTORY_PROVIDER_LIVE_STATUS,
+                    }
                     for row in rows
                 ),
                 "quantified_model_account_gap": sum(

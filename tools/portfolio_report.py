@@ -6328,6 +6328,38 @@ def _accepted_pre_live(
     return observations, (min(live_starts) if observations > 0 else None)
 
 
+def _provider_live_prehistory_pre_live(
+    history: Mapping[str, Any], strategy_version: str
+) -> tuple[int, str | None, str | None]:
+    """Provider-live prehistory (no backtest) strictly before the account start.
+
+    Counts MODEL_LIVE-labelled segments admitted as provider-live prehistory for
+    the same exact version that end before the earliest ACCOUNT_LIVE segment of
+    that version; returns (observations, account-live start, last prehistory date).
+    """
+    segments = _objects(history.get("segments"), "history segments")
+    live_starts = [
+        segment["observed_start"]
+        for segment in segments
+        if segment.get("evidence_layer") == "ACCOUNT_LIVE"
+        and segment.get("mode_admission") == "INCLUDE_SELECTED_LIVE"
+        and segment.get("strategy_version") == strategy_version
+    ]
+    chosen = [
+        segment
+        for segment in segments
+        if live_starts
+        and segment.get("evidence_layer") == "MODEL_LIVE"
+        and segment.get("mode_admission") == "INCLUDE_PROVIDER_LIVE_PREHISTORY"
+        and segment.get("strategy_version") == strategy_version
+        and segment["observed_end"] < min(live_starts)
+    ]
+    observations = sum(segment["return_observations"] for segment in chosen)
+    if observations <= 0:
+        return 0, None, None
+    return observations, min(live_starts), max(s["observed_end"] for s in chosen)
+
+
 def _accepted_pre_live_observations(
     history: Mapping[str, Any], strategy_version: str
 ) -> int:
@@ -6431,6 +6463,34 @@ def _history_contract(
             observations, account_live_start = _accepted_pre_live(
                 history, target["strategy_version"]
             )
+            if observations == 0:
+                (
+                    provider_observations,
+                    provider_live_start,
+                    provider_end,
+                ) = _provider_live_prehistory_pre_live(
+                    history, target["strategy_version"]
+                )
+                if provider_observations > 0:
+                    # No backtest exists for this strategy: the version-matched
+                    # prehistory is the provider's own live record before the
+                    # account was funded, carried under its own status.
+                    target.update(
+                        {
+                            "account_live_start": provider_live_start,
+                            "backtest_observations": provider_observations,
+                            "prehistory_layer": "PROVIDER_LIVE_PREHISTORY_NO_BACKTEST",
+                            "prehistory_observed_end": provider_end,
+                            "compatibility_basis": (
+                                "SAME_PROVIDER_FUND_PATH_PROVIDER_LIVE_BEFORE_ACCOUNT_START"
+                            ),
+                            "history_disposition_reason": (
+                                "Version-matched prehistory: provider-live before "
+                                "account start (no backtest)."
+                            ),
+                            "history_status": "ACCEPTED_PROVIDER_LIVE_PREHISTORY_NO_BACKTEST",
+                        }
+                    )
             if observations > 0:
                 target.update(
                     {
@@ -8012,7 +8072,12 @@ def _strategies(
         )
         if history_contract is not None:
             history_compatibility_status = (
-                "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+                (
+                    "ACCEPTED_PROVIDER_LIVE_PREHISTORY_BEFORE_ACCOUNT_START"
+                    if history.get("history_status")
+                    == "ACCEPTED_PROVIDER_LIVE_PREHISTORY_NO_BACKTEST"
+                    else "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+                )
                 if history_accepted
                 else "UNAVAILABLE_NO_ACCEPTED_HISTORY"
             )

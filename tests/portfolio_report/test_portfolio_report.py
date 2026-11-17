@@ -8922,3 +8922,51 @@ def test_the_unsupplied_workbook_parity_row_passes_the_observed_interval_check_a
         check(
             {**supplied, "observed_start": "2026-09-30", "observed_end": "2026-09-17"}
         )
+
+
+def _provider_live_history(
+    prehistory_end: str = "2024-10-12", live_start: str = "2024-10-16"
+) -> dict[str, Any]:
+    return {
+        "segments": [
+            {
+                "evidence_layer": "MODEL_LIVE",
+                "mode_admission": "INCLUDE_PROVIDER_LIVE_PREHISTORY",
+                "observed_start": "2023-10-23",
+                "observed_end": prehistory_end,
+                "return_observations": 72,
+                "strategy_version": "synthetic-v1",
+            },
+            {
+                "evidence_layer": "ACCOUNT_LIVE",
+                "mode_admission": "INCLUDE_SELECTED_LIVE",
+                "observed_start": live_start,
+                "observed_end": "2026-11-06",
+                "return_observations": 500,
+                "strategy_version": "synthetic-v1",
+            },
+        ]
+    }
+
+
+def test_provider_live_prehistory_is_counted_only_strictly_before_the_account() -> None:
+    history = _provider_live_history()
+    assert reporter._provider_live_prehistory_pre_live(history, "synthetic-v1") == (
+        72,
+        "2024-10-16",
+        "2024-10-12",
+    )
+    # it is never counted as backtest prehistory
+    assert reporter._accepted_pre_live_observations(history, "synthetic-v1") == 0
+    # a different version, or one that reaches the account start, counts nothing
+    assert reporter._provider_live_prehistory_pre_live(history, "other") == (
+        0,
+        None,
+        None,
+    )
+    late = _provider_live_history(prehistory_end="2024-10-16")
+    assert reporter._provider_live_prehistory_pre_live(late, "synthetic-v1")[0] == 0
+    no_account = {"segments": history["segments"][:1]}
+    assert (
+        reporter._provider_live_prehistory_pre_live(no_account, "synthetic-v1")[0] == 0
+    )

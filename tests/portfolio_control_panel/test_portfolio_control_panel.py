@@ -15961,3 +15961,83 @@ def test_underwriting_gap_drops_cash_and_fee_causes_when_evidenced() -> None:
         assert ("ACCOUNT_BOUND_FEE_PATH_INCOMPLETE" in got) == (
             fees != reporter.FEES_STATUS_EVIDENCED
         )
+
+
+def _qc1p_underwriting_with_volatis_prehistory(
+    status: str, observations: int = 73, eligibility: str = "ELIGIBLE_ACCEPTED_HISTORY"
+) -> dict[str, Any]:
+    weekly = _qc1p_weekly(-0.03)
+    strategies = _qc1p_strategy_rows()
+    for row in strategies:
+        row["account_live_observed_start"] = weekly["live_start"]
+        if row["strategy_name"] == "Volatis Strategy":
+            row["history_observations"] = observations
+            row["history_compatibility_status"] = status
+            row["live_plus_backtest_status"] = eligibility
+    result, _policy_hash = panel._strategy_underwriting(
+        strategies,
+        _qc1p_lenses(),
+        {
+            "economic_driver_cluster_budget": {"clusters": []},
+            "correlation_one": {"components": [], "loss": "0.2"},
+        },
+        {"series": weekly["series"]},
+        "2026-09-17",
+    )
+    return result
+
+
+def test_volatis_provider_live_prehistory_is_long_history_and_regime_available() -> (
+    None
+):
+    """Acceptance: provider-live prehistory (no backtest) counts, under its own label."""
+
+    underwriting = _qc1p_underwriting_with_volatis_prehistory(
+        panel.PROVIDER_LIVE_PREHISTORY_TOKEN
+    )
+    volatis = _qc1p_rows_by_name(underwriting)["Volatis Strategy"]
+    long_history = volatis["long_history"]
+    assert long_history["status"] == panel.LONG_HISTORY_PROVIDER_LIVE_STATUS
+    assert long_history["status"] != "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE"
+    assert long_history["matched_backtest_observations"] == 73
+    assert long_history["prehistory_label"] == (
+        "version-matched prehistory: provider-live before account start (no backtest)"
+    )
+    # counted in the long-history total beside the three backtest members
+    assert underwriting["counts"]["version_matched_long_history"] == 4
+    # the regime comparison reads the weekly hybrid series (90 pre-live weeks)
+    assert volatis["regime_conformance"]["status"] == (
+        "AVAILABLE_VERSION_MATCHED_PREHISTORY_COMPARISON"
+    )
+    assert (
+        "NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
+        not in volatis["advisory_disposition"]["reasons"]
+    )
+    # the backtest members carry no provider-live label
+    eu = _qc1p_rows_by_name(underwriting)["EU [P123]"]["long_history"]
+    assert "prehistory_label" not in eu
+
+
+@pytest.mark.parametrize(
+    ("status", "eligibility"),
+    [
+        ("ACCEPTED_SOMETHING_ELSE", "ELIGIBLE_ACCEPTED_HISTORY"),
+        ("UNAVAILABLE_NO_ACCEPTED_HISTORY", "ELIGIBLE_ACCEPTED_HISTORY"),
+        (
+            "ACCEPTED_PROVIDER_LIVE_PREHISTORY_BEFORE_ACCOUNT_START",
+            "BLOCKED_NO_ACCEPTED_HISTORY",
+        ),
+    ],
+)
+def test_provider_live_prehistory_needs_its_token_and_an_eligible_hybrid_mode(
+    status: str, eligibility: str
+) -> None:
+    underwriting = _qc1p_underwriting_with_volatis_prehistory(
+        status, eligibility=eligibility
+    )
+    volatis = _qc1p_rows_by_name(underwriting)["Volatis Strategy"]
+    assert volatis["long_history"]["status"] == (
+        "UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
+    )
+    assert "prehistory_label" not in volatis["long_history"]
+    assert underwriting["counts"]["version_matched_long_history"] == 3
