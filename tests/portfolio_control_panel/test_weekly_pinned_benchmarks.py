@@ -100,3 +100,33 @@ def test_the_panel_validator_follows_the_last_trading_day_rule(
     else:
         with pytest.raises(panel.ControlPanelValidationError):
             panel._weekly_return_analysis(*arguments)  # noqa: SLF001
+
+
+def test_the_partial_label_shows_when_a_visible_current_week_cell_is_partial(
+    tmp_path: Path,
+) -> None:
+    """Global is_partial is false at a Friday cutoff, but a seven-day series is still PARTIAL_BOUNDARY."""
+
+    payload = _payload([])
+    payload["weekly_returns"]["current_week"]["is_partial"] = False  # type: ignore[index]
+    dom = _run(tmp_path, payload, "renderWeeklyTable")
+    html = str(dom["#weekly-table"]["innerHTML"])  # type: ignore[index]
+
+    assert "PARTIAL · data through 2026-09-18" in html
+
+
+def test_no_partial_label_when_every_visible_current_week_cell_is_complete(
+    tmp_path: Path,
+) -> None:
+    payload = _payload([])
+    weekly = payload["weekly_returns"]  # type: ignore[assignment]
+    weekly["current_week"]["is_partial"] = False  # type: ignore[index]
+    for row in weekly["series"]:  # type: ignore[index]
+        for meta in (row.get("observation_meta_by_mode") or {}).values():
+            for entry in meta.values():
+                entry[3] = "COMPLETE_WITHIN_ACCEPTED_CALENDAR"
+        for entry in (row.get("observation_meta") or {}).values():
+            entry[3] = "COMPLETE_WITHIN_ACCEPTED_CALENDAR"
+    dom = _run(tmp_path, payload, "renderWeeklyTable")
+
+    assert "PARTIAL" not in str(dom["#weekly-table"]["innerHTML"])  # type: ignore[index]

@@ -2839,7 +2839,8 @@
     }).join("")}</tr>`).join("");
     const currentWeek = weekly.current_week || {};
     const currentWeekVisible = weeks.includes(currentWeek.week_start);
-    const partialLabel = currentWeekVisible && currentWeek.is_partial === true
+    const currentWeekCellPartial = currentWeekVisible && rows.some((row) => weeklyMeta(row, currentWeek.week_start)?.coverageStatus === "PARTIAL_BOUNDARY");
+    const partialLabel = currentWeekVisible && (currentWeek.is_partial === true || currentWeekCellPartial)
       ? ` · PARTIAL · data through ${safe(currentWeek.data_through_date || "unavailable")}`
       : "";
     $("#weekly-table").innerHTML = `<table class="weekly-table"><caption>Weekly returns${partialLabel}; absent cells are unavailable, not zero</caption>${header}<tbody>${body || `<tr><td colspan="${weeks.length + 1}">No series match the current filter.</td></tr>`}</tbody></table>`;

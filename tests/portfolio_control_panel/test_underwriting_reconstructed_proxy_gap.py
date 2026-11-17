@@ -105,3 +105,54 @@ def test_no_implementation_reconciliation_leaves_the_gap_unavailable() -> None:
 
     assert gap["total_gap"] is None
     assert gap["status"] == "UNAVAILABLE_NO_ACCEPTED_MODEL_OR_PROVIDER_COMPARISON"
+
+
+def test_only_the_named_reconciliation_statuses_are_a_proxy_comparator() -> None:
+    for status in (
+        "VERIFIED_CAUSAL_RETURN_ATTRIBUTION",
+        "PARTIAL",
+        "tested",
+        "SOMETHING",
+    ):
+        gap = panel._model_account_gap_underwriting(  # noqa: SLF001
+            _strategy(implementation_reconciliation=_reconciliation(status=status)),
+            POLICY,
+        )
+        assert gap["total_gap"] is None, status
+
+    for status in (
+        "TESTED_EXACT_COMMON_DATES",
+        "DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV",
+    ):
+        gap = panel._model_account_gap_underwriting(  # noqa: SLF001
+            _strategy(implementation_reconciliation=_reconciliation(status=status)),
+            POLICY,
+        )
+        assert gap["total_gap"] == "-0.1875", status
+
+
+def test_an_inconsistent_difference_is_not_a_comparator() -> None:
+    gap = panel._model_account_gap_underwriting(  # noqa: SLF001
+        _strategy(
+            implementation_reconciliation=_reconciliation(
+                account_minus_model_cumulative=-0.5
+            )
+        ),
+        POLICY,
+    )
+
+    assert gap["total_gap"] is None
+
+
+def test_a_lineage_mismatch_withdraws_the_derived_implementation_gap() -> None:
+    row = {
+        "strategy_id": "syn-a",
+        "implementation_gap_status": "tested",
+        "implementation_gap_basis": "EXACT_DATE_PROVIDER_COMPARISON",
+        "implementation_gap_audit_status": "tested",
+    }
+    (out,) = panel._suppress_unmatched_strategy_performance([row])  # noqa: SLF001
+
+    assert out["implementation_gap_status"] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+    assert out["implementation_gap_basis"] is None
+    assert out["implementation_gap_audit_status"] is None

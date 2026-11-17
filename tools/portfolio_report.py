@@ -2821,6 +2821,33 @@ IMPLEMENTATION_GAP_BASIS_PROVIDER = "EXACT_DATE_PROVIDER_COMPARISON"
 IMPLEMENTATION_GAP_BASIS_NONE = "NO_COMPARATOR_ADMITTED"
 
 
+def _usable_return_reconciliation(implementation: object) -> bool:
+    """A verified implementation contract counts only when its return reconciliation has a status
+    that is not UNAVAILABLE and observations (a trade deconstruction can verify while the return
+    reconciliation is unavailable).  The AI-factor shape nests it under account_basis."""
+
+    if not isinstance(implementation, Mapping):
+        return False
+    basis = implementation.get("account_basis")
+    candidates = [implementation.get("return_reconciliation")]
+    if isinstance(basis, Mapping):
+        candidates.append(basis.get("return_reconciliation"))
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        status = str(candidate.get("status") or "")
+        observations = candidate.get("observations")
+        if (
+            status
+            and not status.startswith("UNAVAILABLE")
+            and isinstance(observations, int)
+            and not isinstance(observations, bool)
+            and observations > 0
+        ):
+            return True
+    return False
+
+
 def _implementation_gap_fields(
     item: Mapping[str, Any],
     comparison: Mapping[str, Any],
@@ -2838,7 +2865,9 @@ def _implementation_gap_fields(
     reconciliation_status = str(item.get("implementation_reconciliation_status") or "")
     comparison_status = str(comparison.get("status") or "")
     observations = metrics.get("observations")
-    if reconciliation_status.startswith("VERIFIED"):
+    if reconciliation_status.startswith("VERIFIED") and _usable_return_reconciliation(
+        item.get("implementation_reconciliation")
+    ):
         status, basis = IMPLEMENTATION_GAP_TESTED, IMPLEMENTATION_GAP_BASIS_VERIFIED
     elif (
         comparison_status.startswith("DESCRIPTIVE_EXACT_DATE")

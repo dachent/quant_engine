@@ -46,6 +46,12 @@ def test_a_verified_implementation_reconciliation_is_tested_whatever_the_audit_s
         {
             "implementation_gap_status": "not_same_vintage",
             "implementation_reconciliation_status": "VERIFIED_CAUSAL_RETURN_ATTRIBUTION",
+            "implementation_reconciliation": {
+                "return_reconciliation": {
+                    "status": "DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV",
+                    "observations": 213,
+                }
+            },
         },
         {"status": "UNAVAILABLE"},
         None,
@@ -112,3 +118,44 @@ def test_a_comparison_without_observations_is_not_tested() -> None:
             None if observations is None else {"observations": observations},
         )
         assert row["implementation_gap_status"] == "not_testable", observations
+
+
+def test_a_verified_contract_with_an_unavailable_return_reconciliation_is_not_tested() -> (
+    None
+):
+    unavailable = {"return_reconciliation": {"status": "UNAVAILABLE_NO_COMMON_DATES"}}
+    for implementation in (
+        unavailable,
+        {"return_reconciliation": {"status": "X"}},
+        None,
+    ):
+        row = _merge(
+            {
+                "implementation_reconciliation_status": "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION",
+                **(
+                    {}
+                    if implementation is None
+                    else {"implementation_reconciliation": implementation}
+                ),
+            },
+            {"status": "UNAVAILABLE"},
+            None,
+        )
+        assert row["implementation_gap_status"] == "not_testable", implementation
+
+
+def test_a_verified_contract_is_tested_from_a_usable_return_reconciliation() -> None:
+    usable = {"status": "TESTED_EXACT_COMMON_DATES", "observations": 12}
+    for implementation in (
+        {"return_reconciliation": usable},
+        {"account_basis": {"return_reconciliation": usable}},
+    ):
+        row = _merge(
+            {
+                "implementation_reconciliation_status": "VERIFIED_CAUSAL_RETURN_ATTRIBUTION",
+                "implementation_reconciliation": implementation,
+            },
+            {"status": "UNAVAILABLE"},
+            None,
+        )
+        assert row["implementation_gap_status"] == "tested", implementation

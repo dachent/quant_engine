@@ -4109,6 +4109,11 @@ def _suppress_unmatched_strategy_performance(
         row["benchmark_comparison_disposition"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["provider_comparison_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["provider_comparison_disposition"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+        if "implementation_gap_status" in row:
+            # derived from the withheld comparison evidence: withdrawn with it
+            row["implementation_gap_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+            row["implementation_gap_basis"] = None
+            row["implementation_gap_audit_status"] = None
         suppressed.append(row)
     return suppressed
 
@@ -9033,6 +9038,10 @@ def _gap_signature(
     return "MATERIAL_PATH_DIVERGENCE"
 
 
+PROXY_RECONSTRUCTED_STATUS = "DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV"
+PROXY_RECONCILIATION_STATUSES = frozenset(
+    {PROXY_RECONSTRUCTED_STATUS, "TESTED_EXACT_COMMON_DATES"}
+)
 RECONSTRUCTED_PROXY_COMPARISON_STATUS = (
     "RECONSTRUCTED_PROXY_DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV"
 )
@@ -9056,8 +9065,7 @@ def _reconstructed_proxy_reference(
     metrics = implementation.get("return_reconciliation")
     if not isinstance(metrics, Mapping):
         return None
-    status = str(metrics.get("status") or "")
-    if not status or status.startswith("UNAVAILABLE"):
+    if metrics.get("status") not in PROXY_RECONCILIATION_STATUSES:
         return None
     observations = metrics.get("observations")
     if (
@@ -9074,6 +9082,14 @@ def _reconstructed_proxy_reference(
             "account_minus_model_cumulative",
         )
     ):
+        return None
+    try:
+        account = float(metrics["account_cumulative_return"])
+        model = float(metrics["model_cumulative_return"])
+        difference = float(metrics["account_minus_model_cumulative"])
+    except (TypeError, ValueError):
+        return None
+    if abs((account - model) - difference) > 1e-9:
         return None
     return dict(metrics)
 
@@ -9809,6 +9825,9 @@ def _strategy_underwriting(
             recommendation_reasons.extend(
                 ["MODEL_ACCOUNT_GAP_AT_OR_BELOW_MINUS_FIVE_PERCENT", gap["signature"]]
             )
+            if gap.get("comparison_status") == RECONSTRUCTED_PROXY_COMPARISON_STATUS:
+                # the reference is the reconstructed replica, not a provider series: say so in the advice
+                recommendation_reasons.append("REFERENCE_IS_RECONSTRUCTED_PROXY")
         elif portfolio_fit_status == "CLUSTER_BUDGET_BREACH":
             advisory_action = "REVIEW_SHARED_CLUSTER_BUDGET_NOT_PROVIDER_LABEL"
             recommendation_reasons.append("SHARED_ECONOMIC_DRIVER_CLUSTER_BREACH")

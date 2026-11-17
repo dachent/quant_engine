@@ -455,6 +455,21 @@ def _line_fields(
     }
 
 
+def _partial_boundary_in_week(meta_maps: Sequence[Mapping[str, Any]], key: str) -> bool:
+    """True when any strategy line is still PARTIAL_BOUNDARY in the week (a seven-day calendar
+    stays partial at a Friday cutoff although the weekday calendar is complete)."""
+
+    for meta in meta_maps:
+        entry = meta.get(key)
+        if (
+            isinstance(entry, list)
+            and len(entry) > 3
+            and entry[3] == "PARTIAL_BOUNDARY"
+        ):
+            return True
+    return False
+
+
 def _build_mode(weekly: Mapping[str, Any], mode: str) -> dict[str, Any]:
     rows = _strategy_rows(weekly)
     if not rows:
@@ -651,7 +666,12 @@ def _build_mode(weekly: Mapping[str, Any], mode: str) -> dict[str, Any]:
         "dates": week_keys,
         "week_end_dates": ends,
         "last_week_partial": current.get("week_start") == week_keys[-1]
-        and bool(current.get("is_partial")),
+        and (
+            bool(current.get("is_partial"))
+            or _partial_boundary_in_week(
+                [meta for _r, _v, meta, _s in per], week_keys[-1]
+            )
+        ),
         "stale_before_current_week": bool(current.get("week_start"))
         and week_keys[-1] < str(current.get("week_start")),
         "data_through_date": ends[-1],
@@ -2025,7 +2045,13 @@ def _verify_mode(
     current_week = _mapping(weekly.get("current_week"))
     week_start = current_week.get("week_start")
     if block["last_week_partial"] != (
-        week_start == dates[-1] and bool(current_week.get("is_partial"))
+        week_start == dates[-1]
+        and (
+            bool(current_week.get("is_partial"))
+            or _partial_boundary_in_week(
+                [inputs[series_id][1] for series_id in ids], dates[-1]
+            )
+        )
     ):
         raise _fail(f"{mode} last_week_partial differs")
     if block["stale_before_current_week"] != (
