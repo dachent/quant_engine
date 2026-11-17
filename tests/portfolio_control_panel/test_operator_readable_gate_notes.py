@@ -56,3 +56,14 @@ def test_a_trailing_full_stop_is_not_swallowed_by_the_argument(panel):
     assert panel._operator_readable("see manual_export_partial:2026-02-14.") == (
         "see manual export partial (2026-02-14)."
     )
+
+
+def test_the_nav_calendar_gap_note_reads_as_written_on_the_daily_nav_gate(panel):
+    """The baseline's nav known-gap line (42 NAV days missing on a live account) is shown to
+    the operator as written: no token in it is rewritten."""
+
+    note = (
+        "42 NAV day(s) missing for account account-f34e5b78348ad26e (IBKR) between "
+        "2026-01-01 and 2026-02-27, on dates the provider reported"
+    )
+    assert panel._operator_readable(note) == note

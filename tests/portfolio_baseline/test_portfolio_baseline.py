@@ -6008,9 +6008,8 @@ def test_nav_missing_on_provider_observed_dates_is_a_disclosed_gap_not_clean() -
 
     assert claim["status"] == "PARTIAL"
     assert claim["known_gaps"] == [
-        "3 NAV day(s) missing on provider-observed dates for account acct-ibkr "
-        "(IBKR), 2026-01-01..2026-01-05: no NAV observation despite the provider "
-        "reporting those dates"
+        "3 NAV day(s) missing for account acct-ibkr (IBKR) between 2026-01-01 "
+        "and 2026-01-05, on dates the provider reported"
     ]
 
 
