@@ -148,3 +148,42 @@ def test_a_closure_date_outside_the_statements_of_the_account_refuses(
     before_all = _statement(tmp_path, date(2026, 1, 5), "20251201")
     with pytest.raises(gen.IbkrGenerationError, match="outside the statements"):
         gen._closed_accounts([before_all], XWALK)
+
+
+def test_every_top_level_key_the_builder_emits_is_in_the_read_catalog_schema(
+    tmp_path: Path,
+) -> None:
+    """The closed_accounts key (and the others the schema once lacked) is listed, so the schema's
+    additionalProperties=false cannot reject a real catalog."""
+
+    import json
+
+    statement = _statement(tmp_path, date(2026, 1, 5), "20260105")
+    catalog = gen._normalize(
+        [statement],
+        {
+            "accounts": [
+                {
+                    "account_id": "account-x",
+                    "base_currency": "USD",
+                    "role": "INVESTMENT",
+                }
+            ],
+            "assignments": [],
+        },
+        XWALK,
+        [],
+        frozenset(),
+        0,
+        None,
+    )
+    assert catalog["closed_accounts"] == [
+        {"account_id": "account-x", "closed_date": "2026-01-05"}
+    ]
+    schema = json.loads(
+        (HERE.parents[1] / "schemas/providers/ibkr-read-catalog.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    unlisted = set(catalog) - set(schema["properties"]) - {"fact_coverage_matrix"}
+    assert unlisted == set(), unlisted
