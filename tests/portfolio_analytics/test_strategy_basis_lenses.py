@@ -299,6 +299,20 @@ def test_the_hybrid_plan_of_an_unadmitted_model_live_strategy_is_its_live_series
     declared sleeve path) instead of refusing, and without a backtest prehistory.
     """
 
+    # the real contract admits the AI layer; hold it for this test, in the builder
+    # and in the verifier the plan runs
+    verifier = planner._layered_history_module()
+    monkeypatch.setattr(planner, "_layered_history_module", lambda: verifier)
+    for module in (target_series, verifier):
+        original = module._model_live_layers
+
+        def held(corrections: Any, _original: Any = original) -> Any:
+            return {
+                strategy: (start, False)
+                for strategy, (start, _admitted) in _original(corrections).items()
+            }
+
+        monkeypatch.setattr(module, "_model_live_layers", held)
     artifacts, manifest = _restated(world)
     coverage = json.loads(artifacts["coverage.json"])
     ai = next(row for row in coverage["strategies"] if row["strategy_id"] == AI)

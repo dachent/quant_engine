@@ -3187,6 +3187,7 @@ def _build_eu_model_live_refresh_bundle(
     writer.writeheader()
     writer.writerows(all_rows)
     returns_content = output.getvalue().encode("utf-8")
+    designer_artifact = cast(list[dict[str, str]], eu_definition["source_artifacts"])[0]
     manifest = {
         **seed,
         "as_of_date": accepted_as_of.isoformat(),
@@ -3207,9 +3208,7 @@ def _build_eu_model_live_refresh_bundle(
                 "returns_sha256": hashlib.sha256(seed_returns).hexdigest(),
             },
             "designer_model_generation_id": designer_model_generation.name,
-            "designer_model_returns_sha256": eu_definition["source_artifacts"][0][
-                "sha256"
-            ],
+            "designer_model_returns_sha256": designer_artifact["sha256"],
             "model_live_observations": len(live),
             "model_live_first": live[0]["date"],
             "model_live_last": live[-1]["date"],
