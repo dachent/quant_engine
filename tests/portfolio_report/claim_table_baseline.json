@@ -476,13 +476,6 @@
    "kinds": [
     "universal"
    ],
-   "text": "Policy statement: read-only advisory surface;"
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
-    "universal"
-   ],
    "text": "Portfolio facts {} · freshness assessed {} (not a current-day claim) · Report {}… · read-only local artifact."
   },
   {
@@ -739,17 +732,17 @@
   {
    "file": "apps/portfolio-control-panel/app.js",
    "kinds": [
-    "universal",
-    "coverage"
+    "universal"
    ],
-   "text": "no numeric HWM is calculated while unavailable"
+   "text": "model-live observations remain authoritative from inception forward."
   },
   {
    "file": "apps/portfolio-control-panel/app.js",
    "kinds": [
-    "universal"
+    "universal",
+    "coverage"
    ],
-   "text": "no row declares an execution effect"
+   "text": "no numeric HWM is calculated while unavailable"
   },
   {
    "file": "apps/portfolio-control-panel/app.js",
@@ -801,6 +794,13 @@
     "epoch"
    ],
    "text": "the strategy row elsewhere mixes bases, see MIXED BASIS on the strategy row."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "this result therefore equals the live-only history and is not described as a long-history result."
   },
   {
    "file": "apps/portfolio-control-panel/app.js",
@@ -864,6 +864,13 @@
    "kinds": [
     "universal"
    ],
+   "text": "Backtest + live changes strategy rows only and uses version-matched backtest history strictly before live inception by date, where the live end is the model's own live record for a strategy with an admitted model-live layer and the owner's account otherwise;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
    "text": "Closing capital opens a successor only when the admission policy explicitly proves continuity."
   },
   {
@@ -887,14 +894,6 @@
     "universal"
    ],
    "text": "Every strategy row and every component line carries an evidence tag;"
-  },
-  {
-   "file": "apps/portfolio-control-panel/index.html",
-   "kinds": [
-    "universal",
-    "coverage"
-   ],
-   "text": "Every unavailable fact stays unavailable"
   },
   {
    "file": "apps/portfolio-control-panel/index.html",
@@ -952,13 +951,6 @@
    "kinds": [
     "universal"
    ],
-   "text": "Backtest + live changes strategy rows only and uses version-matched backtest history strictly before live inception by date, where the live end is the model's own live record for a strategy with an admitted model-live layer and the owner's account otherwise;"
-  },
-  {
-   "file": "apps/portfolio-control-panel/index.html",
-   "kinds": [
-    "universal"
-   ],
    "text": "Live-only evidence is the authoritative default for readiness, allocation, and risk controls."
   },
   {
@@ -981,20 +973,6 @@
     "universal"
    ],
    "text": "Narrowing evidence, never transaction authority"
-  },
-  {
-   "file": "apps/portfolio-control-panel/index.html",
-   "kinds": [
-    "universal"
-   ],
-   "text": "No brokerage connection, order path, or trade authorization."
-  },
-  {
-   "file": "apps/portfolio-control-panel/index.html",
-   "kinds": [
-    "universal"
-   ],
-   "text": "No live market feed, optimizer, or automated drift service is implied."
   },
   {
    "file": "apps/portfolio-control-panel/index.html",
@@ -2028,20 +2006,6 @@
     "epoch"
    ],
    "text": "report_epochs are the governed epochs the report's totals use;"
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
-    "universal"
-   ],
-   "text": "model-live observations remain authoritative from inception forward."
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
-    "universal"
-   ],
-   "text": "this result therefore equals the live-only history and is not described as a long-history result."
   }
  ]
 }
