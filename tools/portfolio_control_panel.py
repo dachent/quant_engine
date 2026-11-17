@@ -4102,6 +4102,9 @@ def _suppress_unmatched_strategy_performance(
             "corroboration",
             "execution_cost",
             "fee_rates",
+            "derived_annual_cost_usd",
+            "cost_classification",
+            "cost_derivation",
             "cost_rate_disclosure",
             "systematic_weight",
         ):

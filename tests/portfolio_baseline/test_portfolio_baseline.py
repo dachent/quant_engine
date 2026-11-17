@@ -2586,7 +2586,7 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
 
     The pins moved once, with cluster 2 task T1 (the catalog gained the
     ``current_capital`` and ``audit_snapshot`` blocks and the two audit checks
-    left ``reconciliation_checks``; the builder version went 1.2.0 -> 1.3.0; R2.1 then added the per-strategy execution_cost block and the optional cost evidence, 1.3.0 -> 1.4.0).
+    left ``reconciliation_checks``; the builder version went 1.2.0 -> 1.3.0; R2.1 then added the per-strategy execution_cost block and the optional cost evidence, 1.3.0 -> 1.4.0; the costs fact then counts derived and classified cost rows, 1.4.0 -> 1.5.0: only the manifest hash moved, the catalog bytes of this fixture did not).
     ``test_allocations_stay_byte_identical_to_the_dated_audit_snapshot`` proves
     that nothing else moved: undoing exactly those changes reproduces the
     previous catalog hash ``fde46f73...``."""
@@ -2603,7 +2603,7 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
     )
     assert (
         hashlib.sha256(manifest_bytes).hexdigest()
-        == "e33b4af4cb47ab99acad2d8156b3c1b0f16cc6716299d466b6311bb826d2d8ec"
+        == "a6d7957118fa52ebbc29cc8d64005da7ed885b700b0f0d889bf99158a49abca9"
     )
 
 

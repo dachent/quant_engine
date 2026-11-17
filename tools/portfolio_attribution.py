@@ -57,13 +57,18 @@ COST_EVIDENCE_KEYS: Final = (
     "execution_cost",
 )
 # Present only on a percent-based cost row (documented rates, no dollar amount).
-COST_RATE_KEYS: Final = ("fee_rates",)
+COST_RATE_KEYS: Final = (
+    "cost_classification",
+    "cost_derivation",
+    "derived_annual_cost_usd",
+    "fee_rates",
+)
 # After-tax cost is outside this engine's pre-tax reporting scope (owner record
 # OR-901-AFTER-TAX, evidence/releases/.../records/sprint-cost): no tax shield is claimed
 # on a subscription or a fund fee, and no tax-lot, tax-rate or realization input is
 # declared. The status says so; it is never a label for evidence that failed to arrive.
 AFTER_TAX_STATUS_NOT_APPLICABLE: Final = "NOT_APPLICABLE_PRE_TAX_REPORTING_SCOPE"
-BUILDER_VERSION: Final = "1.2.2"
+BUILDER_VERSION: Final = "1.3.0"
 STRATEGY_COUNT: Final = 9
 CATALOG_NAME: Final = "strategy-attribution.json"
 AVAILABLE_STATUSES: Final = {

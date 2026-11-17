@@ -1663,7 +1663,12 @@ COST_EVIDENCE_KEYS: Final = (
     "execution_cost",
 )
 # Present only on a percent-based cost row; equal to portfolio_attribution.COST_RATE_KEYS.
-COST_RATE_KEYS: Final = ("fee_rates",)
+COST_RATE_KEYS: Final = (
+    "cost_classification",
+    "cost_derivation",
+    "derived_annual_cost_usd",
+    "fee_rates",
+)
 
 
 def _plain_words(code: object) -> str:
@@ -1945,6 +1950,47 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
     )
     if pages:
         sentence += f"; sources: {', '.join(pages)}"
+    derived = cost.get("derived_annual_cost_usd")
+    basis = cost.get("cost_derivation")
+    if derived is not None and isinstance(basis, Mapping):
+        unpriced = basis.get("unpriced_components") or []
+        in_nav = [
+            item
+            for item in basis.get("classified_components") or []
+            if isinstance(item, Mapping)
+            and item.get("classification") == "IN_NAV_NOT_BILLED"
+        ]
+        contingent = [
+            item
+            for item in basis.get("classified_components") or []
+            if isinstance(item, Mapping)
+            and item.get("classification") == "EVENT_FEE_NOT_ANNUAL"
+        ]
+        sentence += (
+            f"; derived annual {basis.get('rate_kind', '').replace('_', ' ')} cost "
+            f"${derived} ({basis.get('method')}): "
+            f"{_percent_text(basis.get('rate'))} of ${basis.get('base_value_usd')} "
+            f"capital value at the cutoff {basis.get('as_of')}"
+        )
+        if unpriced:
+            sentence += (
+                "; "
+                + ", ".join(str(name).replace("_", " ") for name in unpriced)
+                + " is a share of gains, not of capital value, and is not priced"
+            )
+        for item in in_nav:
+            sentence += (
+                f"; {str(item.get('component')).replace('_', ' ')} "
+                f"{_percent_text(item.get('rate'))} is IN_NAV_NOT_BILLED "
+                "(charged inside the vehicle NAV, not a billed dollar cost)"
+            )
+        for item in contingent:
+            sentence += (
+                f"; {str(item.get('component')).replace('_', ' ')} "
+                f"{_percent_text(item.get('rate'))} is EVENT_FEE_NOT_ANNUAL "
+                "(billed when units are redeemed, not an annual cost)"
+            )
+        return f"{sentence}; billed dollar amount: not published."
     return f"{sentence}; no dollar cost is published."
 
 
@@ -2007,7 +2053,10 @@ def _cutoff_cost_rate(
     }
     if amount_text is None:
         result["cost_rate_reason"] = (
-            "the cost is a documented percent rate; no dollar amount is published"
+            "the cost is a documented percent rate; its derived annual amount is carried beside the rate"
+            if cost.get("derived_annual_cost_usd") is not None
+            and result["fees_status"] == FEES_STATUS_DOCUMENTED_RATE
+            else "the cost is a documented percent rate; no dollar amount is published"
             if result["fees_status"] == FEES_STATUS_DOCUMENTED_RATE
             else "no annual cost amount is evidenced"
         )
