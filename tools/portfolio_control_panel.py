@@ -6594,6 +6594,19 @@ def _attach_alpha_alternatives(grouped: Sequence[Mapping[str, Any]]) -> None:
                     )
 
 
+# Factor-model audit D1: the economic-factor lens reads monthly-published French files
+# and ends before the cutoff, so a cutoff-current lens leads the panel.
+DEFAULT_LENS_ORDER: Final = ("ETF_STYLE", "RETURN_SECTOR", "ECONOMIC_FACTOR")
+
+
+def _current_default_lens(lenses: Sequence[Mapping[str, Any]]) -> str:
+    present = [item.get("lens_id") for item in lenses]
+    for lens_id in DEFAULT_LENS_ORDER:
+        if lens_id in present:
+            return lens_id
+    return str(present[0]) if present and present[0] else "ECONOMIC_FACTOR"
+
+
 def _decomposition_lenses_for_mode(
     root: Path,
     plan_bundle: Path,
@@ -6901,7 +6914,7 @@ def _decomposition_lenses_for_mode(
     _attach_alpha_alternatives(grouped)
     return (
         {
-            "default_lens": "ECONOMIC_FACTOR",
+            "default_lens": _current_default_lens(grouped),
             "lenses": grouped,
             "plan_bundle_id": plan_bundle.name,
             "plan_manifest_sha256": manifest_sha256,

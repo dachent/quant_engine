@@ -217,3 +217,16 @@ def test_the_alpha_window_is_the_training_window_not_the_whole_sample() -> None:
     assert ctx["train_window_days"] == 99
     # fitted on 99 days, so not a headline although the sample spans years
     assert ctx["headline_status"] == "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE"
+
+
+def test_the_default_lens_is_a_cutoff_current_lens() -> None:
+    """Factor-model audit D1: ECONOMIC_FACTOR (French files, monthly) ends before the cutoff."""
+
+    lenses = [{"lens_id": "ECONOMIC_FACTOR"}, {"lens_id": "ETF_STYLE"}]
+    assert panel._current_default_lens(lenses) == "ETF_STYLE"
+    assert panel._current_default_lens([{"lens_id": "ECONOMIC_FACTOR"}]) == (
+        "ECONOMIC_FACTOR"
+    )
+    assert panel._current_default_lens(
+        [{"lens_id": "ECONOMIC_FACTOR"}, {"lens_id": "RETURN_SECTOR"}]
+    ) == ("RETURN_SECTOR")
