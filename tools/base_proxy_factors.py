@@ -102,6 +102,25 @@ def _check_dividend_record(
         for left, right in zip([window_start, *recent], recent)
         if (right - left).days > MONTHLY_MAX_GAP_DAYS
     ]
+    # every calendar month between the window's first and the capture's last month
+    # carries a distribution; January alone may not (the year-end one goes ex in Dec)
+    paid_months = {(day.year, day.month) for day in paid}
+    year, month = window_start.year, window_start.month
+    missing_months: list[tuple[int, int]] = []
+    while True:
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+        if (year, month) >= (last_price.year, last_price.month):
+            break
+        if (year, month) not in paid_months and month != 1:
+            missing_months.append((year, month))
+    if missing_months:
+        raise BaseProxyError(
+            f"{ticker}: no distribution recorded in {missing_months[0][0]}-"
+            f"{missing_months[0][1]:02d} (and {len(missing_months) - 1} other "
+            "month(s)): its ex-date would stay a price drop in the returns"
+        )
     if gaps:
         raise BaseProxyError(
             f"{ticker}: no distribution recorded between {gaps[0][0].isoformat()} "
