@@ -695,7 +695,7 @@ def test_the_hybrid_plan_of_an_admitted_model_live_strategy_is_backtest_then_mod
         admission=admitted,
     )
     composition = result["composition"][SERIES]
-    assert composition["status"] == "AVAILABLE_LIVE_PLUS_BACKTEST"
+    assert composition["status"] == "AVAILABLE_BACKTEST_PREHISTORY_PLUS_MODEL_LIVE"
     assert composition["live_evidence_layer"] == "MODEL_LIVE"
     assert composition["backtest_observations_used"] > 0
     primary = [row for row in result["rows"] if row["series_id"] == SERIES]

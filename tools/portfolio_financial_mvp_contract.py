@@ -4327,6 +4327,18 @@ def _validate_history_corrections(
                 raise FinancialMvpContractError(
                     f"incompatible model-live entered the research series: {correction_id}"
                 )
+            if hybrid == "INCLUDE_MODEL_LIVE_RESEARCH" and (
+                _object(source.get("freshness"), "model-live source freshness")[
+                    "max_age_days"
+                ]
+                <= 0
+            ):
+                # the layer is a live record, so its source must carry a real age
+                # bound; a zero bound would read every cutoff before the evaluation
+                # date as stale
+                raise FinancialMvpContractError(
+                    f"admitted model-live source has no freshness bound: {correction_id}"
+                )
             if compatibility == "ACCOUNT_OWNED":
                 raise FinancialMvpContractError(
                     f"model-live carries account-owned version: {correction_id}"

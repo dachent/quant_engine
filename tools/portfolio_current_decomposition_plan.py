@@ -680,7 +680,15 @@ def _layered_history_targets(
                     else (
                         "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
                         if no_matched_prehistory
-                        else "AVAILABLE_LIVE_PLUS_BACKTEST"
+                        else (
+                            (
+                                "AVAILABLE_BACKTEST_PREHISTORY_PLUS_MODEL_LIVE"
+                                if backtest_observations
+                                else "AVAILABLE_MODEL_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+                            )
+                            if live_layer == "MODEL_LIVE"
+                            else "AVAILABLE_LIVE_PLUS_BACKTEST"
+                        )
                     )
                 )
             ),

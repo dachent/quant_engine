@@ -164,6 +164,8 @@
     AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE: "Available: version-matched backtest prehistory plus live",
     AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY: "Available live; no version-matched backtest prehistory",
     LIVE_ONLY_RESEARCH_SERIES_WITHHELD_MODEL_LIVE_NOT_ADMITTED: "Research series withheld: model-live layer not admitted; the account series is used",
+    AVAILABLE_BACKTEST_PREHISTORY_PLUS_MODEL_LIVE: "Available: version-matched backtest prehistory plus the model's own live record",
+    AVAILABLE_MODEL_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY: "Available: the model's own live record; no version-matched backtest prehistory",
     AVAILABLE_LIVE_ONLY: "Available: live only",
     AVAILABLE_HWM_QUALIFIED: "Available for HWM",
     UNAVAILABLE_SOURCE_LINEAGE_MISMATCH: "Report performance withheld: source-lineage mismatch",

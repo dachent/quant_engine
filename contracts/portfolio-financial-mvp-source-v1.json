@@ -3779,9 +3779,9 @@
     "cadence": "VERSION_SNAPSHOT"
    },
    "freshness": {
-    "max_age_days": 0,
-    "publication_lag_days": 0,
-    "rule": "IMMUTABLE_VERSION_MATCHED_EVIDENCE"
+    "max_age_days": 7,
+    "publication_lag_days": 2,
+    "rule": "IMMUTABLE_VERSION_MATCHED_EVIDENCE_FOR_BACKTEST_LAYERS; DECLARED_PROVIDER_CADENCE_AND_LAG_FOR_THE_MODEL_LIVE_LAYER"
    },
    "admission": {
     "transform": "portfolio-strategy-history",

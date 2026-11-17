@@ -4917,3 +4917,18 @@ def test_fund_scoped_custody_decision_is_complete_paired_and_policy_driven() -> 
         contract_tool._validate_policy_decision(
             duplicated, "provider_custody_perimeter"
         )
+
+
+def test_an_admitted_model_live_source_needs_a_real_freshness_bound() -> None:
+    """Kill test: a model-live layer with a zero age bound would read every cutoff
+    before the evaluation date as stale, so the contract refuses it; the real
+    contract carries the provider cadence for the EU model-live source."""
+
+    real = _source(_contract(), "strategy-backtests")["freshness"]
+    assert real["max_age_days"] > 0
+    zero = copy.deepcopy(_contract())
+    _source(zero, "strategy-backtests")["freshness"]["max_age_days"] = 0
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError, match="no freshness bound"
+    ):
+        _validate(zero)
