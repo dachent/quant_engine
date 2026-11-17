@@ -299,6 +299,20 @@ def test_the_hybrid_plan_of_an_unadmitted_model_live_strategy_is_its_live_series
     declared sleeve path) instead of refusing, and without a backtest prehistory.
     """
 
+    # the real contract admits the AI layer; hold it for this test, in the builder
+    # and in the verifier the plan runs
+    verifier = planner._layered_history_module()
+    monkeypatch.setattr(planner, "_layered_history_module", lambda: verifier)
+    for module in (target_series, verifier):
+        original = module._model_live_layers
+
+        def held(corrections: Any, _original: Any = original) -> Any:
+            return {
+                strategy: (start, False)
+                for strategy, (start, _admitted) in _original(corrections).items()
+            }
+
+        monkeypatch.setattr(module, "_model_live_layers", held)
     artifacts, manifest = _restated(world)
     coverage = json.loads(artifacts["coverage.json"])
     ai = next(row for row in coverage["strategies"] if row["strategy_id"] == AI)
@@ -646,3 +660,102 @@ def test_without_a_lane_there_is_no_split_margin(tmp_path: Path) -> None:
     target, days = _write_sources(root)
     result, _, _ = decomposition.build_decomposition(_spec(root, target, days), root)
     assert "split_margin" not in result["model_results"][0]["coverage"]
+
+
+def test_the_hybrid_plan_of_an_admitted_model_live_strategy_is_backtest_then_model_live(
+    world: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill test: an admitted model-live layer is the live end of the plan, never
+    the account, and the plan no longer refuses for lack of an account segment."""
+
+    from test_portfolio_layered_history import _admit_p123_ai_model_live
+
+    import test_portfolio_layered_history as layered
+
+    # the world builds in immutable-generation mode; identity refresh must too
+    monkeypatch.setattr(layered, "_build", lambda _fixture: _build(world))
+    _admit_p123_ai_model_live(world["fixture"])
+    from test_portfolio_layered_history import _synthetic_current_admission
+
+    # the contract changed, so the admission it binds is recomputed for build and plan
+    admitted = _synthetic_current_admission(world["fixture"])
+    monkeypatch.setattr(
+        target_series, "_current_source_admission_authority", lambda **_: admitted
+    )
+    # the sleeve restatement is declared: the hybrid plan must not seal-check the
+    # account rows it does not carry
+    artifacts, manifest = _restated(world)
+    result = _plan(
+        world,
+        monkeypatch,
+        artifacts,
+        manifest,
+        mode="LIVE_PLUS_BACKTEST",
+        admission=admitted,
+    )
+    composition = result["composition"][SERIES]
+    assert composition["status"] == "AVAILABLE_BACKTEST_PREHISTORY_PLUS_MODEL_LIVE"
+    assert composition["live_evidence_layer"] == "MODEL_LIVE"
+    assert composition["backtest_observations_used"] > 0
+    primary = [row for row in result["rows"] if row["series_id"] == SERIES]
+    assert {row["evidence_layer"] for row in primary} == {"BACKTEST", "MODEL_LIVE"}
+    # the account lane still rides beside the research series
+    assert {row["evidence_layer"] for row in composition["account_basis"]["rows"]} >= {
+        "ACCOUNT_LIVE"
+    }
+
+
+def _lane_manifest() -> dict[str, Any]:
+    return {
+        "strategy_basis_restatement": {
+            "sleeve_facts": json.dumps({"parent_account_id": "parent"}),
+            "strategies": [
+                {
+                    "series_id": SERIES,
+                    "strategy_id": AI,
+                    "series_sha256": "0" * 64,
+                    "account_id": "sleeve",
+                }
+            ],
+        }
+    }
+
+
+def _lanes(rows: list[dict[str, str]], mode: str) -> Any:
+    return planner._account_basis_lanes(
+        manifest=_lane_manifest(),
+        planned_series={SERIES: AI},
+        selected_projection=rows,
+        evidence_mode=mode,
+        provider_ledger_catalog_path=None,
+    )
+
+
+def _row(layer: str, day: str) -> dict[str, str]:
+    return {
+        "series_id": SERIES,
+        "date": day,
+        "evidence_layer": layer,
+        "return": "0.01",
+    }
+
+
+def test_the_sleeve_seal_is_kept_where_account_rows_are_selected() -> None:
+    """Kill test: in LIVE_ONLY the account rows must be the sealed sleeve rows."""
+
+    with pytest.raises(
+        planner.CurrentPlanError, match="selected live rows differ from the restated"
+    ):
+        _lanes([_row("ACCOUNT_LIVE", "2026-01-05")], "LIVE_ONLY")
+
+
+def test_a_model_live_research_series_never_carries_the_account() -> None:
+    """Kill test: a hybrid projection of a model-live strategy with an account row
+    is refused, where the seal check does not apply."""
+
+    with pytest.raises(planner.CurrentPlanError, match="carries the account"):
+        _lanes(
+            [_row("MODEL_LIVE", "2026-01-06"), _row("ACCOUNT_LIVE", "2026-01-05")],
+            "LIVE_PLUS_BACKTEST",
+        )

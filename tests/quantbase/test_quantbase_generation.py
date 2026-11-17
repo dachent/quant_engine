@@ -438,3 +438,16 @@ def test_plan_identity_and_row_width_fail_closed(tmp_path: Path) -> None:
             expected_file_count=len(FILES),
             expected_record_count=len(FILES) + 1,
         )
+
+
+def test_public_fund_series_is_its_own_family_with_the_ssg_header() -> None:
+    name = "public_fund_Volatis_Strategy_pricehistory.csv"
+    assert generation._family(name) == "public_fund_pricehistory"
+    assert (
+        generation._HEADERS["public_fund_pricehistory"]
+        == (generation._HEADERS["ssg_pricehistory"])
+    )
+    # the owner's account series keeps its own family
+    assert generation._family("ssg_Volatis_Strategy_pricehistory.csv") == (
+        "ssg_pricehistory"
+    )

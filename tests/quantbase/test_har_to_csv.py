@@ -514,7 +514,9 @@ def test_verify_refuses_tampering_and_undeclared_paths(tmp_path: Path) -> None:
     path = target / "source" / "csv" / "accounts.csv"
     original = path.read_bytes()
     path.write_bytes(original + b"x")
-    with pytest.raises(ERROR, match="derived output differs"):
+    with pytest.raises(
+        ERROR, match="derived output differs|undeclared or missing paths"
+    ):
         converter.verify_conversion(case.intake, case.out, "public")
     path.write_bytes(original)
     (target / "source" / "csv" / "extra.csv").write_bytes(b"a\n")
@@ -523,13 +525,17 @@ def test_verify_refuses_tampering_and_undeclared_paths(tmp_path: Path) -> None:
     (target / "source" / "csv" / "extra.csv").unlink()
     manifest = target / "native-manifest.json"
     manifest.write_bytes(manifest.read_bytes().replace(b"native-har", b"native-hax"))
-    with pytest.raises(ERROR, match="derived output differs"):
+    with pytest.raises(
+        ERROR, match="derived output differs|undeclared or missing paths"
+    ):
         converter.verify_conversion(case.intake, case.out, "public")
 
 
 def test_verify_requires_the_same_mode(tmp_path: Path) -> None:
     case, _ = _ready(tmp_path, "public")
-    with pytest.raises(ERROR, match="derived output differs"):
+    with pytest.raises(
+        ERROR, match="derived output differs|undeclared or missing paths"
+    ):
         converter.verify_conversion(case.intake, case.out, "account-level")
 
 
@@ -1314,3 +1320,23 @@ def test_an_unknown_activity_type_and_a_missing_stats_column_refuse_under_drift(
     # the 21 explicit optional columns and extra keys are still tolerated
     Case(tmp_path / "ok", _drift).convert("account-level", allow_provider_drift=True)
     assert len(converter._STATS_OPTIONAL) == 21
+
+
+def test_account_level_mode_keeps_the_public_volatis_fund_series(
+    tmp_path: Path,
+) -> None:
+    _, public = _ready(tmp_path / "a", "public")
+    _, account = _ready(tmp_path / "b", "account-level")
+    kept = account / "source/csv" / "public_fund_Volatis_Strategy_pricehistory.csv"
+    # the provider's fund-level series is the same bytes the public mode writes
+    # as the ssg series, never the owner's account series
+    assert (
+        kept.read_bytes()
+        == (
+            public / "source/csv" / "ssg_Volatis_Strategy_pricehistory.csv"
+        ).read_bytes()
+    )
+    assert not (
+        public / "source/csv" / "public_fund_Volatis_Strategy_pricehistory.csv"
+    ).exists()
+    assert ACCOUNT_VALUE not in kept.read_text(encoding="utf-8")

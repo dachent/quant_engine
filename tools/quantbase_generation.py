@@ -165,6 +165,7 @@ _HEADERS: Final[dict[str, tuple[str, ...]]] = {
         "backtest_end_date",
     ),
     "key_value": ("column", "value"),
+    "public_fund_pricehistory": ("fund_title", "fund_id", "value", "time"),
     "ssg_pricehistory": ("fund_title", "fund_id", "value", "time"),
     "volatis_rebalance": ("date", "symbol", "proportion"),
 }
@@ -275,6 +276,8 @@ def _family(name: str) -> str:
         return "fund_stats"
     if name in {"partner_status.csv", "user_profile.csv", "volatis_strategy_stats.csv"}:
         return "key_value"
+    if name.startswith("public_fund_") and name.endswith("_pricehistory.csv"):
+        return "public_fund_pricehistory"
     if name.startswith("ssg_") and name.endswith("_pricehistory.csv"):
         return "ssg_pricehistory"
     if name == "volatis_strategy_rebalance_history.csv":

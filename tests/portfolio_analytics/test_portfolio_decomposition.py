@@ -2434,3 +2434,54 @@ def test_atomic_write_keeps_a_different_existing_file(tmp_path: Path) -> None:
     assert decomposition._write_new_atomic(path, b"second") is False
     assert path.read_bytes() == b"first"
     assert [item.name for item in tmp_path.iterdir()] == ["entry.json"]
+
+
+def _hybrid_targets(
+    path: Path, live_layer: str, live_basis: str, backtest_basis: str = "MODEL"
+) -> Path:
+    rows = [
+        ("S", "2026-01-02", "0.01", "BACKTEST", backtest_basis),
+        ("S", "2026-01-05", "0.02", "BACKTEST", backtest_basis),
+        ("S", "2026-01-06", "0.03", live_layer, live_basis),
+        ("S", "2026-01-07", "0.01", live_layer, live_basis),
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(decomposition.TARGET_HEADERS)
+        for series_id, day, value, layer, basis in rows:
+            writer.writerow([series_id, day, value, layer, basis, "TOTAL", ""])
+    return path
+
+
+def test_target_loader_accepts_the_model_live_layer_on_model_basis(
+    tmp_path: Path,
+) -> None:
+    """Kill test: backtest then the model's own live record is one MODEL series."""
+
+    targets = _hybrid_targets(tmp_path / "t.csv", "MODEL_LIVE", "MODEL")
+    rows = decomposition._read_targets(
+        targets, date(2026, 1, 31), "LIVE_PLUS_BACKTEST"
+    )["S"]
+    assert [row.evidence_layer for row in rows] == [
+        "BACKTEST",
+        "BACKTEST",
+        "MODEL_LIVE",
+        "MODEL_LIVE",
+    ]
+
+
+def test_target_loader_still_refuses_a_realized_live_layer_on_model_basis(
+    tmp_path: Path,
+) -> None:
+    """Kill test: only the model's own live record may be MODEL basis."""
+
+    targets = _hybrid_targets(tmp_path / "t.csv", "ACCOUNT_LIVE", "MODEL")
+    with pytest.raises(
+        decomposition.DecompositionError, match="cannot mix return semantics"
+    ):
+        decomposition._read_targets(targets, date(2026, 1, 31), "LIVE_PLUS_BACKTEST")
+    mixed = _hybrid_targets(tmp_path / "m.csv", "MODEL_LIVE", "NET")
+    with pytest.raises(
+        decomposition.DecompositionError, match="cannot mix return semantics"
+    ):
+        decomposition._read_targets(mixed, date(2026, 1, 31), "LIVE_PLUS_BACKTEST")

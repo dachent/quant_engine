@@ -1075,7 +1075,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "98f35a39b2f000bc49d53ac25470f0eea4ef851140937c5c65aca66371d58d1b"
+        "e50ee9aae9e6163ff4c13eb01ce94a0981131027dff77352c3aedf75a9e3d3b8"
     )
 
 
@@ -3058,7 +3058,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     assert history["policy_id"] == "PORT-HISTORY-TRUTH-2"
     assert history["owner_issue"] == 319
     rows = history["corrections"]
-    assert len(rows) == 21
+    assert len(rows) == 22
     segment_identities = history["materialized_segment_identities"]
     assert [row["segment_id"] for row in segment_identities] == sorted(
         row["segment_id"] for row in segment_identities
@@ -3105,6 +3105,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         ("p123-eu", "ACCOUNT_LIVE"),
         ("volatis-strategy", "BACKTEST"),
         ("volatis-strategy", "PROVIDER_LIVE"),
+        ("volatis-strategy", "MODEL_LIVE"),
         ("volatis-strategy", "ACCOUNT_LIVE"),
         ("echotrade-growth-pivots", "ACCOUNT_LIVE"),
         ("grizzlybears-vtma", "BACKTEST"),
@@ -3511,9 +3512,17 @@ def test_layer_boundaries_copy_account_and_model_live() -> None:
     ):
         _validate(in_live_only)
     uncaptured = copy.deepcopy(_contract())
-    _history_correction(uncaptured, "p123-ai-model-live")["mode_admission"][
-        "LIVE_PLUS_BACKTEST"
-    ] = "INCLUDE_MODEL_LIVE_RESEARCH"
+    _uncaptured_row = _history_correction(uncaptured, "p123-ai-model-live")
+    _uncaptured_row["capture"] = {
+        "status": "NOT_CAPTURED",
+        "capture_defect": "MODEL_LIVE_ROWS_NOT_CAPTURED",
+        "generation_id": None,
+        "generation_sha256": None,
+        "as_of": None,
+    }
+    _uncaptured_row["mode_admission"]["LIVE_PLUS_BACKTEST"] = (
+        "INCLUDE_MODEL_LIVE_RESEARCH"
+    )
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match="incompatible model-live entered the research series",
@@ -4447,11 +4456,13 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # correction removes only that consumer from the historical source rows.
     # Moved again by the 2026-10-16 Matrixport NAV gap declaration (#287 V3).
     # Moved again by the R3 FX re-selection (generation ff77af45, through 2026-11-06).
+    # Moved again by the model-live admission (EU strategy-backtests restaged onto
+    # the EU model-live seed; AI and EU model-live corrections READY).
     # The affected product-data-class pins are then rederived from those changed
     # source identities, including the four verified source-class bindings;
     # financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "0e52172b1ce1829e3773530a0d26611582259d4dae62fb314cf30b23a96154c0"
+        "9bae8d794d2da375e936c5037dfb9ea34f28e90018d97e000e76629d8fddfcbe"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4488,7 +4499,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "0e52172b1ce1829e3773530a0d26611582259d4dae62fb314cf30b23a96154c0"
+        "9bae8d794d2da375e936c5037dfb9ea34f28e90018d97e000e76629d8fddfcbe"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
@@ -4907,3 +4918,105 @@ def test_fund_scoped_custody_decision_is_complete_paired_and_policy_driven() -> 
         contract_tool._validate_policy_decision(
             duplicated, "provider_custody_perimeter"
         )
+
+
+def test_an_admitted_model_live_source_needs_a_real_freshness_bound() -> None:
+    """Kill test: a model-live layer with a zero age bound would read every cutoff
+    before the evaluation date as stale, so the contract refuses it; the real
+    contract carries the provider cadence for the EU model-live source."""
+
+    real = _source(_contract(), "strategy-backtests")["freshness"]
+    assert real["max_age_days"] > 0
+    zero = copy.deepcopy(_contract())
+    _source(zero, "strategy-backtests")["freshness"]["max_age_days"] = 0
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError, match="no freshness bound"
+    ):
+        _validate(zero)
+
+
+def _admitted_volatis_prehistory() -> dict[str, object]:
+    """The contract with the Volatis provider-live prehistory admitted."""
+
+    contract = copy.deepcopy(_contract())
+    row = _history_correction(contract, "volatis-model-live")
+    live = _history_correction(contract, "volatis-provider-live")
+    row["capture"] = copy.deepcopy(live["capture"])
+    row["mode_admission"]["LIVE_PLUS_BACKTEST"] = (
+        contract_tool.PROVIDER_LIVE_PREHISTORY_ADMISSION
+    )
+    row["readiness"] = "READY"
+    row["blockers"] = []
+    return contract
+
+
+def test_provider_live_prehistory_is_its_own_admission_for_volatis_only() -> None:
+    assert contract_tool.PROVIDER_LIVE_PREHISTORY_STRATEGIES == {"volatis-strategy"}
+
+    # the account continues in the same series (it is NOT the p123 shape)
+    account = _history_correction(_contract(), "volatis-account-live")
+    assert account["mode_admission"]["LIVE_PLUS_BACKTEST"] == "INCLUDE_SELECTED_LIVE"
+
+    # the p123 admission token cannot be used by Volatis ...
+    swapped = _admitted_volatis_prehistory()
+    _history_correction(swapped, "volatis-model-live")["mode_admission"][
+        "LIVE_PLUS_BACKTEST"
+    ] = "INCLUDE_MODEL_LIVE_RESEARCH"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="model-live research admission differs",
+    ):
+        _validate(swapped)
+
+    # ... and the prehistory token cannot be used by a p123 model-live layer
+    borrowed = copy.deepcopy(_contract())
+    _history_correction(borrowed, "p123-ai-model-live")["mode_admission"][
+        "LIVE_PLUS_BACKTEST"
+    ] = contract_tool.PROVIDER_LIVE_PREHISTORY_ADMISSION
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="model-live research admission differs",
+    ):
+        _validate(borrowed)
+
+
+@pytest.mark.parametrize(
+    ("observed_end", "message"),
+    [
+        ("2024-10-15", "not strictly before the account"),
+        ("2024-11-01", "not strictly before the account"),
+        ("2024-10-05", "leaves a gap before the account"),
+    ],
+)
+def test_provider_live_prehistory_must_hand_over_to_the_account(
+    observed_end: str, message: str
+) -> None:
+    contract = _admitted_volatis_prehistory()
+    _history_correction(contract, "volatis-model-live")["interval"]["observed_end"] = (
+        observed_end
+    )
+    with pytest.raises(contract_tool.FinancialMvpContractError, match=message):
+        _validate(contract)
+
+
+def test_provider_live_prehistory_needs_the_account_path_version() -> None:
+    contract = _admitted_volatis_prehistory()
+    row = _history_correction(contract, "volatis-model-live")
+    row["strategy_version"]["version_ref"] = "volatis-quantbase-provider-path:other"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError, match="version differs"
+    ):
+        _validate(contract)
+    uncaptured = _admitted_volatis_prehistory()
+    _history_correction(uncaptured, "volatis-model-live")["capture"] = {
+        "status": "NOT_CAPTURED",
+        "capture_defect": "X",
+        "generation_id": None,
+        "generation_sha256": None,
+        "as_of": None,
+    }
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="incompatible model-live entered the research series",
+    ):
+        _validate(uncaptured)
