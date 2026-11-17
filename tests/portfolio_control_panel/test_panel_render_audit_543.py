@@ -1075,6 +1075,7 @@ def test_F33_tones_come_from_an_explicit_table_and_completeness_proofs_are_not_p
         "OBSERVED_NOT_COMPLETENESS_PROOF": "neutral",
         "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF": "neutral",
         "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF": "neutral",
+        "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF": "neutral",
         "NO_ACCEPTED_FACT_PATH": "danger",
         "COMPLETE_WITHIN_DECLARED_BOUNDARY": "positive",
     }

@@ -5434,6 +5434,7 @@ def _coverage_evidence(
                 if isinstance(item.get(amount_field), Mapping)
                 and item[amount_field].get("status") != "AVAILABLE"
             )
+            excluded = (unattributed or {}).get((account_id, fact_type), 0)
             if accepted:
                 status = (
                     "OBSERVED_WITH_UNAVAILABLE_AMOUNTS_NOT_COMPLETENESS_PROOF"
@@ -5452,16 +5453,22 @@ def _coverage_evidence(
                 )
                 boundary_basis = "OBSERVED_RECORDS_ONLY"
             elif admitted:
-                status = (
-                    "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
-                    if cadence == "EVENT_STREAM"
-                    else "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF"
-                )
-                disposition = (
-                    "RETAINED_UNATTESTED_EVENT_INTERVAL"
-                    if cadence == "EVENT_STREAM"
-                    else "RETAINED_NO_REPORTED_FACT"
-                )
+                if excluded and cadence == "EVENT_STREAM":
+                    # events exist in the provider ledger but none is attributed to a strategy:
+                    # they are neither accepted nor absent
+                    status = "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF"
+                    disposition = "RETAINED_PROVIDER_EVENTS_NOT_ATTRIBUTED"
+                else:
+                    status = (
+                        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+                        if cadence == "EVENT_STREAM"
+                        else "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF"
+                    )
+                    disposition = (
+                        "RETAINED_UNATTESTED_EVENT_INTERVAL"
+                        if cadence == "EVENT_STREAM"
+                        else "RETAINED_NO_REPORTED_FACT"
+                    )
                 missing_reason = (
                     "an effective-dated provider admission exists, but it is not a "
                     "fact completeness declaration"
@@ -5477,7 +5484,6 @@ def _coverage_evidence(
                 )
                 authority = "ACCOUNT_REGISTRY_NO_PROVIDER_SOURCE"
                 boundary_basis = "NO_ACCEPTED_SOURCE"
-            excluded = (unattributed or {}).get((account_id, fact_type), 0)
             if excluded:
                 missing_reason += (
                     f"; provider ledger {fact_type} for this account: {excluded} "

@@ -6025,12 +6025,28 @@ def test_a_reason_names_the_provider_records_that_were_excluded_not_attributed()
     assert _matrix_row({("account-reserve", "transactions"): 0}, []) == plain
 
     row = _matrix_row({("account-reserve", "transactions"): 444}, [])
-    assert row["status"] == plain["status"]  # no new status string
+    # events exist but none is attributed: neither "no reported events" nor accepted
+    assert row["status"] == "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF"
+    assert row["disposition"] == "RETAINED_PROVIDER_EVENTS_NOT_ATTRIBUTED"
     assert row["missing_interval_reason"] == (
         plain["missing_interval_reason"]
         + "; provider ledger transactions for this account: 444 lack a strategy "
         "attribution and are left out of the accepted records"
     )
+    # accepted records keep the observed status; the reason still names the excluded ones
+    observed = _matrix_row(
+        {("account-reserve", "transactions"): 3},
+        [
+            {
+                "account_id": "account-reserve",
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+                "event_date": "2026-02-01",
+                "record_id": "t-1",
+            }
+        ],
+    )
+    assert observed["status"] == "OBSERVED_NOT_COMPLETENESS_PROOF"
+    assert "3 lack a strategy attribution" in observed["missing_interval_reason"]
     # another account's or another fact's count never leaks into this row
     other = _matrix_row(
         {("account-other", "transactions"): 9, ("account-reserve", "flows"): 7}, []

@@ -106,6 +106,16 @@ def test_zero_leg_mwr_keeps_the_receipt_status_and_names_the_unproven_flow_path(
     assert row["mwr_flow_path_status"] == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
 
 
+def test_mwr_over_unattributed_provider_flows_names_the_unproven_flow_path() -> None:
+    row = _rows("PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF")[0]
+
+    assert row["mwr_coverage_status"] == "COMPLETE"
+    assert (
+        row["mwr_flow_path_status"]
+        == "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF"
+    )
+
+
 def test_mwr_over_an_account_with_no_accepted_flow_path_says_so() -> None:
     row = _rows("NO_ACCEPTED_FACT_PATH")[0]
 
@@ -144,6 +154,7 @@ def test_report_schema_keeps_the_receipt_enum_and_adds_the_flow_path_field() -> 
     assert reporter.MWR_FLOW_PATH_UNPROVEN == {
         "NO_ACCEPTED_FACT_PATH",
         "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF",
+        "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF",
     }
 
 
