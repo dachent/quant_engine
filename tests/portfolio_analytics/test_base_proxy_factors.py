@@ -27,8 +27,14 @@ def _days() -> list[date]:
     return out
 
 
+EARLIER = (21, 42, 63, 84)
+
+
 def _rows(
-    *, bil_dividend_on: int | None = 110, hyg_dividend_on: int | None = 110
+    *,
+    bil_dividend_on: int | None = 110,
+    hyg_dividend_on: int | None = 110,
+    bil_skip: tuple[int, ...] = (),
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     days = _days()
@@ -40,7 +46,14 @@ def _rows(
     ):
         price = Decimal(91)
         for n, day in enumerate(days):
-            dividend = amount if pay is not None and n == pay else Decimal(0)
+            earlier = (
+                ticker in ("BIL", "HYG")
+                and n in EARLIER
+                and not (ticker == "BIL" and n in bil_skip)
+            )
+            dividend = (
+                amount if (pay is not None and n == pay) or earlier else Decimal(0)
+            )
             # the close falls by the dividend on the ex-date, otherwise drifts up
             price = price * (1 + drift) - dividend if n else price
             rows.append(
@@ -135,3 +148,29 @@ def test_a_risk_free_gap_over_a_few_hundredths_of_a_percent_a_year_is_refused() 
     off = {day: Decimal("0.000190") for day in _days()[1:100]}  # 4e-5/day above BIL
     with pytest.raises(proxies.BaseProxyError, match="differs from French RF"):
         proxies.build_factors(_rows(), off)
+
+
+def test_the_overlap_tolerance_is_exactly_the_stated_bound() -> None:
+    """Astra: the test must prove the 3e-5/day tolerance it names, both sides."""
+
+    below = {day: Decimal("0.000179") for day in _days()[1:100]}  # gap 2.9e-5
+    proxies.build_factors(_rows(), below)
+    above = {day: Decimal("0.000181") for day in _days()[1:100]}  # gap 3.1e-5
+    with pytest.raises(proxies.BaseProxyError, match="differs from French RF"):
+        proxies.build_factors(_rows(), above)
+
+
+def test_an_interior_french_gap_is_refused_not_filled_from_bil() -> None:
+    """Astra: BIL is used only after French's last date, never inside its range."""
+
+    french = _french(100)
+    del french[_days()[50]]
+    with pytest.raises(proxies.BaseProxyError, match="inside its range"):
+        proxies.build_factors(_rows(), french)
+
+
+def test_an_earlier_missing_monthly_distribution_is_refused() -> None:
+    """Astra: a posted latest month must not hide an earlier unposted one."""
+
+    with pytest.raises(proxies.BaseProxyError, match="earlier month is missing"):
+        proxies.build_factors(_rows(bil_skip=(63, 84)), _french(100))

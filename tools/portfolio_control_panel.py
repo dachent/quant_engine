@@ -5736,6 +5736,7 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(train_start, str) and isinstance(train_end, str)
         else None
     )
+    fit_days = train_days if train_days is not None else days
     # the series this fit is shown beside ends at the accepted history end; a lens
     # that stops earlier (French files) lags it by the difference
     reference_ends = [
@@ -5822,9 +5823,9 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "annualisation": ALPHA_ANNUALISATION,
         "annualisation_basis": (
             None
-            if days is None
+            if fit_days is None
             else "ANNUALISED_FROM_DAYS"
-            if days < 365
+            if fit_days < 365
             else "ANNUALISED"
         ),
         "alternatives": [],

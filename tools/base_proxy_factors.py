@@ -28,6 +28,10 @@ RISK_FREE_DAILY_MIN: Final = Decimal("-0.0005")
 RISK_FREE_DAILY_MAX: Final = Decimal("0.005")
 # monthly payers go ex in the first days of the month
 MONTHLY_EX_DATE_LAST_DAY: Final = 5
+# every ex-date of the last three years must be recorded: successive distributions
+# are never more than two months apart (a missing month stays a price drop)
+DIVIDEND_GAP_WINDOW_DAYS: Final = 1095
+MONTHLY_MAX_GAP_DAYS: Final = 70
 
 
 class BaseProxyError(ValueError):
@@ -86,7 +90,22 @@ def _check_dividend_record(
         if last_price.day > MONTHLY_EX_DATE_LAST_DAY
         else (month_start - timedelta(days=1)).replace(day=1)
     )
-    paid = [day for day, (_close, dividend) in prices.items() if dividend > 0]
+    paid = sorted(day for day, (_close, dividend) in prices.items() if dividend > 0)
+    window_start = max(
+        last_price - timedelta(days=DIVIDEND_GAP_WINDOW_DAYS), min(prices)
+    )
+    recent = [day for day in paid if day >= window_start]
+    gaps = [
+        (left, right)
+        for left, right in zip([window_start, *recent], recent)
+        if (right - left).days > MONTHLY_MAX_GAP_DAYS
+    ]
+    if gaps:
+        raise BaseProxyError(
+            f"{ticker}: no distribution recorded between {gaps[0][0].isoformat()} "
+            f"and {gaps[0][1].isoformat()}: an earlier month is missing, so its "
+            "ex-date would stay a price drop in the returns"
+        )
     if not paid or max(paid) < needed_from:
         raise BaseProxyError(
             f"{ticker}: no distribution recorded since {needed_from.isoformat()} "
@@ -136,6 +155,11 @@ def build_factors(
         for day in calendar:
             if any(day not in returns[ticker] for ticker in PROXIES.values()):
                 continue
+            if french_last is not None and day <= french_last and day not in french_rf:
+                raise BaseProxyError(
+                    f"French RF has no value for {day.isoformat()}, inside its range "
+                    f"(last {french_last.isoformat()}): BIL is used only after that date"
+                )
             rf = french_rf[day] if day in french_rf else cash[day]
             if not RISK_FREE_DAILY_MIN <= rf <= RISK_FREE_DAILY_MAX:
                 raise BaseProxyError(
