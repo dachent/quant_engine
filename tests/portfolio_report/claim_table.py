@@ -703,6 +703,40 @@ def b_underwriting_none(payload: Payload) -> None:
     ]["execution_effect"] = "TRADE"
 
 
+def p_concept_cards(payload: Payload) -> Result:
+    block = payload.panel.get("strategy_concepts")
+    strategies = rows_of(payload.panel.get("strategies"))
+    if not isinstance(block, dict) or not strategies:
+        return skip("no strategy_concepts block or strategies")
+    cards = {str(r.get("strategy_id")) for r in rows_of(block.get("rows"))}
+    current = {str(r.get("strategy_id")) for r in strategies}
+    if cards != current:
+        return bad(
+            f"concept cards {names(cards ^ current)} differ from the current strategies"
+        )
+    return ok(f"{len(cards)} concept cards equal the {len(current)} current strategies")
+
+
+def b_concept_cards(payload: Payload) -> None:
+    rows_of(get(payload.panel, "strategy_concepts", "rows")).pop()
+
+
+def p_concept_source(payload: Payload) -> Result:
+    block = payload.panel.get("strategy_concepts")
+    if not isinstance(block, dict):
+        return skip("no strategy_concepts block")
+    digest = str(block.get("source_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return bad("strategy_concepts carries no source sha256")
+    if not str(block.get("source_artifact") or "").endswith(".json"):
+        return bad("strategy_concepts names no source artifact")
+    return ok(f"concept text is bound to {block['source_artifact']} sha256 {digest[:12]}")
+
+
+def b_concept_source(payload: Payload) -> None:
+    payload.panel["strategy_concepts"]["source_sha256"] = "x"
+
+
 def p_hwm_perimeter(payload: Payload) -> Result:
     hwm = payload.panel.get("hwm_summary")
     if not isinstance(hwm, dict):
@@ -1440,6 +1474,26 @@ ROWS: tuple[Row, ...] = (
         "allocation and execution effect are NONE on every underwriting row",
         p_underwriting_none,
         b_underwriting_none,
+    ),
+    Row(
+        "CN1",
+        "count",
+        "Strategy concepts",
+        PANEL_HTML,
+        (r"One card per current strategy",),
+        "there is one concept card for each current strategy",
+        p_concept_cards,
+        b_concept_cards,
+    ),
+    Row(
+        "CN2",
+        "universal",
+        "Strategy concepts",
+        PANEL_JS,
+        (r"Concept text is the governed contract",),
+        "concept text is the governed return-sources contract, bound by its sha256",
+        p_concept_source,
+        b_concept_source,
     ),
     Row(
         "T13b",

@@ -3040,11 +3040,7 @@
   let coverageFilter = "attention";
   // LATE and STALE freshness rows carry escalation_required (STALE also blocks_current_consumers) but their bare
   // tokens have no tone of their own, so the explicit flags and tokens count as needing attention as well.
-  // A disposition that says an interval has no strategy by construction (a pool-only history) is a structural
-  // statement about the data, not a defect: it is shown neutral with its reason and is not an attention item.
-  const STRUCTURAL_DISPOSITION_CODES = new Set(["POOL_ONLY_UNALLOCATED_RETAINED"]);
-  const structuralCoverage = (row) => Boolean(row && row.disposition && typeof row.disposition === "object" && STRUCTURAL_DISPOSITION_CODES.has(row.disposition.code));
-  const coverageNeedsAttention = (row) => !structuralCoverage(row) && ["warning", "danger"].includes(toneForStatus(row.status))
+  const coverageNeedsAttention = (row) => ["warning", "danger"].includes(toneForStatus(row.status))
     || row.escalation_required === true
     || row.blocks_current_consumers === true
     || ["LATE", "STALE"].includes(String(row.status).toUpperCase());
@@ -3068,8 +3064,6 @@
   function renderData() {
     const factRows = data.coverage.filter((row) => row.category === "FACT_COVERAGE");
     const cleanFacts = factRows.filter((row) => row.status === "COMPLETE_WITHIN_DECLARED_BOUNDARY").length;
-    const structuralFacts = factRows.filter((row) => row.status !== "COMPLETE_WITHIN_DECLARED_BOUNDARY" && structuralCoverage(row));
-    const partialFacts = factRows.filter((row) => row.status !== "COMPLETE_WITHIN_DECLARED_BOUNDARY" && !structuralCoverage(row));
     const dispositionText = (value) => value && typeof value === "object" ? [value.code, value.effect].filter(Boolean).join(": ") : String(value || "Disposition not recorded");
     const observedWindow = (row) => {
       if (row.observed_start || row.observed_end) return `${formatDate(row.observed_start)}–${formatDate(row.observed_end)}`;
@@ -3094,10 +3088,10 @@
     renderKpis("#data-kpis", [
       ["Report generation", data.meta.report_generation_id.slice(0, 12), "Accepted local authority"],
       ["Baseline generation", data.meta.baseline_generation_id.slice(0, 12), "Hash-linked input"],
-      ["Fact status", `${cleanFacts}/${factRows.length} complete`, [structuralFacts.length ? `${structuralFacts.length} structural, not a defect (${structuralFacts.map((row) => humanStatus(row.item)).join(", ")})` : "", partialFacts.length ? `${partialFacts.length} partial (${partialFacts.map((row) => humanStatus(row.item)).join(", ")})` : ""].filter(Boolean).join(" · ") || `${cleanFacts} of ${factRows.length} facts reported complete`, partialFacts.length ? "warning" : "positive"],
+      ["Fact status", `${cleanFacts}/${factRows.length} clean`, `${factRows.length - cleanFacts} are not complete within the declared boundary`, cleanFacts === factRows.length ? "positive" : "warning"],
       ["External connections", "0", "Policy statement: direct-file local operation; not counted from the payload", "reserve"],
     ]);
-    const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><th scope="row"><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></th><td>${structuralCoverage(row) ? `<span class="status-text neutral">${safe(humanStatus(row.status))}</span><span class="cell-secondary">Structural: ${safe(row.disposition.effect)}</span>` : statusText(row.status)}${row.escalation_required ? '<span class="cell-secondary">Escalation required</span>' : ""}</td><td>${safe(observedWindow(row))}</td><td>${safe(freshnessPolicy(row))}</td><td>${safe(row.evidence_authority || "Evidence authority not assigned")}<span class="cell-secondary">${safe(row.resolution_authority || "Resolution authority not assigned")}</span></td><td>${safe(coverageValueText(row))}</td><td>${safe(dispositionText(row.disposition))}</td><td>${safe(row.known_gap ? operatorText(row.known_gap) : "No known gap within the declared boundary")}</td></tr>`);
+    const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><th scope="row"><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></th><td>${statusText(row.status)}${row.escalation_required ? '<span class="cell-secondary">Escalation required</span>' : ""}</td><td>${safe(observedWindow(row))}</td><td>${safe(freshnessPolicy(row))}</td><td>${safe(row.evidence_authority || "Evidence authority not assigned")}<span class="cell-secondary">${safe(row.resolution_authority || "Resolution authority not assigned")}</span></td><td>${safe(coverageValueText(row))}</td><td>${safe(dispositionText(row.disposition))}</td><td>${safe(row.known_gap ? operatorText(row.known_gap) : "No known gap within the declared boundary")}</td></tr>`);
     $("#coverage-table").innerHTML = tableMarkup([["Fact / category"], ["Status / escalation"], ["Observation window / Freshness evaluated"], ["TTL / reconciled"], ["Evidence / resolution authority"], ["Value"], ["Disposition"], ["Known gap / missing interval"]], coverageRows);
     applyCoverageFilter();
     renderFactScopeTables();
@@ -3770,7 +3764,7 @@
     const host = $("#concepts-root");
     if (!host) return;
     if (!block || !Number.isInteger(block.schema_version) || !Array.isArray(block.rows) || !block.rows.length) {
-      host.innerHTML = `<div class="callout callout-neutral"><strong>Strategy concepts are not in this snapshot.</strong> The producer has not published the strategy_concepts block for this generation.</div>`;
+      host.innerHTML = `<div class="callout callout-neutral"><strong>Strategy concepts are not in this snapshot.</strong> ${block && Array.isArray(block.rows) ? "The producer published the strategy_concepts block with no strategy rows." : "The producer has not published the strategy_concepts block for this generation."}</div>`;
       return;
     }
     const strategies = new Map((data.strategies || []).map((row) => [row.strategy_id, row]));
