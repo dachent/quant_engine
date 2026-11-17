@@ -3062,7 +3062,9 @@ def _itemized_candidates(
     )
     if current_reserve is not None:
         retained = summary_value(ctx, "Retained excluded systematic balance")
-        retained_value = retained[1] if retained and retained[1] is not None else Decimal(0)
+        retained_value = (
+            retained[1] if retained and retained[1] is not None else Decimal(0)
+        )
         at_cutoff["sum(current account values at cutoff) + current reserve"] = (
             cutoff_systematic + current_reserve
         )

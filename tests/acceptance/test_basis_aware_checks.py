@@ -289,7 +289,9 @@ def test_a_stamped_total_is_reproduced_from_the_current_statement_dated_reserve(
     monkeypatch.setattr(checks, "cutoff_capital_by_strategy", lambda _ctx: cut)
     for total, expected in (("1157", 0), ("1150", 0), ("1120", 1)):
         context = _context(
-            report=_current_reserve_report(total, "STATEMENT_DATED_MANDATE_CLASSIFICATION")
+            report=_current_reserve_report(
+                total, "STATEMENT_DATED_MANDATE_CLASSIFICATION"
+            )
         )
         assert len(list(checks.check_reconciliation_recompute(context))) == expected
 
@@ -301,7 +303,9 @@ def test_a_statement_dated_reserve_row_does_not_claim_the_cutoff() -> None:
     ):
         context = _context(report=_current_reserve_report("1157", status))
         found = [
-            f for f in checks.check_capital_as_of(context) if f.entity == "reserve-classification"
+            f
+            for f in checks.check_capital_as_of(context)
+            if f.entity == "reserve-classification"
         ]
         assert bool(found) is flagged
 
