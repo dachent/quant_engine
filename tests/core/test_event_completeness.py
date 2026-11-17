@@ -132,6 +132,7 @@ def test_the_declaration_alone_never_completes_a_fact() -> None:
     ("mutation", "expected"),
     [
         ("missing_statement_day", "STATEMENT_ROW_ON_EVERY_NAV_DAY"),
+        ("missing_nav_and_statement_day", "NAV_ON_EVERY_MARKET_DAY"),
         ("statement_total_differs", "STATEMENT_TOTALS_EQUAL_LEDGER_FLOWS"),
         ("ledger_flow_without_statement", "STATEMENT_TOTALS_EQUAL_LEDGER_FLOWS"),
         ("unavailable_amount", "FLOW_AMOUNTS_AVAILABLE"),
@@ -148,6 +149,11 @@ def test_each_closure_check_refuses_on_its_own_failure(
     cin = _cin(A, {day: "1000"})
     entry = _entry()
     as_of = END
+    nav_days = None
+    if mutation == "missing_nav_and_statement_day":
+        gap = _days()[3]
+        cin = [r for r in cin if r["accounting_date"] != gap.isoformat()]
+        nav_days = {A: set(_days()) - {gap}, B: set(_days())}
     if mutation == "missing_statement_day":
         cin = [r for r in cin if r["accounting_date"] != _days()[3].isoformat()]
     elif mutation == "statement_total_differs":
@@ -163,7 +169,7 @@ def test_each_closure_check_refuses_on_its_own_failure(
         cin = _cin(A, {day: "250"})
     elif mutation == "interval_short_of_cutoff":
         as_of = END + timedelta(days=1)
-    row = _run([entry], flows, cin, as_of=as_of)[0]
+    row = _run([entry], flows, cin, nav_days=nav_days, as_of=as_of)[0]
     assert row["status"] == ec.CLOSURE_FAILED
     assert expected in _failed(row)
 

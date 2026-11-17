@@ -20,11 +20,13 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 import json
 import re
 from typing import Any, Final
+
+from leverage_disclosure import market_holidays
 
 SCHEMA_VERSION: Final = 1
 DECLARED_COMPLETE: Final = "DECLARED_COMPLETE"
@@ -221,6 +223,21 @@ def _evaluate_ibkr_flows(
 
     record("INTERVAL_REACHES_CUTOFF", 0 if end >= as_of_date else 1)
     interval_nav = {day for day in nav_days if start <= day <= end}
+    holidays: set[date] = set()
+    for year in range(start.year, end.year + 1):
+        holidays |= set(market_holidays(year))
+    expected = [
+        start + timedelta(days=offset)
+        for offset in range((end - start).days + 1)
+        if (start + timedelta(days=offset)).weekday() < 5
+        and (start + timedelta(days=offset)) not in holidays
+    ]
+    missing_calendar = [day for day in expected if day not in interval_nav]
+    record(
+        "NAV_ON_EVERY_MARKET_DAY",
+        len(missing_calendar),
+        {"missing_days": [day.isoformat() for day in missing_calendar[:5]]},
+    )
     statement = _statement_flow_by_day(change_in_nav, account)
     missing_statement = sorted(day for day in interval_nav if day not in statement)
     record(
