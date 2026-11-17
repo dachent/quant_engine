@@ -39,7 +39,7 @@ def _pin(tmp_path: Path, account: str, **over: Any) -> dict[str, Any]:
                 "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
             }
         ],
-        "ruling": "owner ruling 2026-11-17",
+        "citation": "owner ruling 2026-11-17",
     }
     entry.update(over)
     raw = json.dumps({"schema_version": 1, "declarations": [entry]}).encode()
@@ -98,7 +98,7 @@ def test_a_tampered_or_malformed_declaration_is_refused(
         admit._stage_world(
             tampered, monkeypatch, {"event_completeness_declaration": pin}
         )
-    bad = _pin(malformed, account, ruling=" ")
+    bad = _pin(malformed, account, citation=" ")
     with pytest.raises(ledger.ProviderLedgerError, match="invalid"):
         admit._stage_world(
             malformed, monkeypatch, {"event_completeness_declaration": bad}

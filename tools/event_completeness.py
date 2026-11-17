@@ -60,7 +60,7 @@ _ENTRY_KEYS: Final = {
     "declared_end",
     "closure",
     "evidence_refs",
-    "ruling",
+    "citation",
 }
 
 
@@ -76,7 +76,7 @@ class Declaration:
     declared_end: date
     closure: str
     evidence_refs: tuple[tuple[str, str], ...]
-    ruling: str
+    citation: str
 
 
 def _day(value: object, name: str) -> date:
@@ -137,9 +137,11 @@ def load_declaration(raw: bytes) -> tuple[Declaration, ...]:
             )
         ):
             raise EventCompletenessError("declaration evidence refs are invalid")
-        ruling = entry["ruling"]
-        if not isinstance(ruling, str) or not ruling.strip():
-            raise EventCompletenessError("declaration needs a ruling citation")
+        citation = entry["citation"]
+        if not isinstance(citation, str) or not citation.strip():
+            raise EventCompletenessError(
+                "declaration needs a citation naming its authority"
+            )
         out.append(
             Declaration(
                 account,
@@ -148,7 +150,7 @@ def load_declaration(raw: bytes) -> tuple[Declaration, ...]:
                 end,
                 closure,
                 tuple((item["path"], item["sha256"]) for item in refs),
-                ruling,
+                citation,
             )
         )
     return tuple(out)
@@ -408,7 +410,7 @@ def evaluate(
                     ],
                     "fact_type": declaration.fact_type,
                     "provider_id": account_provider.get(declaration.account_id),
-                    "ruling": declaration.ruling,
+                    "citation": declaration.citation,
                     "status": declaration.closure,
                 }
             )
@@ -446,7 +448,7 @@ def evaluate(
                 ],
                 "fact_type": fact,
                 "provider_id": provider,
-                "ruling": declaration.ruling,
+                "citation": declaration.citation,
                 "status": DECLARED_COMPLETE if passed else CLOSURE_FAILED,
             }
         )

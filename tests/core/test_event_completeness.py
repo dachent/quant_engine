@@ -25,7 +25,7 @@ def _entry(**over: Any) -> dict[str, Any]:
         "declared_end": END.isoformat(),
         "closure": ec.CLOSURE_IBKR_FLOWS,
         "evidence_refs": [{"path": "C:/evidence/flex.xml", "sha256": SHA}],
-        "ruling": "owner ruling 2026-11-17",
+        "citation": "owner ruling 2026-11-17",
     }
     entry.update(over)
     return entry
@@ -214,7 +214,7 @@ def test_loader_is_strict() -> None:
             "invalid field set",
         ),
         (_doc({**good, "extra": 1}), "invalid field set"),
-        (_doc({k: v for k, v in good.items() if k != "ruling"}), "invalid field set"),
+        (_doc({k: v for k, v in good.items() if k != "citation"}), "invalid field set"),
         (_doc(good, copy.deepcopy(good)), "repeats"),
         (_doc({**good, "closure": "OTHER"}), "closure does not fit"),
         (_doc({**good, "fact_type": "transactions"}), "closure does not fit"),
@@ -225,7 +225,7 @@ def test_loader_is_strict() -> None:
             _doc({**good, "evidence_refs": [{"path": "x", "sha256": "zz"}]}),
             "evidence refs",
         ),
-        (_doc({**good, "ruling": "  "}), "ruling"),
+        (_doc({**good, "citation": "  "}), "citation"),
     ]
     for raw, message in bad:
         with pytest.raises(ec.EventCompletenessError, match=message):
@@ -405,16 +405,16 @@ def test_a_typed_outcome_is_recorded_but_never_complete(outcome: str) -> None:
         ("account-statements", "positions", outcome)
     ]
     assert rows[0]["status"] != ec.DECLARED_COMPLETE
-    assert rows[0]["checks"] == [] and rows[0]["ruling"]
+    assert rows[0]["checks"] == [] and rows[0]["citation"]
     assert rows[0]["evidence_refs"] == [{"path": "C:/evidence/flex.xml", "sha256": SHA}]
 
 
-def test_a_typed_outcome_still_needs_evidence_a_ruling_and_a_known_fact() -> None:
+def test_a_typed_outcome_still_needs_evidence_a_citation_and_a_known_fact() -> None:
     good = _entry(fact_type="positions", closure="EXCLUDED_BY_RULING")
     assert ec.load_declaration(_doc(good))[0].closure == "EXCLUDED_BY_RULING"
     for bad, message in [
         ({**good, "evidence_refs": []}, "evidence refs"),
-        ({**good, "ruling": ""}, "ruling"),
+        ({**good, "citation": ""}, "citation"),
         ({**good, "fact_type": "dividends"}, "fact type is unknown"),
     ]:
         with pytest.raises(ec.EventCompletenessError, match=message):

@@ -6192,7 +6192,7 @@ def test_a_governed_outcome_types_the_row_and_never_declares_it_complete(
         "account_id": "account-reserve",
         "fact_type": "transactions",
         "status": outcome,
-        "ruling": "owner ruling 2026-11-17",
+        "citation": "owner ruling 2026-11-17",
     }
     row = _matrix_row(None, [], {("account-reserve", "transactions"): proof})
     assert row["status"] == status and row["disposition"] == disposition

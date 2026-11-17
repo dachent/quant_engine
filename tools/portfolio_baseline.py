@@ -5531,7 +5531,7 @@ def _coverage_evidence(
                 status, disposition = _TYPED_OUTCOME_STATUS[str(proof["status"])]
                 authority = "GOVERNED_DECLARATION"
                 missing_reason = (
-                    f"governed declaration {proof['status']}: {proof['ruling']}"
+                    f"governed declaration {proof['status']}: {proof['citation']}"
                 )
             elif proof is not None:
                 failed = ", ".join(
