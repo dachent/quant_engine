@@ -6147,3 +6147,57 @@ def test_reserve_account_total_nav_needs_no_strategy_interval(
         assert member["as_of_date"] != "2026-07-29"
     else:
         assert (member["value"]["value"], member["as_of_date"]) == expected
+
+
+def _nav_claim(calendar: list[dict[str, Any]]) -> dict[str, Any]:
+    accounts = [{"account_id": "acct-ibkr", "role": "INVESTMENT", "provider": "IBKR"}]
+    claims, _ = baseline._fact_coverage(
+        accounts, [], [], [], [], [], 0, date(2026, 11, 6), calendar=calendar
+    )
+    return next(c for c in claims if c["fact_type"] == "nav")
+
+
+def test_nav_missing_on_provider_observed_dates_is_a_disclosed_gap_not_clean() -> None:
+    """Kill test: a live account with NAV missing on dates its provider observed (the IBKR
+    f34e5b78 2026-01/02 window) must not read 'Accepted within the declared boundary'."""
+
+    days = ["2026-01-01", "2026-01-02", "2026-01-05"]
+    calendar = [
+        {
+            "account_id": "acct-ibkr",
+            "provider": "IBKR",
+            "date": day,
+            "status": "MISSING_ON_PROVIDER_OBSERVED_DATE",
+        }
+        for day in days
+    ]
+
+    claim = _nav_claim(calendar)
+
+    assert claim["status"] == "PARTIAL"
+    assert claim["known_gaps"] == [
+        "3 NAV day(s) missing on provider-observed dates for account acct-ibkr "
+        "(IBKR), 2026-01-01..2026-01-05: no NAV observation despite the provider "
+        "reporting those dates"
+    ]
+
+
+def test_nav_claim_stays_clean_when_the_calendar_has_no_missing_days() -> None:
+    calendar = [
+        {
+            "account_id": "acct-ibkr",
+            "provider": "IBKR",
+            "date": "2026-01-02",
+            "status": status,
+        }
+        for status in (
+            "OBSERVED",
+            "NON_BUSINESS_WEEKEND",
+            "UNRESOLVED_NO_CALENDAR_EVIDENCE",
+        )
+    ]
+
+    claim = _nav_claim(calendar)
+
+    assert claim["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert claim["known_gaps"] == []

@@ -5140,6 +5140,35 @@ def _costs_claim(costs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _calendar_gap_lines(calendar: Sequence[Mapping[str, Any]]) -> list[str]:
+    """One disclosed line per account with NAV missing on provider-observed dates.
+
+    A day the provider observed for other accounts but that has no NAV for this account is
+    a gap on that account, never a clean daily series.
+    """
+
+    missing: dict[str, list[str]] = {}
+    for row in calendar:
+        if row.get("status") == "MISSING_ON_PROVIDER_OBSERVED_DATE" and row.get("date"):
+            missing.setdefault(str(row["account_id"]), []).append(str(row["date"]))
+    return [
+        f"{len(days)} NAV day(s) missing on provider-observed dates for account "
+        f"{account_id} ({provider}), {min(days)}..{max(days)}: no NAV observation "
+        "despite the provider reporting those dates"
+        for account_id, days in sorted(missing.items())
+        for provider in [
+            next(
+                (
+                    str(r.get("provider"))
+                    for r in calendar
+                    if r["account_id"] == account_id
+                ),
+                "",
+            )
+        ]
+    ]
+
+
 def _fact_coverage(
     accounts: Sequence[Mapping[str, Any]],
     assignments: Sequence[Mapping[str, Any]],
@@ -5154,6 +5183,7 @@ def _fact_coverage(
     costs: Sequence[Mapping[str, Any]] = (),
     fx_admission: Mapping[str, Any] | None = None,
     coverage_matrix: Sequence[Mapping[str, Any]] | None = None,
+    calendar: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     investment_count = sum(1 for item in accounts if item["role"] == "INVESTMENT")
     investment_ids = {
@@ -5250,16 +5280,19 @@ def _fact_coverage(
         },
         {
             "fact_type": "nav",
-            "known_gaps": (
-                [
-                    f"{missing_strategy_nav_count} current strategies lack account-specific daily series"
-                ]
-                if missing_strategy_nav_count
-                else []
-            ),
+            "known_gaps": [
+                *(
+                    [
+                        f"{missing_strategy_nav_count} current strategies lack account-specific daily series"
+                    ]
+                    if missing_strategy_nav_count
+                    else []
+                ),
+                *_calendar_gap_lines(calendar),
+            ],
             "status": (
                 "PARTIAL"
-                if missing_strategy_nav_count
+                if missing_strategy_nav_count or _calendar_gap_lines(calendar)
                 else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
             ),
             "disposition": {
@@ -7018,6 +7051,7 @@ def build_catalog(
         costs=costs,
         fx_admission=fx_authority or None,
         coverage_matrix=fact_coverage_matrix,
+        calendar=calendar,
     )
     unmapped = [
         *sorted(
