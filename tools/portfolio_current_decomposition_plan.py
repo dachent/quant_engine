@@ -507,7 +507,13 @@ def _layered_history_targets(
     selected_admissions = (
         {"INCLUDE_SELECTED_LIVE"}
         if evidence_mode == "LIVE_ONLY"
-        else {"INCLUDE_SELECTED_LIVE", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+        else {
+            "INCLUDE_SELECTED_LIVE",
+            "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+            # an admitted model-live layer continues the backtest; the account is
+            # never part of that research series
+            "INCLUDE_MODEL_LIVE_RESEARCH",
+        }
     )
     for strategy_id, series_id in planned:
         coverage_row = coverage_by_strategy.get(strategy_id)
@@ -561,6 +567,17 @@ def _layered_history_targets(
                 {"INCLUDE_SELECTED_LIVE"} if live_only_fallback else selected_admissions
             )
         ]
+        if evidence_mode == "LIVE_PLUS_BACKTEST" and any(
+            summary.get("evidence_layer") == "MODEL_LIVE"
+            for summary in selected_summaries
+        ):
+            # the account is not part of the research series of a strategy with an
+            # admitted model-live layer, whatever its own LIVE_ONLY admission says
+            selected_summaries = [
+                summary
+                for summary in selected_summaries
+                if summary.get("evidence_layer") != "ACCOUNT_LIVE"
+            ]
         if not selected_summaries:
             raise CurrentPlanError(
                 f"layered history has no selected segment for {strategy_id}"
@@ -583,14 +600,25 @@ def _layered_history_targets(
             _integer(summary.get("return_observations"), "segment observations", 1)
             for summary in selected_summaries
         )
+        # The live end of a research series: the account for a strategy without a
+        # model-live layer, the model's own live record for one with it admitted.
+        live_layer = (
+            "MODEL_LIVE"
+            if any(
+                summary.get("evidence_layer") == "MODEL_LIVE"
+                for summary in selected_summaries
+            )
+            else "ACCOUNT_LIVE"
+        )
         live_summaries = [
             summary
             for summary in selected_summaries
-            if summary.get("evidence_layer") == "ACCOUNT_LIVE"
+            if summary.get("evidence_layer") == live_layer
         ]
         if not live_summaries:
             raise CurrentPlanError(
-                f"layered history has no selected account-live segment for {strategy_id}"
+                f"layered history has no selected {live_layer.lower().replace('_', '-')} "
+                f"segment for {strategy_id}"
             )
         for summary in live_summaries:
             source_id = _text(summary.get("source_id"), "live source_id")
@@ -613,7 +641,7 @@ def _layered_history_targets(
             source_age_dispositions.append(
                 {
                     **age,
-                    "evidence_layer": "ACCOUNT_LIVE",
+                    "evidence_layer": live_layer,
                     "source_id": source_id,
                     "strategy_id": strategy_id,
                 }
@@ -630,7 +658,7 @@ def _layered_history_targets(
             "backtest_observations_used": backtest_observations,
             "evidence_mode": evidence_mode,
             "expected_observations": expected_observations,
-            "live_evidence_layer": "ACCOUNT_LIVE",
+            "live_evidence_layer": live_layer,
             "live_inception": min(
                 _text(summary.get("observed_start"), "live observed_start")
                 for summary in live_summaries
@@ -666,7 +694,7 @@ def _layered_history_targets(
     allowed_layers = (
         {"ACCOUNT_LIVE"}
         if evidence_mode == "LIVE_ONLY"
-        else {"ACCOUNT_LIVE", "BACKTEST"}
+        else {"ACCOUNT_LIVE", "BACKTEST", "MODEL_LIVE"}
     )
     selected_projection = [
         row

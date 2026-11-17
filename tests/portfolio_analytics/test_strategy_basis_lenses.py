@@ -660,3 +660,41 @@ def test_without_a_lane_there_is_no_split_margin(tmp_path: Path) -> None:
     target, days = _write_sources(root)
     result, _, _ = decomposition.build_decomposition(_spec(root, target, days), root)
     assert "split_margin" not in result["model_results"][0]["coverage"]
+
+
+def test_the_hybrid_plan_of_an_admitted_model_live_strategy_is_backtest_then_model_live(
+    world: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill test: an admitted model-live layer is the live end of the plan, never
+    the account, and the plan no longer refuses for lack of an account segment."""
+
+    from test_portfolio_layered_history import _admit_p123_ai_model_live
+
+    import test_portfolio_layered_history as layered
+
+    # the world builds in immutable-generation mode; identity refresh must too
+    monkeypatch.setattr(layered, "_build", lambda _fixture: _build(world))
+    _admit_p123_ai_model_live(world["fixture"])
+    from test_portfolio_layered_history import _synthetic_current_admission
+
+    # the contract changed, so the admission it binds is recomputed for build and plan
+    admitted = _synthetic_current_admission(world["fixture"])
+    monkeypatch.setattr(
+        target_series, "_current_source_admission_authority", lambda **_: admitted
+    )
+    artifacts, manifest = _build(world)
+    result = _plan(
+        world,
+        monkeypatch,
+        artifacts,
+        manifest,
+        mode="LIVE_PLUS_BACKTEST",
+        admission=admitted,
+    )
+    composition = result["composition"][SERIES]
+    assert composition["status"] == "AVAILABLE_LIVE_PLUS_BACKTEST"
+    assert composition["live_evidence_layer"] == "MODEL_LIVE"
+    assert composition["backtest_observations_used"] > 0
+    primary = [row for row in result["rows"] if row["series_id"] == SERIES]
+    assert {row["evidence_layer"] for row in primary} == {"BACKTEST", "MODEL_LIVE"}
