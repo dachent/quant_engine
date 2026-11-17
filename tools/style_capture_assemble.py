@@ -55,10 +55,15 @@ def check_monthly_payers(raw_groups: Sequence[Mapping[str, Any]]) -> list[str]:
     return sorted(checked)
 
 
-def assemble(capture_dir: Path, out_dir: Path) -> dict[str, Any]:
-    """Write ``yahoo-style-adjusted.json`` and its manifest under ``out_dir``."""
+def assemble(
+    capture_dir: Path,
+    out_dir: Path,
+    prefix: str = "yahoo-style-",
+    output_name: str = OUTPUT_NAME,
+) -> dict[str, Any]:
+    """Write the assembled adjusted source and its manifest under ``out_dir``."""
 
-    adjusted_files = sorted(capture_dir.glob("yahoo-style-*-history_adjusted.json"))
+    adjusted_files = sorted(capture_dir.glob(f"{prefix}*-history_adjusted.json"))
     if not adjusted_files:
         raise StyleAssembleError("no adjusted group files in the capture")
     adjusted = [_load(path) for path in adjusted_files]
@@ -114,7 +119,7 @@ def assemble(capture_dir: Path, out_dir: Path) -> dict[str, Any]:
         "source_run_id": run_id,
         "request": {"dataset": "history_adjusted", "tickers": tickers},
         "artifact": {
-            "name": OUTPUT_NAME,
+            "name": output_name,
             "sha256": hashlib.sha256(content).hexdigest(),
             "size_bytes": len(content),
         },
@@ -132,8 +137,8 @@ def assemble(capture_dir: Path, out_dir: Path) -> dict[str, Any]:
         },
     }
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / OUTPUT_NAME).write_bytes(content)
-    (out_dir / f"{OUTPUT_NAME}.manifest.json").write_bytes(
+    (out_dir / output_name).write_bytes(content)
+    (out_dir / f"{output_name}.manifest.json").write_bytes(
         (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
     )
     return manifest
@@ -143,8 +148,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture-dir", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument("--prefix", default="yahoo-style-")
+    parser.add_argument("--output-name", default=OUTPUT_NAME)
     args = parser.parse_args(argv)
-    manifest = assemble(args.capture_dir, args.out_dir)
+    manifest = assemble(args.capture_dir, args.out_dir, args.prefix, args.output_name)
     print(json.dumps(manifest["artifact"], sort_keys=True))
     return 0
 
