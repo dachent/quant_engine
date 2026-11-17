@@ -95,6 +95,32 @@
         },
         "finality_evidence": {
           "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/file" }]
+        },
+        "selection": {
+          "type": "object",
+          "description": "Present only when the generation was chosen by the latest_at_or_before rule: the rule, the dates it used, and every candidate with its verdict.",
+          "additionalProperties": false,
+          "required": ["rule", "cutoff", "evaluated_on", "coverage_required", "candidates"],
+          "properties": {
+            "rule": { "type": "string" },
+            "cutoff": { "type": "string" },
+            "evaluated_on": { "type": "string" },
+            "coverage_required": { "type": "boolean" },
+            "candidates": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["generation_id", "as_of_date", "observed_end", "verdict"],
+                "properties": {
+                  "generation_id": { "type": "string" },
+                  "as_of_date": { "type": ["string", "null"] },
+                  "observed_end": { "type": ["string", "null"] },
+                  "verdict": { "type": "string" }
+                }
+              }
+            }
+          }
         }
       }
     }
