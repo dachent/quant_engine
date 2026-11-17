@@ -138,7 +138,7 @@ def test_cycle_manifest_derivation_carries_everything_but_the_overrides() -> Non
         cycle_id="cycle-new",
         predecessor="rel-new",
         generations={"alpaca": ("gen-9", "c" * 64)},
-        roots={"alpaca": ("world", "alpaca")},
+        roots={"alpaca": ("world", "dataAlpaca")},
     )
     alpha = new["providers"]["alpaca"]  # type: ignore[index]
     assert new["cycle_id"] == "cycle-new" and new["predecessor"] == {
@@ -146,7 +146,7 @@ def test_cycle_manifest_derivation_carries_everything_but_the_overrides() -> Non
     }
     assert alpha["generation"] == {"mode": "explicit", "generation_id": "gen-9"}
     assert alpha["manifest_sha256"] == "c" * 64
-    assert alpha["root"] == {"root_key": "world", "relative": "alpaca"}
+    assert alpha["root"] == {"root_key": "world", "relative": "dataAlpaca"}
     assert new["cutoff"] == "2026-01-02" and _base_cm()["cycle_id"] == "cycle-old"
 
 
@@ -185,3 +185,13 @@ def test_cycle_manifest_command_is_create_only(tmp_path: Path) -> None:
     ]
     assert tool.main(args) == 0
     assert tool.main(args) == 1
+
+
+def test_a_world_local_provider_root_must_keep_the_real_leaf_name() -> None:
+    with pytest.raises(tool.WorldError, match="ledger identity"):
+        tool.derive_cycle_manifest(
+            _base_cm(),
+            cycle_id="x",
+            predecessor="y",
+            roots={"alpaca": ("world", "alpaca")},
+        )

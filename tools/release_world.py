@@ -183,6 +183,13 @@ def derive_cycle_manifest(
         }
         providers[name]["manifest_sha256"] = manifest_sha
     for name, (root_key, relative) in (roots or {}).items():
+        leaf = Path(relative).name
+        if leaf.casefold() != f"data{name}".casefold():
+            # the casefolded leaf enters the run-observation identity and so the ledger id
+            raise WorldError(
+                f"provider root leaf {leaf!r} must be named data<Provider> "
+                f"(expected data{name}, any case): the leaf is part of the ledger identity"
+            )
         providers[name]["root"] = {"root_key": root_key, "relative": relative}
     try:
         release_cycle_manifest.validate_static(manifest)
