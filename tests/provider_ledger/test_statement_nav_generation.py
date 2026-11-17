@@ -55,17 +55,40 @@ def _composer_text(
     )
 
 
+_JH_LABELS = (
+    "Gain/Loss",
+    "Administrative Fee",
+    "Roth 401(k) Contribution",
+    "General Administrative Charge",
+)
+
+
 def _jh_text(
-    start: date, end: date, *, opening: str, items: list[str], closing: str
+    start: date,
+    end: date,
+    *,
+    opening: str,
+    items: list[str],
+    closing: str,
+    labels: list[str] | None = None,
+    fund: str = "100.00",
 ) -> str:
     pad = " " * 160
     rows = [f"{pad}{_money(value)}" for value in [opening, *items, closing]]
+    labels = labels if labels is not None else list(_JH_LABELS[: len(items)])
+    closing_value = Decimal(closing.replace(",", ""))
+    bucket = f"{closing_value - Decimal(fund):,.2f}"
     lines = [
         f"STATEMENT PERIOD: {start:%m/%d/%Y} - {end:%m/%d/%Y}   {PLAN}",
         f"Opening Balance   $ {opening}",
         f"Closing Balance   ${closing}",
+        f"Participant Contributions    500 Index Fund    ${fund}   10.00% 10%",
+        f"Closing Total    Brokerage Account    ${bucket}   90.00% 90%",
         "For the period",
         *rows,
+        f"Balance as of {start:%B} {start.day}, {start.year}",
+        *labels,
+        f"Net Asset Value as of {end:%B} {end.day}, {end.year}",
     ]
     return "\n".join(lines)
 
@@ -378,3 +401,113 @@ def test_nav_rows_have_the_shape_the_ledger_reader_needs(tmp_path: Path) -> None
     assert row["value_basis"] == "ACCOUNT_VALUE"
     assert row["source_artifact_id"] in ids
     assert not {"mapping_status", "provider_id"} & set(row)
+
+
+def _jh_catalog(tmp_path: Path, **kwargs: Any) -> dict[str, Any]:
+    catalog, _manifest, _bytes = gen.build_generation(_jh(tmp_path, **kwargs))
+    return dict(catalog)
+
+
+def test_john_hancock_statements_yield_flows_transactions_and_fund_level_positions(
+    tmp_path: Path,
+) -> None:
+    catalog = _jh_catalog(tmp_path)
+
+    # Q1 items: Gain/Loss 30.00 (valuation, no row), Administrative Fee -20.00;
+    # Q2: Gain/Loss 50.00 (no row).  No contribution in the fixture: no flow row.
+    assert catalog["flows"] == []
+    assert [
+        (t["event_date"], t["kind"], t["amount"]["value"])
+        for t in catalog["transactions"]
+    ] == [("2026-03-31", "FEE:AdministrativeFee", "-20.00")]
+    assert catalog["transactions"][0]["timing"] == "PERIOD_AGGREGATE"
+    positions = catalog["positions"]
+    assert len(positions) == 4  # two fund-level holdings per statement
+    by_date: dict[str, Decimal] = {}
+    for row in positions:
+        by_date[row["as_of_date"]] = by_date.get(
+            row["as_of_date"], Decimal(0)
+        ) + Decimal(row["market_value"]["value"])
+    assert by_date == {
+        "2026-03-31": Decimal("1010.00"),
+        "2026-06-30": Decimal("1060.00"),
+    }
+    assert {r["asset_category"] for r in positions} == {"FUND", "PLAN_BROKERAGE_BUCKET"}
+    assert [x["symbol"] for x in catalog["securities"]] == [
+        "Brokerage Account",
+        "Fidelity 500 Index Fund",
+    ]
+
+
+def test_john_hancock_contribution_is_a_flow_and_fees_and_income_are_transactions(
+    tmp_path: Path,
+) -> None:
+    quarter_text = _jh_text(
+        date(2026, 1, 1),
+        date(2026, 3, 31),
+        opening="1,000.00",
+        items=["-50.00", "-2.00", "500.00", "-8.00"],
+        closing="1,440.00",
+    )
+    other = _jh_text(
+        date(2026, 4, 1),
+        date(2026, 6, 30),
+        opening="1,440.00",
+        items=["3.00", "10.00", "-1.00", "-4.00"],
+        closing="1,448.00",
+        labels=[
+            "Dividends/Interest",
+            "Gain/Loss",
+            "Administrative Fee",
+            "General Administrative Charge",
+        ],
+    )
+    spec = _spec(
+        tmp_path,
+        "john_hancock",
+        [
+            ("jh-2026q1", date(2026, 3, 31), quarter_text),
+            ("jh-2026q2", date(2026, 6, 30), other),
+        ],
+        external="FSN-401K-PLAN",
+        coverage=("2026-01-01", "2026-06-30"),
+    )
+
+    catalog, _manifest, _bytes = gen.build_generation(spec)
+
+    assert [
+        (f["event_date"], f["flow_type"], f["amount"]["value"])
+        for f in catalog["flows"]
+    ] == [("2026-03-31", "CONTRIBUTION", "500.00")]
+    assert [(t["kind"], t["amount"]["value"]) for t in catalog["transactions"]] == [
+        ("FEE:AdministrativeFee", "-2.00"),
+        ("FEE:GeneralAdministrativeCharge", "-8.00"),
+        ("CASH_ACTIVITY:DividendsInterest", "3.00"),
+        ("FEE:AdministrativeFee", "-1.00"),
+        ("FEE:GeneralAdministrativeCharge", "-4.00"),
+    ]
+
+
+def test_john_hancock_refuses_labels_that_do_not_match_the_items() -> None:
+    text = _jh_text(
+        date(2026, 1, 1),
+        date(2026, 3, 31),
+        opening="1,000.00",
+        items=["30.00", "-20.00"],
+        closing="1,010.00",
+        labels=["Gain/Loss"],
+    )
+    with pytest.raises(gen.StatementGenerationError, match="labels differ"):
+        gen.parse_john_hancock(text)
+
+
+def test_john_hancock_refuses_holdings_that_do_not_sum_to_closing() -> None:
+    text = _jh_text(
+        date(2026, 1, 1),
+        date(2026, 3, 31),
+        opening="1,000.00",
+        items=["30.00", "-20.00"],
+        closing="1,010.00",
+    ).replace("$100.00", "$101.00")
+    with pytest.raises(gen.StatementGenerationError, match="holdings differ"):
+        gen.parse_john_hancock(text)

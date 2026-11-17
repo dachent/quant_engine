@@ -141,8 +141,67 @@ def parse_john_hancock(text: str) -> dict[str, Any]:
         "opening": opening_value,
         "closing": closing_value,
         "items": items,
+        "labelled_items": _jh_labelled_items(lines, items),
+        "holdings": _jh_holdings(text, closing_value),
         "closure_residual": opening_value + sum(items, _ZERO) - closing_value,
     }
+
+
+_JH_ITEM_LABELS = (
+    "Dividends/Interest",
+    "Gain/Loss",
+    "Administrative Fee",
+    "Roth 401(k) Contribution",
+    "General Administrative Charge",
+)
+
+
+def _jh_labelled_items(
+    lines: list[str], items: list[Decimal]
+) -> list[tuple[str, Decimal]]:
+    """The statement's own row labels, in page order, paired with the ordered items.
+
+    The text layer interleaves the two fund columns, but the label column keeps the
+    page order of the rows; a label count that differs from the item count is refused.
+    """
+
+    first = next(
+        (i for i, line in enumerate(lines) if line.startswith("Balance as of")), None
+    )
+    last = next(
+        (i for i, line in enumerate(lines) if line.startswith("Net Asset Value as of")),
+        None,
+    )
+    if first is None or last is None or last <= first:
+        raise StatementGenerationError("John Hancock activity rows not recognised")
+    labels = [
+        label
+        for line in lines[first : last + 1]
+        for label in _JH_ITEM_LABELS
+        if line.startswith(label)
+    ]
+    if len(labels) != len(items):
+        raise StatementGenerationError(
+            "John Hancock activity labels differ from the activity items"
+        )
+    return list(zip(labels, items, strict=True))
+
+
+def _jh_holdings(text: str, closing: Decimal) -> list[tuple[str, Decimal]]:
+    """The two fund-level holdings of the Investment Summary; they must sum to closing."""
+
+    holdings: list[tuple[str, Decimal]] = []
+    for name, pattern in (
+        ("Fidelity 500 Index Fund", r"500 Index Fund\s+\$([\d,]+\.\d\d)\s+[\d.]+%"),
+        ("Brokerage Account", r"Brokerage Account\s+\$([\d,]+\.\d\d)\s+[\d.]+%"),
+    ):
+        match = re.search(pattern, text)
+        if match is None:
+            raise StatementGenerationError(f"John Hancock holdings lack {name!r}")
+        holdings.append((name, _money(match.group(1))))
+    if sum((value for _, value in holdings), _ZERO) != closing:
+        raise StatementGenerationError("John Hancock holdings differ from closing")
+    return holdings
 
 
 def _composer_line(text: str, label: str) -> list[Decimal]:
@@ -311,6 +370,107 @@ def _expected_statement_id(provider: str, start: date, end: date) -> str:
 # ---------------------------------------------------------------- build
 
 
+_JH_FLOW_LABELS = {"Roth 401(k) Contribution": "CONTRIBUTION"}
+_JH_TRANSACTION_LABELS = {
+    "Administrative Fee": "FEE:AdministrativeFee",
+    "Dividends/Interest": "CASH_ACTIVITY:DividendsInterest",
+    "General Administrative Charge": "FEE:GeneralAdministrativeCharge",
+}
+
+
+def _amount(value: str) -> dict[str, str]:
+    return {"currency": "USD", "status": "AVAILABLE", "value": value}
+
+
+def _john_hancock_activity(
+    provider: str, account_id: str, windows: Sequence[Mapping[str, object]]
+) -> dict[str, list[dict[str, object]]]:
+    """Flows, transactions, positions and securities read from the statement windows.
+
+    Quarterly statements publish period aggregates, so every row is dated at the period
+    end (``timing`` PERIOD_AGGREGATE).  Market change is a valuation item, not a
+    transaction.  Holdings are fund-level: the plan statement shows the brokerage window
+    as one bucket without security detail.
+    """
+
+    empty: dict[str, list[dict[str, object]]] = {
+        "flows": [],
+        "positions": [],
+        "securities": [],
+        "transactions": [],
+    }
+    if provider != "john_hancock":
+        return empty
+    flows: list[dict[str, object]] = []
+    transactions: list[dict[str, object]] = []
+    positions: list[dict[str, object]] = []
+    securities: dict[str, dict[str, object]] = {}
+    for window in windows:
+        end = str(window["period_end"])
+        common = {
+            "account_id": account_id,
+            "source_artifact_id": window["source_artifact_id"],
+            "statement_id": window["statement_id"],
+            "timing": "PERIOD_AGGREGATE",
+        }
+        for item in window["labelled_items"]:  # type: ignore[attr-defined]
+            label, amount = str(item["label"]), str(item["amount"])
+            if Decimal(amount) == _ZERO:
+                continue
+            slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+            if label in _JH_FLOW_LABELS:
+                flows.append(
+                    {
+                        **common,
+                        "amount": _amount(amount),
+                        "event_date": end,
+                        "flow_type": _JH_FLOW_LABELS[label],
+                        "record_id": f"{provider}:flow:{end}:{slug}",
+                        "source_record_id": f"{window['statement_id']}:{slug}",
+                    }
+                )
+            elif label in _JH_TRANSACTION_LABELS:
+                transactions.append(
+                    {
+                        **common,
+                        "amount": _amount(amount),
+                        "event_date": end,
+                        "kind": _JH_TRANSACTION_LABELS[label],
+                        "record_id": f"{provider}:txn:{end}:{slug}",
+                        "source_record_id": f"{window['statement_id']}:{slug}",
+                    }
+                )
+        for holding in window["holdings"]:  # type: ignore[attr-defined]
+            name = str(holding["name"])
+            slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+            security_id = f"security-{provider.replace('_', '-')}-{slug}"
+            securities[security_id] = {
+                "currency": "USD",
+                "provider_id": provider,
+                "security_id": security_id,
+                "symbol": name,
+            }
+            positions.append(
+                {
+                    **common,
+                    "as_of_date": end,
+                    "asset_category": (
+                        "PLAN_BROKERAGE_BUCKET" if "Brokerage" in name else "FUND"
+                    ),
+                    "market_value": _amount(str(holding["market_value"])),
+                    "record_id": f"{provider}:pos:{end}:{slug}",
+                    "security_id": security_id,
+                    "source_record_id": f"{window['statement_id']}:{slug}",
+                }
+            )
+    return {
+        "flows": flows,
+        "positions": positions,
+        "securities": [securities[key] for key in sorted(securities)],
+        "transactions": transactions,
+    }
+
+
 def build_generation(
     spec_path: Path,
 ) -> tuple[dict[str, object], GenerationManifest, bytes]:
@@ -373,6 +533,14 @@ def build_generation(
             opening, closing = parsed["opening"], parsed["closing"]
             detail: dict[str, object] = {
                 "items": [_dec(item) for item in parsed["items"]],
+                "labelled_items": [
+                    {"amount": _dec(amount), "label": label}
+                    for label, amount in parsed["labelled_items"]
+                ],
+                "holdings": [
+                    {"market_value": _dec(value), "name": name}
+                    for name, value in parsed["holdings"]
+                ],
                 "closure_residual": _dec(parsed["closure_residual"]),
             }
         else:
@@ -461,7 +629,9 @@ def build_generation(
         }
         for item in windows
     ]
+    activity = _john_hancock_activity(provider, internal, windows)
     catalog: dict[str, object] = {
+        **activity,
         "accounts": [
             {
                 "account_id": internal,
@@ -516,7 +686,11 @@ def build_generation(
                 f"{len(windows)} {meta['cadence'].lower()}ly statements, "
                 f"{coverage_start.isoformat()} through {coverage_end.isoformat()}"
             ),
-            fact_types=("nav_observations", "statement_windows"),
+            fact_types=(
+                "nav_observations",
+                "statement_windows",
+                *sorted(key for key in activity if activity[key]),
+            ),
             observed_start=coverage_start,
             observed_end=coverage_end,
             known_gaps=(),
