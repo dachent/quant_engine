@@ -345,7 +345,7 @@ def test_each_chip_names_its_window_and_the_live_share_of_a_backtest_line(
     dom = _run(tmp_path, _payload(anchor=100), ['perfZoom = "Max"'])
     legend = _text(dom, "#perf-returns-legend")
     assert re.search(
-        r"Alpha .*?\d{4}-\d{2}-\d{2} → \d{4}-\d{2}-\d{2} · live from \d{4}-\d{2}-\d{2}, live ",
+        r"Alpha .*?[0-9]{4}-[0-9]{2}-[0-9]{2} → [0-9]{4}-[0-9]{2}-[0-9]{2} · [+-][0-9.]+% a year · live from [0-9]{4}-[0-9]{2}-[0-9]{2}, live ",
         legend,
     )
     gamma = re.search(
@@ -406,7 +406,7 @@ def test_value_chart_drops_all_zero_slices_and_labels_both_benchmark_bases(
     assert "own total return" in _text(
         dom, "#perf-returns-note"
     ) or "own weekly total return" in _text(dom, "#perf-returns-note")
-    assert "Max:" in note and "first dollar of capital" in note
+    assert "Max:" in note and "of its peak value" in note
 
 
 def test_a_slice_with_value_in_a_short_window_is_kept(tmp_path: Path) -> None:
@@ -436,3 +436,161 @@ def test_dark_only_is_recorded() -> None:
     assert (
         "prefers-color-scheme" not in css
     )  # the panel is dark-only; no light theme exists or is requested
+
+
+def test_chips_print_a_yearly_rate_over_a_year_and_say_so_under_one(
+    tmp_path: Path,
+) -> None:
+    long_run = _text(_run(tmp_path, _payload(anchor=100), []), "#perf-returns-legend")
+    assert re.search(r"Alpha [^A-Z]*?a year", long_run)
+    short = _text(
+        _run(tmp_path, _payload(), ['perfZoom = "3m"']), "#perf-returns-legend"
+    )
+    assert "under 1 year, not annualised" in short
+
+
+def test_ytd_is_a_zoom_on_both_charts(tmp_path: Path) -> None:
+    source = (PANEL_ROOT / "app.js").read_text(encoding="utf-8")
+    assert '["YTD", "ytd"]' in source
+    dom = _run(
+        tmp_path, _payload(anchor=100), ['perfZoom = "YTD"; perfValueZoom = "YTD"']
+    )
+    note = _text(dom, "#perf-window-note")
+    assert note.startswith("YTD: ") and "2025-01-" in note.replace(
+        "2025-01-06", "2025-01-"
+    )
+    assert _text(dom, "#perf-value-window-note").startswith("YTD: 2025-")
+
+
+def test_switching_every_series_off_says_so_instead_of_drawing_a_blank_axis(
+    tmp_path: Path,
+) -> None:
+    keys = [
+        "strategy:Alpha",
+        "strategy:Beta",
+        "strategy:Gamma",
+        "portfolio:equal_weight",
+        "market:SPY",
+        "market:SPXL",
+    ]
+    hide = "; ".join(f'perfHidden.add("{key}")' for key in keys)
+    dom = _run(tmp_path, _payload(), [hide])
+    assert "Every series is switched off" in _text(dom, "#perf-returns-chart")
+    assert "<svg" not in dom["#perf-returns-chart"]["innerHTML"]
+    assert "Alpha" in _text(
+        dom, "#perf-returns-legend"
+    )  # chips stay to switch them back on
+
+
+def test_a_slice_that_has_not_started_is_not_a_dollar(tmp_path: Path) -> None:
+    payload = _payload()
+    rows = payload["performance_tab"]["slices"]["rows"]
+    rows[1]["nav_cents"] = [None] * 60 + rows[1]["nav_cents"][60:]
+    dom = _run(tmp_path, payload, ['perfValueZoom = "Max"'])
+    assert "Beta" in _text(dom, "#perf-value-legend")  # still valued later
+    # the tooltip prints a dash for a day before the slice existed
+    result = _eval_value(tmp_path, payload)
+    assert result is True
+
+
+def _eval_value(tmp_path: Path, payload: dict[str, Any]) -> bool:
+    payload_path = tmp_path / "payload2.json"
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    calls_path = tmp_path / "calls2.json"
+    calls_path.write_text(
+        json.dumps([{"eval": "perfPublishedValue().table[10].slices.s_late === null"}]),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            str(shutil.which("node")),
+            str(HARNESS),
+            str(PANEL_ROOT / "app.js"),
+            str(payload_path),
+            "renderPerformance",
+            str(calls_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=180,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)["returns"][0]["value"]
+
+
+def test_spxl_and_the_strategy_palette_do_not_collide() -> None:
+    source = (PANEL_ROOT / "app.js").read_text(encoding="utf-8")
+    colours = re.search(
+        r'PERF_BENCHMARK_COLORS = [{] SPY: "(#[0-9a-f]{6})", SPXL: "(#[0-9a-f]{6})" [}]',
+        source,
+    )
+    palette = source.split("const PERF_COLORS = [")[1].split("]")[0]
+    assert colours and palette
+    strategy = set(re.findall(r"#[0-9a-f]{6}", palette))
+
+    def rgb(value: str) -> tuple[int, int, int]:
+        return tuple(int(value[i : i + 2], 16) for i in (1, 3, 5))  # type: ignore[return-value]
+
+    for benchmark in colours.groups():
+        for other in strategy:
+            distance = (
+                sum(
+                    (a - b) ** 2
+                    for a, b in zip(rgb(benchmark), rgb(other), strict=True)
+                )
+                ** 0.5
+            )
+            assert distance > 60, (benchmark, other, distance)
+
+
+def test_value_slices_have_at_least_as_many_colours_as_the_published_slices() -> None:
+    source = (PANEL_ROOT / "app.js").read_text(encoding="utf-8")
+    palette = source.split("const PERF_SLICE_COLORS = [")[1].split("]")[0]
+    assert len(set(re.findall(r"#[0-9a-f]{6}", palette))) >= 13
+
+
+def test_tooltips_are_keyboard_and_touch_reachable_and_do_not_cover_the_chart() -> None:
+    source = (PANEL_ROOT / "app.js").read_text(encoding="utf-8")
+    for needle in (
+        'addEventListener("pointermove"',
+        'addEventListener("pointerdown"',
+        'addEventListener("keydown"',
+        'tabindex="0"',
+        "?.focus()",
+    ):
+        assert needle in source, needle
+    assert (
+        'addEventListener("mousemove"'
+        not in source[
+            source.index("function renderPerformanceReturns") : source.index(
+                "function bindPerformanceControls"
+            )
+        ]
+    )
+    css = (PANEL_ROOT / "analytics.css").read_text(encoding="utf-8")
+    assert ".perf-tooltip { position: static; max-width: none;" in css
+    assert ".perf-tooltip { max-height: 280px; overflow: auto; }" in css
+
+
+def test_long_definitions_are_folded_and_the_trailing_table_names_its_calendar(
+    tmp_path: Path,
+) -> None:
+    dom = _run(tmp_path, _payload(), [])
+    html = dom["#perf-returns-note"]["innerHTML"]
+    assert "<details" not in html or "Line definitions and basis notes" in html
+    assert "Calendar windows ending" in dom["#perf-trailing-note"]["textContent"]
+
+
+def test_benchmark_days_without_a_value_are_named(tmp_path: Path) -> None:
+    payload = _payload()
+    payload["performance_tab"]["slices"]["benchmarks"][0]["nav_cents"][50:53] = [
+        0,
+        0,
+        0,
+    ]
+    dom = _run(tmp_path, payload, [])
+    assert "3 days in this window have no benchmark value" in _text(
+        dom, "#perf-value-legend"
+    )

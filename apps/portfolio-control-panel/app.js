@@ -3087,8 +3087,12 @@
   // shown unavailable with the producer's reason.
   const PERF_COLORS = ["#5cc8c0", "#7cb7ff", "#f2bb62", "#f27b82", "#c4b5fd", "#86efac", "#f9a8d4"];
   const PERF_DAY = 86400000;
-  const PERF_ZOOMS = [["1m", 30], ["3m", 91], ["6m", 183], ["1y", 365], ["3y", 1096], ["Max", null]];
-  const PERF_VALUE_ZOOMS = [["1w", 7], ["1m", 30], ["3m", 91], ["6m", 183], ["1y", 365], ["Max", null]];
+  const PERF_ZOOMS = [["1m", 30], ["3m", 91], ["6m", 183], ["YTD", "ytd"], ["1y", 365], ["3y", 1096], ["Max", null]];
+  const PERF_VALUE_ZOOMS = [["1w", 7], ["1m", 30], ["3m", 91], ["6m", 183], ["YTD", "ytd"], ["1y", 365], ["Max", null]];
+  // The value chart's Max starts on the first day the stack holds this share of its peak value, so a sliver of early capital does not flatten the chart.
+  const PERF_VALUE_MIN_SHARE = 0.05;
+  const PERF_SLICE_COLORS = ["#5cc8c0", "#7cb7ff", "#f2bb62", "#f27b82", "#c4b5fd", "#86efac", "#f9a8d4", "#ff8f3d", "#4cc9f0", "#b8e45c", "#d96ad0", "#9aa5b1", "#2f9e8f", "#e0e0a0"];
+  const perfSliceColor = (index) => PERF_SLICE_COLORS[index % PERF_SLICE_COLORS.length];
   let perfMode = "LIVE_PLUS_BACKTEST";
   let perfAxis = "linear";
   let perfZoom = "Max";
@@ -3198,9 +3202,10 @@
     const lastTime = ends[ends.length - 1];
     const anchor = anchorIndex ?? 0;
     return PERF_ZOOMS.map(([label, days]) => {
-      const requested = days == null ? 0 : Math.max(0, starts.findIndex((time) => time >= lastTime - days * PERF_DAY));
+      const requestedTime = days == null ? null : days === "ytd" ? Date.UTC(new Date(lastTime).getUTCFullYear(), 0, 1) : lastTime - days * PERF_DAY;
+      const requested = requestedTime == null ? 0 : Math.max(0, starts.findIndex((time) => time >= requestedTime));
       const baseIndex = Math.max(requested, anchor);
-      return { label, days, baseIndex, start: starts[baseIndex], limited: days != null && anchor > requested, spanDays: Math.round((lastTime - starts[baseIndex]) / PERF_DAY) };
+      return { label, days, baseIndex, start: starts[baseIndex], limited: requestedTime != null && anchor > requested, requestedDays: requestedTime == null ? null : Math.round((lastTime - requestedTime) / PERF_DAY), spanDays: Math.round((lastTime - starts[baseIndex]) / PERF_DAY) };
     });
   }
 
@@ -3211,7 +3216,7 @@
   // strategy line has data), and the daily flow-matched benchmark dollars in slices.benchmarks.  Nothing is derived from
   // weekly_returns or the epoch traces here: a snapshot without a schema-3 block says so.
   const PERF_SCHEMA_VERSION = 3;
-  const PERF_BENCHMARK_COLORS = { SPY: "#a8b7c5", SPXL: "#e6c36a" };
+  const PERF_BENCHMARK_COLORS = { SPY: "#a8b7c5", SPXL: "#ff6a3d" };
   // A line's origin decides its stroke: live evidence is solid, every other origin is dashed in its own pattern.
   const PERF_ORIGIN_STYLES = Object.freeze({
     ACCOUNT_LIVE: { name: "solid", dash: null },
@@ -3359,37 +3364,60 @@
     }).join("");
     const latest = (line) => line.points.filter((point) => point.value != null).at(-1)?.value;
     const rebaseSummary = own ? "each line rebased at its own first week, log axis" : `rebased at ${perfDate(starts[baseIndex])}`;
-    host.innerHTML = `<div class="perf-plot"><svg class="perf-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${safe(`Rebased total return, ${rebaseSummary}: ${rebased.map((line) => `${line.name} ${(((latest(line) ?? 1) - 1) * 100).toFixed(1)}%`).join("; ")}`)}">${grid}${paths}${liveMarkers}<line class="perf-cursor" x1="0" x2="0" y1="${top}" y2="${height - bottom}" hidden></line></svg><div class="perf-tooltip" hidden></div></div>`;
-    const plot = host.querySelector(".perf-plot");
-    const svg = plot.querySelector("svg");
-    const tip = plot.querySelector(".perf-tooltip");
-    const cursor = svg.querySelector(".perf-cursor");
-    const byTime = new Map(visibleLines.map((line) => [line.key, new Map(line.points.filter((point) => point.value != null).map((point) => [point.time, point]))]));
-    const times = [...new Set(visibleLines.flatMap((line) => line.points.filter((point) => point.value != null).map((point) => point.time)))].sort((a, b) => a - b);
-    const startTimes = new Set(starts);
-    const endTimes = new Set(ends);
-    svg.addEventListener("mousemove", (event) => {
-      if (!times.length) return;
-      const box = svg.getBoundingClientRect();
-      const time = from + ((event.clientX - box.left) / box.width * width - left) / (width - left - right) * (lastTime - from);
-      const nearest = times.reduce((best, candidate) => (Math.abs(candidate - time) < Math.abs(best - time) ? candidate : best), times[0]);
-      const rows = visibleLines.map((line) => ({ line, point: byTime.get(line.key).get(nearest) })).filter((entry) => entry.point);
-      cursor.setAttribute("x1", x(nearest).toFixed(1)); cursor.setAttribute("x2", x(nearest).toFixed(1)); cursor.hidden = false;
-      tip.hidden = false;
-      tip.innerHTML = `<strong>${startTimes.has(nearest) && !endTimes.has(nearest) ? "Week starting" : "Week ending"} ${safe(perfDate(nearest))}</strong>${rows.map(({ line, point }) => `<div><i style="background:${line.color}"></i>${safe(line.name)}<b>${perfPercent(point.value)}${point.origin && !perfIsLive(point.origin) ? ` · ${safe(humanStatus(point.origin).toLowerCase())}` : ""}</b></div>`).join("")}`;
-      tip.style.left = `${Math.min(box.width - 240, Math.max(0, (x(nearest) / width) * box.width + 12))}px`;
-    });
-    svg.addEventListener("mouseleave", () => { tip.hidden = true; cursor.hidden = true; });
+    if (!visibleLines.length) {
+      host.innerHTML = '<div class="callout callout-neutral">Every series is switched off. Select a series below to draw it.</div>';
+    } else {
+      host.innerHTML = `<div class="perf-plot"><svg class="perf-svg" tabindex="0" viewBox="0 0 ${width} ${height}" role="img" aria-label="${safe(`Rebased total return, ${rebaseSummary}: ${rebased.map((line) => `${line.name} ${(((latest(line) ?? 1) - 1) * 100).toFixed(1)}%`).join("; ")}. Arrow keys move the cursor.`)}">${grid}${paths}${liveMarkers}<line class="perf-cursor" x1="0" x2="0" y1="${top}" y2="${height - bottom}" hidden></line></svg><div class="perf-tooltip" hidden></div></div>`;
+      const plot = host.querySelector(".perf-plot");
+      const svg = plot.querySelector("svg");
+      const tip = plot.querySelector(".perf-tooltip");
+      const cursor = svg.querySelector(".perf-cursor");
+      const byTime = new Map(visibleLines.map((line) => [line.key, new Map(line.points.filter((point) => point.value != null).map((point) => [point.time, point]))]));
+      const times = [...new Set(visibleLines.flatMap((line) => line.points.filter((point) => point.value != null).map((point) => point.time)))].sort((a, b) => a - b);
+      const startTimes = new Set(starts);
+      const endTimes = new Set(ends);
+      const firstTime = new Map(visibleLines.map((line) => [line.key, line.points.find((point) => point.value != null)?.time]));
+      let cursorIndex = times.length - 1;
+      const hide = () => { tip.hidden = true; cursor.hidden = true; };
+      const show = (index) => {
+        cursorIndex = index;
+        const nearest = times[index];
+        const rows = visibleLines.map((line) => ({ line, point: byTime.get(line.key).get(nearest) })).filter((entry) => entry.point);
+        const later = visibleLines.filter((line) => !byTime.get(line.key).has(nearest) && firstTime.get(line.key) > nearest).map((line) => line.name);
+        cursor.setAttribute("x1", x(nearest).toFixed(1)); cursor.setAttribute("x2", x(nearest).toFixed(1)); cursor.hidden = false;
+        tip.hidden = false;
+        tip.innerHTML = `<strong>${startTimes.has(nearest) && !endTimes.has(nearest) ? "Week starting" : "Week ending"} ${safe(perfDate(nearest))}</strong>${rows.map(({ line, point }) => `<div><i style="background:${line.color}"></i>${safe(line.name)}<b>${perfPercent(point.value)}${point.origin && !perfIsLive(point.origin) ? ` · ${safe(humanStatus(point.origin).toLowerCase())}` : ""}</b></div>`).join("")}${later.length ? `<div class="perf-tip-later">Not started yet: ${safe(later.join(", "))}</div>` : ""}`;
+        if (width >= 520) tip.style.left = `${Math.min(svg.getBoundingClientRect().width - 240, Math.max(0, (x(nearest) / width) * svg.getBoundingClientRect().width + 12))}px`;
+      };
+      const indexAt = (clientX) => {
+        const box = svg.getBoundingClientRect();
+        const time = from + ((clientX - box.left) / box.width * width - left) / (width - left - right) * (lastTime - from);
+        return times.reduce((best, candidate, index) => (Math.abs(candidate - time) < Math.abs(times[best] - time) ? index : best), 0);
+      };
+      const pointer = (event) => { if (times.length) show(indexAt(event.clientX)); };
+      svg.addEventListener("pointermove", pointer);
+      svg.addEventListener("pointerdown", pointer);
+      svg.addEventListener("pointerleave", hide);
+      svg.addEventListener("blur", hide);
+      svg.addEventListener("keydown", (event) => {
+        if (!times.length || !["ArrowLeft", "ArrowRight", "Home", "End", "Escape"].includes(event.key)) return;
+        event.preventDefault();
+        if (event.key === "Escape") return hide();
+        show(event.key === "Home" ? 0 : event.key === "End" ? times.length - 1 : Math.min(times.length - 1, Math.max(0, cursorIndex + (event.key === "ArrowRight" ? 1 : -1))));
+      });
+    }
     // Each chip says which weeks its percentage covers, and the live-only share for a line with earlier backtest weeks.
     const windowText = (line) => {
       const pts = line.points.filter((point) => point.value != null);
       const live = perfLiveStart(line);
-      return `${perfDate(pts[0].time)} → ${perfDate(pts[pts.length - 1].time)}${live ? ` · live from ${perfDate(live.time)}, live ${perfPercent(1 + live.liveReturn)}` : ""}`;
+      const years = (pts[pts.length - 1].time - pts[0].time) / (365 * PERF_DAY);
+      const annual = years >= 1 && pts[0].value > 0 ? ` · ${perfPercent(Math.pow(pts[pts.length - 1].value / pts[0].value, 1 / years))} a year` : " · under 1 year, not annualised";
+      return `${perfDate(pts[0].time)} → ${perfDate(pts[pts.length - 1].time)}${annual}${live ? ` · live from ${perfDate(live.time)}, live ${perfPercent(1 + live.liveReturn)}` : ""}`;
     };
     $("#perf-returns-legend").innerHTML = rebased.map((line) => `<button type="button" class="perf-legend-item${perfHidden.has(line.key) ? " is-off" : ""}" data-perf-series="${safe(line.key)}" aria-pressed="${!perfHidden.has(line.key)}"><i style="background:${line.color}"></i>${safe(line.name)} <b>${latest(line) != null ? perfPercent(latest(line)) : "—"}</b><span class="perf-chip-window">${safe(windowText(line))}</span></button>`).join("")
       + absent.map((line) => `<span class="perf-legend-item is-missing" title="This line has no value at the rebase week of this view"><i style="background:${line.color}"></i>${safe(line.name)} <b>starts after this window</b></span>`).join("")
       + built.missing.map((item) => `<span class="perf-legend-item is-missing" title="${safe(item.reason)}; no other ETF is substituted"><i style="background:${item.color}"></i>${safe(item.name)} <b>unavailable: ${safe(String(item.reason).toLowerCase().replaceAll("_", " "))}</b></span>`).join("");
-    $$("[data-perf-series]").forEach((button) => button.addEventListener("click", () => { const key = button.dataset.perfSeries; if (perfHidden.has(key)) perfHidden.delete(key); else perfHidden.add(key); renderPerformanceReturns(); }));
+    $$("[data-perf-series]").forEach((button) => button.addEventListener("click", () => { const key = button.dataset.perfSeries; if (perfHidden.has(key)) perfHidden.delete(key); else perfHidden.add(key); renderPerformanceReturns(); $$("[data-perf-series]").find((item) => item.dataset.perfSeries === key)?.focus(); }));
     const presentOrigins = [...new Set(rebased.flatMap((line) => line.points.map((point) => point.origin)).filter((origin) => !perfIsLive(origin)))];
     const styleNote = presentOrigins.length
       ? presentOrigins.map((origin) => `${perfOriginStyle(origin).name} = ${humanStatus(origin).toLowerCase()}`).join(", ")
@@ -3402,21 +3430,22 @@
         : `Every line is rebased to 1.00 at the start of <strong>${safe(formatDate(perfDate(starts[baseIndex])))}</strong>, the later of the window start and the group anchor.`;
     const anchorNote = built.anchorDate ? ` Group anchor <strong>${safe(formatDate(built.anchorDate))}</strong>: the first week every strategy line has data${anchorSetBy}.` : "";
     const benchmarkNote = " SPY and SPXL are the benchmark's own weekly total return, rebased the same way (the dollar chart below puts the same cash flows into the benchmark instead).";
-    $("#perf-returns-note").innerHTML = `${rebaseNote}${anchorNote} Total return, weekly points, as published by the producer; a line draws nothing before its own first week. A dot marks where a line's live evidence begins.${styleNote ? ` Line style: solid = live account evidence, ${safe(styleNote)}.` : ""}${benchmarkNote}${built.gaps.length ? ` Weeks with no data inside a line (not zero): ${safe(built.gaps.join(", "))}.` : ""}${built.partial ? ` The last week is partial (data through ${safe(formatDate(built.dataThrough))}).` : ""} ${safe(built.definitions.join(" "))}`;
+    const basesNote = " The equal-weight line here is one portfolio basis; the governed index and the money-weighted return are different bases and appear in the value readout below.";
+    $("#perf-returns-note").innerHTML = `${rebaseNote}${anchorNote} Total return, weekly points, as published by the producer; a line draws nothing before its own first week. A dot marks where a line's live evidence begins.${styleNote ? ` Line style: solid = live account evidence, ${safe(styleNote)}.` : ""}${benchmarkNote}${basesNote}${built.gaps.length ? ` Weeks with no data inside a line (not zero): ${safe(built.gaps.join(", "))}.` : ""}${built.partial ? ` The last week is partial (data through ${safe(formatDate(built.dataThrough))}).` : ""}${built.definitions.length ? `<details class="perf-definitions"><summary>Line definitions and basis notes</summary>${safe(built.definitions.join(" "))}</details>` : ""}`;
     // A zoom longer than the common history says so: explicit state on the button and in the window line, never silent.
     const windowNote = $("#perf-window-note");
     if (windowNote) {
       windowNote.textContent = own
         ? `Own start: each line from its own first week, ${perfDate(from)} to ${perfDate(lastTime)}.`
         : current.limited
-          ? `${current.label} is limited by the group anchor: the window starts ${perfDate(current.start)} (${integer.format(current.spanDays)} days of the ${integer.format(current.days)} requested).`
+          ? `${current.label} is limited by the group anchor: the window starts ${perfDate(current.start)} (${integer.format(current.spanDays)} days of the ${integer.format(current.requestedDays)} requested).`
           : `${current.label}: ${perfDate(current.start)} to ${perfDate(lastTime)} (${integer.format(current.spanDays)} days).`;
     }
     $$("[data-perf-zoom]").forEach((button) => {
       const win = windows.find((item) => item.label === button.dataset.perfZoom);
       const active = button.dataset.perfZoom === perfZoom;
       button.classList.toggle("is-active", active); button.classList.toggle("is-limited", Boolean(win?.limited)); button.setAttribute("aria-pressed", String(active));
-      button.title = !win ? "" : win.label === "Max" ? `Common window from the group anchor, ${perfDate(win.start)}` : win.limited ? `Limited by group anchor: starts ${perfDate(win.start)} (${integer.format(win.spanDays)} of ${integer.format(win.days)} days)` : `Starts ${perfDate(win.start)}`;
+      button.title = !win ? "" : win.label === "Max" ? `Common window from the group anchor, ${perfDate(win.start)}` : win.limited ? `Limited by group anchor: starts ${perfDate(win.start)} (${integer.format(win.spanDays)} of ${integer.format(win.requestedDays)} days)` : `Starts ${perfDate(win.start)}`;
       if (win?.limited) button.setAttribute("aria-label", `${win.label}, limited by group anchor: starts ${perfDate(win.start)}`); else button.removeAttribute("aria-label");
     });
     $$("[data-perf-axis]").forEach((button) => { const active = button.dataset.perfAxis === effectiveAxis; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); button.disabled = own; button.title = own ? "The own-start view spans each line's full history and always uses a log axis" : ""; });
@@ -3442,8 +3471,8 @@
     const names = Object.fromEntries(slices.rows.map((row) => [row.slice_id, `${strategyNameById(row.strategy_id)}${row.sleeve_id ? ` · ${row.sleeve_id}` : ""}`]));
     const divisor = slices.unit === "USD_CENTS" ? 100 : 1;
     const table = slices.dates.map((date, index) => {
-      const values = Object.fromEntries(slices.rows.map((row) => [row.slice_id, (Number(row.nav_cents?.[index]) || 0) / divisor]));
-      return { date, index, time: perfTime(date), slices: values, total: Object.values(values).reduce((sum, value) => sum + value, 0) };
+      const values = Object.fromEntries(slices.rows.map((row) => [row.slice_id, number(row.nav_cents?.[index]) == null ? null : Number(row.nav_cents[index]) / divisor]));
+      return { date, index, time: perfTime(date), slices: values, total: Object.values(values).reduce((sum, value) => sum + (value ?? 0), 0) };
     }).filter((row, index, all) => row.total > 0 || index === all.length - 1);
     if (!table.length) return { unavailable: "no slice carries a value" };
     const reconciliation = slices.reconciliation || {};
@@ -3502,8 +3531,11 @@
     const readoutBlock = perfTab()?.readout;
     const published = readoutBlock?.hwm_governed_index?.status === "AVAILABLE" ? readoutBlock.hwm_governed_index : null;
     const lastTime = table.at(-1).time;
-    const zoomDays = PERF_VALUE_ZOOMS.find(([label]) => label === perfValueZoom)?.[1] ?? null;
-    const from = zoomDays == null ? table[0].time : Math.max(table[0].time, lastTime - zoomDays * PERF_DAY);
+    const zoom = PERF_VALUE_ZOOMS.find(([label]) => label === perfValueZoom);
+    const peakTotal = Math.max(...table.map((row) => row.total));
+    const firstMeaningful = table.find((row) => row.total >= peakTotal * PERF_VALUE_MIN_SHARE) || table[0];
+    const requestedFrom = zoom?.[1] == null ? null : zoom[1] === "ytd" ? Date.UTC(new Date(lastTime).getUTCFullYear(), 0, 1) : lastTime - zoom[1] * PERF_DAY;
+    const from = requestedFrom == null ? firstMeaningful.time : Math.max(table[0].time, requestedFrom);
     const rows = table.filter((row) => row.time >= from);
     // A slice that is $0 in every row of the window is left out of the stack, the tooltip and the legend.
     const activeIds = ids.filter((id) => rows.some((row) => row.slices[id] > 0));
@@ -3522,7 +3554,7 @@
       const forward = rows.map((row, position) => `${x(row.time).toFixed(1)},${y(upper[position]).toFixed(1)}`);
       const backward = rows.map((row, position) => `${x(row.time).toFixed(1)},${y(lower[position]).toFixed(1)}`).reverse();
       lower = upper;
-      return `<polygon fill="${perfColor(index)}" fill-opacity=".78" stroke="${perfColor(index)}" stroke-width=".6" points="${[...forward, ...backward].join(" ")}"></polygon>`;
+      return `<polygon fill="${perfSliceColor(index)}" fill-opacity=".78" stroke="${perfSliceColor(index)}" stroke-width=".6" points="${[...forward, ...backward].join(" ")}"></polygon>`;
     }).join("");
     const totalLine = `<polyline fill="none" stroke="#edf4f7" stroke-width="1.6" points="${rows.map((row) => `${x(row.time).toFixed(1)},${y(row.total).toFixed(1)}`).join(" ")}"></polyline>`;
     const benchmarkLines = drawnBenchmarks.map((item) => {
@@ -3538,26 +3570,41 @@
     const grid = ticks.map((tick) => `<line x1="${left}" x2="${width - right}" y1="${y(tick).toFixed(1)}" y2="${y(tick).toFixed(1)}" stroke="currentColor" stroke-opacity=".14"></line><text class="chart-label axis-label" x="2" y="${(y(tick) + 4).toFixed(1)}">${currency(tick)}</text>`).join("")
       + perfTimeTicks(from, lastTime, width - left - right).map((tick) => `<text class="chart-label axis-label" text-anchor="${tick.anchor}" x="${x(tick.time).toFixed(1)}" y="${height - 8}">${safe(tick.label)}</text>`).join("");
     const benchmarkAria = drawnBenchmarks.map((item) => ` ${item.ticker} flow-matched ${currency(item.end)}`).join(";");
-    host.innerHTML = `<div class="perf-plot"><svg class="perf-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${safe(`Value of the systematic portfolio by strategy, ${perfDate(from)} to ${perfDate(lastTime)}. Latest total ${currency(table.at(-1).total)}: ${activeIds.map((id) => `${(spec.names?.[id] || strategyNameById(id))} ${currency(table.at(-1).slices[id])}`).join("; ")}.${benchmarkAria ? ` Benchmarks on the same cash flows:${benchmarkAria}.` : ""}`)}">${grid}${areas}${totalLine}${benchmarkLines}<line class="perf-cursor" x1="0" x2="0" y1="${top}" y2="${height - bottom}" hidden></line></svg><div class="perf-tooltip" hidden></div></div>`;
+    host.innerHTML = `<div class="perf-plot"><svg class="perf-svg" tabindex="0" viewBox="0 0 ${width} ${height}" role="img" aria-label="${safe(`Value of the systematic portfolio by strategy, ${perfDate(from)} to ${perfDate(lastTime)}. Latest total ${currency(table.at(-1).total)}: ${activeIds.map((id) => `${(spec.names?.[id] || strategyNameById(id))} ${currency(table.at(-1).slices[id])}`).join("; ")}.${benchmarkAria ? ` Benchmarks on the same cash flows:${benchmarkAria}.` : ""}`)}">${grid}${areas}${totalLine}${benchmarkLines}<line class="perf-cursor" x1="0" x2="0" y1="${top}" y2="${height - bottom}" hidden></line></svg><div class="perf-tooltip" hidden></div></div>`;
     const plot = host.querySelector(".perf-plot");
     const svg = plot.querySelector("svg");
     const tip = plot.querySelector(".perf-tooltip");
     const cursor = svg.querySelector(".perf-cursor");
-    svg.addEventListener("mousemove", (event) => {
-      const box = svg.getBoundingClientRect();
-      const time = from + ((event.clientX - box.left) / box.width * width - left) / (width - left - right) * (lastTime - from);
-      const row = rows.reduce((best, candidate) => (Math.abs(candidate.time - time) < Math.abs(best.time - time) ? candidate : best), rows[0]);
+    let cursorPosition = rows.length - 1;
+    const hideValue = () => { tip.hidden = true; cursor.hidden = true; };
+    const showValue = (rowIndex) => {
+      cursorPosition = rowIndex;
+      const row = rows[rowIndex];
       const position = table.indexOf(row);
       cursor.setAttribute("x1", x(row.time).toFixed(1)); cursor.setAttribute("x2", x(row.time).toFixed(1)); cursor.hidden = false;
       tip.hidden = false;
-      tip.innerHTML = `<strong>${safe(formatDate(row.date))}</strong>${activeIds.map((id) => `<div><i style="background:${perfColor(ids.indexOf(id))}"></i>${safe((spec.names?.[id] || strategyNameById(id)))}<b>${currency(row.slices[id])}</b></div>`).join("")}<div class="perf-tip-total">Total<b>${currency(row.total)}</b></div>${drawnBenchmarks.map((item) => `<div><i style="background:${item.color}"></i>${safe(item.ticker)}, same cash flows<b>${item.dollars[position] > 0 ? currency(item.dollars[position]) : "—"}</b></div>`).join("")}`;
-      tip.style.left = `${Math.min(box.width - 240, Math.max(0, (x(row.time) / width) * box.width + 12))}px`;
+      tip.innerHTML = `<strong>${safe(formatDate(row.date))}</strong>${activeIds.map((id) => `<div><i style="background:${perfSliceColor(ids.indexOf(id))}"></i>${safe((spec.names?.[id] || strategyNameById(id)))}<b>${currency(row.slices[id])}</b></div>`).join("")}<div class="perf-tip-total">Total<b>${currency(row.total)}</b></div>${drawnBenchmarks.map((item) => `<div><i style="background:${item.color}"></i>${safe(item.ticker)}, same cash flows<b>${item.dollars[position] > 0 ? currency(item.dollars[position]) : "—"}</b></div>`).join("")}`;
+      if (width >= 520) tip.style.left = `${Math.min(svg.getBoundingClientRect().width - 240, Math.max(0, (x(row.time) / width) * svg.getBoundingClientRect().width + 12))}px`;
+    };
+    const valuePointer = (event) => {
+      const box = svg.getBoundingClientRect();
+      const time = from + ((event.clientX - box.left) / box.width * width - left) / (width - left - right) * (lastTime - from);
+      showValue(rows.reduce((best, candidate, index) => (Math.abs(candidate.time - time) < Math.abs(rows[best].time - time) ? index : best), 0));
+    };
+    svg.addEventListener("pointermove", valuePointer);
+    svg.addEventListener("pointerdown", valuePointer);
+    svg.addEventListener("pointerleave", hideValue);
+    svg.addEventListener("blur", hideValue);
+    svg.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End", "Escape"].includes(event.key)) return;
+      event.preventDefault();
+      if (event.key === "Escape") return hideValue();
+      showValue(event.key === "Home" ? 0 : event.key === "End" ? rows.length - 1 : Math.min(rows.length - 1, Math.max(0, cursorPosition + (event.key === "ArrowRight" ? 1 : -1))));
     });
-    svg.addEventListener("mouseleave", () => { tip.hidden = true; cursor.hidden = true; });
     const first = rows[0];
     const end = table.at(-1);
     const valueNote = $("#perf-value-window-note");
-    if (valueNote) valueNote.textContent = `${perfValueZoom}: ${perfDate(from)} to ${perfDate(lastTime)}${perfValueZoom === "Max" ? " (first dollar of capital; the return chart's Max starts at its own common window)" : ""}. Benchmark dollars put the same deposits and withdrawals into the benchmark (flow-matched); the return chart above shows the benchmark's own total return.`;
+    if (valueNote) valueNote.textContent = `${perfValueZoom}: ${perfDate(from)} to ${perfDate(lastTime)}${perfValueZoom === "Max" ? ` (the first day the stack holds at least ${PERF_VALUE_MIN_SHARE * 100}% of its peak value; earlier days are not drawn; the return chart's Max starts at its own common window)` : ""}. Benchmark dollars put the same deposits and withdrawals into the benchmark (flow-matched); the return chart above shows the benchmark's own total return.`;
     const proof = data.hwm_governed_proof;
     const path = Array.isArray(proof?.index_path) ? proof.index_path : [];
     // The governed proof is a candidate until the owner accepts it; the Risk view says so and so does this readout.
@@ -3580,12 +3627,16 @@
     const basesText = basesParts.join(" · ");
     const windowReturn = perfValueZoom === "Max" && published && number(published.cumulative_return) != null ? Number(published.cumulative_return) : !path.length ? null : perfValueZoom === "Max" ? perfIndexReturn(path, perfTime(path[0].as_of), lastTime) : perfIndexReturn(path, from, lastTime);
     $("#perf-value-readout").innerHTML = `<div class="perf-readout"><div><span>Systematic portfolio value</span><b>${currency(end.total)}</b><small>${safe(formatDate(end.date))}, reserve excluded</small></div><div><span>Change in value, ${safe(perfValueZoom)}</span><b>${currency(end.total - first.total)}</b><small>includes deposits and withdrawals</small></div><div><span>Time-weighted return, ${safe(perfValueZoom)}</span><b>${windowReturn == null ? "—" : pct(windowReturn)}</b><small>${windowReturn == null ? "no governed index in this snapshot" : `${safe(proofLabel)}, levered net NAV basis`}${summedText ? `<br>${safe(summedText)}` : ""}${basesText ? `<br>${safe(basesText)}` : ""}</small></div></div>`;
+    const benchmarkGapDays = (item) => {
+      const first = table.findIndex((row, position) => row.time >= from && item.dollars[position] > 0);
+      return first < 0 ? 0 : table.filter((row, position) => position > first && row.time >= from && !(item.dollars[position] > 0)).length;
+    };
     const benchmarkLegend = benchmarks.map((item) => (item.available
-      ? `<span class="perf-legend-item" title="${safe(item.methodDefinition)}"><i class="perf-dash-swatch" style="border-color:${item.color}"></i>${safe(item.ticker)}, same cash flows <b>${currency(item.end)}</b>${item.difference == null ? "" : `<span class="cell-secondary">portfolio ${item.difference >= 0 ? "ahead by" : "behind by"} ${currency(Math.abs(item.difference))}</span>`}</span>`
+      ? `<span class="perf-legend-item" title="${safe(item.methodDefinition)}"><i class="perf-dash-swatch" style="border-color:${item.color}"></i>${safe(item.ticker)}, same cash flows <b>${currency(item.end)}</b>${item.difference == null ? "" : `<span class="cell-secondary">portfolio ${item.difference >= 0 ? "ahead by" : "behind by"} ${currency(Math.abs(item.difference))}</span>`}${item.dollars && benchmarkGapDays(item) ? `<span class="cell-secondary">${integer.format(benchmarkGapDays(item))} days in this window have no benchmark value; the line breaks there and is not drawn at zero</span>` : ""}</span>`
       : `<span class="perf-legend-item is-missing" title="${safe(item.reason)}"><i class="perf-dash-swatch" style="border-color:${item.color}"></i>${safe(item.ticker)}, same cash flows <b>unavailable: ${safe(String(item.reason).toLowerCase().replaceAll("_", " "))}</b></span>`)).join("");
     const methodNote = drawnBenchmarks.length ? `${safe(drawnBenchmarks[0].methodDefinition)}${drawnBenchmarks.some((item) => item.triBasis) ? ` Index basis: ${safe([...new Set(drawnBenchmarks.map((item) => humanStatus(item.triBasis).toLowerCase()))].join(", "))}${drawnBenchmarks.some((item) => item.flowTiming) ? `; flow timing: ${safe([...new Set(drawnBenchmarks.map((item) => humanStatus(item.flowTiming).toLowerCase()))].join(", "))}` : ""}.` : ""}` : "";
     const benchmarkMissingNote = spec.benchmarksPublished ? "" : `<span class="cell-secondary">Benchmark dollar series unavailable: the producer published no slices.benchmarks in this snapshot.</span>`;
-    $("#perf-value-legend").innerHTML = activeIds.map((id) => (end.slices[id] > 0 ? `<span class="perf-legend-item"><i style="background:${perfColor(ids.indexOf(id))}"></i>${safe((spec.names?.[id] || strategyNameById(id)))} <b>${currency(end.slices[id])}</b></span>` : `<span class="perf-legend-item is-closed" title="Held value earlier in this window; nothing at its end"><i style="background:${perfColor(ids.indexOf(id))}"></i>${safe((spec.names?.[id] || strategyNameById(id)))} <b>ended in window</b></span>`)).join("") + `<span class="perf-legend-item"><i style="background:#edf4f7"></i>Total <b>${currency(end.total)}</b></span>${benchmarkLegend}${benchmarkMissingNote}${spec.basisNote ? `<span class="cell-secondary">${safe(spec.basisNote)}</span>` : ""}${spec.reconciliation ? `<span class="cell-secondary">${safe(spec.reconciliation)}</span>` : ""}${spec.flowText ? `<span class="cell-secondary">${safe(spec.flowText)}</span>` : ""}${methodNote ? `<span class="cell-secondary">${methodNote}</span>` : ""}`;
+    $("#perf-value-legend").innerHTML = activeIds.map((id) => (end.slices[id] > 0 ? `<span class="perf-legend-item"><i style="background:${perfSliceColor(ids.indexOf(id))}"></i>${safe((spec.names?.[id] || strategyNameById(id)))} <b>${currency(end.slices[id])}</b></span>` : `<span class="perf-legend-item is-closed" title="Held value earlier in this window; nothing at its end"><i style="background:${perfSliceColor(ids.indexOf(id))}"></i>${safe((spec.names?.[id] || strategyNameById(id)))} <b>ended in window</b></span>`)).join("") + `<span class="perf-legend-item"><i style="background:#edf4f7"></i>Total <b>${currency(end.total)}</b></span>${benchmarkLegend}${benchmarkMissingNote}${spec.basisNote ? `<span class="cell-secondary">${safe(spec.basisNote)}</span>` : ""}${spec.reconciliation ? `<span class="cell-secondary">${safe(spec.reconciliation)}</span>` : ""}${spec.flowText ? `<span class="cell-secondary">${safe(spec.flowText)}</span>` : ""}${methodNote ? `<span class="cell-secondary">${methodNote}</span>` : ""}`;
     const trailing = [["1w", 7, "1w"], ["1m", 30, "1m"], ["3m", 91, "3m"], ["6m", 183, "6m"], ["YTD", null, "YTD"], ["1y", 365, "1y"], ["Since start", "start", "SINCE_START"]];
     const endTime = lastTime;
     const ytdStart = perfTime(`${new Date(endTime).getUTCFullYear() - 1}-12-31`);
@@ -3602,6 +3653,8 @@
       : [`<tr><th scope="row">SPY, SPXL<span class="cell-secondary">Unavailable</span></th><td colspan="${trailing.length}" class="cell-secondary">The producer published no benchmark series for this view</td></tr>`];
     $("#perf-trailing-table").innerHTML = tableMarkup([["Trailing return (time-weighted)"], ...trailing.map(([label]) => [label, "numeric"])],
       [`<tr><th scope="row">Systematic portfolio<span class="cell-secondary">${safe(proofLabel)}, levered net NAV basis</span></th>${trailing.map(([, days]) => `<td class="numeric">${pct(periodReturn(days))}</td>`).join("")}</tr>`, ...benchmarkTrailingRows]);
+    const trailingNote = $("#perf-trailing-note");
+    if (trailingNote) trailingNote.textContent = `Calendar windows ending ${perfDate(endTime)} on daily data. The return chart above uses weekly points from the first week of each window to the last published week, so the same label can differ by the days at either edge.`;
     $$("[data-perf-value-zoom]").forEach((button) => { const active = button.dataset.perfValueZoom === perfValueZoom; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); });
   }
 

@@ -76,10 +76,12 @@ for (const [viewport, width, height] of VIEWPORTS) {
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error)));
+  page.on("requestfailed", (request) => errors.push(`request failed: ${request.url().slice(0, 100)}`));
   await page.goto(`${urlBase}#performance`, { waitUntil: "load", timeout: 120000 });
   await page.waitForSelector("#perf-returns-chart svg", { timeout: 30000 });
   const modes = await page.$$eval("[data-perf-mode]", (buttons) => buttons.map((button) => button.dataset.perfMode));
   const zooms = await page.$$eval("[data-perf-zoom]", (buttons) => buttons.map((button) => button.dataset.perfZoom));
+  if (!zooms.includes("YTD")) violations.push({ state: `${viewport}/controls`, message: "no YTD zoom" });
   const vzooms = await page.$$eval("[data-perf-value-zoom]", (buttons) => buttons.map((button) => button.dataset.perfValueZoom));
   const shot = async (name) => { if (options.shots) { fs.mkdirSync(options.shots, { recursive: true }); await page.locator("#perf-returns-chart").locator("xpath=ancestor::article[1]").screenshot({ path: path.join(options.shots, `${name}.png`) }); } };
   for (const mode of modes) {
@@ -117,6 +119,26 @@ for (const [viewport, width, height] of VIEWPORTS) {
   await page.mouse.move(svgBox.x + svgBox.width * 0.7, svgBox.y + svgBox.height * 0.5);
   const tip = await page.evaluate(() => { const node = document.querySelector("#perf-returns-chart .perf-tooltip"); return node && !node.hidden ? node.innerText : ""; });
   if (!tip.includes("%") || /\d{3,}\.\d{3}/.test(tip)) violations.push({ state: `${viewport}/tooltip`, message: `tooltip does not print percentages only: ${tip.slice(0, 120)}` });
+  // Keyboard: the chart takes focus and the arrow keys move a visible tooltip.
+  await page.locator("#perf-returns-chart svg").focus();
+  await page.keyboard.press("ArrowLeft");
+  if (!(await page.evaluate(() => { const node = document.querySelector("#perf-returns-chart .perf-tooltip"); return Boolean(node && !node.hidden && node.innerText.includes("%")); }))) violations.push({ state: `${viewport}/keyboard`, message: "ArrowLeft did not show the tooltip" });
+  // A phone tooltip sits below the chart, not over it.
+  if (width < 520) {
+    const geometry = await page.evaluate(() => { const svg = document.querySelector("#perf-returns-chart svg").getBoundingClientRect(); const tip = document.querySelector("#perf-returns-chart .perf-tooltip").getBoundingClientRect(); return { svgBottom: svg.bottom, tipTop: tip.top }; });
+    if (geometry.tipTop < geometry.svgBottom - 1) violations.push({ state: `${viewport}/tooltip-position`, message: "tooltip covers the chart on a phone" });
+  }
+  // Every series off: a message, not a blank axis; chips stay so the series can come back.
+  const chipCount = await page.locator("[data-perf-series]").count();
+  for (let index = 0; index < chipCount; index += 1) {
+    const chip = page.locator("[data-perf-series]").nth(index);
+    if ((await chip.getAttribute("aria-pressed")) === "true") await chip.click();
+  }
+  if (!(await page.$eval("#perf-returns-chart", (node) => node.textContent)).includes("switched off")) violations.push({ state: `${viewport}/all-off`, message: "no empty-state message when every series is off" });
+  for (let index = 0; index < chipCount; index += 1) {
+    const chip = page.locator("[data-perf-series]").nth(index);
+    if ((await chip.getAttribute("aria-pressed")) === "false") await chip.click();
+  }
   // Value chart zooms.
   for (const zoom of vzooms) {
     await page.click(`[data-perf-value-zoom="${zoom}"]`);
