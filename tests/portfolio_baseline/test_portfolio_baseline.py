@@ -5979,3 +5979,82 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
     assert [r["status"] for r in jh_calendar] == ["STATEMENT_CADENCE_NAV_OBSERVATIONS"]
     assert members["account-jh"]["authority"] == "AUTHORITATIVE"
     assert members["account-jh"]["as_of_date"] == "2026-06-30"
+
+
+def _matrix_row(unattributed: Any, accepted: list[dict[str, Any]]) -> dict[str, Any]:
+    account = {
+        "account_id": "account-reserve",
+        "base_currency": "USD",
+        "provider": "schwab",
+        "role": "INVESTMENT",
+    }
+    admission = {
+        "account_id": "account-reserve",
+        "disposition": "AUTHORITATIVE",
+        "effective_end": "2026-07-30",
+        "effective_start": "2026-01-01",
+        "fact_type": "transactions",
+    }
+    matrix, _, _ = baseline._coverage_evidence(
+        accounts=[account],
+        assignments=[],
+        provider_admissions=[admission],
+        provider_coverage=[],
+        nav=[],
+        positions=[],
+        transactions=accepted,
+        flows=[],
+        as_of_date=date(2026, 7, 30),
+        **({} if unattributed is None else {"unattributed": unattributed}),
+    )
+    return next(row for row in matrix if row["fact_type"] == "transactions")
+
+
+def test_a_reason_names_the_provider_records_that_were_excluded_not_attributed() -> (
+    None
+):
+    """An account whose provider events were all excluded for lack of a strategy
+    attribution must not be described as having no events: the reason states the count
+    (status vocabulary unchanged)."""
+
+    plain = _matrix_row(None, [])
+    assert plain["status"] == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+    assert "carry no strategy attribution" not in plain["missing_interval_reason"]
+    # absent or zero counts leave the row byte-identical
+    assert _matrix_row({}, []) == plain
+    assert _matrix_row({("account-reserve", "transactions"): 0}, []) == plain
+
+    row = _matrix_row({("account-reserve", "transactions"): 444}, [])
+    assert row["status"] == plain["status"]  # no new status string
+    assert row["missing_interval_reason"] == (
+        plain["missing_interval_reason"]
+        + "; provider ledger transactions for this account: 444 carry no strategy "
+        "attribution and are excluded from the accepted records"
+    )
+    # another account's or another fact's count never leaks into this row
+    other = _matrix_row(
+        {("account-other", "transactions"): 9, ("account-reserve", "flows"): 7}, []
+    )
+    assert other == plain
+
+
+def test_unattributed_provider_records_counts_only_records_that_are_not_mapped() -> (
+    None
+):
+    catalog = {
+        "transactions": [
+            {"account_id": "a", "mapping_status": "UNMAPPED"},
+            {"account_id": "a", "mapping_status": "UNMAPPED"},
+            {"account_id": "a", "mapping_status": "MAPPED"},
+            {"account_id": "b", "mapping_status": "UNMAPPED"},
+        ],
+        "flows": [{"account_id": "a", "mapping_status": "UNMAPPED"}],
+        "positions": [{"account_id": "a", "mapping_status": "UNMAPPED"}],
+    }
+    assert baseline._unattributed_provider_records(catalog) == {
+        ("a", "transactions"): 2,
+        ("b", "transactions"): 1,
+        ("a", "flows"): 1,
+    }
+    assert baseline._unattributed_provider_records(None) == {}
+    assert baseline._unattributed_provider_records({"transactions": "x"}) == {}
