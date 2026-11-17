@@ -223,6 +223,13 @@ def test_a_staged_candidate_carries_rows_of_an_observed_account_and_verifies(
     ]
     # the row past the provider's financial cutoff is not projected
     assert [r["as_of_date"] for r in zero] == ["2026-01-05"]
+    # downstream readers admit a provider fact only under the provider's selected
+    # generation; the derived zero-financing generation rides in its own field
+    provider_generation = json.loads(spec_path.read_bytes())["providers"][PROVIDER][
+        "generation_id"
+    ]
+    assert {r["generation_id"] for r in zero} == {provider_generation}
+    assert {r["observation_generation_id"] for r in zero} == {"zero-financing-x"}
     ledger.verify_candidate(spec_path, str(staged["generation_id"]))
 
 
