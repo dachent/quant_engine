@@ -342,3 +342,24 @@ def test_shipped_baseline_has_no_sentence_with_a_row() -> None:
     assert outcome["stale_baseline"] == 0, (
         "baseline entry for a sentence that is gone or covered"
     )
+
+
+def test_the_evidence_composition_sentences_stay_in_the_claim_scan() -> None:
+    """Kill test: the sentences that name the live end of a research series are whole
+    literals, so the scan sees them. A sentence that became a nested template would
+    drop out of the scan and weaken the gate while the baseline still passed."""
+
+    baseline = claim_table_runner.load_baseline(claim_table_runner.DEFAULT_BASELINE)
+    outcome = claim_table_runner.run(
+        Payload(panel={}, report={}),
+        REPO,
+        claim_table_runner.load_allowlist(claim_table_runner.DEFAULT_ALLOWLIST),
+        baseline=baseline,
+    )
+    scanned = {sentence.key for sentence in outcome["all_uncovered"]}
+    for text in (
+        "live observations remain authoritative from inception forward.",
+        "model-live observations remain authoritative from inception forward.",
+        "this result therefore equals the live-only history and is not described as a long-history result.",
+    ):
+        assert f"apps/portfolio-control-panel/app.js::{text}" in scanned, text

@@ -111,15 +111,15 @@ def statement_reserve_facts(
             }
         )
     return {
-        "accounts": [{"account_id": account_id, "provider": account.get("provider")}],
-        "assignments": [
+        # The census owns the account row and its open reserve-pool assignment; the baseline
+        # binds these points to the census account of the same provider (never a second account).
+        "accounts": [
             {
                 "account_id": account_id,
-                "effective_end": None,
-                "effective_start": points[0][0].isoformat(),
-                "pool_id": RESERVE_POOL_ID,
+                "provider": str(account.get("provider", "")).upper().replace("_", " "),
             }
         ],
+        "assignments": [],
         "nav": [
             {**dict(row), "provider_id": str(account.get("provider", "")).lower()}
             for _day, row in points

@@ -36,6 +36,10 @@
       "BENCHMARK_HIGH_ABSOLUTE_RETURN"
     ],
     "benchmark_series": {
+      "benchmark:crypto-btc-eth-equal-weight": {
+        "components": ["market:BTC-USD", "market:ETH-USD"],
+        "method": "EQUAL_WEIGHT_WEEKLY_PROXY_APPROXIMATION"
+      },
       "benchmark:developed-ex-us-iefa": {
         "components": ["market:IEFA"],
         "method": "SINGLE_ACCEPTED_WEEKLY_PROXY"

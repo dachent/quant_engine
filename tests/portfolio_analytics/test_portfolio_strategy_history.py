@@ -1577,3 +1577,102 @@ def test_a_retained_bundle_refuses_every_other_layer(
     manifest, content, _ = _layered_seed(tmp_path, layer, declare=declare)
     with pytest.raises(history.StrategyHistoryError, match="retained layers differ"):
         history._validated_retained_bundle(manifest, content)
+
+
+_EU_BACKTEST = [
+    ("2024-02-15", "0.01", "BACKTEST"),
+    ("2024-02-16", "0.02", "BACKTEST"),
+]
+_EU_LIVE = [
+    ("2024-02-19", "0.03", "PROVIDER_MODEL_LIVE"),
+    ("2024-02-20", "0.04", "PROVIDER_MODEL_LIVE"),
+]
+
+
+def _eu_seed(tmp_path: Path) -> Path:
+    inputs = _bundle_inputs(tmp_path)
+    seed = history.write_bundle(
+        tmp_path / "seed",
+        **inputs,
+        p123_eu_designer_model_generation=_designer_generation(
+            tmp_path / "designer-seed", _EU_BACKTEST
+        ),
+        p123_eu_strategy_version=DESIGNER_VERSION,
+        as_of_date="2026-09-17",
+        live_inceptions={"QSI": "2026-01-05"},
+    )
+    return Path(str(seed["destination"]))
+
+
+def _eu_refresh(
+    tmp_path: Path, seed: Path, rows: list[tuple[str, str, str]], as_of: str
+) -> dict[str, object]:
+    return history.write_eu_model_live_refresh_bundle(
+        tmp_path / "refreshed",
+        retained_manifest_path=seed / "manifest.json",
+        retained_returns_path=seed / "returns.csv",
+        designer_model_generation=_designer_generation(tmp_path / "designer-new", rows),
+        as_of_date=as_of,
+    )
+
+
+def test_eu_refresh_adds_only_the_model_live_layer_to_the_seed(
+    tmp_path: Path,
+) -> None:
+    """Kill test: every seed row stays byte for byte; only EU MODEL_LIVE is added."""
+
+    seed = _eu_seed(tmp_path)
+    result = _eu_refresh(tmp_path, seed, [*_EU_BACKTEST, *_EU_LIVE], "2026-11-06")
+    refreshed = Path(str(result["destination"]))
+    seed_lines = (seed / "returns.csv").read_text(encoding="utf-8").splitlines()
+    new_lines = (refreshed / "returns.csv").read_text(encoding="utf-8").splitlines()
+    added = [line for line in new_lines if line not in set(seed_lines)]
+    assert [line.split(",")[:2] for line in added] == [
+        ["EU [P123]", "2024-02-19"],
+        ["EU [P123]", "2024-02-20"],
+    ]
+    assert all(line.split(",")[3] == "MODEL_LIVE" for line in added)
+    assert [line for line in new_lines if line not in added] == seed_lines
+    manifest = json.loads((refreshed / "manifest.json").read_text(encoding="utf-8"))
+    eu = next(item for item in manifest["series"] if item["series_id"] == "EU [P123]")
+    assert eu["model_live_observations"] == 2
+    assert eu["return_observations"] == len(_EU_BACKTEST)
+    assert manifest["eu_model_live_refresh"]["model_live_last"] == "2024-02-20"
+    assert manifest["as_of_date"] == "2026-11-06"
+
+
+def test_eu_refresh_refuses_to_move_the_seed_backtest(tmp_path: Path) -> None:
+    seed = _eu_seed(tmp_path)
+    moved = [("2024-02-15", "0.011", "BACKTEST"), _EU_BACKTEST[1], *_EU_LIVE]
+    with pytest.raises(history.StrategyHistoryError, match="BACKTEST rows"):
+        _eu_refresh(tmp_path, seed, moved, "2026-11-06")
+
+
+def test_eu_refresh_refuses_a_designer_curve_without_live_rows(
+    tmp_path: Path,
+) -> None:
+    seed = _eu_seed(tmp_path)
+    with pytest.raises(history.StrategyHistoryError, match="no live rows"):
+        _eu_refresh(tmp_path, seed, _EU_BACKTEST, "2026-11-06")
+
+
+def test_eu_refresh_refuses_live_rows_past_the_as_of_date(tmp_path: Path) -> None:
+    seed = _eu_seed(tmp_path)
+    with pytest.raises(history.StrategyHistoryError, match="pass the as-of"):
+        _eu_refresh(tmp_path, seed, [*_EU_BACKTEST, *_EU_LIVE], "2024-02-19")
+
+
+def test_eu_refresh_refuses_a_seed_that_already_has_live_rows(tmp_path: Path) -> None:
+    seed = _eu_seed(tmp_path)
+    first = _eu_refresh(tmp_path, seed, [*_EU_BACKTEST, *_EU_LIVE], "2026-11-06")
+    again = tmp_path / "again"
+    with pytest.raises(history.StrategyHistoryError, match="already carries"):
+        history.write_eu_model_live_refresh_bundle(
+            again,
+            retained_manifest_path=Path(str(first["destination"])) / "manifest.json",
+            retained_returns_path=Path(str(first["destination"])) / "returns.csv",
+            designer_model_generation=_designer_generation(
+                tmp_path / "designer-again", [*_EU_BACKTEST, *_EU_LIVE]
+            ),
+            as_of_date="2026-11-06",
+        )

@@ -11,6 +11,7 @@ performs no provider call, and emits hash-bound CSV/JSON artifacts.
 from __future__ import annotations
 
 import argparse
+import sys
 import csv
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -3123,6 +3124,121 @@ def _build_qsi_refresh_bundle(
     return returns_content, canonical_json_bytes(manifest)
 
 
+def _build_eu_model_live_refresh_bundle(
+    *,
+    retained_manifest_path: Path,
+    retained_returns_path: Path,
+    designer_model_generation: Path,
+    as_of_date: str,
+) -> tuple[bytes, bytes]:
+    """Add the EU designer model's own live record to the accepted seed.
+
+    The seed's every other series, label and boundary stay byte for byte; only the
+    EU series is replaced, by the governed designer-model generation read the same
+    way a full build reads it. The EU BACKTEST rows must equal the seed's exactly,
+    so the pinned backtest identity of the series cannot move: the refresh adds the
+    MODEL_LIVE layer and nothing else.
+    """
+
+    seed_content = _bundle_bytes(retained_manifest_path)
+    seed_returns = _bundle_bytes(retained_returns_path)
+    seed, retained_rows = _validated_retained_bundle(seed_content, seed_returns)
+    accepted_as_of = _date_value(as_of_date, "EU refresh as-of")
+    seed_definition = next(
+        (item for item in seed["series"] if item["series_id"] == "EU [P123]"), None
+    )
+    if seed_definition is None:
+        raise StrategyHistoryError("EU refresh seed carries no EU series")
+    if any(
+        row["series_id"] == "EU [P123]" and row["evidence_layer"] != "BACKTEST"
+        for row in retained_rows
+    ):
+        raise StrategyHistoryError("EU refresh seed already carries EU model-live rows")
+    version = str(seed_definition["strategy_version"])
+    eu_rows, eu_definition = _p123_eu_designer_curve(designer_model_generation, version)
+    seed_backtest = [row for row in retained_rows if row["series_id"] == "EU [P123]"]
+    new_backtest = [row for row in eu_rows if row["evidence_layer"] == "BACKTEST"]
+    if seed_backtest != new_backtest:
+        raise StrategyHistoryError(
+            "EU refresh changes the seed's EU BACKTEST rows; the pinned identity would move"
+        )
+    live = [row for row in eu_rows if row["evidence_layer"] == "MODEL_LIVE"]
+    if not live:
+        raise StrategyHistoryError("EU refresh designer model carries no live rows")
+    if live[-1]["date"] > accepted_as_of.isoformat():
+        raise StrategyHistoryError("EU refresh live rows pass the as-of date")
+    definition = {
+        **seed_definition,
+        "model_live_observations": eu_definition["model_live_observations"],
+        "model_live_start": eu_definition["model_live_start"],
+        "model_live_end": eu_definition["model_live_end"],
+        "segment_labels": eu_definition["segment_labels"],
+        "source_artifacts": eu_definition["source_artifacts"],
+    }
+    all_rows = sorted(
+        [
+            *[row for row in retained_rows if row["series_id"] != "EU [P123]"],
+            *eu_rows,
+        ],
+        key=lambda row: (row["series_id"], row["date"]),
+    )
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=RETURN_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(all_rows)
+    returns_content = output.getvalue().encode("utf-8")
+    designer_artifact = cast(list[dict[str, str]], eu_definition["source_artifacts"])[0]
+    manifest = {
+        **seed,
+        "as_of_date": accepted_as_of.isoformat(),
+        "series": [
+            definition if item["series_id"] == "EU [P123]" else item
+            for item in seed["series"]
+        ],
+        "returns_artifact": {
+            **seed["returns_artifact"],
+            "sha256": hashlib.sha256(returns_content).hexdigest(),
+            "size_bytes": len(returns_content),
+        },
+        "eu_model_live_refresh": {
+            "schema_version": 1,
+            "accepted_predecessor": {
+                "bundle_id": seed["bundle_id"],
+                "manifest_sha256": hashlib.sha256(seed_content).hexdigest(),
+                "returns_sha256": hashlib.sha256(seed_returns).hexdigest(),
+            },
+            "designer_model_generation_id": designer_model_generation.name,
+            "designer_model_returns_sha256": designer_artifact["sha256"],
+            "model_live_observations": len(live),
+            "model_live_first": live[0]["date"],
+            "model_live_last": live[-1]["date"],
+        },
+    }
+    manifest.pop("bundle_id")
+    manifest["bundle_id"] = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
+    manifest_content = canonical_json_bytes(manifest)
+    # the refreshed bundle must itself be an admissible seed
+    _validated_retained_bundle(manifest_content, returns_content)
+    return returns_content, manifest_content
+
+
+def write_eu_model_live_refresh_bundle(
+    output_root: Path,
+    *,
+    retained_manifest_path: Path,
+    retained_returns_path: Path,
+    designer_model_generation: Path,
+    as_of_date: str,
+) -> dict[str, object]:
+    returns_content, manifest_content = _build_eu_model_live_refresh_bundle(
+        retained_manifest_path=retained_manifest_path,
+        retained_returns_path=retained_returns_path,
+        designer_model_generation=designer_model_generation,
+        as_of_date=as_of_date,
+    )
+    return _write_bundle_contents(output_root, returns_content, manifest_content)
+
+
 def _seed_generation_identity(
     seed_content: bytes, seed_returns: bytes
 ) -> dict[str, Any]:
@@ -3463,6 +3579,32 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    if (
+        argv is not None
+        and list(argv)[:1] == ["eu-refresh"]
+        or (argv is None and sys.argv[1:2] == ["eu-refresh"])
+    ):
+        refresh = argparse.ArgumentParser(prog="portfolio_strategy_history eu-refresh")
+        refresh.add_argument("--retained-manifest", type=Path, required=True)
+        refresh.add_argument("--retained-returns", type=Path, required=True)
+        refresh.add_argument("--designer-model-generation", type=Path, required=True)
+        refresh.add_argument("--as-of-date", required=True)
+        refresh.add_argument("--output-root", type=Path, required=True)
+        parsed = refresh.parse_args(
+            list(argv)[1:] if argv is not None else sys.argv[2:]
+        )
+        try:
+            outcome = write_eu_model_live_refresh_bundle(
+                parsed.output_root,
+                retained_manifest_path=parsed.retained_manifest,
+                retained_returns_path=parsed.retained_returns,
+                designer_model_generation=parsed.designer_model_generation,
+                as_of_date=parsed.as_of_date,
+            )
+        except StrategyHistoryError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(json.dumps(outcome, sort_keys=True, separators=(",", ":")))
+        return 0
     parser = _parser()
     args = parser.parse_args(argv)
     refused = check_entry_interpreter(
