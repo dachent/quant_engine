@@ -734,7 +734,9 @@ def test_the_policy_weights_and_the_rule_loss_do_not_move_with_the_basis(
     )
     literal = next(row for row in policy["series"] if row["series_id"] == AI_SERIES)
     assert Decimal(ai["conservative_loss_fraction"]) == pytest.approx(
-        Decimal(literal["audit_adverse_loss_fraction"]), abs=Decimal("1e-9")
+        # the fixture holds three live rows, under the minimum: the prior term plus the 5pp uplift
+        Decimal(literal["audit_adverse_loss_fraction"]) + Decimal("0.05"),
+        abs=Decimal("1e-9"),
     )
 
 

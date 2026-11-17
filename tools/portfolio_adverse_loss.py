@@ -178,14 +178,17 @@ def restate_policy(
             )
         backtest_mdd = max_drawdown(backtest) if backtest else None
         live_mdd = max_drawdown(live) if live else None
+        uplift = (
+            bool(row["platform_only_history"])
+            or len(live) < parameters["minimum_live_observations"]
+        )
         loss = rule_loss(
             prior=_decimal(prior, f"{series_id} prior_max_drawdown")
             if prior is not None
             else None,
             backtest=backtest_mdd,
             live=live_mdd,
-            platform_only=bool(row["platform_only_history"])
-            or len(live) < parameters["minimum_live_observations"],
+            platform_only=uplift,
             parameters=parameters,
         )
         audit = _decimal(
@@ -201,7 +204,9 @@ def restate_policy(
                     if backtest_mdd is None
                     else _text(backtest_mdd),
                     "live_max_drawdown": None if live_mdd is None else _text(live_mdd),
+                    "live_observations": len(live),
                     "platform_only_history": bool(row["platform_only_history"]),
+                    "platform_only_uplift_applied": uplift,
                     "prior_max_drawdown": None if prior is None else str(prior),
                     "rule_statement": STATEMENT,
                 },

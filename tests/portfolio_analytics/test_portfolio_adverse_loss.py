@@ -197,8 +197,14 @@ def test_the_policy_schema_pins_the_rule_parameters() -> None:
     props = schema["$defs"]["adverse_loss_rule"]["properties"]
     assert [
         props[k]["const"]
-        for k in ("prior_multiplier", "live_multiplier", "platform_only_uplift", "cap")
-    ] == ["1.25", "1.5", "0.05", "1"]
+        for k in (
+            "prior_multiplier",
+            "live_multiplier",
+            "platform_only_uplift",
+            "cap",
+            "minimum_live_observations",
+        )
+    ] == ["1.25", "1.5", "0.05", "1", "30"]
 
 
 def test_an_accepted_span_compounds_into_the_live_drawdown() -> None:
@@ -216,7 +222,7 @@ def test_an_accepted_span_compounds_into_the_live_drawdown() -> None:
     assert _loss(with_span, "tt-portfolio") == _loss(without, "tt-portfolio")
 
 
-def test_the_uplift_follows_live_existence_not_a_copied_flag() -> None:
+def test_the_uplift_applies_below_the_live_observation_minimum() -> None:
     robuxio = next(s for s in POLICY["series"] if s["strategy_id"] == "robuxio-crypto")
     assert robuxio["platform_only_history"] is False
     rows = [
@@ -228,6 +234,9 @@ def test_the_uplift_follows_live_existence_not_a_copied_flag() -> None:
     # below the minimum the live history is missing: 1.25 x 0.352 + 5pp
     thin = rule.restate_policy(POLICY, rows + _live_rows(sid, "0.1103", count=29))
     assert _loss(thin, "robuxio-crypto") == Decimal("0.49")
+    basis = next(r for r in thin["series"] if r["strategy_id"] == "robuxio-crypto")
+    assert basis["adverse_loss_basis"]["platform_only_uplift_applied"] is True
+    assert basis["adverse_loss_basis"]["live_observations"] == 29
     # at the minimum it exists: the uplift goes, 1.25 x 0.352
     full = rule.restate_policy(POLICY, rows + _live_rows(sid, "0.1103", count=30))
     assert _loss(full, "robuxio-crypto") == Decimal("0.44")
