@@ -3368,7 +3368,10 @@
     const yCount = Math.max(4, Math.floor((height - top - bottom) / 48));
     const yTicks = (logScale ? (high / low < 12 ? perfTicksMin(low * 0.98, high * 1.02, yCount) : perfLogAxisTicks(low * 0.98, high * 1.02)) : perfTicksMin(Math.max(0, yLow), yHigh, yCount)).filter((tick) => tick > 0);
     const xTicks = perfTimeTicks(from, lastTime, width - left - right);
-    const grid = yTicks.map((tick) => `<line x1="${left}" x2="${width - right}" y1="${y(tick).toFixed(1)}" y2="${y(tick).toFixed(1)}" stroke="currentColor" stroke-opacity="${tick === 1 ? 0.4 : 0.14}"${tick === 1 ? ' stroke-dasharray="4 3"' : ""}></line><text class="chart-label axis-label" x="2" y="${(y(tick) + 4).toFixed(1)}">${perfTickLabel(tick)}</text>`).join("")
+    // The 1.00 rebase line is always drawn when 1.00 is inside the plot, whether or not a gridline falls on it.
+    const baselineInside = logScale ? yLow <= 0 && yHigh >= 0 : yLow <= 1 && yHigh >= 1;
+    const baseline = baselineInside ? `<line x1="${left}" x2="${width - right}" y1="${y(1).toFixed(1)}" y2="${y(1).toFixed(1)}" stroke="currentColor" stroke-opacity="0.4" stroke-dasharray="4 3"></line>` : "";
+    const grid = baseline + yTicks.map((tick) => `<line x1="${left}" x2="${width - right}" y1="${y(tick).toFixed(1)}" y2="${y(tick).toFixed(1)}" stroke="currentColor" stroke-opacity="${tick === 1 ? 0.4 : 0.14}"${tick === 1 ? ' stroke-dasharray="4 3"' : ""}></line><text class="chart-label axis-label" x="2" y="${(y(tick) + 4).toFixed(1)}">${perfTickLabel(tick)}</text>`).join("")
       + xTicks.map((tick) => `<text class="chart-label axis-label" text-anchor="${tick.anchor}" x="${x(tick.time).toFixed(1)}" y="${height - 8}">${safe(tick.label)}</text>`).join("");
     const paths = visibleLines.map((line) => perfSegments(line.points).map((segment) => `<polyline fill="none" stroke="${line.color}" stroke-width="${line.kind === "portfolio" ? 2.6 : 1.8}"${segment.style.dash ? ` stroke-dasharray="${segment.style.dash}"` : ""}${line.kind === "benchmark" ? ' stroke-opacity=".85"' : ""} points="${segment.points.map((point) => `${x(point.time).toFixed(1)},${y(point.value).toFixed(1)}`).join(" ")}"></polyline>`).join("")).join("");
     // A dot where a line's live evidence begins, after backtest or model weeks.
