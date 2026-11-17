@@ -173,13 +173,17 @@ def test_a_capital_row_not_dated_at_the_cutoff_gives_no_base() -> None:
     assert baseline._cutoff_capital_values(pending, AS_OF) == {}
 
 
-def test_the_catalog_derives_after_the_current_capital_and_not_in_the_cost_builder() -> None:
+def test_the_catalog_derives_after_the_current_capital_and_not_in_the_cost_builder() -> (
+    None
+):
     import inspect
 
     build = inspect.getsource(baseline.build_catalog)
-    assert build.index("_build_current_capital(") < build.index(
-        "_derive_rate_dollar_costs("
-    ) < build.index("_fact_coverage(")
+    assert (
+        build.index("_build_current_capital(")
+        < build.index("_derive_rate_dollar_costs(")
+        < build.index("_fact_coverage(")
+    )
     # the allocation snapshot's dated values must not feed the derivation
     assert "_derive_rate_dollar_costs" not in inspect.getsource(
         baseline._allocations_and_coverage
@@ -221,7 +225,9 @@ def _unknown(strategy: str) -> dict[str, Any]:
     }
 
 
-def test_a_deprecated_history_only_strategy_is_excluded_with_the_policy_reason() -> None:
+def test_a_deprecated_history_only_strategy_is_excluded_with_the_policy_reason() -> (
+    None
+):
     (row,) = baseline._classify_excluded_history_only_costs(
         [_unknown("echotrade-growth-pivots")], AS_OF
     )
@@ -233,7 +239,9 @@ def test_a_deprecated_history_only_strategy_is_excluded_with_the_policy_reason()
 
 
 def test_an_unknown_cost_of_a_live_strategy_is_not_excluded() -> None:
-    (row,) = baseline._classify_excluded_history_only_costs([_unknown("volatis")], AS_OF)
+    (row,) = baseline._classify_excluded_history_only_costs(
+        [_unknown("volatis")], AS_OF
+    )
     assert "cost_classification" not in row
     assert baseline._costs_claim([row])["status"] == "PARTIAL"
 

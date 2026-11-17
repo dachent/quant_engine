@@ -2416,7 +2416,9 @@ def _cutoff_capital_values(
     """Strategy sleeve values the current capital view dates at the cutoff itself."""
 
     values: dict[str, tuple[Decimal, date]] = {}
-    for row in _objects(current_capital.get("strategies"), "current_capital.strategies"):
+    for row in _objects(
+        current_capital.get("strategies"), "current_capital.strategies"
+    ):
         amount = row.get("current_value")
         if (
             row.get("status") == _CAPITAL_AVAILABLE
@@ -2456,7 +2458,9 @@ def _derive_rate_dollar_costs(
             and rates["tier"] != FEE_TIER_UNSETTLED
             and item["annual_external_cost_usd"] is None
         ):
-            tier_row = next(r for r in rates["tier_table"] if r["tier"] == rates["tier"])
+            tier_row = next(
+                r for r in rates["tier_table"] if r["tier"] == rates["tier"]
+            )
             found_value = values.get(str(item["strategy_id"]))
             value = found_value[0] if found_value is not None else None
             if found_value is not None and found_value[1] != as_of:

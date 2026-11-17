@@ -233,4 +233,3 @@ def test_an_in_nav_performance_fee_is_stated_as_classified() -> None:
         "not a billed dollar cost)" in sentence
     )
     assert "not priced" not in sentence
-
