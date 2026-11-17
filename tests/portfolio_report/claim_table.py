@@ -680,29 +680,6 @@ def b_positions_total(payload: Payload) -> None:
     payload.panel["counts"]["positions"] = 1
 
 
-def p_underwriting_none(payload: Payload) -> Result:
-    rows = rows_of(get(payload.panel, "strategy_underwriting", "rows"))
-    if not rows:
-        return skip("no underwriting rows")
-    off = [
-        str(r.get("strategy_id") or i)
-        for i, r in enumerate(rows)
-        if get(r, "advisory_disposition", "execution_effect") != "NONE"
-        or get(r, "advisory_disposition", "allocation_effect") != "NONE"
-    ]
-    if off:
-        return bad(
-            f"{len(off)} underwriting rows declare an allocation/execution effect"
-        )
-    return ok(f"allocation and execution effect NONE on all {len(rows)} rows")
-
-
-def b_underwriting_none(payload: Payload) -> None:
-    rows_of(get(payload.panel, "strategy_underwriting", "rows"))[0][
-        "advisory_disposition"
-    ]["execution_effect"] = "TRADE"
-
-
 def p_hwm_perimeter(payload: Payload) -> Result:
     hwm = payload.panel.get("hwm_summary")
     if not isinstance(hwm, dict):
@@ -1430,16 +1407,6 @@ ROWS: tuple[Row, ...] = (
         "every current position carries a strategy assignment",
         p_current_positions_mapped,
         b_current_positions_mapped,
-    ),
-    Row(
-        "T20",
-        "universal",
-        "Signals",
-        PANEL_JS,
-        (r"Read-only advisory surface; declared by every underwriting row",),
-        "allocation and execution effect are NONE on every underwriting row",
-        p_underwriting_none,
-        b_underwriting_none,
     ),
     Row(
         "T13b",

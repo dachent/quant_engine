@@ -751,7 +751,7 @@
   }
 
   function renderCommand() {
-    $("#command-heading").textContent = performanceLineageMismatch ? "REPORT PERFORMANCE WITHHELD" : `Data as of ${formatDate(data.meta.portfolio_as_of)}`;
+    $("#command-heading").textContent = performanceLineageMismatch ? "REPORT PERFORMANCE WITHHELD" : data.advisory.readiness.replaceAll("_", " ");
     $("#command-reason").textContent = performanceLineageMismatch
       ? `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`
       : data.advisory.reason;

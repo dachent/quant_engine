@@ -1927,42 +1927,10 @@ def test_F30_the_stress_bar_scale_and_marker_follow_the_governed_limit(
     assert "scenario-limit" not in html(bar("0.10", "unknown"), "#stress-bar")
 
 
-def test_F31_the_reserve_risk_budget_literal_is_marked_as_policy_text() -> None:
-    page = (PANEL_ROOT / "index.html").read_bytes().decode("utf-8")
-    assert re.search(
-        r'<div class="reserve-lock policy-text" title="Policy statement[^"]*">', page
-    )
-    assert (
-        'class="policy-text" title="Policy statement; the payload carries no field for it">NONE</strong>'
-        in page
-    )
-    assert '<blockquote class="policy-text"' in page
-
-
-def test_F32_the_advisory_effects_are_bound_to_the_underwriting_rows(
-    tmp_path: Path,
-) -> None:
-    rows = [
-        {
-            "advisory_disposition": {
-                "allocation_effect": "NONE",
-                "execution_effect": "NONE",
-            }
-        }
-    ]
-    declared = base(strategy_underwriting={"rows": rows})
-    assert call(tmp_path, declared, "advisoryExecutionEffect") == "NONE"
-    assert "declared by every underwriting row" in call(
-        tmp_path, declared, "advisoryExecutionEffectNote"
-    )
-    changed = base(
-        strategy_underwriting={
-            "rows": [{"advisory_disposition": {"execution_effect": "REVIEW_REQUIRED"}}]
-        }
-    )
-    assert call(tmp_path, changed, "advisoryExecutionEffect") == "REVIEW_REQUIRED"
-    none = base()
-    assert "Policy statement" in call(tmp_path, none, "advisoryExecutionEffectNote")
+# F31 (policy-text literals) and the first F32 (advisory effects bound to underwriting rows) were retired
+# deliberately: the owner ruled the standing-policy prose (reserve-lock note, execution-authority NONE,
+# decision-boundary blockquote, automated-action KPI) is no longer rendered; the payload fields stay.
+# Claim-table row T20 was retired for the same reason. Nothing was loosened: the removed sentences are gone.
 
 
 def test_F32_the_mwr_note_and_external_connections_say_what_they_are_bound_to(

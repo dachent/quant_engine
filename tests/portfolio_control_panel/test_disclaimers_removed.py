@@ -52,7 +52,7 @@ def test_the_payload_boundary_fields_stay_in_the_schema() -> None:
     assert "allocation_authority" in SCHEMA and "execution_authority" in SCHEMA
 
 
-def test_the_command_banner_shows_the_data_date_not_a_readiness_slogan(
+def test_the_command_banner_keeps_the_readiness_status_from_the_payload(
     tmp_path: Path,
 ) -> None:
     payload = _capital_payload(_cost_strategy())
@@ -65,5 +65,5 @@ def test_the_command_banner_shows_the_data_date_not_a_readiness_slogan(
     dom = _run(tmp_path, payload, "renderCommand")
     heading = str(dom["#command-heading"].get("textContent", ""))
 
-    assert heading == "Data as of Nov 6, 2026"
-    assert "EXPAND" not in heading.upper()
+    # The readiness status stays visible; only the slogan prose around it was removed.
+    assert heading == "DO NOT EXPAND SYSTEMATIC RISK"
