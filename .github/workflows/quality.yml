@@ -267,6 +267,8 @@ jobs:
           tools/quantbase_fund_days.py
           tools/series_label.py
           tools/published_render_check.py
+          tools/check_plausibility.py
+          tools/owner_eyes_render.py
           tools/capture_governed_price.py
           tools/portfolio_model_vs_actual_derive.py
           tools/portfolio_cash_drag.py

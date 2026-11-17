@@ -3,6 +3,15 @@
   "note": "A check id absent from tests/acceptance/test_check_reachability.PROVEN must be listed here with an issue, an owner and a close_by date; an expired entry fails the test. Never lengthen close_by without a new ruling.",
   "entries": [
     {
+      "check_id": "plausibility.owner_eyes",
+      "defect": "OE",
+      "issue": 912,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-15",
+      "reason": "the owner-eyes rules fail on the A5 panel by design (finds 1 to 7); a builder-class payload that passes them needs the release B panel, then this check leaves the register for PROVEN"
+    },
+    {
       "check_id": "completeness.required_outputs",
       "defect": "E2",
       "issue": 895,

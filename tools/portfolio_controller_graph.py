@@ -424,6 +424,11 @@ _PATH_STAGES = {
     "tools/published_render_check.py": [],
     "apps/portfolio-control-panel/published_render_check.mjs": [],
     "apps/portfolio-control-panel/render_contract.json": [],
+    # Owner-eyes checks (#912, review Q1): plausibility rules and numeric rendered-panel checks
+    # over a finished panel; read-only, write only their own report; import no producer.
+    "tools/check_plausibility.py": [],
+    "tools/owner_eyes_render.py": [],
+    "apps/portfolio-control-panel/owner_eyes_render.mjs": [],
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
     "tools/capture_fidelity_intake.py": [],

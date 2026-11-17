@@ -480,6 +480,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         corrections=corrections,
         provider_ledger=provider_ledger,
         provider_receipt=provider_receipt,
+        owner_eyes=True,
         strategy_basis=strategy_basis,
         sleeve_facts=sleeve_facts,
         facts_sources=facts_sources,

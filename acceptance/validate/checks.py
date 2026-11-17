@@ -36,6 +36,7 @@ from typing import Any, cast
 
 from .. import owner_view as owner_view  # re-exported: the runner uses it
 from . import facts_bindings, layers, payload_rule, shell, sleeve_basis
+from . import plausibility as plausibility  # re-exported: tools/check_plausibility.py
 from .generation import (
     APP,
     PAYLOAD_FILES,
@@ -221,6 +222,10 @@ class Context:
     # The provider-ledger admit-or-declare receipt (``--admission-receipt``): the governed
     # per-item EXCLUDE dispositions. ``None`` is no receipt, which exempts nothing.
     provider_receipt: Mapping[str, Any] | None = None
+    # #912: run the owner-eyes plausibility rules (``plausibility.owner_eyes``).  Off for a
+    # library caller that builds a synthetic panel; ``tools/validate_generation.py`` turns it
+    # on for every real generation, so a release run cannot skip it.
+    owner_eyes: bool = False
     # #624: the ``strategy-basis-declaration/1`` the generation was built with ({strategy id:
     # basis}) and the sleeve facts its sleeve epochs stand on.  ``None`` is no declaration:
     # every strategy is on its parent-account basis and nothing below changes.
@@ -10199,6 +10204,30 @@ def _payload_budget_findings(ctx: Context) -> Iterator[Finding]:
         )
 
 
+def check_plausibility_owner_eyes(ctx: Context) -> Iterator[Finding]:
+    """#912 (review Q1): the owner-eyes plausibility rules on the REAL panel payload.
+
+    Ranges, calendar truth, equalities between surfaces, dates against the cutoff and claims
+    that must be able to fail; each rule names the owner finds it catches (acceptance/
+    validate/plausibility.py, ``tools/check_plausibility.py --list``).  A rule hit blocks."""
+
+    if not ctx.owner_eyes:
+        return
+    klass = {r.rule_id: r.klass for r in plausibility.RULES}
+    for hit in plausibility.evaluate(ctx.panel, ctx.cutoff):
+        yield _finding(
+            "plausibility.owner_eyes",
+            NOT_READY if klass.get(hit.rule) == "NOT_READY" else BLOCKER_REGRESSION,
+            hit.rule,
+            jsonable(hit.observed),
+            hit.expected,
+            PANEL,
+            hit.path,
+            tuple(f"OE{n}" for n in hit.finds),
+            hit.message,
+        )
+
+
 def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
     """F4/F5: payload size and duplicate copies (never a G1 prerequisite)."""
 
@@ -12786,6 +12815,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("lint.invested_capital_vs_contributions", check_lint_invested_capital),
     ("lint.internal_tokens_displayed", check_lint_display_tokens),
     ("lint.payload_size", check_lint_payload_size),
+    ("plausibility.owner_eyes", check_plausibility_owner_eyes),
     ("correction.unresolved", check_corrections),
     ("expected", check_expected),
 )
