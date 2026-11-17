@@ -32,6 +32,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import account_financing
+import event_completeness
 import quantbase_fund_days
 import zero_financing_statements
 
@@ -2557,6 +2558,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "account_roles",
             "quantbase_fill_closes",
             "zero_financing_observations",
+            "event_completeness_declaration",
         )
         allowed.update(
             frozenset({*expected, *subset})
@@ -4219,6 +4221,37 @@ def _quantbase_fill_closes(value: object) -> dict[str, dict[date, Decimal]]:
             raise ProviderLedgerError("quantbase_fill_closes is empty")
         out[symbol] = series
     return out
+
+
+def _event_completeness_declaration(
+    value: object, as_of: date
+) -> tuple[tuple[event_completeness.Declaration, ...], SourceArtifact]:
+    """The pinned governed completeness declaration and its manifest artifact."""
+
+    ref = _object(value, "event_completeness_declaration")
+    if set(ref) != {"path", "sha256", "size_bytes"}:
+        raise ProviderLedgerError("event_completeness_declaration keys differ")
+    path = _absolute_regular_path(ref["path"], "event_completeness_declaration.path")
+    raw = path.read_bytes()
+    if (
+        hashlib.sha256(raw).hexdigest() != ref["sha256"]
+        or len(raw) != ref["size_bytes"]
+    ):
+        raise ProviderLedgerError("event_completeness_declaration identity differs")
+    try:
+        declarations = event_completeness.load_declaration(raw)
+    except event_completeness.EventCompletenessError as exc:
+        raise ProviderLedgerError(
+            f"event_completeness_declaration is invalid: {exc}"
+        ) from exc
+    return declarations, SourceArtifact(
+        artifact_id="event-completeness/declaration",
+        sha256=hashlib.sha256(raw).hexdigest(),
+        size_bytes=len(raw),
+        as_of_date=as_of,
+        schema_name="event-completeness-declaration",
+        schema_version=str(event_completeness.SCHEMA_VERSION),
+    )
 
 
 def _reserve_nav_windows(value: object) -> dict[str, list[tuple[date, date, str]]]:
@@ -11301,6 +11334,36 @@ def build_catalog(
             )
         provider_artifacts.extend(zero_artifacts)
 
+    completeness_rows: list[dict[str, Any]] | None = None
+    if "event_completeness_declaration" in spec:
+        declarations, declaration_artifact = _event_completeness_declaration(
+            spec["event_completeness_declaration"], as_of
+        )
+        nav_days: dict[str, set[date]] = defaultdict(set)
+        account_provider: dict[str, str] = {}
+        for nav_row in combined.get("nav_observations", []):
+            account_ = str(nav_row["account_id"])
+            nav_days[account_].add(_day(nav_row["as_of_date"], "nav as_of_date"))
+            account_provider[account_] = str(nav_row["provider_id"])
+        try:
+            completeness_rows = event_completeness.evaluate(
+                declarations,
+                flows=combined.get("flows", []),
+                change_in_nav_by_provider={
+                    provider_id_: _objects(
+                        catalog_.get("change_in_nav_observations", []),
+                        f"{provider_id_}.change_in_nav_observations",
+                    )
+                    for provider_id_, catalog_ in catalogs.items()
+                },
+                nav_days_by_account=nav_days,
+                account_provider=account_provider,
+                as_of_date=as_of,
+            )
+        except event_completeness.EventCompletenessError as exc:
+            raise ProviderLedgerError(f"event_completeness: {exc}") from exc
+        provider_artifacts.append(declaration_artifact)
+
     authoritative_strategy_ids = {
         str(row.get("strategy_id"))
         for row in _objects(authority["contract"].get("strategies"), "strategies")
@@ -11701,6 +11764,10 @@ def build_catalog(
         "strategy_returns": strategy_returns,
         "transactions": combined.get("transactions", []),
     }
+    if (
+        completeness_rows is not None
+    ):  # absent otherwise: ids of other specs do not move
+        catalog["event_completeness"] = completeness_rows
     if fx_rates is not None:
         catalog["portfolio_fx_generation"] = {
             "generation_id": fx_rates[0],
