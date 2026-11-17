@@ -566,3 +566,66 @@ def test_cross_stage_a_one_byte_tamper_after_a_pass_forces_a_rerun_that_refuses(
     third = _stage(world, tmp_path)
     assert third.returncode != 0 and "verifier refuses" in third.stderr, third
     assert "REUSED" not in third.stdout
+
+
+class BlobVerifier(Verifier):
+    """Returns a non-JSON result (bytes and tuples), as a rendered bundle does."""
+
+    def compute(self) -> dict[str, object]:  # type: ignore[override]
+        base = super().compute()
+        return {"files": {"a": b"\x00\xff" * 4}, "pair": (Path("x"), "s"), **base}
+
+    def run(self, *, identity: str = "spec1") -> dict[str, object]:
+        import pickle
+
+        return vr.run_with_receipt(
+            "blob",
+            {"spec": identity},
+            repo_root=self.world["repo"],
+            state_root=self.world["state"],
+            compute=self.compute,
+            on_reuse=self.reused.append,
+            blob_codec=(
+                lambda value: pickle.dumps(value, protocol=4),
+                pickle.loads,
+            ),
+        )
+
+
+def test_blob_result_is_reused_with_its_exact_types_after_digest_check(world):
+    v = BlobVerifier(world)
+    first = v.run()
+    vr.clear_memory_receipts()  # a new process
+    second = v.run()
+    assert v.live == 1 and len(v.reused) == 1
+    assert second == first and isinstance(second["pair"], tuple)
+    assert list(vr.receipt_directory(world["state"]).glob("blob-*.blob"))
+
+
+def test_a_tampered_or_missing_blob_is_never_loaded(world):
+    v = BlobVerifier(world)
+    v.run()
+    (blob,) = vr.receipt_directory(world["state"]).glob("blob-*.blob")
+    blob.write_bytes(blob.read_bytes() + b"x")  # one appended byte
+    vr.clear_memory_receipts()
+    assert v.run()["total"] == 3
+    assert v.live == 2 and v.reused == []
+    blob.unlink()
+    vr.clear_memory_receipts()
+    v.run()
+    assert v.live == 3
+
+
+def test_a_changed_input_voids_a_blob_receipt_and_default_mode_writes_no_blob(
+    world, monkeypatch
+):
+    v = BlobVerifier(world)
+    v.run()
+    (world["data"] / "a.json").write_text('{"v": 10}', encoding="utf-8")
+    assert v.run()["total"] == 12 and v.live == 2
+    monkeypatch.delenv(vr.MODE_ENV)
+    for stale in vr.receipt_directory(world["state"]).glob("*"):
+        stale.unlink()
+    vr.clear_memory_receipts()
+    BlobVerifier(world).run()
+    assert not list(vr.receipt_directory(world["state"]).glob("*.blob"))

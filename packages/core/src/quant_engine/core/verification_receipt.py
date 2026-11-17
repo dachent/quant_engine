@@ -714,6 +714,43 @@ def _store(
         _memory[key] = document
 
 
+def _blob_path(state_root: Path | None, name: str, key: str) -> Path | None:
+    path = _receipt_path(state_root, name, key)
+    return None if path is None else path.with_suffix(".blob")
+
+
+def _write_blob(state_root: Path | None, name: str, key: str, data: bytes) -> bool:
+    path = _blob_path(state_root, name, key)
+    if path is None:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():
+            return False
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
+        return True
+    except OSError:
+        return False
+
+
+def _read_blob(
+    state_root: Path | None, name: str, key: str, result_json: str
+) -> bytes | None:
+    """The sidecar bytes iff their sha256 equals the digest the receipt recorded."""
+
+    path = _blob_path(state_root, name, key)
+    if path is None or path.is_symlink() or not path.is_file():
+        return None
+    try:
+        data = path.read_bytes()
+        recorded = json.loads(result_json)["blob_sha256"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return data if hashlib.sha256(data).hexdigest() == recorded else None
+
+
 def clear_memory_receipts() -> None:
     with _memory_lock:
         _memory.clear()
@@ -728,8 +765,14 @@ def run_with_receipt(
     compute: Callable[[], T],
     on_reuse: Callable[[str], None] | None = None,
     exclude_roots: tuple[Path, ...] = (),
+    blob_codec: tuple[Callable[[T], bytes], Callable[[bytes], T]] | None = None,
 ) -> T:
     """Run ``compute`` once per key; later calls re-hash the read-set and reuse it.
+
+    ``blob_codec`` (dumps, loads) is for results that are not JSON-native (large byte
+    payloads): the result is stored in a sidecar file whose sha256 is the receipt's
+    result, so it is loaded only after that digest matches. Blob results are stored
+    only when persistence is on (a sidecar needs a directory).
 
     ``compute`` must return JSON-native data (checked: anything that does not
     round-trip unchanged is returned but never stored). ``identity`` is the
@@ -775,12 +818,30 @@ def run_with_receipt(
                 extra["reason"] = reason[:200]
         still_valid = reason is None
         if still_valid and mode != "refresh":
-            if on_reuse is not None:
-                on_reuse(str(stored["receipt_sha256"]))
-            return json.loads(str(body["result"]))  # type: ignore[no-any-return]
+            blob = (
+                None
+                if blob_codec is None
+                else _read_blob(state_root, name, key, str(body["result"]))
+            )
+            if blob_codec is None or blob is not None:
+                if on_reuse is not None:
+                    on_reuse(str(stored["receipt_sha256"]))
+                if blob_codec is None or blob is None:
+                    return json.loads(str(body["result"]))  # type: ignore[no-any-return]
+                return blob_codec[1](blob)
+            still_valid = False  # blob missing or altered: recompute and replace it
     with _record() as recorder:
         result = compute()
-    result_json = _roundtrip_json(result)
+    blob_bytes: bytes | None = None
+    if blob_codec is not None:
+        if _receipt_path(state_root, name, key) is None:
+            return result  # no sidecar directory without persistence
+        blob_bytes = blob_codec[0](result)
+        result_json = _roundtrip_json(
+            {"blob_sha256": hashlib.sha256(blob_bytes).hexdigest()}
+        )
+    else:
+        result_json = _roundtrip_json(result)
     with stage_timing.stage("verification_receipt_store", verifier=name) as extra:
         if result_json is None:
             body_new, why = None, "result is not JSON-native"
@@ -802,5 +863,9 @@ def run_with_receipt(
                 raise VerificationReceiptMismatch(
                     f"live re-run of {name} disagrees with its stored receipt"
                 )
+        if blob_bytes is not None and not _write_blob(
+            state_root, name, key, blob_bytes
+        ):
+            return result
         _store(state_root, name, key, body_new)
     return result
