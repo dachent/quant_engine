@@ -11374,6 +11374,15 @@ def build_catalog(
                 as_of_date=as_of,
                 positions=combined.get("positions", []),
                 transactions=combined.get("transactions", []),
+                closed_dates={
+                    str(item["account_id"]): _day(
+                        item["closed_date"], "closed_accounts.closed_date"
+                    )
+                    for catalog_ in catalogs.values()
+                    for item in _objects(
+                        catalog_.get("closed_accounts", []), "closed_accounts"
+                    )
+                },
                 empty_position_accounts=sorted(
                     {
                         str(account_id)

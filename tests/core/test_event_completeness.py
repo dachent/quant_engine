@@ -85,6 +85,7 @@ def _run(
     nav_values: dict[str, dict[date, Decimal | None]] | None = None,
     positions: list[dict[str, Any]] | None = None,
     transactions: list[dict[str, Any]] | None = None,
+    closed_dates: dict[str, date] | None = None,
 ) -> list[dict[str, Any]]:
     if nav_values is None:
         days = nav_days if nav_days is not None else {A: set(_days()), B: set(_days())}
@@ -101,6 +102,7 @@ def _run(
         transactions=transactions or [],
         account_provider={A: "ibkr", B: "ibkr", "account-schwab": "schwab"},
         as_of_date=as_of,
+        closed_dates=closed_dates,
     )
 
 
@@ -251,6 +253,7 @@ def _closed_world(
     after_flow: bool = False,
     after_position: date | None = None,
     after_tx: date | None = None,
+    closed: date | None = date(2026, 2, 10),
 ) -> dict[str, Any]:
     nav: dict[date, Decimal | None] = {}
     for day in _market(LONG_START, last):
@@ -277,6 +280,7 @@ def _closed_world(
     return {
         "nav": nav,
         "cin": cin,
+        "closed": closed,
         "flows": flows,
         "positions": (
             [{"account_id": A, "as_of_date": after_position.isoformat()}]
@@ -302,6 +306,7 @@ def _closed_run(world: dict[str, Any]) -> dict[str, Any]:
         positions=world["positions"],
         transactions=world["transactions"],
         as_of=LONG_END,
+        closed_dates={A: world["closed"]} if world.get("closed") else None,
     )[0]
 
 
@@ -363,6 +368,9 @@ def test_a_gap_in_the_middle_is_not_a_closure_even_when_the_nav_is_zero_either_s
         "position_after_settling",
         "transaction_after_settling",
         "nav_just_above_dust",
+        "no_broker_closure_fact",
+        "closure_before_settling",
+        "closure_after_last_observation",
     ],
 )
 def test_the_closed_rule_refuses_each_way_the_closure_could_be_vacuous(
@@ -381,6 +389,13 @@ def test_the_closed_rule_refuses_each_way_the_closure_could_be_vacuous(
         kwargs = {"after_tx": date(2026, 2, 9)}
     elif variant == "nav_just_above_dust":
         kwargs = {"dust": "0.02"}
+    elif variant == "no_broker_closure_fact":
+        # data simply stops: a missing deposit would be invisible, so absence is not closure
+        kwargs = {"closed": None}
+    elif variant == "closure_before_settling":
+        kwargs = {"closed": date(2026, 1, 20)}
+    elif variant == "closure_after_last_observation":
+        kwargs = {"closed": date(2026, 3, 20)}
     row = _closed_run(_closed_world(**kwargs))
     assert row["status"] == ec.CLOSURE_FAILED
     assert not any(c["check"] == "CLOSED_ACCOUNT_DERIVED" for c in row["checks"])

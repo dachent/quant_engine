@@ -243,8 +243,13 @@ def closed_since(
     positions: Sequence[Mapping[str, Any]],
     transactions: Sequence[Mapping[str, Any]],
     flows: Sequence[Mapping[str, Any]],
+    broker_closed_date: date | None = None,
 ) -> tuple[date, date] | None:
-    """(settled day, last observed day) when the account is derivably closed, else None.
+    """(settled day, last observed day) when the account is closed, else None.
+
+    Absence of data is never a closure: the broker's own closure date (``broker_closed_date``,
+    AccountInformation dateClosed carried by the provider catalog) must be stated and must lie on
+    or after the settled day and not after the last observed day.
 
     The trailing run of NAV observations is at most ``CLOSED_NAV_TOLERANCE`` in size; the run
     starts on the settled day Z and covers at least ``CLOSED_MIN_ZERO_MARKET_DAYS`` market
@@ -285,6 +290,8 @@ def closed_since(
         or after(transactions, "event_date")
         or after(flows, "event_date")
     ):
+        return None
+    if broker_closed_date is None or not settled <= broker_closed_date <= last:
         return None
     return settled, last
 
@@ -407,7 +414,9 @@ def _evaluate_ibkr_flows(
     positions: Sequence[Mapping[str, Any]],
     transactions: Sequence[Mapping[str, Any]],
     as_of_date: date,
+    closed_dates: Mapping[str, date] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    closed_dates = closed_dates or {}
     start, end = declaration.declared_start, declaration.declared_end
     account = declaration.account_id
     checks: list[dict[str, Any]] = []
@@ -426,7 +435,12 @@ def _evaluate_ibkr_flows(
     nav_days = set(nav_values)
     interval_nav = {day for day in nav_days if start <= day <= end}
     closure = closed_since(
-        account, nav_values, positions=positions, transactions=transactions, flows=flows
+        account,
+        nav_values,
+        positions=positions,
+        transactions=transactions,
+        flows=flows,
+        broker_closed_date=closed_dates.get(account),
     )
     coverage_end = end
     if closure is not None and start <= closure[1] < end:
@@ -531,6 +545,7 @@ def evaluate(
     positions: Sequence[Mapping[str, Any]] = (),
     transactions: Sequence[Mapping[str, Any]] = (),
     empty_position_accounts: Collection[str] = (),
+    closed_dates: Mapping[str, date] | None = None,
 ) -> list[dict[str, Any]]:
     """One row per declaration: ``DECLARED_COMPLETE`` only if every closure check passes."""
 
@@ -583,6 +598,7 @@ def evaluate(
                 positions,
                 transactions,
                 as_of_date,
+                closed_dates,
             )
         passed = all(item["status"] == "PASS" for item in checks)
         by_id = {str(f.get("record_id")): f for f in flows}
