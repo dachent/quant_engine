@@ -1675,4 +1675,114 @@ def test_eu_refresh_refuses_a_seed_that_already_has_live_rows(tmp_path: Path) ->
                 tmp_path / "designer-again", [*_EU_BACKTEST, *_EU_LIVE]
             ),
             as_of_date="2026-11-06",
+
+def _fund_csv(path: Path, rows: list[tuple[str, str]]) -> Path:
+    path.write_text(
+        "date,value,source_time\n"
+        + "".join(f"{day},{value},{day}T04:00:00Z\n" for day, value in rows),
+        encoding="utf-8",
+    )
+    return path
+
+
+_FUND_ROWS = [
+    ("2024-09-27", "100"),
+    ("2024-10-02", "110"),
+    ("2024-10-07", "99"),
+    ("2024-10-12", "108.9"),
+    ("2024-10-17", "120"),
+]
+
+
+def test_volatis_fund_prehistory_is_provider_live_strictly_before_the_account(
+    tmp_path: Path,
+) -> None:
+    rows, definition = history._volatis_fund_prefunding(
+        _fund_csv(tmp_path / "fund.csv", _FUND_ROWS),
+        strategy_version="volatis-quantbase-provider-path:abc",
+        live_inception=date(2024, 10, 15),
+    )
+    assert [row["date"] for row in rows] == ["2024-10-02", "2024-10-07", "2024-10-12"]
+    assert {row["evidence_layer"] for row in rows} == {"MODEL_LIVE"}
+    assert {row["strategy_version"] for row in rows} == {
+        "volatis-quantbase-provider-path:abc"
+    }
+    assert rows[0]["return"] == "0.1"
+    assert definition["frequency"] == "INTERVAL_5_CALENDAR_DAY_PROVIDER_PUBLICATION"
+    assert definition["history_status"] == (
+        "ACCEPTED_PROVIDER_LIVE_PREHISTORY_NO_BACKTEST"
+    )
+    assert definition["return_observations"] == 3
+    # the layer is declared, never BACKTEST
+    assert definition["series_labels"][0]["layer"] == "MODEL_LIVE"
+    assert definition["segment_labels"][0]["layer"] == "MODEL_LIVE"
+
+
+def test_volatis_fund_prehistory_never_reaches_the_account_start(
+    tmp_path: Path,
+) -> None:
+    rows, _ = history._volatis_fund_prefunding(
+        _fund_csv(tmp_path / "fund.csv", _FUND_ROWS),
+        strategy_version="v",
+        live_inception=date(2024, 10, 12),
+    )
+    assert max(row["date"] for row in rows) == "2024-10-07"
+    with pytest.raises(history.StrategyHistoryError, match="insufficient"):
+        history._volatis_fund_prefunding(
+            _fund_csv(tmp_path / "late.csv", _FUND_ROWS),
+            strategy_version="v",
+            live_inception=date(2024, 10, 2),
+        )
+
+
+@pytest.mark.parametrize(
+    ("rows", "match"),
+    [
+        (
+            [("2024-10-07", "99"), ("2024-10-02", "110"), ("2024-10-12", "5")],
+            "unordered",
+        ),
+        ([("2024-10-02", "110"), ("2024-10-07", "0"), ("2024-10-12", "5")], "positive"),
+    ],
+)
+def test_volatis_fund_prehistory_refuses_bad_calendars_and_values(
+    tmp_path: Path, rows: list[tuple[str, str]], match: str
+) -> None:
+    with pytest.raises(history.StrategyHistoryError, match=match):
+        history._volatis_fund_prefunding(
+            _fund_csv(tmp_path / "bad.csv", rows),
+            strategy_version="v",
+            live_inception=date(2024, 10, 15),
+        )
+
+
+def test_build_bundle_carries_volatis_fund_prehistory_as_model_live(
+    tmp_path: Path,
+) -> None:
+    inputs = _bundle_inputs(tmp_path)
+    fund = _fund_csv(tmp_path / "fund.csv", _FUND_ROWS)
+    returns_content, manifest_content = history.build_bundle(
+        **inputs,
+        volatis_fund_pricehistory_csv=fund,
+        live_inceptions={"Volatis Strategy": "2024-10-15"},
+        as_of_date="2026-08-03",
+    )
+    manifest = json.loads(manifest_content)
+    rows = list(history.csv.DictReader(io.StringIO(returns_content.decode("utf-8"))))
+    volatis = [row for row in rows if row["series_id"] == "Volatis Strategy"]
+    assert [row["evidence_layer"] for row in volatis] == ["MODEL_LIVE"] * 3
+    definition = next(
+        item for item in manifest["series"] if item["series_id"] == "Volatis Strategy"
+    )
+    assert (
+        definition["strategy_version"]
+        == next(
+            item
+            for item in manifest["history_dispositions"]
+            if item["series_id"] == "Volatis Strategy"
+        )["strategy_version"]
+    )
+    with pytest.raises(history.StrategyHistoryError, match="live inception"):
+        history.build_bundle(
+            **inputs, volatis_fund_pricehistory_csv=fund, as_of_date="2026-08-03"
         )

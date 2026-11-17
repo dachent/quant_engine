@@ -36,6 +36,7 @@ from series_label import SeriesLabel
 _ROBUXIO_SERIES_ID: Final = "Robuxio Crypto (High Sharpe High Vol)"
 _ROBUXIO_GAV_SERIES_ID: Final = "Robuxio Crypto (High Sharpe High Vol) [GAV gross]"
 _GRIZZLY_SERIES_ID: Final = "GrizzlyBears VTMA"
+_VOLATIS_SERIES_ID: Final = "Volatis Strategy"
 _GRIZZLY_VENDOR_SERIES_ID: Final = "GrizzlyBears VTMA [vendor 1x]"
 
 RETURN_FIELDS: Final = (
@@ -2598,6 +2599,103 @@ def _volatis_disposition(path: Path, *, accepted_as_of: date) -> dict[str, objec
     return disposition
 
 
+def _volatis_fund_prefunding(
+    path: Path, *, strategy_version: str, live_inception: date
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    """The provider's own fund NAV strictly before the owner's funding (MODEL_LIVE).
+
+    Quantbase publishes the Volatis fund-level value on its own cadence (every
+    5 calendar days in the retained file). The vendor states its backtest ended
+    before this file starts, so these rows are the provider's live out-of-sample
+    track, a layer of its own (MODEL_LIVE): never relabelled BACKTEST and never
+    the owner's account. Each row is the return over the interval ending on its
+    date; no row is filled, spread or resampled. A row on or after the account's
+    funding date is refused: that period belongs to the account layer.
+    """
+
+    source = _source_identity(path, "quantbase-volatis-fund-pricehistory")
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if tuple(reader.fieldnames or ()) != ("date", "value", "source_time"):
+                raise StrategyHistoryError("Volatis fund pricehistory headers differ")
+            raw_rows = list(reader)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise StrategyHistoryError("Volatis fund pricehistory is invalid") from exc
+    levels: list[tuple[date, Decimal]] = []
+    for raw in raw_rows:
+        observed = _date_value(raw.get("date"), "Volatis fund date")
+        value = _decimal(raw.get("value"), "Volatis fund value")
+        if value <= 0:
+            raise StrategyHistoryError("Volatis fund value is not positive")
+        levels.append((observed, value))
+    if [item[0] for item in levels] != sorted({item[0] for item in levels}):
+        raise StrategyHistoryError("Volatis fund calendar is duplicate or unordered")
+    rows: list[dict[str, str]] = []
+    steps: set[int] = set()
+    for (previous_day, previous_value), (observed, value) in zip(
+        levels, levels[1:], strict=False
+    ):
+        if observed >= live_inception:
+            break
+        steps.add((observed - previous_day).days)
+        rows.append(
+            {
+                "series_id": _VOLATIS_SERIES_ID,
+                "date": observed.isoformat(),
+                "return": format(
+                    (value / previous_value - Decimal(1)).normalize(), "f"
+                ),
+                "evidence_layer": "MODEL_LIVE",
+                "strategy_version": strategy_version,
+            }
+        )
+    if len(rows) < 2:
+        raise StrategyHistoryError("Volatis fund prehistory is insufficient")
+    dates = [row["date"] for row in rows]
+    cadence = (
+        f"INTERVAL_{next(iter(steps))}_CALENDAR_DAY_PROVIDER_PUBLICATION"
+        if len(steps) == 1
+        else "IRREGULAR_PROVIDER_PUBLICATION"
+    )
+    definition: dict[str, object] = {
+        "compatibility_basis": (
+            "SAME_PROVIDER_FUND_PATH_AS_OWNER_ACCOUNT_PROVIDER_LIVE_BEFORE_ACCOUNT_START"
+        ),
+        "coverage_disposition": "COMPLETE_STRICTLY_BEFORE_ACCOUNT_LIVE_INCEPTION",
+        "frequency": cadence,
+        "history_status": "ACCEPTED_PROVIDER_LIVE_PREHISTORY_NO_BACKTEST",
+        "implementation_reconciliation_status": "SAME_PROVIDER_ACCOUNT_PATH",
+        "interval_days": sorted(steps),
+        "live_inception": live_inception.isoformat(),
+        "method": "PROVIDER_PUBLISHED_FUND_VALUE_INTERVAL_RETURN",
+        "model_live_end": dates[-1],
+        "model_live_observations": len(rows),
+        "model_live_start": dates[0],
+        "observed_end": dates[-1],
+        "observed_start": dates[0],
+        "required_for_analysis": True,
+        "return_observations": len(rows),
+        "series_id": _VOLATIS_SERIES_ID,
+        "source_artifacts": [source],
+        "strategy_version": strategy_version,
+    }
+    entity = "Quantbase Volatis Strategy fund value"
+    label = SeriesLabel(
+        layer="MODEL_LIVE",
+        entity_id=entity,
+        entity_role="PRODUCT_NAV",
+        first=dates[0],
+        last=dates[-1],
+        observations=len(rows),
+        currency="USD",
+        return_basis="PROVIDER_PUBLISHED_FUND_VALUE_INTERVAL_RATIO",
+        cost_basis="NET",
+    )
+    layer_series.attach_label(definition, label, segments=[label])
+    return rows, definition
+
+
 def build_bundle(
     *,
     grizzly_workbook: Path,
@@ -2623,6 +2721,7 @@ def build_bundle(
     p123_eu_designer_model_generation: Path | None = None,
     p123_eu_strategy_version: str | None = None,
     live_inceptions: Mapping[str, str] | None = None,
+    volatis_fund_pricehistory_csv: Path | None = None,
 ) -> tuple[bytes, bytes]:
     try:
         accepted_as_of = date.fromisoformat(as_of_date)
@@ -2631,6 +2730,20 @@ def build_bundle(
     volatis_disposition = _volatis_disposition(
         volatis_pricehistory_csv, accepted_as_of=accepted_as_of
     )
+    volatis_fund_parts: list[tuple[list[dict[str, str]], dict[str, object]]] = []
+    if volatis_fund_pricehistory_csv is not None:
+        volatis_inception = (live_inceptions or {}).get(_VOLATIS_SERIES_ID)
+        if volatis_inception is None:
+            raise StrategyHistoryError(
+                "Volatis fund prehistory needs the account live inception"
+            )
+        volatis_fund_parts = [
+            _volatis_fund_prefunding(
+                volatis_fund_pricehistory_csv,
+                strategy_version=str(volatis_disposition["strategy_version"]),
+                live_inception=_date_value(volatis_inception, "Volatis live inception"),
+            )
+        ]
     robuxio_parts: list[tuple[list[dict[str, str]], dict[str, object]]] = []
     if (robuxio_track_record_generation is None) != (robuxio_strategy_version is None):
         raise StrategyHistoryError(
@@ -2750,6 +2863,7 @@ def build_bundle(
         *((p123_eu_part,) if p123_eu_part is not None else ()),
         *robuxio_parts,
         *grizzly_vendor_parts,
+        *volatis_fund_parts,
     )
     rows = [row for accepted, _ in parts for row in accepted]
     definitions = [definition for _accepted, definition in parts]
@@ -3540,6 +3654,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--qsi-price-root", type=Path, required=True)
     parser.add_argument("--price-extension-json", type=Path)
     parser.add_argument("--volatis-pricehistory-csv", type=Path)
+    parser.add_argument("--volatis-fund-pricehistory-csv", type=Path)
     parser.add_argument(
         "--qsi-refresh-retained-manifest",
         type=Path,
@@ -3621,6 +3736,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "grizzly_live_trade_history",
         "tt_workbook",
         "volatis_pricehistory_csv",
+        "volatis_fund_pricehistory_csv",
         "portfolio123_generation_root",
         "robuxio_track_record_generation",
         "robuxio_strategy_version",
@@ -3687,6 +3803,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             qsi_price_root=args.qsi_price_root,
             price_extension_json=args.price_extension_json,
             volatis_pricehistory_csv=args.volatis_pricehistory_csv,
+            volatis_fund_pricehistory_csv=args.volatis_fund_pricehistory_csv,
             portfolio123_generation_root=args.portfolio123_generation_root,
             robuxio_track_record_generation=args.robuxio_track_record_generation,
             robuxio_strategy_version=args.robuxio_strategy_version,
