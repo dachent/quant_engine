@@ -6139,6 +6139,9 @@ def test_a_closed_unassigned_interval_is_disclosed_with_its_closure() -> None:
     claim = _closure_claim()
 
     assert claim["disposition"]["code"] == "CLOSED_FLOW_CLOSED_UNASSIGNED"
+    # never rendered as clean: a disclosed item that keeps the fact PARTIAL
+    assert claim["status"] == "PARTIAL"
+    assert "not attributed to a strategy" in claim["known_gaps"][0]
     (row,) = claim["disposition"]["closed_unassigned_intervals"]
     assert (row["opening_nav"], row["net_transfers"], row["closing_nav"]) == (
         "10",

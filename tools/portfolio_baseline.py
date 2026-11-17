@@ -5194,13 +5194,26 @@ def _fact_coverage(
         },
         {
             "fact_type": "historical_strategy_attribution",
-            "known_gaps": (
-                [f"{len(historical_unmapped)} historical intervals remain pool-only"]
-                if historical_unmapped
-                else []
-            ),
+            "known_gaps": [
+                *(
+                    [
+                        f"{len(historical_unmapped)} historical intervals remain pool-only"
+                    ]
+                    if historical_unmapped
+                    else []
+                ),
+                *(
+                    [
+                        f"{len(closed_unassigned)} closed historical interval(s) held "
+                        "capital not attributed to a strategy; each closes with no "
+                        "external flow (closure numbers in the disposition)"
+                    ]
+                    if closed_unassigned
+                    else []
+                ),
+            ],
             "status": "PARTIAL"
-            if historical_unmapped
+            if historical_unmapped or closed_unassigned
             else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
             "disposition": {
                 "authority": "effective-dated account assignment registry",
