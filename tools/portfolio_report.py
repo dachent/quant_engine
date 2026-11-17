@@ -1656,7 +1656,7 @@ COST_EVIDENCE_KEYS: Final = (
     "execution_cost",
 )
 # Present only on a percent-based cost row; equal to portfolio_attribution.COST_RATE_KEYS.
-COST_RATE_KEYS: Final = ("fee_rates",)
+COST_RATE_KEYS: Final = ("cost_derivation", "derived_annual_cost_usd", "fee_rates")
 
 
 def _plain_words(code: object) -> str:
@@ -1938,6 +1938,23 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
     )
     if pages:
         sentence += f"; sources: {', '.join(pages)}"
+    derived = cost.get("derived_annual_cost_usd")
+    basis = cost.get("cost_derivation")
+    if derived is not None and isinstance(basis, Mapping):
+        unpriced = basis.get("unpriced_components") or []
+        sentence += (
+            f"; derived annual {basis.get('rate_kind', '').replace('_', ' ')} cost "
+            f"${derived} ({basis.get('method')}): "
+            f"{_percent_text(basis.get('rate'))} of ${basis.get('base_value_usd')} "
+            f"sleeve value as of {basis.get('as_of')}"
+        )
+        if unpriced:
+            sentence += (
+                "; "
+                + ", ".join(str(name).replace("_", " ") for name in unpriced)
+                + " is a share of gains, not of sleeve value, and is not priced"
+            )
+        return f"{sentence}; no billed dollar amount is published."
     return f"{sentence}; no dollar cost is published."
 
 

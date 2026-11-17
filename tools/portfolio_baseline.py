@@ -130,6 +130,7 @@ COST_CLASS_PERCENT_RATE: Final = "PERCENT_RATE"
 COST_STATUS_DOCUMENTED_RATE: Final = "documented_rate_percent"
 COST_STATUS_TIER_UNSETTLED: Final = "documented_rate_tier_unsettled"
 FEE_TIER_UNSETTLED: Final = "TIER_UNSETTLED"
+COST_DERIVATION_METHOD: Final = "DERIVED_FROM_DOCUMENTED_RATE"
 _FEE_PLACEMENTS: Final = frozenset(
     {"INSIDE_VEHICLE_NAV", "OUTSIDE_BILLED", "NOT_STATED_IN_DOCUMENTATION"}
 )
@@ -2384,6 +2385,9 @@ def _allocations_and_coverage(
             costs, evidence_path, strategy_aliases, publication_date
         )
     _require_fee_rate_evidence(costs)
+    costs = _derive_rate_dollar_costs(
+        costs, {key: item[0] for key, item in by_strategy.items()}, publication_date
+    )
     # The audit snapshot is sealed: these totals are compared with the audit's reported
     # total and with the materializer's own sum, so they are added as the audit added
     # them (see ``_snapshot_sum``), never exactly.
@@ -2396,6 +2400,58 @@ def _allocations_and_coverage(
         systematic_total,
         nav_covered,
     )
+
+
+def _derive_rate_dollar_costs(
+    costs: Sequence[Mapping[str, Any]],
+    values: Mapping[str, Decimal],
+    as_of: date,
+) -> list[dict[str, Any]]:
+    """Annual dollars of a documented management rate: the rate times the sleeve value.
+
+    Only the selected tier's own ``management_rate`` is used, and only where it is
+    stated: an unsettled tier, a null rate or a strategy without a sleeve value is
+    left without a dollar figure (no rate is invented).  A performance rate is a
+    share of gains over a high-water mark, not of the sleeve value, so it is never
+    priced here; a row that documents one keeps its dollar figure for the
+    management part only and names the unpriced component.  The recorded amount
+    is ``derived_annual_cost_usd``; ``annual_external_cost_usd`` stays null.
+    """
+
+    carried: list[dict[str, Any]] = []
+    for row in costs:
+        item = dict(row)
+        rates = item.get("fee_rates")
+        if (
+            isinstance(rates, dict)
+            and rates["tier"] != FEE_TIER_UNSETTLED
+            and item["annual_external_cost_usd"] is None
+        ):
+            tier_row = next(r for r in rates["tier_table"] if r["tier"] == rates["tier"])
+            value = values.get(str(item["strategy_id"]))
+            if tier_row["management_rate"] is not None and value is not None:
+                if value < 0:
+                    raise BaselineValidationError(
+                        f"sleeve value of {item['strategy_id']} is negative"
+                    )
+                rate = Decimal(tier_row["management_rate"])
+                unpriced = (
+                    ["performance_rate"]
+                    if tier_row["performance_rate"] not in (None, "0")
+                    else []
+                )
+                item["derived_annual_cost_usd"] = decimal_text(rate * value)
+                item["cost_derivation"] = {
+                    "as_of": as_of.isoformat(),
+                    "base_value_usd": decimal_text(value),
+                    "method": COST_DERIVATION_METHOD,
+                    "rate": tier_row["management_rate"],
+                    "rate_kind": "management_rate",
+                    "tier": rates["tier"],
+                    "unpriced_components": unpriced,
+                }
+        carried.append(item)
+    return carried
 
 
 def _require_fee_rate_evidence(costs: Sequence[Mapping[str, Any]]) -> None:
@@ -4888,14 +4944,20 @@ def _positions_claim(
 
 
 def _costs_claim(costs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Costs are complete only when every sleeve cost is a known dollar amount."""
+    """Costs are complete when every sleeve cost is a known or fully derived dollar amount."""
 
-    unknown = [
-        row
-        for row in costs
-        if not str(row.get("cost_status", "")).startswith("known")
-        or row.get("annual_external_cost_usd") is None
-    ]
+    def known(row: Mapping[str, Any]) -> bool:
+        if str(row.get("cost_status", "")).startswith("known"):
+            return row.get("annual_external_cost_usd") is not None
+        derivation = row.get("cost_derivation")
+        return (
+            row.get("derived_annual_cost_usd") is not None
+            and isinstance(derivation, Mapping)
+            and derivation.get("method") == COST_DERIVATION_METHOD
+            and not derivation.get("unpriced_components")
+        )
+
+    unknown = [row for row in costs if not known(row)]
     complete = bool(costs) and not unknown
     return {
         "fact_type": "costs",
