@@ -958,7 +958,8 @@
             "NON_BUSINESS_WEEKEND",
             "MISSING_ON_PROVIDER_OBSERVED_DATE",
             "UNRESOLVED_NO_CALENDAR_EVIDENCE",
-            "NO_ACCOUNT_NAV_OBSERVATIONS"
+            "NO_ACCOUNT_NAV_OBSERVATIONS",
+            "STATEMENT_CADENCE_NAV_OBSERVATIONS"
           ]
         }
       }

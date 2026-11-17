@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 import hashlib
 import importlib.util
@@ -394,7 +394,8 @@ def test_weekly_generation_compounds_and_keeps_evidence_modes_separate(
     assert strategy["values_by_mode"]["LIVE_PLUS_BACKTEST"]["2026-07-20"] == "0.02"
     assert payload["week_policy"]["absent_value"] == "UNAVAILABLE_NOT_ZERO"
     assert payload["current_week"]["default_visible"] is True
-    assert payload["current_week"]["is_partial"] is True
+    # 2026-07-31 is a Friday: the last trading day of its week, so the week is complete
+    assert payload["current_week"]["is_partial"] is False
     assert payload["current_week"]["data_through_date"] == payload["as_of_date"]
     assert payload["observation_meta_fields"] == [
         "daily_observation_count",
@@ -489,7 +490,8 @@ def test_current_partial_week_is_visible_by_default(tmp_path: Path) -> None:
     )
 
     assert payload["current_week"]["default_visible"] is True
-    assert payload["current_week"]["is_partial"] is True
+    # 2026-07-31 is a Friday: the last trading day of its week, so the week is complete
+    assert payload["current_week"]["is_partial"] is False
     assert payload["current_week"]["data_through_date"] == payload["as_of_date"]
     assert payload["default_evidence_mode"] == "LIVE_ONLY"
 
@@ -630,7 +632,7 @@ def test_weekly_current_week_is_anchored_to_the_data_cutoff_not_the_manifest_dat
     assert payload["current_week"] == {
         "data_through_date": "2026-07-31",
         "default_visible": True,
-        "is_partial": True,
+        "is_partial": False,
         "week_end": "2026-08-02",
         "week_start": "2026-07-27",
     }
@@ -1925,3 +1927,67 @@ def test_span_check_fails_on_a_manifest_link_the_weekly_line_omits(
     empty = _span_manifest(tmp_path / "e.json", {}, ("2026-07-21", "2026-07-23"))
     with pytest.raises(builder.VerticalBuildError, match="manifest link"):
         builder._verify_weekly_spans_against_manifest(tmp_path, empty, source)
+
+
+def test_a_friday_cutoff_is_a_complete_trading_week() -> None:
+    friday = date(2026, 11, 6)
+
+    assert weekly.current_week_is_partial(friday) is False
+    assert weekly._current_week(friday)["is_partial"] is False  # noqa: SLF001
+    assert weekly._current_week(friday)["week_end"] == "2026-11-08"  # noqa: SLF001
+
+
+def test_a_midweek_cutoff_is_a_partial_week() -> None:
+    for day in (date(2026, 11, 2), date(2026, 11, 4), date(2026, 11, 5)):
+        assert weekly.current_week_is_partial(day) is True, day
+
+
+def test_thursday_before_good_friday_is_a_complete_trading_week() -> None:
+    # Good Friday 2026-04-03 is an NYSE holiday: Thursday 04-02 closes the trading week
+    assert weekly.current_week_is_partial(date(2026, 4, 2)) is False
+    assert weekly.current_week_is_partial(date(2026, 4, 1)) is True
+    # a cutoff on the holiday itself is complete too (nothing more can arrive)
+    assert weekly.current_week_is_partial(date(2026, 4, 3)) is False
+
+
+def test_a_weekday_series_is_complete_at_a_friday_cutoff() -> None:
+    weekday = [
+        (date(2026, 11, 2) + timedelta(days=offset), Decimal("0.01"))
+        for offset in range(5)
+    ]
+
+    _, meta, basis = weekly._weekly_series(  # noqa: SLF001
+        weekday, as_of=date(2026, 11, 6)
+    )
+
+    assert basis == "WEEKDAY"
+    assert meta["2026-11-02"][3] == "COMPLETE_WITHIN_ACCEPTED_CALENDAR"
+    assert meta["2026-11-02"][4] == []
+
+
+def test_a_seven_day_series_is_still_partial_at_a_friday_cutoff() -> None:
+    seven_day = [
+        (date(2026, 11, 2) + timedelta(days=offset), Decimal("0.01"))
+        for offset in range(5)
+    ] + [(date(2026, 10, 31), Decimal("0.01"))]
+
+    _, meta, basis = weekly._weekly_series(  # noqa: SLF001
+        seven_day, as_of=date(2026, 11, 6)
+    )
+
+    assert basis == "CALENDAR_7_DAY"
+    assert meta["2026-11-02"][3] == "PARTIAL_BOUNDARY"
+    assert "CURRENT_AS_OF" in meta["2026-11-02"][4]
+
+
+def test_a_good_friday_week_is_complete_for_a_weekday_series() -> None:
+    thursday_close = [
+        (date(2026, 3, 30) + timedelta(days=offset), Decimal("0.01"))
+        for offset in range(4)
+    ]
+
+    _, meta, _ = weekly._weekly_series(  # noqa: SLF001
+        thursday_close, as_of=date(2026, 4, 2)
+    )
+
+    assert meta["2026-03-30"][3] == "COMPLETE_WITHIN_ACCEPTED_CALENDAR"
