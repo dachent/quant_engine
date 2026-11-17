@@ -10,6 +10,8 @@ solved, never refused, and a key that includes a changed producer simply misses.
              read from the run's own vertical recipe, never typed. A cold run (no base)
              has no overlay marker; its plain cache root is accepted only when the run's
              root marker names it, and only the content-keyed kinds are sealed.
+``seed``     hard-link a sealed base into ``<cycle>/cachebase`` (the run config's
+             ``retained_cache_base`` must lie in the cycle), verified before and after.
 ``verify``   prove a base is byte-for-byte what ``promote`` recorded (the attended runner
              also does this before it links any overlay to a promoted base).
 ``report``   after a run: per cache kind, entries inherited from the base vs new, and
@@ -25,10 +27,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Sequence
 
+from quant_engine.core.retained_cache_base import provenance_path
 from quant_engine.core import (
     COLD_CACHE_KINDS,
     CacheBaseError,
@@ -153,6 +158,35 @@ def report(
     return result, (EXIT_SUSPICIOUS_REUSE if suspicious else 0)
 
 
+def seed(base: Path, target: Path) -> dict[str, Any]:
+    """Hard-link a sealed base to ``target`` (a path inside the next cycle, where the run
+    config's ``retained_cache_base`` must lie) so the next run starts warm. The base is
+    verified before and the copy after; nothing is copied and ``target`` must not exist,
+    so a half-seeded base can never be used."""
+
+    verify_cache_base(base)
+    if os.path.lexists(target):
+        raise CacheBaseError(f"seed target already exists: {target}")
+    try:
+        target.mkdir(parents=True)
+        for rel, source, _info in iter_cache_files(base):
+            destination = target / rel
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(source, destination)
+            except OSError as exc:
+                raise CacheBaseError(
+                    "cannot hard-link the base into the cycle (different volume?): "
+                    f"{exc}"
+                ) from exc
+        shutil.copyfile(provenance_path(base), provenance_path(target))
+        return verify_cache_base(target)
+    except BaseException:
+        shutil.rmtree(target, ignore_errors=True)
+        provenance_path(target).unlink(missing_ok=True)
+        raise
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -160,6 +194,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--overlay", type=Path, required=True)
     p.add_argument("--base", type=Path, required=True)
     p.add_argument("--run-root", type=Path, required=True)
+    sd = sub.add_parser("seed")
+    sd.add_argument("--base", type=Path, required=True)
+    sd.add_argument("--target", type=Path, required=True)
     v = sub.add_parser("verify")
     v.add_argument("--base", type=Path, required=True)
     r = sub.add_parser("report")
@@ -185,6 +222,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if cold:
                 out["cold_run_kinds_sealed"] = sorted(COLD_CACHE_KINDS)
             code = 0
+        elif a.command == "seed":
+            out, code = seed(a.base, a.target), 0
         elif a.command == "verify":
             out, code = verify_cache_base(a.base), 0
         else:
