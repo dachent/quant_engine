@@ -2732,6 +2732,11 @@ def _age_boundary_value(
     }
 
 
+# Same set as the plan builder's ACCEPTED_PUBLIC_FACTOR_BUILDER_VERSIONS (0.4.0: latest
+# complete published French month; 0.3.0: carried A5 bundles).
+_PUBLIC_FACTOR_BUILDER_VERSIONS = frozenset({"0.3.0", "0.4.0"})
+
+
 def _retained_public_factor_capture(
     attribution_bundle: Path,
     inputs: Mapping[str, tuple[str, int]],
@@ -2829,7 +2834,7 @@ def _expected_non_spec_data_age(
     if (
         public_manifest.get("schema_version") != 2
         or public_manifest.get("builder") != "portfolio-public-decomposition-sources"
-        or public_manifest.get("builder_version") != "0.3.0"
+        or public_manifest.get("builder_version") not in _PUBLIC_FACTOR_BUILDER_VERSIONS
         or not isinstance(acquisition_run, dict)
     ):
         raise VerticalBuildError("public factor manifest contract differs")
