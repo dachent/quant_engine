@@ -433,7 +433,7 @@ def _coverage_required(provider: Mapping[str, Any]) -> bool:
 
     if provider["qualification"] == "FINITE_STATIC":
         return False
-    return provider.get("cutoff_coverage", "REQUIRED") == "REQUIRED"
+    return bool(provider.get("cutoff_coverage", "REQUIRED") == "REQUIRED")
 
 
 def _generation_facts(directory: Path) -> dict[str, Any]:
