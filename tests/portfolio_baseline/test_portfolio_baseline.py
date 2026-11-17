@@ -4237,6 +4237,21 @@ def test_allocations_stay_byte_identical_to_the_dated_audit_snapshot(
         {key: value for key, value in row.items() if key != "execution_cost"}
         for row in catalog["costs"]
     ]
+    # #900 nav-gap disclosure: the nav fact names NAV days missing on provider-observed
+    # dates; the merge-base catalog did not, so those lines are restored away.
+    legacy["fact_coverage"] = [
+        {
+            **row,
+            "known_gaps": [
+                gap
+                for gap in row["known_gaps"]
+                if "NAV day(s) missing for account" not in gap
+            ],
+        }
+        if row["fact_type"] == "nav"
+        else row
+        for row in catalog["fact_coverage"]
+    ]
     assert (
         hashlib.sha256(canonical_json_bytes(legacy)).hexdigest()
         == LEGACY_CATALOG_SHA256
