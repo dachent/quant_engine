@@ -597,7 +597,7 @@
           "required": ["classification", "constants", "policy_id", "restated_strategies", "policy", "sensitivity", "statement"],
           "properties": {
             "classification": { "const": "OWNER_APPROVED_POLICY_CONSTANT_NOT_RESTATED" },
-            "constants": { "type": "array", "items": { "enum": ["allocation_weight", "conservative_loss_fraction"] }, "minItems": 2, "maxItems": 2 },
+            "constants": { "type": "array", "items": { "enum": ["allocation_weight"] }, "minItems": 1, "maxItems": 1 },
             "policy_id": { "const": "PORT-DEPENDENCE-1" },
             "restated_strategies": { "type": "array", "minItems": 1, "items": { "type": "string" } },
             "policy": {

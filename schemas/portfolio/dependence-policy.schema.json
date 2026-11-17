@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": [
     "$schema",
+    "adverse_loss_rule",
     "allocation_authority",
     "calculation_parameters",
     "conceptual_priors",
@@ -20,6 +21,7 @@
     "schema_version": {"const": 1},
     "policy_id": {"const": "PORT-DEPENDENCE-1"},
     "owner_issue": {"const": 336},
+    "adverse_loss_rule": {"$ref": "#/$defs/adverse_loss_rule"},
     "history_authority": {"$ref": "#/$defs/history_authority"},
     "allocation_authority": {"$ref": "#/$defs/allocation_authority"},
     "series": {
@@ -94,17 +96,60 @@
     "series": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["adverse_loss_fraction", "allocation_weight", "series_id", "strategy_id"],
+      "required": [
+        "allocation_weight",
+        "audit_adverse_loss_fraction",
+        "platform_only_history",
+        "prior_max_drawdown",
+        "series_id",
+        "strategy_id"
+      ],
       "properties": {
         "strategy_id": {"$ref": "#/$defs/nonempty"},
         "series_id": {"$ref": "#/$defs/nonempty"},
-        "adverse_loss_fraction": {
+        "audit_adverse_loss_fraction": {
           "type": "string",
           "pattern": "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
         },
+        "prior_max_drawdown": {
+          "type": ["string", "null"],
+          "pattern": "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
+        },
+        "platform_only_history": {"type": "boolean"},
         "allocation_weight": {
           "type": "string",
           "pattern": "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
+        }
+      }
+    },
+    "adverse_loss_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "audit_input",
+        "cap",
+        "live_multiplier",
+        "platform_only_uplift",
+        "prior_multiplier",
+        "rule_id",
+        "statement"
+      ],
+      "properties": {
+        "rule_id": {"const": "underwriting_stressed_component_max_drawdown"},
+        "prior_multiplier": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$"},
+        "live_multiplier": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$"},
+        "platform_only_uplift": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$"},
+        "cap": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$"},
+        "statement": {"$ref": "#/$defs/nonempty"},
+        "audit_input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["file", "note", "sha256"],
+          "properties": {
+            "file": {"$ref": "#/$defs/nonempty"},
+            "sha256": {"$ref": "#/$defs/hash"},
+            "note": {"$ref": "#/$defs/nonempty"}
+          }
         }
       }
     },

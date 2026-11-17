@@ -4413,9 +4413,10 @@ def _policy_constant_sensitivity(
 ) -> dict[str, Any] | None:
     """Beside the owner-approved dependence weights, what the restated weights would give.
 
-    The PORT-DEPENDENCE-1 allocation weights and conservative loss fractions are static
-    owner inputs and are never restated.  When a strategy is on its sleeve basis the
-    payload says so and shows, from data, the central-case and conservative-bound losses
+    The PORT-DEPENDENCE-1 allocation weights are static owner inputs and are never
+    restated; the adverse loss fractions are computed by the audit rule from the governed
+    series at each cutoff.  When a strategy is on its sleeve basis the
+    payload says so and shows, from data, the central-case and adverse-loss-bound losses
     with the weights replaced by the restated current-capital weights of the dependence
     strategies, normalized within that perimeter exactly as the policy weights are.  The
     adverse loss fractions and the dependence matrix are the payload's own (measured on
@@ -4513,7 +4514,7 @@ def _policy_constant_sensitivity(
         )
     return {
         "classification": "OWNER_APPROVED_POLICY_CONSTANT_NOT_RESTATED",
-        "constants": ["allocation_weight", "conservative_loss_fraction"],
+        "constants": ["allocation_weight"],
         "policy_id": DEPENDENCE_POLICY_ID,
         "restated_strategies": restated,
         "policy": {
@@ -4538,9 +4539,11 @@ def _policy_constant_sensitivity(
             ),
         },
         "statement": (
-            "The dependence allocation weights and conservative loss fractions are "
-            "owner-approved policy constants (PORT-DEPENDENCE-1), not restated. "
-            "Shown beside them: the same central-case and conservative-bound losses "
+            "The dependence allocation weights are "
+            "owner-approved policy constants (PORT-DEPENDENCE-1), not restated; the "
+            "adverse loss fractions are computed by the audit rule (1.25x prior / 1.5x live max drawdown +5pp, all strategies lose simultaneously; not a statistical confidence bound) "
+            "from the governed series. "
+            "Shown beside them: the same central-case and adverse-loss-bound losses "
             "with the weights replaced by the restated current-capital weights of "
             "the dependence strategies, normalized within the perimeter. The adverse "
             "loss fractions and correlations are measured on the restated paths."
@@ -11734,7 +11737,7 @@ def _panel_data(
                 "performance, HWM, or readiness conclusion is accepted."
                 if not performance_lineage_available
                 else (
-                    "Readiness is governed by the correlation-one conservative bound; "
+                    "Readiness is governed by the correlation-one adverse-loss bound (1.25x prior / 1.5x live max drawdown +5pp, all strategies lose simultaneously; not a statistical confidence bound); "
                     "the measured-dependence central case is descriptive and does not govern readiness. "
                     "Canonical report admitted NAV now covers "
                     + (", ".join(admitted_nav_names) or "no included-perimeter sleeves")

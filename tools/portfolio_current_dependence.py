@@ -155,6 +155,25 @@ def _financial_module() -> Any:
     return module
 
 
+def _adverse_loss_module() -> Any:
+    try:
+        import portfolio_adverse_loss
+    except ImportError as exc:
+        raise CurrentDependenceError("adverse loss module is unavailable") from exc
+    return portfolio_adverse_loss
+
+
+def _restated_policy(
+    policy: Mapping[str, Any], projection: Sequence[Mapping[str, str]]
+) -> dict[str, Any]:
+    """The policy with each adverse loss fraction computed by its rule from the governed series."""
+    module = _adverse_loss_module()
+    try:
+        return dict(module.restate_policy(policy, projection))
+    except module.AdverseLossError as exc:
+        raise CurrentDependenceError(f"adverse loss rule: {exc}") from exc
+
+
 def _load_authorities(
     contract_path: Path, policy_path: Path
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
@@ -1374,6 +1393,7 @@ def _expected_spec(
         "correlation_one": {
             "components": [
                 {
+                    "adverse_loss_basis": row["adverse_loss_basis"],
                     "adverse_loss_fraction": str(row["adverse_loss_fraction"]),
                     "allocation_weight": normalized_weights[str(row["strategy_id"])],
                     "series_id": str(row["series_id"]),
@@ -1514,6 +1534,7 @@ def build_source(
             evaluated_on=evaluated_on,
             selected=selected,
         )
+    policy = _restated_policy(policy, projection)
     policy_series = _objects(policy.get("series"), "dependence policy series")
     unknown_span_series = set(accepted_spans) - {
         str(row["series_id"]) for row in policy_series
@@ -1610,6 +1631,7 @@ def build_source(
         "correlation_one": {
             "components": [
                 {
+                    "adverse_loss_basis": row["adverse_loss_basis"],
                     "adverse_loss_fraction": str(row["adverse_loss_fraction"]),
                     "allocation_weight": normalized_weights[str(row["strategy_id"])],
                     "series_id": str(row["series_id"]),
@@ -1976,6 +1998,7 @@ def verify_packaged_source(
         segment_content=contents["segments.csv"],
         evaluated_on=evaluated_on,
     )
+    policy = _restated_policy(policy, projection)
     returns_content = _csv_content(RETURN_FIELDS, projection)
     if contents["returns.csv"] != returns_content:
         raise CurrentDependenceError("dependence projected returns differ")
