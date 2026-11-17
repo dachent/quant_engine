@@ -254,7 +254,7 @@
     let line = null;
     if (basis === "VERIFIED_IMPLEMENTATION_RECONCILIATION") line = "Verified implementation reconciliation";
     else if (basis === "EXACT_DATE_PROVIDER_COMPARISON") line = `Exact-date provider comparison · ${integer.format(row.provider_comparison_observations || 0)} observations${row.provider_comparison_version_compatibility === "UNRESOLVED" ? " · version compatibility unresolved" : ""}`;
-    else if (basis === "NO_COMPARATOR_ADMITTED") line = row.provider_comparison_disposition || "No model or provider comparator is admitted";
+    else if (basis === "NO_COMPARATOR_ADMITTED") line = row.provider_comparison_disposition || null;
     const audit = row.implementation_gap_audit_status ? ` title="Retained audit token: ${safe(row.implementation_gap_audit_status)}"` : "";
     return `<span${audit}>${statusText(row.implementation_gap_status)}</span>${line ? `<span class="cell-secondary">${safe(line)}</span>` : ""}`;
   };
