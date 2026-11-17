@@ -235,12 +235,12 @@ _MATRIXPORT_GAP_SPAN_RECEIPTS: Final = (
         "subscription_events_in_span": 0,
     },
 )
-_HISTORY_AUTHORITY_COMMIT: Final = "65d809ec58674668b57f898c58d363be4229f7b1"
+_HISTORY_AUTHORITY_COMMIT: Final = "0a0c0ddc3d1c17e889fda05f1cf9866938b32776"
 _HISTORY_AUTHORITY_RAW_SHA256: Final = (
-    "ef8f452dc6684e1d1c061b7b339df1fcbb3dc174d4fa810d08b87ea7808b0b09"
+    "841cf5cf1796b3477251d360b6ccdc6402053a2024fdf4268a22fac1d8ccf49d"
 )
 _HISTORY_AUTHORITY_SEMANTIC_SHA256: Final = (
-    "98f35a39b2f000bc49d53ac25470f0eea4ef851140937c5c65aca66371d58d1b"
+    "f75abff29f9c1572eb234d4cd0568e3048469c8f86b427e47c3e639f7d2513f7"
 )
 _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
     "accepted_generation_id": (
@@ -4326,6 +4326,18 @@ def _validate_history_corrections(
             ):
                 raise FinancialMvpContractError(
                     f"incompatible model-live entered the research series: {correction_id}"
+                )
+            if hybrid == "INCLUDE_MODEL_LIVE_RESEARCH" and (
+                _object(source.get("freshness"), "model-live source freshness")[
+                    "max_age_days"
+                ]
+                <= 0
+            ):
+                # the layer is a live record, so its source must carry a real age
+                # bound; a zero bound would read every cutoff before the evaluation
+                # date as stale
+                raise FinancialMvpContractError(
+                    f"admitted model-live source has no freshness bound: {correction_id}"
                 )
             if compatibility == "ACCOUNT_OWNED":
                 raise FinancialMvpContractError(
