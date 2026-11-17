@@ -6535,6 +6535,9 @@ def build_catalog(
     custody_authority: dict[str, Any] = {}
     fx_authority: dict[str, Any] = {}
     statement_excluded: list[dict[str, Any]] = []
+    ledger_catalog: Mapping[str, Any] | None = (
+        None  # the provider-ledger catalog, when this spec has one
+    )
     if spec["schema_version"] == 2:
         schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
             spec["provider_generations"], roots, accounts, as_of
@@ -6573,6 +6576,7 @@ def build_catalog(
             custody_authority=custody_authority,
             fx_authority=fx_authority,
         )
+        ledger_catalog = provider_catalog
         (
             nav,
             flows,
@@ -6784,7 +6788,7 @@ def build_catalog(
             transactions,
             flows,
             as_of,
-            unattributed=_unattributed_provider_records(provider_catalog),
+            unattributed=_unattributed_provider_records(ledger_catalog),
         )
     )
     fact_coverage, exceptions = _fact_coverage(
