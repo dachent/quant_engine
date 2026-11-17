@@ -173,7 +173,11 @@ def _write(root: Path, name: str, content: str) -> dict[str, Any]:
 
 
 def _census(
-    root: Path, accounts: list[dict[str, Any]], assignments: list[dict[str, Any]]
+    base: Path,
+    accounts: list[dict[str, Any]],
+    assignments: list[dict[str, Any]],
+    *,
+    forge: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """A governed provenance generation (staged and published) and the reference to it."""
 
@@ -206,8 +210,14 @@ def _census(
         artifacts=(artifact,),
         verification=VerificationStatus.VERIFIED,
     )
+    root = base / "dataPortfolio" / "baseline"
     manifest_path = stage_generation(root, manifest)
-    (manifest_path.parent / "portfolio-baseline.json").write_bytes(raw)
+    written = raw
+    if forge is not None:
+        # an edited catalog placed under the genuine manifest (the generation id is unchanged)
+        written = canonical_json_bytes({**catalog, **forge})
+        digest = hashlib.sha256(written).hexdigest()
+    (manifest_path.parent / "portfolio-baseline.json").write_bytes(written)
     publish_generation(root, manifest.generation_id)
     return {
         "catalog_sha256": digest,
@@ -885,7 +895,7 @@ def test_internal_account_must_be_in_the_governed_census(tmp_path: Path) -> None
         gen.build_generation(spec)
 
     # a catalog whose bytes differ from the configured sha256
-    other = tmp_path / "pinned"
+    other = tmp_path / "c2"
     other.mkdir()
     spec = _jh(other)
     data = json.loads(spec.read_text())
@@ -895,7 +905,7 @@ def test_internal_account_must_be_in_the_governed_census(tmp_path: Path) -> None
         gen.build_generation(spec)
 
     # a generation id that is not what the root's CURRENT pointer names (a copy, a forgery)
-    third = tmp_path / "not-current"
+    third = tmp_path / "c3"
     third.mkdir()
     spec = _jh(third)
     data = json.loads(spec.read_text())
@@ -905,17 +915,17 @@ def test_internal_account_must_be_in_the_governed_census(tmp_path: Path) -> None
         gen.build_generation(spec)
 
     # a root with no governed generation at all (a hand-written catalog in a plain folder)
-    fourth = tmp_path / "plain"
+    fourth = tmp_path / "c4"
     fourth.mkdir()
     spec = _jh(fourth)
     data = json.loads(spec.read_text())
-    data["census_catalog"]["root"] = str(fourth / "empty")
+    data["census_catalog"]["root"] = str(fourth / "dataPortfolio" / "baseline")
     spec.write_text(json.dumps(data))
     with pytest.raises(gen.StatementGenerationError, match="no current generation"):
         gen.build_generation(spec)
 
     # an account of another provider is refused
-    fifth = tmp_path / "wrong-provider"
+    fifth = tmp_path / "c5"
     fifth.mkdir()
     spec = _jh(
         fifth,
@@ -927,7 +937,7 @@ def test_internal_account_must_be_in_the_governed_census(tmp_path: Path) -> None
         gen.build_generation(spec)
 
     # a census without aliases is a refusal, not a KeyError
-    sixth = tmp_path / "no-aliases"
+    sixth = tmp_path / "c6"
     sixth.mkdir()
     spec = _jh(sixth, census_accounts=[{"account_id": ACCOUNT, "role": "INVESTMENT"}])
     with pytest.raises(gen.StatementGenerationError, match="not this provider"):
@@ -1101,6 +1111,64 @@ def test_john_hancock_printed_total_without_a_row_is_refused() -> None:
     ).replace(
         "Closing Balance   $1,010.00",
         "Participant Contributions   $ 777.00\nClosing Balance   $1,010.00",
+    )
+    with pytest.raises(gen.StatementGenerationError, match="no activity row accounts"):
+        gen.parse_john_hancock(text)
+
+
+def test_an_edited_census_catalog_under_a_governed_generation_id_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Round 4: the catalog must hash to what the generation's manifest recorded for it, so an
+    edited copy cannot borrow the governed id, even when re-pinned in the spec."""
+
+    ref = _census(
+        tmp_path / "fg",
+        [{"account_id": ACCOUNT, "provider": "JOHN HANCOCK", "role": "INVESTMENT"}],
+        [{"account_id": ACCOUNT, "effective_start": None}],
+        forge={"as_of_date": "2026-11-06", "extra": "edited"},
+    )
+    census = {
+        "catalog_sha256": ref["catalog_sha256"],
+        "generation_id": ref["generation_id"],
+        "root": ref["root"],
+    }
+    with pytest.raises(
+        gen.StatementGenerationError, match="differs from the content its generation"
+    ):
+        gen._census_account_start(census, ACCOUNT, "JOHN_HANCOCK")
+
+
+def test_the_census_root_must_be_the_governed_baseline_store(tmp_path: Path) -> None:
+    ref = _census(
+        tmp_path / "ok1",
+        [{"account_id": ACCOUNT, "provider": "JOHN HANCOCK", "role": "INVESTMENT"}],
+        [{"account_id": ACCOUNT, "effective_start": None}],
+    )
+    moved = tmp_path / "elsewhere" / "baseline"
+    import shutil
+
+    shutil.copytree(ref["root"], moved)
+    bad = {**ref, "root": str(moved)}
+    with pytest.raises(gen.StatementGenerationError, match="governed dataPortfolio"):
+        gen._census_account_start(bad, ACCOUNT, "JOHN_HANCOCK")
+
+
+def test_john_hancock_printed_total_equal_to_the_closing_balance_is_still_stray() -> (
+    None
+):
+    """The opening and closing balances are each printed once; a further printed value that
+    happens to equal the closing balance is a stray total, not the balance again."""
+
+    text = _jh_text(
+        date(2026, 1, 1),
+        date(2026, 3, 31),
+        opening="1,000.00",
+        items=["30.00", "-20.00"],
+        closing="1,010.00",
+    ).replace(
+        "Closing Balance   $1,010.00",
+        "Participant Contributions   $ 1,010.00\nClosing Balance   $1,010.00",
     )
     with pytest.raises(gen.StatementGenerationError, match="no activity row accounts"):
         gen.parse_john_hancock(text)

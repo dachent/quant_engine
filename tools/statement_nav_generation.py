@@ -34,6 +34,7 @@ from quant_engine.core import (
     VerificationStatus,
     hash_file,
     read_current,
+    read_generation,
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
@@ -208,11 +209,12 @@ def _jh_check_summary(
     )
     if first is None or last is None or last < first:
         raise StatementGenerationError("John Hancock summary rows not recognised")
-    printed = {
+    printed_values = [
         _money(token.replace(" ", ""))
         for line in lines[first : last + 1]
         for token in re.findall(r"-?\$?\s*-?[\d,]+\.\d\d", line[:85])
-    }
+    ]
+    printed = set(printed_values)
     amounts = dict(zip(labels, items, strict=True))
     groups = {
         "contribution": amounts.get("Roth 401(k) Contribution", _ZERO),
@@ -228,8 +230,14 @@ def _jh_check_summary(
     fees = amounts.get("Administrative Fee", _ZERO) + amounts.get(
         "General Administrative Charge", _ZERO
     )
-    explained = {*groups.values(), fees, -fees, opening, closing}
-    stray = printed - explained
+    # the opening and the closing balance are each printed once: remove exactly one of each,
+    # so a contribution that happens to equal the closing balance is still a stray total
+    remaining = list(printed_values)
+    for balance in (opening, closing):
+        if balance in remaining:
+            remaining.remove(balance)
+    explained = {*groups.values(), fees, -fees}
+    stray = set(remaining) - explained
     if stray:
         raise StatementGenerationError(
             "John Hancock summary prints a total no activity row accounts for"
@@ -711,6 +719,10 @@ def _census_account_start(
     }:
         raise StatementGenerationError("census reference has wrong keys")
     root = Path(_text(ref["root"], "census root"))
+    if root.parts[-2:] != ("dataPortfolio", "baseline"):
+        raise StatementGenerationError(
+            "census root is not the governed dataPortfolio/baseline store"
+        )
     generation_id = _text(ref["generation_id"], "census generation_id")
     try:
         pointer = read_current(root)
@@ -726,6 +738,26 @@ def _census_account_start(
     digest = hashlib.sha256(raw).hexdigest()
     if digest != _text(ref["catalog_sha256"], "census catalog_sha256"):
         raise StatementGenerationError("census catalog differs from its pin")
+    # the content must be the one the generation's own manifest recorded for the file: the
+    # generation id is content-addressed to that manifest, so an edited catalog cannot
+    # borrow a governed id
+    try:
+        manifest = read_generation(root, generation_id)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise StatementGenerationError("census generation is unreadable") from exc
+    recorded = [
+        item
+        for item in manifest.artifacts
+        if item.artifact_id == "normalized/portfolio-baseline.json"
+    ]
+    if (
+        len(recorded) != 1
+        or recorded[0].sha256 != digest
+        or recorded[0].size_bytes != len(raw)
+    ):
+        raise StatementGenerationError(
+            "census catalog differs from the content its generation recorded"
+        )
     try:
         catalog = json.loads(raw)
         accounts = catalog["accounts"]
