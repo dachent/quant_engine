@@ -2823,6 +2823,12 @@ VERIFIED_IMPLEMENTATION_STATUSES = frozenset(
         "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION",
     }
 )
+EXACT_DATE_COMPARISON_STATUSES = frozenset(
+    {
+        "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
+        "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
+    }
+)
 USABLE_RETURN_RECONCILIATION_STATUSES = frozenset(
     {"DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV", "TESTED_EXACT_COMMON_DATES"}
 )
@@ -2839,10 +2845,16 @@ def _usable_return_reconciliation(implementation: object) -> bool:
 
     if not isinstance(implementation, Mapping):
         return False
+    # The row's own (top-level) reconciliation decides; the parent-account reconciliation nested under
+    # account_basis is consulted only when the row carries no top-level one, so a sleeve whose own
+    # reconciliation is unavailable never publishes "tested" from its parent account's evidence.
     basis = implementation.get("account_basis")
-    candidates = [implementation.get("return_reconciliation")]
-    if isinstance(basis, Mapping):
-        candidates.append(basis.get("return_reconciliation"))
+    if "return_reconciliation" in implementation:
+        candidates = [implementation.get("return_reconciliation")]
+    elif isinstance(basis, Mapping):
+        candidates = [basis.get("return_reconciliation")]
+    else:
+        candidates = []
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             continue
@@ -2881,7 +2893,7 @@ def _implementation_gap_fields(
     ):
         status, basis = IMPLEMENTATION_GAP_TESTED, IMPLEMENTATION_GAP_BASIS_VERIFIED
     elif (
-        comparison_status.startswith("DESCRIPTIVE_EXACT_DATE")
+        comparison_status in EXACT_DATE_COMPARISON_STATUSES
         and isinstance(observations, int)
         and not isinstance(observations, bool)
         and observations > 0

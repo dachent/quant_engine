@@ -105,3 +105,35 @@ def test_the_register_shows_no_comparator_as_neutral_not_unavailable_red(
         "neutral",
         "Not testable",
     )
+
+
+def test_a_reconstructed_proxy_reference_is_named_beside_the_verified_status(
+    tmp_path: Path,
+) -> None:
+    dom = _command(
+        tmp_path,
+        implementation_gap_status="tested",
+        implementation_gap_basis="VERIFIED_IMPLEMENTATION_RECONCILIATION",
+        implementation_reconciliation={
+            "return_reconciliation": {
+                "status": "DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV"
+            }
+        },
+    )
+
+    assert "reference is a reconstructed proxy, not a provider series" in _flat(
+        dom, "#portfolio-implementation-table"
+    )
+
+
+def test_a_provider_backed_verified_row_does_not_claim_a_proxy(tmp_path: Path) -> None:
+    dom = _command(
+        tmp_path,
+        implementation_gap_status="tested",
+        implementation_gap_basis="VERIFIED_IMPLEMENTATION_RECONCILIATION",
+        implementation_reconciliation={
+            "return_reconciliation": {"status": "TESTED_EXACT_COMMON_DATES"}
+        },
+    )
+
+    assert "reconstructed proxy" not in _flat(dom, "#portfolio-implementation-table")

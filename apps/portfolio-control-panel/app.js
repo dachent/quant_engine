@@ -249,10 +249,12 @@
   // The report derives the account-versus-model status from the row's own evidence (`implementation_gap_basis`); the
   // retained audit token is provenance only and is shown in the tooltip.  A row with no comparator says so in the
   // payload's own words and is not painted as a defect.
+  // A reconstructed replica is a diagnostic reference, never a provider-published series: say so beside the status.
+  const proxyReference = (row) => row.implementation_reconciliation?.return_reconciliation?.status === "DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV";
   const implementationGapMarkup = (row) => {
     const basis = row.implementation_gap_basis;
     let line = null;
-    if (basis === "VERIFIED_IMPLEMENTATION_RECONCILIATION") line = "Verified implementation reconciliation";
+    if (basis === "VERIFIED_IMPLEMENTATION_RECONCILIATION") line = `Verified implementation reconciliation${proxyReference(row) ? " · reference is a reconstructed proxy, not a provider series" : ""}`;
     else if (basis === "EXACT_DATE_PROVIDER_COMPARISON") line = `Exact-date provider comparison · ${integer.format(row.provider_comparison_observations || 0)} observations${row.provider_comparison_version_compatibility === "UNRESOLVED" ? " · version compatibility unresolved" : ""}`;
     else if (basis === "NO_COMPARATOR_ADMITTED") line = row.provider_comparison_disposition || null;
     const audit = row.implementation_gap_audit_status ? ` title="Retained audit status: ${safe(row.implementation_gap_audit_status)}"` : "";
@@ -357,7 +359,7 @@
       // ANY comparison path, not a benchmark-only or N55-only field; render it beside the
       // disposition whenever the report publishes one.
       const head = row.implementation_gap_basis ? statusText(row.implementation_gap_status) : statusText(status);
-      const verified = row.implementation_gap_basis === "VERIFIED_IMPLEMENTATION_RECONCILIATION" ? '<span class="cell-secondary">Verified implementation reconciliation</span>' : "";
+      const verified = row.implementation_gap_basis === "VERIFIED_IMPLEMENTATION_RECONCILIATION" ? `<span class="cell-secondary">Verified implementation reconciliation${proxyReference(row) ? " · reference is a reconstructed proxy, not a provider series" : ""}</span>` : "";
       return `${head}${verified}<span class="cell-secondary">${safe(row.provider_comparison_disposition || "Model live vs My live comparison not published")}</span>${row.provider_comparison_reason ? `<span class="cell-secondary">${safe(row.provider_comparison_reason)}</span>` : ""}`;
     }
     // A5: `provider_annualization.label` already encodes basis/window (and "(<1 year)"

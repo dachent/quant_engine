@@ -179,3 +179,49 @@ def test_only_the_emitted_verified_statuses_count_as_verified() -> None:
             None,
         )
         assert row["implementation_gap_status"] == expected, status
+
+
+def test_a_sleeve_does_not_borrow_the_parent_account_reconciliation() -> None:
+    usable = {"status": "TESTED_EXACT_COMMON_DATES", "observations": 207}
+    row = _merge(
+        {
+            "implementation_reconciliation_status": "VERIFIED_CAUSAL_RETURN_ATTRIBUTION",
+            "implementation_reconciliation": {
+                "return_reconciliation": {"status": "UNAVAILABLE_NO_COMMON_DATES"},
+                "account_basis": {"return_reconciliation": usable},
+            },
+        },
+        {"status": "UNAVAILABLE"},
+        None,
+    )
+
+    assert row["implementation_gap_status"] == "not_testable"
+
+
+def test_a_failed_return_reconciliation_with_observations_is_not_tested() -> None:
+    row = _merge(
+        {
+            "implementation_reconciliation_status": "VERIFIED_BROKEN",
+            "implementation_reconciliation": {
+                "return_reconciliation": {"status": "FAILED", "observations": 1}
+            },
+        },
+        {"status": "UNAVAILABLE"},
+        None,
+    )
+
+    assert row["implementation_gap_status"] == "not_testable"
+
+
+def test_only_the_enumerated_exact_date_comparison_statuses_are_tested() -> None:
+    for status, expected in (
+        ("DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE", "tested"),
+        ("DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED", "tested"),
+        ("DESCRIPTIVE_EXACT_DATE_ANYTHING", "not_testable"),
+    ):
+        row = _merge(
+            {"implementation_reconciliation_status": "ACCEPTED_ACCOUNT_LIVE"},
+            {"status": status},
+            {"observations": 30},
+        )
+        assert row["implementation_gap_status"] == expected, status
