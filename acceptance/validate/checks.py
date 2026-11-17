@@ -1784,6 +1784,8 @@ def check_required_sections(ctx: Context) -> Iterator[Finding]:
         "manifest": ctx.gen.manifest,
     }
     for label, file, keys in _REQUIRED_SECTIONS:
+        if label == "manifest" and ctx.gen.candidate_only:
+            continue
         for key in keys:
             if key not in documents[label]:
                 yield _finding(
@@ -1800,6 +1802,8 @@ def check_required_sections(ctx: Context) -> Iterator[Finding]:
 
 
 def check_generation_id(ctx: Context) -> Iterator[Finding]:
+    if ctx.gen.candidate_only:
+        return  # no manifest yet: the findings-panel stage checks the published one
     manifest_id = ctx.gen.manifest.get("generation_id")
     if manifest_id != ctx.gen.generation_id:
         yield _finding(
@@ -1904,9 +1908,15 @@ def check_nested_generation_ids(ctx: Context) -> Iterator[Finding]:
 
     for file, document in (
         (CANDIDATE, ctx.gen.candidate),
-        (
-            GENERATION_MANIFEST,
-            {k: v for k, v in ctx.gen.manifest.items() if k != "artifacts"},
+        *(
+            ()
+            if ctx.gen.candidate_only
+            else (
+                (
+                    GENERATION_MANIFEST,
+                    {k: v for k, v in ctx.gen.manifest.items() if k != "artifacts"},
+                ),
+            )
         ),
         (PANEL, node(ctx.panel, "meta")),
         (PANEL, node(ctx.panel, "account_manifest")),

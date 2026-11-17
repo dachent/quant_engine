@@ -1267,6 +1267,7 @@
         "{python}",
         "{tools}/validate_generation.py",
         "{run}/stages/panel/candidates/{candidate_id}",
+        "--candidate",
         "--expected",
         "{expected_baseline_arg}",
         "--cutoff",
