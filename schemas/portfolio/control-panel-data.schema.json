@@ -225,7 +225,7 @@
                 "current_hwm": { "$ref": "#/$defs/decimal" },
                 "current_index": { "$ref": "#/$defs/decimal" },
                 "evaluated_on": { "type": "string", "format": "date" },
-                "financial_acceptance": { "const": "PENDING_OWNER_ACCEPTANCE" },
+                "financial_acceptance": { "enum": ["PENDING_OWNER_ACCEPTANCE", "OWNER_ACCEPTED"] },
                 "kpi": {
                   "type": "object",
                   "additionalProperties": false,
@@ -234,7 +234,7 @@
                     "value": { "$ref": "#/$defs/decimal" },
                     "hwm": { "$ref": "#/$defs/decimal" },
                     "drawdown": { "$ref": "#/$defs/decimal" },
-                    "label": { "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" },
+                    "label": { "anyOf": [{ "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" }, { "type": "string", "pattern": "^Governed PORT-HWM-4 high-water mark, owner accepted; missing daily points filled by span returns: [0-9]+$" }] },
                     "perimeter": { "type": "string", "minLength": 1 },
                     "return_basis": { "type": "string", "minLength": 1 },
                     "index_points": { "type": "integer", "minimum": 0 },
@@ -267,13 +267,13 @@
                     }
                   }
                 },
-                "label": { "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" },
+                "label": { "anyOf": [{ "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" }, { "type": "string", "pattern": "^Governed PORT-HWM-4 high-water mark, owner accepted; missing daily points filled by span returns: [0-9]+$" }] },
                 "maximum_drawdown": { "$ref": "#/$defs/decimal" },
                 "not_accepted_reason": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
-                "not_accepted_register": { "const": "E2" },
+                "not_accepted_register": { "enum": ["E2", null] },
                 "policy_id": { "const": "PORT-HWM-4" },
                 "receipt_sha256": { "$ref": "#/$defs/hash" },
-                "status": { "const": "CANDIDATE_PENDING_OWNER_ACCEPTANCE" }
+                "status": { "enum": ["CANDIDATE_PENDING_OWNER_ACCEPTANCE", "OWNER_ACCEPTED"] }
               }
             }
           ]
@@ -4541,7 +4541,8 @@
       "properties": {
         "schema_version": { "const": 1 },
         "status": { "const": "AVAILABLE" },
-        "financial_acceptance": { "const": "PENDING_OWNER_ACCEPTANCE" },
+        "financial_acceptance": { "enum": ["PENDING_OWNER_ACCEPTANCE", "OWNER_ACCEPTED"] },
+        "owner_acceptance_sha256": { "$ref": "#/$defs/hash" },
         "assurance_profile": { "type": "string", "minLength": 1 },
         "policy_id": { "const": "PORT-HWM-4" },
         "policy_sha256": { "$ref": "#/$defs/hash" },

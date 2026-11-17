@@ -351,6 +351,7 @@ _PATH_STAGES = {
     # #899: the pinned bounds of the missing Matrixport NAV points; the report and the
     # panel both read it to decide whether the numeric HWM can publish.
     "contracts/portfolio-hwm-gap-bounds-v1.json": ["report", "panel"],
+    "contracts/portfolio-hwm-owner-acceptance-v1.json": ["report", "panel"],
     # PORT-UNDERWRITE-1: the panel builder reads the underwriting policy (gap, regime benchmark series,
     # portfolio fit) and binds its sha256 into the candidate.
     "contracts/portfolio-strategy-underwriting-v1.json": ["panel"],

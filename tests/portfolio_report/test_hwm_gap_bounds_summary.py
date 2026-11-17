@@ -401,3 +401,167 @@ def test_the_pinned_bounds_name_every_hashed_evidence_input() -> None:
     evidence = document["evidence_sha256"]
     assert len(evidence) == 5
     assert all(len(v) == 64 and int(v, 16) >= 0 for v in evidence.values())
+
+
+RECORD_PATH = REPOSITORY_ROOT / "contracts" / "portfolio-hwm-owner-acceptance-v1.json"
+RECORD_DATES = ("2026-01-27", "2026-07-03", "2026-10-16")
+
+
+def _record() -> dict[str, Any]:
+    return json.loads(RECORD_PATH.read_bytes())
+
+
+def _accepted_shape_proof(**over: Any) -> dict[str, Any]:
+    """A proof shaped as the producer emits it: one point per calendar day, 753 points
+    through 2026-11-06, the three missing source days present (filled by span returns)."""
+
+    from datetime import date, timedelta
+
+    days = [(date(2024, 10, 15) + timedelta(days=n)).isoformat() for n in range(753)]
+    assert days[-1] == "2026-11-06" and all(d in days for d in RECORD_DATES)
+    proof: dict[str, Any] = {
+        "policy_id": "PORT-HWM-4",
+        "policy_sha256": _record()["accepted"]["policy_sha256"],
+        "complete_through": "2026-11-06",
+        "current_index": "160.6296892786988",
+        "current_hwm": "183.54270000",
+        "maximum_drawdown": "-0.32026",
+        "index_path": [{"as_of": d} for d in days],
+    }
+    proof.update(over)
+    return proof
+
+
+def test_the_record_accepts_exactly_what_it_states() -> None:
+    from quant_engine.portfolio_ledger import (
+        OWNER_ACCEPTED,
+        PENDING_OWNER_ACCEPTANCE,
+        hwm_financial_acceptance,
+    )
+
+    record = _record()
+    assert hwm_financial_acceptance(record, _accepted_shape_proof()) == OWNER_ACCEPTED
+    path = _accepted_shape_proof()["index_path"]
+    # KILL: anything the record does not state is pending.
+    for over in (
+        {"complete_through": "2026-11-09"},
+        {"current_index": "160.7000"},
+        {"current_hwm": "999"},
+        {"maximum_drawdown": "-0.9"},
+        {"policy_sha256": "0" * 64},
+        {"policy_id": "PORT-HWM-3"},
+        {"index_path": path[:-1]},  # 752 points, path ends before complete_through
+        {"index_path": [p for p in path if p["as_of"] != RECORD_DATES[0]]},
+        {"index_path": [*path, {"as_of": "2026-11-09"}]},  # path past complete_through
+    ):
+        assert (
+            hwm_financial_acceptance(record, _accepted_shape_proof(**over))
+            == PENDING_OWNER_ACCEPTANCE
+        ), over
+    # a tampered record, another schema, no accepted block, no recorded gaps
+    for bad in (
+        {**record, "decision": "PENDING"},
+        {**record, "schema": "x"},
+        {k: v for k, v in record.items() if k != "accepted"},
+        {**record, "accepted": {**record["accepted"], "missing_daily_points": []}},
+    ):
+        assert hwm_financial_acceptance(bad, _accepted_shape_proof()) == (
+            PENDING_OWNER_ACCEPTANCE
+        )
+    assert hwm_financial_acceptance(None, _accepted_shape_proof()) == (
+        PENDING_OWNER_ACCEPTANCE
+    )
+
+
+def test_the_acceptance_emits_the_record_digest_and_a_hand_edit_flips_nothing() -> None:
+    from quant_engine.portfolio_ledger import (
+        OWNER_ACCEPTANCE_RECORD_SHA256,
+        apply_hwm_owner_acceptance,
+    )
+
+    raw = RECORD_PATH.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == OWNER_ACCEPTANCE_RECORD_SHA256
+    accepted = apply_hwm_owner_acceptance(_accepted_shape_proof(), raw)
+    assert accepted["financial_acceptance"] == "OWNER_ACCEPTED"
+    assert accepted["owner_acceptance_sha256"] == OWNER_ACCEPTANCE_RECORD_SHA256
+    pending = apply_hwm_owner_acceptance(
+        _accepted_shape_proof(complete_through="2026-11-09"), raw
+    )
+    assert pending["financial_acceptance"] == "PENDING_OWNER_ACCEPTANCE"
+    assert "owner_acceptance_sha256" not in pending
+    # KILL: a hand-edited record (still self-consistent) is not the pinned record.
+    edited = json.loads(raw)
+    edited["accepted"]["index_points"] = 752
+    tampered = apply_hwm_owner_acceptance(
+        _accepted_shape_proof(index_path=_accepted_shape_proof()["index_path"][:-1]),
+        json.dumps(edited).encode("utf-8"),
+    )
+    assert tampered["financial_acceptance"] == "PENDING_OWNER_ACCEPTANCE"
+
+
+@pytest.mark.parametrize("compute", [_report, _panel])
+def test_acceptance_does_not_bypass_the_bound_gate(
+    compute: Any, tmp_path: Path
+) -> None:
+    """KILL (review): an accepted proof with an unsafe bound is still UNAVAILABLE."""
+
+    accepted = {**PROOF, "financial_acceptance": "OWNER_ACCEPTED"}
+    result = compute(tmp_path, proof=accepted, range_high="0.95")
+    assert result["hwm_numerical_status"] == "UNAVAILABLE"
+
+
+def _candidate_proof(state: str) -> dict[str, Any]:
+    return {
+        **PROOF,
+        "financial_acceptance": state,
+        "policy_id": "PORT-HWM-4",
+        "maximum_drawdown": "-0.10",
+        "current_hwm": "117.0",
+        "evaluated_on": "2026-09-03",
+        "return_basis": "AS_HELD",
+    }
+
+
+def _receipts_on(dates: tuple[str, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "strategy_id": "robuxio-crypto",
+            "receipt": {
+                "span_return_receipts": [
+                    {
+                        "missing_source_date": d,
+                        "span_start_date": d,
+                        "span_end_date": d,
+                        "return": "0.01",
+                    }
+                    for d in dates
+                ]
+            },
+        }
+    ]
+
+
+def test_the_panel_label_counts_the_checked_points_and_a_mismatch_raises() -> None:
+    summary = {"policy_id": "PORT-HWM-4"}
+    candidate = panel._hwm_candidate(
+        _candidate_proof("OWNER_ACCEPTED"), summary, _receipts_on(RECORD_DATES)
+    )
+    assert candidate is not None
+    assert candidate["status"] == "OWNER_ACCEPTED"
+    assert candidate["not_accepted_register"] is None
+    assert candidate["label"].endswith("filled by span returns: 3")
+    assert candidate["kpi"]["label"] == candidate["label"]
+    # KILL: the receipts disagree with the accepted dates (count or date)
+    for dates in (RECORD_DATES[:2], (*RECORD_DATES[:2], "2026-10-17")):
+        with pytest.raises(panel.ControlPanelValidationError):
+            panel._hwm_candidate(
+                _candidate_proof("OWNER_ACCEPTED"), summary, _receipts_on(dates)
+            )
+    pending = panel._hwm_candidate(
+        _candidate_proof("PENDING_OWNER_ACCEPTANCE"),
+        summary,
+        _receipts_on(RECORD_DATES),
+    )
+    assert pending is not None
+    assert pending["status"] == "CANDIDATE_PENDING_OWNER_ACCEPTANCE"
+    assert pending["not_accepted_register"] == "E2"

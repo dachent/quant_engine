@@ -64,6 +64,8 @@ from quant_engine.portfolio_ledger import (
 )
 from quant_engine.portfolio_ledger import (
     assess_gap_bounds_document,
+    apply_hwm_owner_acceptance,
+    PENDING_OWNER_ACCEPTANCE,
     numerical_from_governed_proof,
     proof_covers_spans,
 )
@@ -200,6 +202,11 @@ HWM_GAP_BOUNDS: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
     / "portfolio-hwm-gap-bounds-v1.json"
+)
+HWM_OWNER_ACCEPTANCE: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-hwm-owner-acceptance-v1.json"
 )
 _PORTABLE_HWM_PRODUCT_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
@@ -9977,10 +9984,10 @@ def _report_governed_hwm_proof(
         )
     except (HwmCoverageError, CapitalValidationError) as exc:
         raise ReportValidationError(f"governed HWM result is invalid: {exc}") from exc
-    return {
+    proof = {
         "schema_version": 1,
         "status": accepted["status"],
-        "financial_acceptance": "PENDING_OWNER_ACCEPTANCE",
+        "financial_acceptance": PENDING_OWNER_ACCEPTANCE,
         "assurance_profile": accepted["assurance_profile"],
         "policy_id": accepted["policy_id"],
         "policy_sha256": accepted["policy_sha256"],
@@ -10010,6 +10017,7 @@ def _report_governed_hwm_proof(
             for row in accepted["index_path"]
         ],
     }
+    return apply_hwm_owner_acceptance(proof, HWM_OWNER_ACCEPTANCE.read_bytes())
 
 
 def _governed_hwm_summary_rows(proof: Mapping[str, Any]) -> list[dict[str, Any]]:
