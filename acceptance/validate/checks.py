@@ -8205,10 +8205,25 @@ def provider_lag_bound(ctx: Context, entity: str, day: date) -> str | None:
             return None
     lag = max(lag for lag in expected.values() if lag is not None)
     eligible = _last_eligible_month_end(ctx.cutoff, lag)
-    if (day.year, day.month) != (eligible.year, eligible.month) or (
-        eligible - day
+    day_month_end = (day.replace(day=28) + timedelta(days=4)).replace(
+        day=1
+    ) - timedelta(days=1)
+    # The lag policy fixes the LAST month a run is obliged to carry.  A lens that ends in
+    # a later month (the provider published it before the cutoff: French files ending
+    # 2026-09-30 were published 2026-10-27, cutoff 2026-11-06) is current for those
+    # sources too, as long as it is a complete month and its end is stated.
+    if (day.year, day.month) < (eligible.year, eligible.month) or (
+        day_month_end - day
     ).days > 4:
         return None
+    if (day.year, day.month) > (eligible.year, eligible.month):
+        return (
+            f"lens ends {day}, {(ctx.cutoff - day).days} days before the cutoff, in a "
+            f"complete month after the last month its governed sources ({', '.join(sorted(expected))}) "
+            f"were obliged to publish by the cutoff ({eligible:%Y-%m}, {lag} day publication lag): "
+            "published data is current for those sources (governed decomposition plan "
+            "freshness policy)"
+        )
     return (
         f"lens ends {day} because its governed sources ({', '.join(sorted(expected))}) "
         f"publish monthly with a {lag} day publication lag: the last eligible month at "
