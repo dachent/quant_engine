@@ -1172,6 +1172,14 @@ def test_diagnostic_dynamic_contributions_use_changing_beta_rows(
             "residual": "0.002" if broken_identity else "0.001",
         },
     ]
+    model["diagnostics"]["dynamic"] = {
+        "exposure_path": [{"date": "2026-07-29", "betas": {"SPY_XS": "0.7"}}],
+        "holdout_forecasts": [
+            {"date": "2026-07-30", "forecast_exposures": {"SPY_XS": "0.5"}}
+        ],
+        "largest_exposure_changes": [{"date": "2026-07-30", "exposure_change_l2": "1"}],
+        "rank_status": "BLOCK_TRIDIAGONAL_FULL_RANK",
+    }
     identity = {"generation_id": "a" * 64, "sha256": "b" * 64}
     if broken_identity:
         with pytest.raises(panel.ControlPanelValidationError, match="do not reconcile"):
@@ -1187,7 +1195,38 @@ def test_diagnostic_dynamic_contributions_use_changing_beta_rows(
     assert row["alpha"]["net_status"] == "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE"
     assert row["diagnostic_detail"]["alpha"] == model["diagnostic_outputs"]["alpha"]
     assert row["exposures"] == []
-    assert row["contribution_summary"] == {
+
+    # no block outside diagnostic_detail carries a beta, exposure path or forecast exposure
+    forbidden = {
+        "betas",
+        "exposures",
+        "forecast_exposures",
+        "exposure_path",
+        "holdout_forecasts",
+        "largest_exposure_changes",
+        "mode_coefficients",
+        "raw_exposures",
+        "factor_means",
+        "alpha_mean",
+    }
+
+    def leaks(value: object, path: str) -> list[str]:
+        found: list[str] = []
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                if key in forbidden and inner not in (None, [], {}):
+                    found.append(f"{path}.{key}")
+                found.extend(leaks(inner, f"{path}.{key}"))
+        elif isinstance(value, list):
+            for index, inner in enumerate(value):
+                found.extend(leaks(inner, f"{path}[{index}]"))
+        return found
+
+    public = {key: value for key, value in row.items() if key != "diagnostic_detail"}
+    assert leaks(public, "row") == []
+    assert row["diagnostic_detail"]["dynamic"]["exposure_path"]
+    assert row["contribution_summary"] is None
+    assert row["diagnostic_detail"]["contribution_summary"] == {
         "alpha_mean": "0.001",
         "factor_means": {"SPY_XS": "0.005"},
         "fitted_mean": "0.006",
@@ -1198,7 +1237,7 @@ def test_diagnostic_dynamic_contributions_use_changing_beta_rows(
     }
     # Latest beta times mean factor return is 0.008, not the actual path mean.
     assert (
-        row["contribution_summary"]["factor_means"]["SPY_XS"]
+        row["diagnostic_detail"]["contribution_summary"]["factor_means"]["SPY_XS"]
         != row["diagnostic_detail"]["exposures"][0]["holdout_mean_period_contribution"]
     )
 

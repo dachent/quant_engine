@@ -5591,6 +5591,36 @@ def _fit_segments(
         return []
 
 
+_GATE_DYNAMIC_RESULT_KEYS: Final = (
+    "exposure_path",
+    "holdout_forecasts",
+    "largest_exposure_changes",
+)
+
+
+def _gate_forensic_dynamic(diagnostics: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The result-bearing part of the dynamic diagnostics of a gate-rejected fit."""
+
+    dynamic = _optional_mapping(diagnostics.get("dynamic"))
+    if dynamic is None:
+        return None
+    return {key: dynamic[key] for key in _GATE_DYNAMIC_RESULT_KEYS if key in dynamic}
+
+
+def _gate_public_diagnostics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
+    """Diagnostics of a gate-rejected fit without any per-date beta or forecast exposure."""
+
+    public = dict(diagnostics)
+    dynamic = _optional_mapping(public.get("dynamic"))
+    if dynamic is not None:
+        public["dynamic"] = {
+            key: value
+            for key, value in dynamic.items()
+            if key not in _GATE_DYNAMIC_RESULT_KEYS
+        }
+    return public
+
+
 def _gate_withheld_alpha() -> dict[str, Any]:
     return {
         "annualized_standard_error": None,
@@ -6045,18 +6075,23 @@ def _factor_analysis(
                     "diagnostic_detail": {
                         "alpha": diagnostic_alpha,
                         "exposures": diagnostic_exposures,
+                        "contribution_summary": (
+                            _factor_contribution_summary(model)
+                            if model.get("contributions")
+                            else None
+                        ),
+                        "dynamic": _gate_forensic_dynamic(diagnostics),
+                        "orthogonal_attribution": orthogonal_surface_fields.get(
+                            "orthogonal_attribution"
+                        ),
                         "warning": "COMPUTED_NOT_ACCEPTED_FOR_PM_ALPHA_OR_EXPOSURE_CONCLUSIONS",
                     },
-                    "contribution_summary": (
-                        _factor_contribution_summary(model)
-                        if model.get("contributions")
-                        else None
-                    ),
+                    "contribution_summary": None,
                     "cost_coverage": _text(
                         model.get("cost_coverage"), "model.cost_coverage"
                     ),
                     "coverage": _object(model.get("coverage"), "model.coverage"),
-                    "diagnostics": diagnostics,
+                    "diagnostics": _gate_public_diagnostics(diagnostics),
                     "estimator": estimator,
                     "evidence_layer": _text(
                         model.get("evidence_layer"), "model.evidence_layer"
@@ -6064,7 +6099,14 @@ def _factor_analysis(
                     "exposures": [],
                     "model_id": model_id,
                     "model_quality": model_quality,
-                    **orthogonal_surface_fields,
+                    **{
+                        key: (
+                            {"status": "WITHHELD_MODEL_QUALITY_GATE"}
+                            if key == "orthogonal_attribution"
+                            else value
+                        )
+                        for key, value in orthogonal_surface_fields.items()
+                    },
                     "selection_status": _text(
                         selection.get("status"), "selection.status"
                     ),
