@@ -769,6 +769,18 @@
         "components": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "current_value": {"$ref": "#/$defs/usd_amount"},
         "members": {"type": "array", "items": {"$ref": "#/$defs/reserve_member"}},
+        "part_dates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["as_of_date", "part"],
+            "properties": {
+              "as_of_date": {"$ref": "#/$defs/nullable_date"},
+              "part": {"type": "string", "minLength": 1}
+            }
+          }
+        },
         "reason": {"type": ["string", "null"], "minLength": 1},
         "status": {"$ref": "#/$defs/capital_status"}
       },
@@ -986,7 +998,7 @@
         "admission_effective_start": {"type": ["string", "null"], "format": "date"},
         "authority": {"type": "string", "minLength": 1},
         "boundary_basis": {"enum": ["OBSERVED_RECORDS_ONLY", "EFFECTIVE_DATED_ADMISSION_NOT_COMPLETENESS", "NO_ACCEPTED_SOURCE"]},
-        "cadence": {"enum": ["DAILY", "EVENT_STREAM", "SNAPSHOT"]},
+        "cadence": {"enum": ["DAILY", "EVENT_STREAM", "SNAPSHOT", "STATEMENT_PERIODIC"]},
         "declared_end": {"type": ["string", "null"], "format": "date"},
         "declared_start": {"type": ["string", "null"], "format": "date"},
         "disposition": {"type": "string", "minLength": 1},
