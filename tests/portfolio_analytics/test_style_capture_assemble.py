@@ -154,3 +154,23 @@ def test_one_ticker_can_be_reissued_from_a_later_capture(tmp_path: Path) -> None
             bad / "yahoo-style-bil-history_adjusted.json",
             tmp_path / "out2",
         )
+
+
+def test_a_sector_capture_is_assembled_under_its_own_prefix_and_name(
+    tmp_path: Path,
+) -> None:
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    _write_group(capture, "bil", "BIL", monthly=True)
+    _write_group(capture, "spy", "SPY", monthly=False)
+    for path in list(capture.glob("yahoo-style-*")):
+        path.rename(path.with_name(path.name.replace("yahoo-style-", "yahoo-sector-")))
+    manifest = assemble.assemble(
+        capture,
+        tmp_path / "out",
+        prefix="yahoo-sector-",
+        output_name="us-sector-return.json",
+    )
+    assert manifest["artifact"]["name"] == "us-sector-return.json"
+    assert (tmp_path / "out" / "us-sector-return.json").is_file()
+    assert (tmp_path / "out" / "us-sector-return.json.manifest.json").is_file()
