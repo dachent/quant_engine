@@ -27,7 +27,7 @@ import re
 import shutil
 import sys
 import tempfile
-from typing import Any, Callable, Final, Mapping, NamedTuple, Sequence
+from typing import Any, Callable, Final, Iterable, Mapping, NamedTuple, Sequence
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -166,6 +166,29 @@ _ACCOUNT_FACTS: Final = {
 _PROVIDER_SOURCE_SEGMENTS: Final = {
     item.provider_id: item.source_segment for item in _PROVIDER_REGISTRY.descriptors()
 }
+
+
+# Statement providers are optional: a cycle names them when their statements are admitted.
+# Their absence is never silent: an account without an admitted provider path stays an
+# explicit RETAINED_NO_ACCEPTED_PROVIDER_PATH row in the baseline fact matrix.
+_STATEMENT_PROVIDER_IDS: Final = frozenset({"john_hancock", "composer"})
+_CORE_PROVIDER_IDS: Final = frozenset(_PROVIDER_CATALOGS) - _STATEMENT_PROVIDER_IDS
+
+
+def _provider_set_is_valid(names: Iterable[str]) -> bool:
+    """Every core provider, plus any subset of the statement providers, nothing else."""
+
+    named = set(names)
+    return _CORE_PROVIDER_IDS <= named <= set(_PROVIDER_CATALOGS)
+
+
+def _selected_provider_ids(names: Iterable[str]) -> list[str]:
+    named = set(names)
+    if not _provider_set_is_valid(named):
+        raise ProviderLedgerError(
+            "provider-ledger spec must name every current provider"
+        )
+    return sorted(named)
 
 
 def provider_catalog_names() -> dict[str, str]:
@@ -2589,10 +2612,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
         spec["schema_version"] = SCHEMA_VERSION
     _day(spec["as_of_date"], "spec.as_of_date")
     providers = _object(spec["providers"], "providers")
-    if set(providers) != set(_PROVIDER_CATALOGS):
-        raise ProviderLedgerError(
-            "provider-ledger spec must name every current provider"
-        )
+    _selected_provider_ids(providers)
     return spec
 
 
@@ -2668,7 +2688,9 @@ def _financial_mvp_authority(spec: Mapping[str, Any]) -> dict[str, Any]:
         str(item.get("source_id")): item
         for item in _objects(contract.get("source_segments"), "source_segments")
     }
-    if not set(_PROVIDER_SOURCE_SEGMENTS.values()).issubset(sources):
+    if not {
+        _PROVIDER_SOURCE_SEGMENTS[provider_id] for provider_id in _CORE_PROVIDER_IDS
+    }.issubset(sources):
         raise ProviderLedgerError("financial MVP provider source set differs")
     authority = {
         "census_id": _text(
@@ -2726,9 +2748,9 @@ def _financial_mvp_authority(spec: Mapping[str, Any]) -> dict[str, Any]:
         _utc_timestamp(observation.get("captured_at_utc"), "run observation capture")
         selected = _object(observation.get("providers"), "run observation providers")
         configured = _object(spec["providers"], "providers")
-        if set(selected) != set(_PROVIDER_CATALOGS):
+        if set(selected) != set(configured) or not _provider_set_is_valid(selected):
             raise ProviderLedgerError("run observation provider set differs")
-        for provider_id in sorted(_PROVIDER_CATALOGS):
+        for provider_id in sorted(selected):
             selection = _object(selected[provider_id], f"{provider_id} observation")
             expected_selection = {
                 "root",
@@ -10030,7 +10052,7 @@ def _admissions(
     reserve_nav_windows: Mapping[str, Sequence[tuple[date, date, str]]] | None = None,
 ) -> tuple[ProviderFactAdmission, ...]:
     provider_authority = (
-        set(_PROVIDER_CATALOGS)
+        set(_CORE_PROVIDER_IDS)
         if authoritative_provider_ids is None
         else authoritative_provider_ids
     )
@@ -10467,7 +10489,7 @@ def _validate_current_census_provider_generations(
 
     selected = {identity.provider_id: identity for identity in identities}
     if (
-        set(expected) != set(_PROVIDER_CATALOGS)
+        not _provider_set_is_valid(expected)
         or len(selected) != len(identities)
         or set(selected) != set(expected)
         or set(manifests) != set(expected)
@@ -10952,7 +10974,7 @@ def _admit_or_declare_receipt(
     observed_receipt_providers: list[dict[str, Any]] = []
     run_observation = authority.get("run_observation")
     by_provider = {item.provider_id: item for item in identities}
-    for provider_id in sorted(_PROVIDER_CATALOGS):
+    for provider_id in sorted(by_provider):
         identity = by_provider[provider_id]
         manifest = manifests[provider_id]
         source = _source_segment(authority, provider_id, identity, manifest)
@@ -11213,7 +11235,7 @@ def build_catalog(
     manifests: dict[str, GenerationManifest] = {}
     provider_roots: dict[str, Path] = {}
     provider_facts: dict[str, dict[str, list[dict[str, Any]]]] = {}
-    for provider_id in sorted(_PROVIDER_CATALOGS):
+    for provider_id in _selected_provider_ids(_object(spec["providers"], "providers")):
         provider_ref = _object(spec["providers"], "providers")[provider_id]
         identity, manifest, provider_catalog, artifacts, root = _provider(
             provider_id,
@@ -11485,7 +11507,8 @@ def build_catalog(
     authoritative_provider_ids = {
         provider_id
         for provider_id, source_id in _PROVIDER_SOURCE_SEGMENTS.items()
-        if _object(authority["sources"][source_id], source_id).get(
+        if provider_id in catalogs
+        and _object(authority["sources"][source_id], source_id).get(
             "product_requirement"
         )
         == "REQUIRED"
@@ -11733,7 +11756,9 @@ def build_catalog(
                 "check_id": "all-current-providers-present",
                 "provider_count": len(identities),
                 "status": "PASS"
-                if len(identities) == len(_PROVIDER_CATALOGS)
+                if _provider_set_is_valid(
+                    identity.provider_id for identity in identities
+                )
                 else "FAIL",
             },
             {
