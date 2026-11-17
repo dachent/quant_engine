@@ -560,6 +560,13 @@ def _composer_security(
     return security_id
 
 
+def _window_rows(window: Mapping[str, object], key: str) -> list[Mapping[str, str]]:
+    rows = window[key]
+    if not isinstance(rows, list):
+        raise StatementGenerationError(f"statement window lacks {key}")
+    return rows
+
+
 def _composer_activity(
     provider: str, account_id: str, windows: Sequence[Mapping[str, object]]
 ) -> dict[str, list[dict[str, object]]]:
@@ -577,7 +584,7 @@ def _composer_activity(
             "source_artifact_id": window["source_artifact_id"],
             "statement_id": statement_id,
         }
-        for index, row in enumerate(window["deposit_rows"], start=1):  # type: ignore[attr-defined]
+        for index, row in enumerate(_window_rows(window, "deposit_rows"), start=1):
             day = _us_date(row["date"])
             flows.append(
                 {
@@ -590,7 +597,7 @@ def _composer_activity(
                     "timing": "EXACT_DATE",
                 }
             )
-        for index, row in enumerate(window["income_rows"], start=1):  # type: ignore[attr-defined]
+        for index, row in enumerate(_window_rows(window, "income_rows"), start=1):
             day = _us_date(row["date"])
             transactions.append(
                 {
@@ -605,7 +612,7 @@ def _composer_activity(
                     "source_record_id": f"{statement_id}:income:{index}",
                 }
             )
-        for index, row in enumerate(window["fee_rows"], start=1):  # type: ignore[attr-defined]
+        for index, row in enumerate(_window_rows(window, "fee_rows"), start=1):
             day = _us_date(row["date"])
             transactions.append(
                 {
@@ -617,7 +624,7 @@ def _composer_activity(
                     "source_record_id": f"{statement_id}:fee:{index}",
                 }
             )
-        for index, row in enumerate(window["trade_rows"], start=1):  # type: ignore[attr-defined]
+        for index, row in enumerate(_window_rows(window, "trade_rows"), start=1):
             day = _us_date(row["date"])
             transactions.append(
                 {
@@ -634,7 +641,7 @@ def _composer_activity(
                     "source_record_id": f"{statement_id}:trade:{index}",
                 }
             )
-        for row in window["holding_rows"]:  # type: ignore[attr-defined]
+        for row in _window_rows(window, "holding_rows"):
             positions.append(
                 {
                     **common,
