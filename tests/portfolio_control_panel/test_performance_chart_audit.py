@@ -1,0 +1,438 @@
+"""Performance charts, visual-audit defects D1-D14: synthetic long-history fixture.
+
+The node shell harness runs the real ``app.js`` against a six-year weekly fixture (three
+strategies that start late with backtest history, two benchmarks from week 0) and the tests
+read what both charts wrote.  The browser test rotates every control combination in
+Chromium and asserts the same properties on the rendered pixels (tick overlap, repeated
+labels, legend windows).  All ids and numbers are synthetic.
+"""
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+import json
+import math
+from pathlib import Path
+import re
+import shutil
+import subprocess
+from typing import Any
+
+import pytest
+from test_shell_qc1_labels import HARNESS, PANEL_ROOT
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("node") is None, reason="the shell tests need node"
+)
+
+WEEKS = 360
+FIRST_MONDAY = date(2019, 1, 7)
+
+
+def _level(index: int, drift: float, wiggle: float) -> float:
+    value = 1.0
+    for step in range(index + 1):
+        value *= 1 + drift + wiggle * math.sin(step / 3.0)
+    return value
+
+
+def _line(
+    series_id: str,
+    name: str,
+    kind: str,
+    first: int,
+    drift: float,
+    origin: list[list[Any]] | None,
+) -> dict[str, Any]:
+    tri: list[float | None] = [None] * first
+    level = 1.0
+    for step in range(first, WEEKS):
+        level *= 1 + drift + 0.01 * math.sin(step / 3.0)
+        tri.append(round(level, 6))
+    line: dict[str, Any] = {
+        "series_id": series_id,
+        "display_name": name,
+        "kind": kind,
+        "tri": tri,
+    }
+    if origin is not None:
+        line["origin"] = origin
+    return line
+
+
+def _mode(anchor: int) -> dict[str, Any]:
+    starts = [FIRST_MONDAY + timedelta(days=7 * index) for index in range(WEEKS)]
+    lines = [
+        _line(
+            "strategy:Alpha",
+            "Alpha",
+            "STRATEGY",
+            max(0, anchor - 100),
+            0.002,
+            [[max(0, anchor - 100), 259, "BACKTEST"], [260, WEEKS - 1, "ACCOUNT_LIVE"]],
+        ),
+        _line(
+            "strategy:Beta",
+            "Beta",
+            "STRATEGY",
+            max(0, anchor - 50),
+            0.001,
+            [[max(0, anchor - 50), 309, "BACKTEST"], [310, WEEKS - 1, "ACCOUNT_LIVE"]],
+        ),
+        _line(
+            "strategy:Gamma",
+            "Gamma",
+            "STRATEGY",
+            anchor,
+            0.0015,
+            [[anchor, WEEKS - 1, "ACCOUNT_LIVE"]],
+        ),
+        _line(
+            "portfolio:equal_weight",
+            "Equal-weight portfolio",
+            "PORTFOLIO",
+            anchor,
+            0.001,
+            [[anchor, WEEKS - 1, "MIXED"]],
+        ),
+        _line("market:SPY", "SPY", "BENCHMARK", 0, 0.002, None),
+        _line("market:SPXL", "SPXL", "BENCHMARK", 0, 0.012, None),
+    ]
+    return {
+        "status": "AVAILABLE",
+        "grid": "ISO_WEEK_START_MONDAY",
+        "union_start_date": starts[0].isoformat(),
+        "group_anchor_date": starts[anchor].isoformat(),
+        "group_anchor_index": anchor,
+        "group_anchor_set_by": "strategy:Gamma",
+        "gaps_before_common_start": [],
+        "dates": [item.isoformat() for item in starts],
+        "week_end_dates": [(item + timedelta(days=6)).isoformat() for item in starts],
+        "last_week_partial": False,
+        "data_through_date": (starts[-1] + timedelta(days=6)).isoformat(),
+        "lines": lines,
+    }
+
+
+def _slices() -> dict[str, Any]:
+    days = 140
+    first = date(2025, 7, 1)
+    dates = [(first + timedelta(days=index)).isoformat() for index in range(days)]
+    rows = [
+        {
+            "slice_id": "s_live",
+            "strategy_id": "alpha",
+            "nav_cents": [10_000_00 + 5_000 * i for i in range(days)],
+        },
+        {
+            "slice_id": "s_late",
+            "strategy_id": "beta",
+            "nav_cents": [0 if i < 60 else 5_000_00 + 2_000 * i for i in range(days)],
+        },
+        {"slice_id": "s_zero", "strategy_id": "gamma", "nav_cents": [0] * days},
+    ]
+    return {
+        "status": "AVAILABLE",
+        "unit": "USD_CENTS",
+        "dates": dates,
+        "rows": rows,
+        "reconciliation": {},
+        "benchmarks": [
+            {
+                "series_id": "market:SPY",
+                "ticker": "SPY",
+                "status": "AVAILABLE",
+                "method_definition": "synthetic flow-matched",
+                "nav_cents": [10_000_00 + 6_000 * i for i in range(days)],
+                "end_value_cents": 10_000_00 + 6_000 * (days - 1),
+                "trailing": None,
+            }
+        ],
+    }
+
+
+def _payload(anchor: int = 300) -> dict[str, Any]:
+    mode = _mode(anchor)
+    return {
+        "performance_tab": {
+            "schema_version": 3,
+            "benchmarks": [
+                {"series_id": "market:SPY", "ticker": "SPY", "status": "AVAILABLE"},
+                {"series_id": "market:SPXL", "ticker": "SPXL", "status": "AVAILABLE"},
+            ],
+            "modes": {"LIVE_ONLY": mode, "LIVE_PLUS_BACKTEST": mode},
+            "slices": _slices(),
+            "readout": {},
+        },
+        "strategies": [
+            {"strategy_id": "alpha", "strategy_name": "Alpha"},
+            {"strategy_id": "beta", "strategy_name": "Beta"},
+            {"strategy_id": "gamma", "strategy_name": "Gamma"},
+        ],
+    }
+
+
+def _run(
+    tmp_path: Path, payload: dict[str, Any], steps: list[str]
+) -> dict[str, dict[str, str]]:
+    """Render, then apply ``steps`` (javascript run inside the panel closure), each followed by a re-render."""
+
+    payload_path = tmp_path / "payload.json"
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    calls = [{"fn": "renderPerformance"}]
+    for step in steps:
+        calls.append({"eval": step})
+        calls.append({"fn": "renderPerformanceReturns"})
+        calls.append({"fn": "renderPerformanceValue"})
+    calls_path = tmp_path / "calls.json"
+    calls_path.write_text(json.dumps(calls), encoding="utf-8")
+    completed = subprocess.run(
+        [
+            str(shutil.which("node")),
+            str(HARNESS),
+            str(PANEL_ROOT / "app.js"),
+            str(payload_path),
+            "renderPerformance,renderPerformanceReturns,renderPerformanceValue",
+            str(calls_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=180,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["errors"] == [], result["errors"]
+    assert all("error" not in item for item in result["returns"]), result["returns"]
+    return result["dom"]
+
+
+def _eval(tmp_path: Path, expression: str) -> Any:
+    payload_path = tmp_path / "payload.json"
+    payload_path.write_text(json.dumps(_payload()), encoding="utf-8")
+    calls_path = tmp_path / "calls.json"
+    calls_path.write_text(json.dumps([{"eval": expression}]), encoding="utf-8")
+    completed = subprocess.run(
+        [
+            str(shutil.which("node")),
+            str(HARNESS),
+            str(PANEL_ROOT / "app.js"),
+            str(payload_path),
+            "renderPerformance",
+            str(calls_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=180,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert "error" not in result["returns"][0], result["returns"][0]
+    return result["returns"][0]["value"]
+
+
+def _text(dom: dict[str, Any], selector: str) -> str:
+    entry = dom[selector]
+    return re.sub(
+        r"\s+", " ", re.sub(r"<[^>]+>", " ", entry["innerHTML"] or entry["textContent"])
+    ).strip()
+
+
+def _axis(html: str) -> tuple[list[str], list[str]]:
+    """(x labels, y labels) of the chart svg."""
+
+    xs = re.findall(
+        r'text-anchor="(?:start|middle|end)" x="[\d.]+" y="[\d.]+">([^<]+)</text>', html
+    )
+    ys = re.findall(
+        r'class="chart-label axis-label" x="2" y="[\d.]+">([^<]+)</text>', html
+    )
+    return xs, ys
+
+
+def _number(label: str) -> float:
+    match = re.fullmatch(r"([\d,.]+)([KMBT]?)", label)
+    assert match, label
+    scale = {"": 1, "K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}[match.group(2)]
+    return float(match.group(1).replace(",", "")) * scale
+
+
+ZOOMS = ["1m", "3m", "6m", "1y", "3y", "Max"]
+
+
+def test_time_ticks_are_calendar_aware_with_exact_edges_and_no_repeats(
+    tmp_path: Path,
+) -> None:
+    day = 86400000
+    spans = {
+        "week": 7,
+        "month": 30,
+        "half-year": 183,
+        "three-years": 1096,
+        "nineteen-years": 6900,
+    }
+    start = 1_735_689_600_000  # 2025-01-01
+    for plot_px in (260, 800):
+        for name, days in spans.items():
+            ticks = _eval(
+                tmp_path, f"perfTimeTicks({start}, {start + days * day}, {plot_px})"
+            )
+            labels = [tick["label"] for tick in ticks]
+            assert len(labels) == len(set(labels)), (name, plot_px, labels)
+            assert ticks[0]["time"] == start and ticks[0]["anchor"] == "start", name
+            assert (
+                ticks[-1]["time"] == start + days * day and ticks[-1]["anchor"] == "end"
+            ), name
+            assert len(ticks) <= plot_px // 100 + 2, (name, plot_px, labels)
+            assert [tick["time"] for tick in ticks] == sorted(
+                tick["time"] for tick in ticks
+            )
+    # Month labels only past the day-level spans, years at the longest span.
+    long = _eval(tmp_path, f"perfTimeTicks({start}, {start + 6900 * day}, 800)")
+    assert any(re.fullmatch(r"\d{4}", tick["label"]) for tick in long)
+
+
+def test_geometry_follows_the_container_and_shrinks_on_a_phone(tmp_path: Path) -> None:
+    wide = _eval(tmp_path, "perfGeometry({ clientWidth: 1000 })")
+    phone = _eval(tmp_path, "perfGeometry({ clientWidth: 360 })")
+    assert wide["width"] == 1000 and phone["width"] == 360
+    assert phone["height"] < wide["height"] and phone["left"] <= wide["left"]
+    assert _eval(tmp_path, "perfGeometry({ clientWidth: 0 })")["width"] == 900
+
+
+def test_log_axis_ticks_are_thinned_to_eight_or_fewer(tmp_path: Path) -> None:
+    ticks = _eval(tmp_path, "perfLogAxisTicks(0.5, 4194304)")
+    assert 2 <= len(ticks) <= 8
+
+
+def test_max_is_the_common_window_on_a_linear_axis_without_huge_ticks(
+    tmp_path: Path,
+) -> None:
+    dom = _run(tmp_path, _payload(), [])
+    xs, ys = _axis(dom["#perf-returns-chart"]["innerHTML"])
+    assert len(ys) >= 4 and max(_number(label) for label in ys) < 20
+    assert len(xs) == len(set(xs))
+    note = _text(dom, "#perf-returns-note")
+    assert "Common window" in note and "group anchor" in note
+    legend = _text(dom, "#perf-returns-legend")
+    assert "345" not in legend  # no compounded-from-2007 percentages
+    # every chip covers the same common window
+    windows = set(re.findall(r"(\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})", legend))
+    assert (
+        len({start for start, _end in windows}) <= 2
+    )  # live-from dates aside, one rebase start per line group
+
+
+def test_own_start_view_is_explicit_log_with_few_ticks_and_windows_on_every_chip(
+    tmp_path: Path,
+) -> None:
+    dom = _run(tmp_path, _payload(), ['perfBasis = "own"'])
+    xs, ys = _axis(dom["#perf-returns-chart"]["innerHTML"])
+    assert 2 <= len(ys) <= 9 and len(xs) == len(set(xs))
+    assert "Own-start view, log axis" in _text(dom, "#perf-returns-note")
+    legend = dom["#perf-returns-legend"]["innerHTML"]
+    chips = re.findall(r"<button[^>]*perf-legend-item.*?</button>", legend, flags=re.S)
+    assert chips and all("→" in chip for chip in chips)
+    assert "Own start" in _text(dom, "#perf-window-note")
+
+
+def test_each_chip_names_its_window_and_the_live_share_of_a_backtest_line(
+    tmp_path: Path,
+) -> None:
+    dom = _run(tmp_path, _payload(anchor=100), ['perfZoom = "Max"'])
+    legend = _text(dom, "#perf-returns-legend")
+    assert re.search(
+        r"Alpha .*?\d{4}-\d{2}-\d{2} → \d{4}-\d{2}-\d{2} · live from \d{4}-\d{2}-\d{2}, live ",
+        legend,
+    )
+    gamma = re.search(
+        r"Gamma [^A-Z]*?(\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})([^A-Z]*)", legend
+    )
+    assert gamma and "live from" not in gamma.group(3)  # live throughout: no marker
+
+
+def test_a_dot_marks_where_live_evidence_begins(tmp_path: Path) -> None:
+    dom = _run(tmp_path, _payload(anchor=100), ['perfZoom = "Max"'])
+    html = dom["#perf-returns-chart"]["innerHTML"]
+    assert (
+        html.count("live evidence starts") == 2
+    )  # Alpha and Beta; Gamma is live throughout
+
+
+def test_one_year_and_three_year_differ_when_the_anchor_allows(tmp_path: Path) -> None:
+    early = {}
+    for zoom in ("1y", "3y"):
+        dom = _run(tmp_path, _payload(anchor=100), [f'perfZoom = "{zoom}"'])
+        early[zoom] = _text(dom, "#perf-window-note")
+    assert early["1y"] != early["3y"] and "limited" not in early["3y"]
+    late = _run(tmp_path, _payload(anchor=300), ['perfZoom = "3y"'])
+    note = _text(late, "#perf-window-note")
+    assert "3y is limited by the group anchor: the window starts" in note
+    assert re.search(r"\(\d+ days of the 1,096 requested\)", note)
+
+
+def test_every_zoom_has_unique_axis_labels_and_edge_dates_on_both_charts(
+    tmp_path: Path,
+) -> None:
+    for zoom in ZOOMS:
+        value_zoom = "Max" if zoom in ("3y", "Max") else zoom
+        dom = _run(
+            tmp_path,
+            _payload(),
+            [
+                f'perfZoom = "{zoom}"; perfValueZoom = "{value_zoom if value_zoom in ("1w", "1m", "3m", "6m", "1y", "Max") else "Max"}"'
+            ],
+        )
+        for selector in ("#perf-returns-chart", "#perf-value-chart"):
+            xs, _ys = _axis(dom[selector]["innerHTML"])
+            assert len(xs) >= 2 and len(xs) == len(set(xs)), (zoom, selector, xs)
+            assert re.fullmatch(
+                r"[A-Z][a-z]{2} \d{1,2}, \d{4}", xs[0]
+            ) and re.fullmatch(r"[A-Z][a-z]{2} \d{1,2}, \d{4}", xs[-1])
+
+
+def test_value_chart_drops_all_zero_slices_and_labels_both_benchmark_bases(
+    tmp_path: Path,
+) -> None:
+    dom = _run(tmp_path, _payload(), [])
+    legend = _text(dom, "#perf-value-legend")
+    assert "Alpha" in legend and "Beta" in legend and "Gamma" not in legend
+    assert dom["#perf-value-chart"]["innerHTML"].count("<polygon") == 2
+    note = _text(dom, "#perf-value-window-note")
+    assert "flow-matched" in note and "benchmark's own total return" in note
+    assert "own total return" in _text(
+        dom, "#perf-returns-note"
+    ) or "own weekly total return" in _text(dom, "#perf-returns-note")
+    assert "Max:" in note and "first dollar of capital" in note
+
+
+def test_a_slice_with_value_in_a_short_window_is_kept(tmp_path: Path) -> None:
+    dom = _run(tmp_path, _payload(), ['perfValueZoom = "1m"'])
+    assert "Beta" in _text(dom, "#perf-value-legend")  # beta is live in the last month
+
+
+def test_tooltip_source_prints_percent_not_raw_levels() -> None:
+    source = (PANEL_ROOT / "app.js").read_text(encoding="utf-8")
+    assert "point.value.toFixed(3)" not in source
+    assert "perfPercent(point.value)" in source
+    assert "Week starting" in source
+
+
+def test_zoom_buttons_state_a_limited_window_explicitly() -> None:
+    source = (PANEL_ROOT / "app.js").read_text(encoding="utf-8")
+    assert "Limited by group anchor: starts" in source
+    assert "is-limited" in source
+    css = (PANEL_ROOT / "analytics.css").read_text(encoding="utf-8")
+    assert ".segment.is-limited" in css
+
+
+def test_dark_only_is_recorded() -> None:
+    css = (PANEL_ROOT / "styles.css").read_text(encoding="utf-8") + (
+        PANEL_ROOT / "analytics.css"
+    ).read_text(encoding="utf-8")
+    assert (
+        "prefers-color-scheme" not in css
+    )  # the panel is dark-only; no light theme exists or is requested
