@@ -1,7 +1,7 @@
 """Copy a predecessor release world into a new one and repoint its JSON files, as a committed command (refs #418).
 
 A release pass runs in a *world* directory: ``cm`` (cycle manifests and seeds), ``in`` (bundles), ``l0``, ``finality``,
-``frozen-inputs``, ``matrixport``, ``repo``. A new pass starts from a copy of the previous world with every absolute path
+``frozen-inputs`` and the per-provider extracts. A new pass starts from a copy of the previous world with every absolute path
 that names the old world repointed. Hand scripts did that with ``sed`` on a name token; the provenance seed stores paths
 JSON-escaped (``C:\\\\Dev\\\\...``), the mixed result named a directory that did not exist and the failure surfaced two
 stages later (``portfolio_provenance``: ``root design-intake is not a directory``).
@@ -13,7 +13,7 @@ existing destination, and prints the plan unless ``--apply`` is given. ``--roots
 manifest commands read.
 
     python tools/release_world.py copy --from C:/Dev/scratch/qe-r3/world-B2 --to C:/Dev/scratch/qe-r3/world-X \\
-        [--dirs cm,in,l0,finality,frozen-inputs,matrixport,repo] [--roots-file roots.json --data-root D] [--apply]
+        [--dirs a,b,c (default: every subdirectory)] [--roots-file roots.json --data-root D] [--apply]
 """
 
 from __future__ import annotations
@@ -24,8 +24,6 @@ import json
 from pathlib import Path
 import shutil
 import sys
-
-DEFAULT_DIRS = ("cm", "in", "l0", "finality", "frozen-inputs", "matrixport", "repo")
 
 
 class WorldError(ValueError):
@@ -119,7 +117,7 @@ def _parser() -> argparse.ArgumentParser:
     copy = commands.add_parser("copy")
     copy.add_argument("--from", dest="src", type=Path, required=True)
     copy.add_argument("--to", dest="dst", type=Path, required=True)
-    copy.add_argument("--dirs", default=",".join(DEFAULT_DIRS))
+    copy.add_argument("--dirs", default="")
     copy.add_argument("--roots-file", type=Path)
     copy.add_argument("--data-root", type=Path)
     copy.add_argument("--apply", action="store_true")
@@ -129,6 +127,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     dirs = [name for name in args.dirs.split(",") if name]
+    if not dirs and args.src.is_dir():
+        dirs = sorted(p.name for p in args.src.iterdir() if p.is_dir())
     try:
         steps = plan(args.src, args.dst, dirs)
         if args.roots_file is not None and args.data_root is None:
