@@ -12,10 +12,11 @@ from datetime import date
 from decimal import Decimal
 import importlib.util
 from pathlib import Path
-import sys
 from typing import Any
 
 import pytest
+
+from tools import portfolio_baseline as baseline
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -24,14 +25,10 @@ def _load(name: str, path: Path) -> Any:
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
 
-baseline = _load(
-    "portfolio_baseline_cost_dollar", ROOT / "tools" / "portfolio_baseline.py"
-)
 docs = _load("cost_rate_documents_dollar", ROOT / "tests/core/cost_rate_documents.py")
 AS_OF = date(2026, 9, 17)
 VOLATIS_VALUE = Decimal("66456.99")
