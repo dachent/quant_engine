@@ -718,7 +718,7 @@ def p_concept_cards(payload: Payload) -> Result:
 
 
 def b_concept_cards(payload: Payload) -> None:
-    rows_of(get(payload.panel, "strategy_concepts", "rows")).pop()
+    payload.panel["strategy_concepts"]["rows"].pop()
 
 
 def p_concept_source(payload: Payload) -> Result:
