@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from datetime import date, timedelta
+from decimal import Decimal
 import json
 from typing import Any
 
@@ -81,14 +82,23 @@ def _run(
     cin: list[dict[str, Any]],
     nav_days: dict[str, set[date]] | None = None,
     as_of: date = END,
+    nav_values: dict[str, dict[date, Decimal | None]] | None = None,
+    positions: list[dict[str, Any]] | None = None,
+    transactions: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    if nav_values is None:
+        days = nav_days if nav_days is not None else {A: set(_days()), B: set(_days())}
+        nav_values = {
+            account: {day: Decimal(100) for day in account_days}
+            for account, account_days in days.items()
+        }
     return ec.evaluate(
         ec.load_declaration(_doc(*entries)),
         flows=flows,
         change_in_nav_by_provider={"ibkr": cin},
-        nav_days_by_account=nav_days
-        if nav_days is not None
-        else {A: set(_days()), B: set(_days())},
+        nav_values_by_account=nav_values,
+        positions=positions or [],
+        transactions=transactions or [],
         account_provider={A: "ibkr", B: "ibkr", "account-schwab": "schwab"},
         as_of_date=as_of,
     )
@@ -220,3 +230,163 @@ def test_loader_is_strict() -> None:
     for raw, message in bad:
         with pytest.raises(ec.EventCompletenessError, match=message):
             ec.load_declaration(raw)
+
+
+# --- derived closed account -------------------------------------------------------------------
+
+LONG_START = date(2026, 1, 5)
+LONG_END = date(2026, 3, 31)
+
+
+def _market(start: date, end: date) -> list[date]:
+    return ec._market_days(start, end)
+
+
+def _closed_world(
+    *,
+    settle: date = date(2026, 2, 2),
+    last: date = date(2026, 3, 6),
+    drop: date | None = None,
+    dust: str = "0.000632254",
+    after_flow: bool = False,
+    after_position: date | None = None,
+    after_tx: date | None = None,
+) -> dict[str, Any]:
+    nav: dict[date, Decimal | None] = {}
+    for day in _market(LONG_START, last):
+        nav[day] = Decimal(dust) if day >= settle else Decimal(5000)
+    if drop is not None:
+        nav.pop(drop)
+    cin = []
+    for day in nav:
+        cin.append(
+            {
+                "account_id": A,
+                "accounting_date": day.isoformat(),
+                "components": [
+                    {"source_component_key": "depositsWithdrawals", "value": "0"},
+                ],
+            }
+        )
+    flows: list[dict[str, Any]] = []
+    if after_flow:
+        flows.append(_flow(A, settle + timedelta(days=3), "1"))
+        for row in cin:
+            if row["accounting_date"] == (settle + timedelta(days=3)).isoformat():
+                row["components"][0]["value"] = "1"
+    return {
+        "nav": nav,
+        "cin": cin,
+        "flows": flows,
+        "positions": (
+            [{"account_id": A, "as_of_date": after_position.isoformat()}]
+            if after_position
+            else []
+        ),
+        "transactions": (
+            [{"account_id": A, "event_date": after_tx.isoformat()}] if after_tx else []
+        ),
+    }
+
+
+def _closed_run(world: dict[str, Any]) -> dict[str, Any]:
+    return _run(
+        [
+            _entry(
+                declared_start=LONG_START.isoformat(), declared_end=LONG_END.isoformat()
+            )
+        ],
+        world["flows"],
+        world["cin"],
+        nav_values={A: world["nav"]},
+        positions=world["positions"],
+        transactions=world["transactions"],
+        as_of=LONG_END,
+    )[0]
+
+
+def test_a_settled_inactive_account_is_derived_closed_and_exempt_after_its_last_day() -> (
+    None
+):
+    row = _closed_run(_closed_world())
+    assert row["status"] == ec.DECLARED_COMPLETE
+    derived = next(c for c in row["checks"] if c["check"] == "CLOSED_ACCOUNT_DERIVED")
+    assert (
+        derived["settled_on"] == "2026-02-02"
+        and derived["last_observed"] == "2026-03-06"
+    )
+
+
+def test_an_open_account_whose_nav_merely_stops_is_never_closed() -> None:
+    # NAV stops at a non-zero value (the observations are missing, not settled)
+    world = _closed_world(dust="5000")
+    row = _closed_run(world)
+    assert row["status"] == ec.CLOSURE_FAILED
+    assert "NAV_ON_EVERY_MARKET_DAY" in _failed(row)
+    assert not any(c["check"] == "CLOSED_ACCOUNT_DERIVED" for c in row["checks"])
+
+
+def test_a_gap_in_the_middle_is_not_a_closure_even_when_the_nav_is_zero_either_side() -> (
+    None
+):
+    # f34e5b78 style: observed, then a missing stretch, then observed again to the end
+    nav = {day: Decimal(5000) for day in _market(LONG_START, LONG_END)}
+    for day in _market(date(2026, 2, 2), date(2026, 3, 6)):
+        nav.pop(day)
+    world = {
+        "nav": nav,
+        "cin": [
+            {
+                "account_id": A,
+                "accounting_date": d.isoformat(),
+                "components": [
+                    {"source_component_key": "depositsWithdrawals", "value": "0"}
+                ],
+            }
+            for d in nav
+        ],
+        "flows": [],
+        "positions": [],
+        "transactions": [],
+    }
+    row = _closed_run(world)
+    assert row["status"] == ec.CLOSURE_FAILED
+    assert "NAV_ON_EVERY_MARKET_DAY" in _failed(row)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "zero_run_too_short",
+        "missing_day_inside_zero_run",
+        "flow_after_settling",
+        "position_after_settling",
+        "transaction_after_settling",
+        "nav_just_above_dust",
+    ],
+)
+def test_the_closed_rule_refuses_each_way_the_closure_could_be_vacuous(
+    variant: str,
+) -> None:
+    kwargs: dict[str, Any] = {}
+    if variant == "zero_run_too_short":
+        kwargs = {"settle": date(2026, 3, 2), "last": date(2026, 3, 6)}
+    elif variant == "missing_day_inside_zero_run":
+        kwargs = {"drop": date(2026, 2, 18)}
+    elif variant == "flow_after_settling":
+        kwargs = {"after_flow": True}
+    elif variant == "position_after_settling":
+        kwargs = {"after_position": date(2026, 2, 9)}
+    elif variant == "transaction_after_settling":
+        kwargs = {"after_tx": date(2026, 2, 9)}
+    elif variant == "nav_just_above_dust":
+        kwargs = {"dust": "0.02"}
+    row = _closed_run(_closed_world(**kwargs))
+    assert row["status"] == ec.CLOSURE_FAILED
+    assert not any(c["check"] == "CLOSED_ACCOUNT_DERIVED" for c in row["checks"])
+
+
+def test_activity_on_the_settling_day_itself_is_allowed() -> None:
+    world = _closed_world()
+    world["flows"] = [_flow(A, date(2026, 2, 2), "0", "DEPOSIT_OR_WITHDRAWAL")]
+    assert _closed_run(world)["status"] == ec.DECLARED_COMPLETE

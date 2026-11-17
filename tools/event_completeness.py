@@ -41,6 +41,11 @@ _FLOW_TYPES: Final = frozenset(
     }
 )
 _STATEMENT_FLOW_KEYS: Final = ("depositsWithdrawals", "assetTransfers")
+# A closed account is derived, never declared: its NAV settles to dust (at most this many dollars)
+# and stays there with no position, transaction or flow after the settling day, for a stretch long
+# enough that a missing observation cannot pass as a closure.
+CLOSED_NAV_TOLERANCE: Final = Decimal("0.01")
+CLOSED_MIN_ZERO_MARKET_DAYS: Final = 20
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _ENTRY_KEYS: Final = {
     "account_id",
@@ -200,11 +205,78 @@ def _unpaired_internal_legs(
     return unpaired
 
 
+def _market_days(start: date, end: date) -> list[date]:
+    holidays: set[date] = set()
+    for year in range(start.year, end.year + 1):
+        holidays |= set(market_holidays(year))
+    return [
+        start + timedelta(days=offset)
+        for offset in range((end - start).days + 1)
+        if (start + timedelta(days=offset)).weekday() < 5
+        and (start + timedelta(days=offset)) not in holidays
+    ]
+
+
+def closed_since(
+    account_id: str,
+    nav_values: Mapping[date, Decimal | None],
+    *,
+    positions: Sequence[Mapping[str, Any]],
+    transactions: Sequence[Mapping[str, Any]],
+    flows: Sequence[Mapping[str, Any]],
+) -> tuple[date, date] | None:
+    """(settled day, last observed day) when the account is derivably closed, else None.
+
+    The trailing run of NAV observations is at most ``CLOSED_NAV_TOLERANCE`` in size; the run
+    starts on the settled day Z and covers at least ``CLOSED_MIN_ZERO_MARKET_DAYS`` market
+    days; and the ledger holds no position, transaction or flow of the account after Z.  An
+    account whose NAV is merely missing has no trailing zero run and is never closed.
+    """
+
+    days = sorted(nav_values)
+    if not days:
+        return None
+    run: list[date] = []
+    for day in reversed(days):
+        value = nav_values[day]
+        if value is None or abs(value) > CLOSED_NAV_TOLERANCE:
+            break
+        run.append(day)
+    if not run:
+        return None
+    run.reverse()
+    settled, last = run[0], run[-1]
+    market = _market_days(settled, last)
+    if len(market) < CLOSED_MIN_ZERO_MARKET_DAYS:
+        return None
+    observed = set(run)
+    if any(day not in observed for day in market):
+        return None  # the zero run must be unbroken: every market day observed
+
+    def after(rows: Sequence[Mapping[str, Any]], field: str) -> bool:
+        return any(
+            row.get("account_id") == account_id
+            and row.get(field) is not None
+            and _day(row[field], field) > settled
+            for row in rows
+        )
+
+    if (
+        after(positions, "as_of_date")
+        or after(transactions, "event_date")
+        or after(flows, "event_date")
+    ):
+        return None
+    return settled, last
+
+
 def _evaluate_ibkr_flows(
     declaration: Declaration,
     flows: Sequence[Mapping[str, Any]],
     change_in_nav: Sequence[Mapping[str, Any]],
-    nav_days: set[date],
+    nav_values: Mapping[date, Decimal | None],
+    positions: Sequence[Mapping[str, Any]],
+    transactions: Sequence[Mapping[str, Any]],
     as_of_date: date,
 ) -> list[dict[str, Any]]:
     start, end = declaration.declared_start, declaration.declared_end
@@ -222,16 +294,25 @@ def _evaluate_ibkr_flows(
         )
 
     record("INTERVAL_REACHES_CUTOFF", 0 if end >= as_of_date else 1)
+    nav_days = set(nav_values)
     interval_nav = {day for day in nav_days if start <= day <= end}
-    holidays: set[date] = set()
-    for year in range(start.year, end.year + 1):
-        holidays |= set(market_holidays(year))
-    expected = [
-        start + timedelta(days=offset)
-        for offset in range((end - start).days + 1)
-        if (start + timedelta(days=offset)).weekday() < 5
-        and (start + timedelta(days=offset)) not in holidays
-    ]
+    closure = closed_since(
+        account, nav_values, positions=positions, transactions=transactions, flows=flows
+    )
+    coverage_end = end
+    if closure is not None and start <= closure[1] < end:
+        # derived closure: market days after the last observation of a settled, inactive
+        # account carry no NAV by design; the rule's evidence is on the row
+        coverage_end = closure[1]
+        record(
+            "CLOSED_ACCOUNT_DERIVED",
+            0,
+            {
+                "settled_on": closure[0].isoformat(),
+                "last_observed": closure[1].isoformat(),
+            },
+        )
+    expected = _market_days(start, coverage_end)
     missing_calendar = [day for day in expected if day not in interval_nav]
     record(
         "NAV_ON_EVERY_MARKET_DAY",
@@ -294,9 +375,11 @@ def evaluate(
     *,
     flows: Sequence[Mapping[str, Any]],
     change_in_nav_by_provider: Mapping[str, Sequence[Mapping[str, Any]]],
-    nav_days_by_account: Mapping[str, set[date]],
+    nav_values_by_account: Mapping[str, Mapping[date, Decimal | None]],
     account_provider: Mapping[str, str],
     as_of_date: date,
+    positions: Sequence[Mapping[str, Any]] = (),
+    transactions: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """One row per declaration: ``DECLARED_COMPLETE`` only if every closure check passes."""
 
@@ -316,7 +399,9 @@ def evaluate(
                 declaration,
                 flows,
                 change_in_nav_by_provider.get(provider, ()),
-                nav_days_by_account.get(declaration.account_id, set()),
+                nav_values_by_account.get(declaration.account_id, {}),
+                positions,
+                transactions,
                 as_of_date,
             )
         passed = all(item["status"] == "PASS" for item in checks)

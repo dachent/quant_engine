@@ -11339,11 +11339,16 @@ def build_catalog(
         declarations, declaration_artifact = _event_completeness_declaration(
             spec["event_completeness_declaration"], as_of
         )
-        nav_days: dict[str, set[date]] = defaultdict(set)
+        nav_values: dict[str, dict[date, Decimal | None]] = defaultdict(dict)
         account_provider: dict[str, str] = {}
         for nav_row in combined.get("nav_observations", []):
             account_ = str(nav_row["account_id"])
-            nav_days[account_].add(_day(nav_row["as_of_date"], "nav as_of_date"))
+            amount_ = nav_row.get("nav")
+            nav_values[account_][_day(nav_row["as_of_date"], "nav as_of_date")] = (
+                _decimal(amount_["value"], "nav value")
+                if isinstance(amount_, Mapping) and amount_.get("status") == "AVAILABLE"
+                else None
+            )
             account_provider[account_] = str(nav_row["provider_id"])
         try:
             completeness_rows = event_completeness.evaluate(
@@ -11356,9 +11361,11 @@ def build_catalog(
                     )
                     for provider_id_, catalog_ in catalogs.items()
                 },
-                nav_days_by_account=nav_days,
+                nav_values_by_account=nav_values,
                 account_provider=account_provider,
                 as_of_date=as_of,
+                positions=combined.get("positions", []),
+                transactions=combined.get("transactions", []),
             )
         except event_completeness.EventCompletenessError as exc:
             raise ProviderLedgerError(f"event_completeness: {exc}") from exc
