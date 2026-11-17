@@ -2529,6 +2529,13 @@ def _derive_rate_dollar_costs(
                     "unpriced_components": unpriced,
                     "classified_components": classified,
                 }
+                settled = rates.get("derivation")
+                if isinstance(settled, dict) and settled.get("last_date"):
+                    # the tier was settled from posted fees up to this date; the
+                    # derived dollars hold if the tier is unchanged since
+                    item["cost_derivation"]["tier_settled_through"] = settled[
+                        "last_date"
+                    ]
         carried.append(item)
     return carried
 

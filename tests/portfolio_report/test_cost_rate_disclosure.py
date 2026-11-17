@@ -233,3 +233,23 @@ def test_an_in_nav_performance_fee_is_stated_as_classified() -> None:
         "not a billed dollar cost)" in sentence
     )
     assert "not priced" not in sentence
+
+
+def test_a_settled_tier_sentence_names_the_date_and_the_condition() -> None:
+    row = _row(docs.volatis_rates("NON_QUALIFIED_FLAT"))
+    row["derived_annual_cost_usd"] = "1682.02"
+    row["cost_derivation"] = {
+        "as_of": "2026-11-06",
+        "base_value_usd": "48057.62",
+        "classified_components": [],
+        "method": "DERIVED_FROM_DOCUMENTED_RATE",
+        "rate": "0.035",
+        "rate_kind": "management_rate",
+        "tier": "NON_QUALIFIED_FLAT",
+        "tier_settled_through": "2026-09-02",
+        "unpriced_components": [],
+    }
+    assert (
+        "fee tier settled through 2026-09-02 (fee journals); derived dollars valid "
+        "if the tier is unchanged since" in report.cost_rate_disclosure(row)
+    )

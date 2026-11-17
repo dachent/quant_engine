@@ -58,9 +58,12 @@ def _rows(volatis_tier: str, rates_mutator: Any = None) -> list[dict[str, Any]]:
 VALUES = {"volatis": (VOLATIS_VALUE, AS_OF), "robuxio": (ROBUXIO_VALUE, AS_OF)}
 
 
+def _derive_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return baseline._derive_rate_dollar_costs(rows, VALUES, AS_OF)
+
+
 def _derive(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    out = baseline._derive_rate_dollar_costs(rows, VALUES, AS_OF)
-    return {row["strategy_id"]: row for row in out}
+    return {row["strategy_id"]: row for row in _derive_rows(rows)}
 
 
 def test_a_settled_management_rate_gives_annual_dollars_with_its_derivation() -> None:
@@ -80,6 +83,19 @@ def test_a_settled_management_rate_gives_annual_dollars_with_its_derivation() ->
     }
     # the rate row stays visible
     assert volatis["fee_rates"]["tier"] == "NON_QUALIFIED_FLAT"
+
+
+def test_a_settled_tier_carries_the_date_its_fees_run_through() -> None:
+    rows = _rows("NON_QUALIFIED_FLAT")
+    volatis = next(r for r in rows if r["strategy_id"] == "volatis")
+    raw = volatis["fee_rates"]
+    raw["derivation"] = docs.volatis_derivation(raw)
+    volatis["fee_rates"] = baseline._fee_rates(raw, "test.rates")
+    last = volatis["fee_rates"]["derivation"]["last_date"]
+    out = {r["strategy_id"]: r for r in _derive_rows(rows)}
+    assert out["volatis"]["cost_derivation"]["tier_settled_through"] == last
+    # a row without a derivation carries no such date
+    assert "tier_settled_through" not in out["robuxio"]["cost_derivation"]
 
 
 def test_an_unsettled_tier_is_never_priced() -> None:

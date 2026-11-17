@@ -1971,6 +1971,11 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
                 + ", ".join(str(name).replace("_", " ") for name in unpriced)
                 + " is a share of gains, not of capital value, and is not priced"
             )
+        if basis.get("tier_settled_through"):
+            sentence += (
+                f"; fee tier settled through {basis['tier_settled_through']} "
+                "(fee journals); derived dollars valid if the tier is unchanged since"
+            )
         for item in in_nav:
             sentence += (
                 f"; {str(item.get('component')).replace('_', ' ')} "
