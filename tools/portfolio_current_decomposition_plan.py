@@ -20,7 +20,12 @@ import strategy_basis_disclosure
 
 BUILDER_VERSION = "0.18.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
-PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
+# 0.4.0 admits the latest complete published French month (the 45-day rule stays the
+# minimum and the recorded lag); 0.3.0 bundles (08-31 style, carried A5) stay valid.
+PUBLIC_FACTOR_BUILDER_VERSION = "0.4.0"
+ACCEPTED_PUBLIC_FACTOR_BUILDER_VERSIONS = frozenset(
+    {"0.3.0", PUBLIC_FACTOR_BUILDER_VERSION}
+)
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
     "policy_id": "KENNETH_FRENCH_MONTHLY_DAILY_45D_V1",
     "observation_cadence": "DAILY",
@@ -1409,7 +1414,8 @@ def _verify_public_factor_manifest(
     if (
         manifest.get("schema_version") != 2
         or manifest.get("builder") != PUBLIC_FACTOR_BUILDER
-        or manifest.get("builder_version") != PUBLIC_FACTOR_BUILDER_VERSION
+        or manifest.get("builder_version")
+        not in ACCEPTED_PUBLIC_FACTOR_BUILDER_VERSIONS
     ):
         raise CurrentPlanError("public factor manifest contract is unsupported")
     catalog = _object(manifest.get("catalog"), "public factor manifest catalog")
