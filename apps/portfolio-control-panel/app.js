@@ -148,6 +148,8 @@
     AVAILABLE_WITH_INFERRED_FLOW_TIMING: "Available · estimated timing",
     known_gold_api: "Known (gold API)",
     AVAILABLE_OBSERVED_BASIS: "Available: observed basis",
+    CORRELATION_ONE_CONSERVATIVE_BOUND: "Correlation-one stress bound (not an expectation)",
+    CONSERVATIVE_STRESS_BOUND_NOT_EXPECTATION: "Correlation-one stress bound (not an expectation)",
     DATE_ONLY_END_OF_DAY_INFERRED_TIMING: "Date only; end-of-day timing inferred",
     UNAVAILABLE_UNKNOWN_TARGET_SERIES: "No accepted return series",
     UNAVAILABLE_INSUFFICIENT_HISTORY: "Insufficient accepted history",
@@ -2581,6 +2583,9 @@
     const proxyGovernance = analysis.proxy_governance || {};
     const semantics = lensSemantics[analysis.lens_id] || { question: "What return drivers explain the strategy?", method: "Returns-based decomposition.", beta: "Beta is fitted return sensitivity.", caveat: "No holdings inference is made." };
     $("#factor-lens-boundary").innerHTML = `<strong>${safe(analysis.lens_label || analysis.lens_id)}</strong> · ${safe(humanStatus(analysis.return_basis || "UNAVAILABLE"))} · ${safe(humanStatus(selectedFactorEvidenceMode))} · ${safe(surfaceLabels[selectedFactorSurface] || humanStatus(selectedFactorSurface))}<br><strong>Question:</strong> ${safe(semantics.question)} <strong>Method:</strong> ${safe(semantics.method)} <strong>Beta:</strong> ${safe(semantics.beta)} <strong>Boundary:</strong> ${safe(semantics.caveat)}<br><strong>Selection boundary:</strong> ${safe(humanStatus(proxyGovernance.selection_boundary || "UNAVAILABLE_NOT_DECLARED"))}. ${sourceSummaryHtml}. ${integer.format(proxyGovernance.candidate_count || 0)} governed candidates; ${safe(humanStatus(proxyGovernance.orthogonality_claim || "UNAVAILABLE"))}. Static and dynamic are separately planned, computed, and published surfaces. Live only is authoritative; live + backtest uses only compatible pre-live history. Lenses remain separate and are never concatenated.`;
+    // The lens header states how far its factor data ends before the cutoff (French files publish monthly).
+    const lensLagDays = daysBeforeCutoff(analysis.as_of_date);
+    if (lensLagDays > 10) $("#factor-lens-boundary").insertAdjacentHTML("beforeend", `<br><strong>Research lens:</strong> factor data through ${safe(formatDate(analysis.as_of_date))}, ${integer.format(lensLagDays)} days before the ${safe(formatDate(data.meta?.portfolio_as_of))} cutoff; not a cutoff-current headline.`);
     renderUnderwriting();
     renderFactorKpis(analysis);
     $("#factor-method-badge").textContent = analysis.method_label.replaceAll("_", " ");
@@ -2744,7 +2749,7 @@
     renderKpis("#dependence-kpis", [
       ["Measured pairs", `${dependence.available_pair_count}/${dependence.pair_count}`, combined ? "Version-matched pre-live backtest plus authoritative live" : "Exact-date live observations", "positive"],
       ["Unavailable pairs", String(unavailable), "No inferred diversification credit", "danger"],
-      ["Correlation-one bound", pct(corrOne.loss), `${number(clusterBudget.limit_breach) == null ? "—" : (Number(clusterBudget.limit_breach) * 100).toFixed(1)} pp above the ${pct(clusterBudget.systematic_loss_limit)} systematic limit; governs readiness`, "danger"],
+      ["Correlation-one stress bound (not an expectation)", pct(corrOne.loss), `${number(clusterBudget.limit_breach) == null ? "—" : (Number(clusterBudget.limit_breach) * 100).toFixed(1)} pp above the ${pct(clusterBudget.systematic_loss_limit)} systematic limit; governs readiness`, "danger"],
       ["Analytics as of", formatDate(dependence.as_of_date), `Generation ${dependence.generation_id.slice(0, 12)}…`],
     ]);
     selectedPair ||= pairKey(dependence.cells.find((item) => item.observed.status === "AVAILABLE")?.left || dependence.series_ids[0], dependence.cells.find((item) => item.observed.status === "AVAILABLE")?.right || dependence.series_ids[1]);
@@ -2752,7 +2757,7 @@
     const selected = dependence.cells.find((item) => pairKey(item.left, item.right) === selectedPair) || dependence.cells[0];
     renderCorrelationDetail(selected.left, selected.right);
     const centralLoss = centralCase.loss == null ? "Unavailable" : pct(centralCase.loss);
-    $("#correlation-one-summary").innerHTML = `<div class="metric-block"><div class="metric-label">Adverse-loss bound</div><div class="metric-value">${pct(corrOne.loss)}</div><div class="metric-note">Governs readiness · ${safe(humanStatus(corrOne.method || corrOne.status))} · 1.25x prior / 1.5x live max drawdown, +5pp where live history is missing or platform-only; all strategies lose simultaneously; not a statistical confidence bound</div></div><div class="metric-block"><div class="metric-label">Systematic limit</div><div class="metric-value">${pct(clusterBudget.systematic_loss_limit)}</div><div class="metric-note">Breach ${pct(clusterBudget.limit_breach)}</div></div><div class="metric-block"><div class="metric-label">Central case</div><div class="metric-value">${centralLoss}</div><div class="metric-note">Descriptive only · ${safe(centralCase.status)}</div></div><div class="metric-block"><div class="metric-label">Reconciliation</div><div class="metric-value">${safe(smallDecimal(corrOne.reconciliation_difference))}</div><div class="metric-note">${safe(humanStatus(corrOne.status))}</div></div>`;
+    $("#correlation-one-summary").innerHTML = `<div class="metric-block"><div class="metric-label">Correlation-one stress bound (not an expectation)</div><div class="metric-value">${pct(corrOne.loss)}</div><div class="metric-note">Governs readiness · ${safe(humanStatus(corrOne.method || corrOne.status))} · 1.25x prior / 1.5x live max drawdown, +5pp where live history is missing or platform-only; all strategies lose simultaneously; not a statistical confidence bound</div></div><div class="metric-block"><div class="metric-label">Systematic limit</div><div class="metric-value">${pct(clusterBudget.systematic_loss_limit)}</div><div class="metric-note">Breach ${pct(clusterBudget.limit_breach)}</div></div><div class="metric-block"><div class="metric-label">Central case</div><div class="metric-value">${centralLoss}</div><div class="metric-note">Descriptive only · ${safe(centralCase.status)}</div></div><div class="metric-block"><div class="metric-label">Reconciliation</div><div class="metric-value">${safe(smallDecimal(corrOne.reconciliation_difference))}</div><div class="metric-note">${safe(humanStatus(corrOne.status))}</div></div>`;
     const componentRows = corrOne.components.map((row) => `<tr><td>${safe(row.series_id)}</td><td class="numeric">${pct(row.allocation_weight)}</td><td class="numeric">${pct(row.conservative_loss_fraction ?? row.adverse_loss_fraction)}</td><td class="numeric">${row.adverse_loss_basis ? pct(row.adverse_loss_basis.audit_adverse_loss_fraction) : "—"}</td><td class="numeric">${pct(row.loss_contribution)}</td></tr>`);
     // F20: weight and contribution add across the components shown; the adverse loss fraction does not.
     const componentWeights = corrOne.components.map((row) => number(row.allocation_weight)).filter((value) => value != null);
@@ -2957,7 +2962,7 @@
       const clusterRows = driverMap.driver_clusters.map((row) => `<tr><th scope="row"><span class="cell-primary">${safe(humanStatus(row.cluster_id))}</span><span class="cell-secondary">${safe(row.members.join(" · "))}</span></th><td>${pct(row.allocation_weight)}</td><td>${pct(row.adverse_loss_budget)}<span class="cell-secondary">${safe(humanStatus(row.budget_status))}</span></td><td>${row.observed_pair_count ? `${decimal(row.observed_pair_correlation_minimum)}–${decimal(row.observed_pair_correlation_maximum)}<span class="cell-secondary">${integer.format(row.observed_pair_count)} measured pairs</span>` : "UNAVAILABLE"}</td></tr>`);
       $("#candidate-driver-table").innerHTML = tableMarkup([["Driver cluster / members"], ["Systematic weight"], ["Adverse-loss budget"], ["Observed pair range"]], clusterRows);
       const leaveRows = driverMap.tactical_leave_one_out.map((row) => `<tr><th scope="row">${safe(row.series_id)}</th><td>${pct(row.correlation_one_loss_reduction)}</td><td>${pct(row.central_case_loss_reduction)}</td><td>${pct(row.cluster_loss_without)}<span class="cell-secondary">${safe(humanStatus(row.cluster_budget_status_without))}</span></td></tr>`);
-      $("#candidate-leave-one-out-table").innerHTML = tableMarkup([["Tactical sleeve"], ["Conservative reduction"], ["Central reduction"], ["Cluster loss without"]], leaveRows);
+      $("#candidate-leave-one-out-table").innerHTML = tableMarkup([["Tactical sleeve"], ["Stress reduction"], ["Central reduction"], ["Cluster loss without"]], leaveRows);
       $("#candidate-driver-grid").hidden = false;
     } else {
       $("#candidate-boundary").textContent = `Frozen ${appendix.as_of_date} audit appendix · source ${appendix.source_sha256.slice(0, 14)}… · no refresh or capital authority.`;
