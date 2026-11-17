@@ -2814,6 +2814,48 @@ def _window_limit(
     }
 
 
+IMPLEMENTATION_GAP_TESTED = "tested"
+IMPLEMENTATION_GAP_NOT_TESTABLE = "not_testable"
+IMPLEMENTATION_GAP_BASIS_VERIFIED = "VERIFIED_IMPLEMENTATION_RECONCILIATION"
+IMPLEMENTATION_GAP_BASIS_PROVIDER = "EXACT_DATE_PROVIDER_COMPARISON"
+IMPLEMENTATION_GAP_BASIS_NONE = "NO_COMPARATOR_ADMITTED"
+
+
+def _implementation_gap_fields(
+    item: Mapping[str, Any],
+    comparison: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive the account-versus-model status from the row's own evidence at build time.
+
+    The status is never read from the retained audit input: that input is a dated hand
+    audit.  A verified implementation reconciliation, or an exact-date provider comparison
+    with observations, is "tested" (an unresolved version compatibility stays visible in
+    `provider_comparison_version_compatibility`); a row with no comparator at all is
+    "not_testable" and says so.  The audit token and its note are kept as provenance only.
+    """
+
+    reconciliation_status = str(item.get("implementation_reconciliation_status") or "")
+    comparison_status = str(comparison.get("status") or "")
+    observations = metrics.get("observations")
+    if reconciliation_status.startswith("VERIFIED"):
+        status, basis = IMPLEMENTATION_GAP_TESTED, IMPLEMENTATION_GAP_BASIS_VERIFIED
+    elif (
+        comparison_status.startswith("DESCRIPTIVE_EXACT_DATE")
+        and isinstance(observations, int)
+        and not isinstance(observations, bool)
+        and observations > 0
+    ):
+        status, basis = IMPLEMENTATION_GAP_TESTED, IMPLEMENTATION_GAP_BASIS_PROVIDER
+    else:
+        status, basis = IMPLEMENTATION_GAP_NOT_TESTABLE, IMPLEMENTATION_GAP_BASIS_NONE
+    return {
+        "implementation_gap_status": status,
+        "implementation_gap_basis": basis,
+        "implementation_gap_audit_status": item.get("implementation_gap_status"),
+    }
+
+
 def _merge_attribution(
     strategies: Sequence[Mapping[str, Any]],
     attribution: Mapping[str, Any],
@@ -3040,6 +3082,7 @@ def _merge_attribution(
                     "version_compatibility_status"
                 ),
                 "provider_comparison_observations": metrics.get("observations"),
+                **_implementation_gap_fields(item, comparison, metrics),
                 "provider_comparison_observed_start": metrics.get("observed_start"),
                 "provider_comparison_observed_end": metrics.get("observed_end"),
                 "provider_account_cumulative_return": metrics.get(
