@@ -16003,3 +16003,99 @@ def test_underwriting_gap_drops_cash_and_fee_causes_when_evidenced() -> None:
         assert ("ACCOUNT_BOUND_FEE_PATH_INCOMPLETE" in got) == (
             fees != reporter.FEES_STATUS_EVIDENCED
         )
+
+
+def test_a_gate_rejected_schema_three_row_publishes_no_number_outside_the_detail() -> (
+    None
+):
+    """Validator finding: 23 of 28 gated rows leaked betas through the orthogonal and dynamic blocks."""
+
+    decomposition = _decomposition()
+    decomposition["analytics_schema_version"] = 3
+    decomposition["proxy_governance"] = {
+        "candidate_count": 1,
+        "orthogonality_claim": "RAW_CANDIDATES_NOT_ASSUMED_ORTHOGONAL",
+        "proxies": [{"factor_id": "SPY_XS"}],
+        "selection_boundary": "TRAIN_ONLY",
+    }
+    for item in decomposition["model_results"]:
+        item["analytics_identities"] = {
+            "raw": {
+                "methodology_manifest_sha256": "e" * 64,
+                "model_id": item["model_id"],
+                "surface": "RAW_MODEL",
+            },
+            "orthogonal": {
+                "methodology_manifest_sha256": "e" * 64,
+                "model_id": item["model_id"],
+                "surface": "ORTHOGONAL_RISK_ATTRIBUTION",
+            },
+        }
+        item["interval_association"] = {
+            "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+            "holdout_display_claim": "holdout association using selected historical snapshot",
+        }
+        item["orthogonal_attribution"] = {
+            "method_id": "TRAIN_SYMMETRIC_WHITENING_V1",
+            "rank": 1,
+            "status": "AVAILABLE",
+            "training_row_identity": "f" * 64,
+            "mode_coefficients": [{"symmetric_mode:SPY_XS": "0.7"}],
+            "raw_exposures": [{"SPY_XS": "0.7"}],
+            "orthogonal_intercept": ["0.001"],
+        }
+    model = next(
+        row
+        for row in decomposition["model_results"]
+        if row["status"] == "DIAGNOSTIC_ONLY"
+    )
+    model["estimator"] = "DYNAMIC_FLS"
+    model["diagnostics"]["dynamic"] = {
+        "exposure_path": [{"date": "2026-07-29", "betas": {"SPY_XS": "0.7"}}],
+        "holdout_forecasts": [
+            {"date": "2026-07-30", "forecast_exposures": {"SPY_XS": "0.5"}}
+        ],
+        "largest_exposure_changes": [{"date": "2026-07-30", "exposure_change_l2": "1"}],
+    }
+
+    output = panel._factor_analysis(
+        decomposition,
+        {"generation_id": "a" * 64, "sha256": "b" * 64},
+        set(STRATEGY_NAMES),
+    )
+    row = next(
+        item for item in output["series"] if item["model_id"] == model["model_id"]
+    )
+    assert row["status"] == "DIAGNOSTIC_ONLY"
+    assert row["orthogonal_attribution"] == {"status": "WITHHELD_MODEL_QUALITY_GATE"}
+    forbidden = {
+        "betas",
+        "exposures",
+        "forecast_exposures",
+        "exposure_path",
+        "holdout_forecasts",
+        "largest_exposure_changes",
+        "mode_coefficients",
+        "raw_exposures",
+        "orthogonal_intercept",
+        "factor_means",
+        "alpha_mean",
+    }
+
+    def leaks(value: object, path: str) -> list[str]:
+        found: list[str] = []
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                if key in forbidden and inner not in (None, [], {}):
+                    found.append(f"{path}.{key}")
+                found.extend(leaks(inner, f"{path}.{key}"))
+        elif isinstance(value, list):
+            for index, inner in enumerate(value):
+                found.extend(leaks(inner, f"{path}[{index}]"))
+        return found
+
+    public = {key: value for key, value in row.items() if key != "diagnostic_detail"}
+    assert leaks(public, "row") == []
+    detail = row["diagnostic_detail"]
+    assert detail["orthogonal_attribution"]["mode_coefficients"]
+    assert detail["dynamic"]["exposure_path"]
