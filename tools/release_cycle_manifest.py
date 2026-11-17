@@ -267,6 +267,15 @@ def validate_static(manifest: Mapping[str, Any]) -> None:
             )
         needs = provider["finality_source"] != GENERATION_MANIFEST
         has = "finality_evidence" in provider
+        if late and needs:
+            # late binding: the capture stage's finality record supplies both values
+            if has or "finalized_through" in provider:
+                raise CycleManifestError(
+                    "FINALITY_HAND_TYPED",
+                    f"{provider_id}: latest_at_or_before takes finality from the capture "
+                    "stage's finality record, not from the cycle manifest",
+                )
+            continue
         if needs and not has:
             raise CycleManifestError(
                 "FINALITY_EVIDENCE_REQUIRED",
@@ -452,12 +461,99 @@ def _generation_facts(directory: Path) -> dict[str, Any]:
     }
 
 
+FINALITY_RECORD_VERSION = "qe-capture-finality/1"
+_FINALITY_RECORD_KEYS = {
+    "evidence",
+    "finalized_through",
+    "generation_id",
+    "provider_id",
+    "schema_version",
+}
+
+
+def finality_record_path(root: Path, generation_id: str) -> Path:
+    """Where a capture stage leaves the finality record of a generation (beside, not inside, it)."""
+
+    return root / "finality" / f"{generation_id}.json"
+
+
+def _read_finality_record(
+    what: str, root: Path, provider_id: str, generation_id: str
+) -> tuple[str, dict[str, Any]]:
+    """The date a capture stage declared final and the hash-checked evidence file it names."""
+
+    refuse_links(root, ["finality", f"{generation_id}.json"], what)
+    path = finality_record_path(root, generation_id)
+    if not path.is_file():
+        raise CycleManifestError(
+            "FINALITY_RECORD_MISSING",
+            f"{what}: no finality record for generation {generation_id[:12]}",
+        )
+    record = _read_json(path)
+    evidence = record.get("evidence") if isinstance(record, dict) else None
+    if (
+        not isinstance(record, dict)
+        or set(record) != _FINALITY_RECORD_KEYS
+        or record["schema_version"] != FINALITY_RECORD_VERSION
+        or not isinstance(evidence, dict)
+        or set(evidence) != {"relative", "sha256", "size_bytes"}
+    ):
+        raise CycleManifestError(
+            "FINALITY_RECORD_INVALID", f"{what}: finality record shape differs"
+        )
+    if record["provider_id"] != provider_id or record["generation_id"] != generation_id:
+        raise CycleManifestError(
+            "FINALITY_RECORD_INVALID",
+            f"{what}: finality record names another provider or generation",
+        )
+    _day(record["finalized_through"], f"{what}.finalized_through")
+    parts = _relative_parts(evidence["relative"], f"{what}.finality evidence")
+    refuse_links(root, parts, f"{what} finality evidence")
+    pin = _file(
+        root.joinpath(*parts),
+        evidence["sha256"],
+        evidence["size_bytes"],
+        f"{what} finality evidence",
+    )
+    return record["finalized_through"], pin
+
+
+def write_finality_record(
+    root: Path,
+    provider_id: str,
+    generation_id: str,
+    finalized_through: str,
+    evidence_relative: str,
+) -> Path:
+    """Capture stages call this once the generation exists: create-only, hashes the evidence file."""
+
+    _day(finalized_through, "finalized_through")
+    parts = _relative_parts(evidence_relative, "finality evidence")
+    refuse_links(root, parts, "finality evidence")
+    data = root.joinpath(*parts).read_bytes()
+    record = {
+        "schema_version": FINALITY_RECORD_VERSION,
+        "provider_id": provider_id,
+        "generation_id": generation_id,
+        "finalized_through": finalized_through,
+        "evidence": {
+            "relative": evidence_relative,
+            "sha256": _sha256(data),
+            "size_bytes": len(data),
+        },
+    }
+    path = finality_record_path(root, generation_id)
+    _write_create_only(path, dumps(record))
+    return path
+
+
 def _select_latest(
     what: str,
     provider: Mapping[str, Any],
     generations: Path,
     cutoff: str,
     evaluated_on: str,
+    record_of: Mapping[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Newest verified generation that covers the cutoff and was captured by ``evaluated_on``.
 
@@ -482,6 +578,16 @@ def _select_latest(
             verdict = "REJECTED_COVERAGE_BEFORE_CUTOFF"
         else:
             verdict = "ELIGIBLE"
+            if record_of is not None:
+                try:
+                    final, _pin_unused = _read_finality_record(
+                        what, record_of["root"], record_of["provider_id"], path.name
+                    )
+                except CycleManifestError:
+                    verdict = "REJECTED_NO_FINALITY_RECORD"
+                else:
+                    if required and final < cutoff:
+                        verdict = "REJECTED_FINALITY_BEFORE_CUTOFF"
         rows.append(
             {
                 "generation_id": path.name,
@@ -523,6 +629,7 @@ def _check_cutoff_coverage(
     provider: Mapping[str, Any],
     declared: Mapping[str, Any],
     cutoff: str,
+    finalized: str | None,
 ) -> None:
     """Refuse a provider whose data, or whose declared finality, stops before the cutoff."""
 
@@ -535,7 +642,6 @@ def _check_cutoff_coverage(
             "COVERAGE_BEFORE_CUTOFF",
             f"{what}: observed coverage ends {end}, before the cutoff {cutoff}",
         )
-    finalized = provider.get("finalized_through")
     if finalized is not None and finalized < cutoff:
         raise CycleManifestError(
             "FINALITY_BEFORE_CUTOFF",
@@ -559,9 +665,17 @@ def _generation(
         )
     chosen = provider["generation"]
     selection: dict[str, Any] | None = None
-    if chosen["mode"] == "latest_at_or_before":
+    late = chosen["mode"] == "latest_at_or_before"
+    if late:
         generation_id, selection = _select_latest(
-            what, provider, generations, cutoff, evaluated_on
+            what,
+            provider,
+            generations,
+            cutoff,
+            evaluated_on,
+            {"root": root, "provider_id": provider_id}
+            if provider["finality_source"] != GENERATION_MANIFEST
+            else None,
         )
         directory = generations / generation_id
     elif chosen["mode"] == "explicit":
@@ -610,17 +724,22 @@ def _generation(
             "ID_MISMATCH",
             f"{what}: generation.json names another generation than its directory",
         )
-    _check_cutoff_coverage(what, provider, declared, cutoff)
     source = provider["finality_source"]
+    finalized = provider.get("finalized_through")
     if source == GENERATION_MANIFEST:
         evidence: dict[str, Any] | None = dict(manifest)
+    elif late:
+        finalized, evidence = _read_finality_record(
+            what, root, provider_id, generation_id
+        )
     else:
         evidence = _pin(
             provider["finality_evidence"], roots, f"{what} finality evidence"
         )
+    _check_cutoff_coverage(what, provider, declared, cutoff, finalized)
     row: dict[str, Any] = {
         "qualification": provider["qualification"],
-        "finalized_through": provider.get("finalized_through"),
+        "finalized_through": finalized,
         "root": root.as_posix(),
         "generation_id": generation_id,
         "generation_dir": directory.as_posix(),
@@ -739,7 +858,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands.choices["resolve"].add_argument(
         "--out", type=Path, help="create-only; stdout when absent"
     )
+    write = commands.add_parser(
+        "write-finality",
+        help="a capture stage records the finality of the generation it just created",
+    )
+    write.add_argument("--provider-root", type=Path, required=True)
+    write.add_argument("--provider-id", required=True)
+    write.add_argument("--generation-id", required=True)
+    write.add_argument("--finalized-through", required=True)
+    write.add_argument(
+        "--evidence", required=True, help="path of the evidence file under the root"
+    )
     args = parser.parse_args(argv)
+    if args.command == "write-finality":
+        try:
+            path = write_finality_record(
+                args.provider_root.resolve(),
+                args.provider_id,
+                args.generation_id,
+                args.finalized_through,
+                args.evidence,
+            )
+        except (CycleManifestError, OSError) as exc:
+            print(f"release-cycle-manifest: FAIL: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"finality_record": path.as_posix()}))
+        return 0
     try:
         data = args.manifest.read_bytes()
         roots = parse_roots(args.root, args.roots_file)
