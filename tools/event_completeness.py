@@ -478,6 +478,26 @@ def _evaluate_ibkr_flows(
         and start <= _day(f.get("event_date"), "flow event_date") <= end
     ]
     record("INTERNAL_TRANSFERS_PAIRED", len(unpaired))
+    # a flow dated before the declared start, where the statements already covered the account, is
+    # a hole in the claim's boundary: the declaration must start at or before it (refused, named).
+    # Without any statement day before the start the earlier flows lie outside statement
+    # coverage: not refused, disclosed (flows_before_start) and left out of the claim.
+    earlier = sorted(
+        str(f.get("record_id"))
+        for f in own
+        if _day(f.get("nav_recognition_date") or f.get("event_date"), "flow date")
+        < start
+    )
+    covered_before = sum(1 for day in statement if day < start)
+    record(
+        "NO_FLOWS_BEFORE_DECLARED_START_WITH_STATEMENT_COVERAGE",
+        len(earlier) if covered_before else 0,
+        {
+            "flows_before_start": len(earlier),
+            "statement_days_before_start": covered_before,
+            "record_ids": earlier[:5],
+        },
+    )
     proven = sorted(str(f["record_id"]) for f in in_interval if f.get("record_id"))
     return checks, proven
 

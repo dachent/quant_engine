@@ -584,3 +584,52 @@ def test_a_nonzero_internal_cash_transfer_component_must_tie_to_the_ledger_flows
         _flow(B, day, "-40", "TRANSFER:INTERNAL:OUT"),
     ]
     assert _run([_entry()], flows, cin)[0]["status"] == ec.DECLARED_COMPLETE
+
+
+# --- flows before the declared start --------------------------------------------------------
+
+
+def _later_declaration(**over: Any) -> dict[str, Any]:
+    return _entry(declared_start=_days()[2].isoformat(), **over)
+
+
+def test_a_flow_before_the_declared_start_refuses_when_statements_covered_that_time() -> (
+    None
+):
+    # the account has statement rows for every day (including before the declared start):
+    # a flow on the first day sits in covered history outside the claim: refused, named
+    early = _days()[0]
+    flows = [_flow(A, early, "300")]
+    row = _run([_later_declaration()], flows, _cin(A, {early: "300"}))[0]
+    assert row["status"] == ec.CLOSURE_FAILED
+    check = next(
+        c
+        for c in row["checks"]
+        if c["check"] == "NO_FLOWS_BEFORE_DECLARED_START_WITH_STATEMENT_COVERAGE"
+    )
+    assert check["status"] == "FAIL" and check["flows_before_start"] == 1
+    assert check["record_ids"] == [flows[0]["record_id"]]
+    # declaring from the first day instead proves the same flow and completes
+    ok = _run([_entry()], flows, _cin(A, {early: "300"}))[0]
+    assert ok["status"] == ec.DECLARED_COMPLETE
+
+
+def test_flows_before_any_statement_coverage_are_disclosed_not_refused() -> None:
+    early = date(2025, 12, 1)
+    flows = [_flow(A, early, "300")]
+    row = _run(
+        [_later_declaration()],
+        flows,
+        [r for r in _cin(A) if r["accounting_date"] >= _days()[2].isoformat()],
+    )[0]
+    check = next(
+        c
+        for c in row["checks"]
+        if c["check"] == "NO_FLOWS_BEFORE_DECLARED_START_WITH_STATEMENT_COVERAGE"
+    )
+    assert check["status"] == "PASS"
+    assert (
+        check["flows_before_start"] == 1 and check["statement_days_before_start"] == 0
+    )
+    # the earlier flow is not among the records the closure proved
+    assert row["proven_record_ids"] == []

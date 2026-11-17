@@ -5548,6 +5548,16 @@ def _coverage_evidence(
                 missing_reason = (
                     f"completeness proved by ledger closure {proof['closure']}"
                 )
+                before = sum(
+                    1
+                    for item in accepted
+                    if item.get(date_field) and str(item[date_field]) < lo
+                )
+                if before:
+                    missing_reason += (
+                        f"; {before} accepted records dated before the declared start "
+                        f"{declared_start} lie outside the declaration"
+                    )
             elif proof_gap is not None:
                 missing_reason += proof_gap
             elif proof is not None and proof.get("status") in _TYPED_OUTCOME_STATUS:

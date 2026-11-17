@@ -6289,3 +6289,19 @@ def test_a_row_with_all_events_unattributed_stays_typed_not_complete_despite_a_p
     )
     assert row["status"] == "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF"
     assert "31 proven records are not accepted" in row["missing_interval_reason"]
+
+
+def test_a_complete_row_states_the_accepted_records_outside_its_declaration() -> None:
+    proof = {
+        ("account-reserve", "transactions"): _closure_row(
+            "DECLARED_COMPLETE", proven=["t-1"]
+        )
+    }
+    row = _matrix_row(None, [_accepted("t-1"), _accepted("t-0", "2025-12-01")], proof)
+    assert row["status"] == "DECLARED_COMPLETE"
+    assert (
+        "1 accepted records dated before the declared start 2026-01-02 lie outside the declaration"
+        in row["missing_interval_reason"]
+    )
+    plain = _matrix_row(None, [_accepted("t-1")], proof)
+    assert "outside the declaration" not in plain["missing_interval_reason"]
