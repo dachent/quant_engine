@@ -2485,3 +2485,32 @@ def test_target_loader_still_refuses_a_realized_live_layer_on_model_basis(
         decomposition.DecompositionError, match="cannot mix return semantics"
     ):
         decomposition._read_targets(mixed, date(2026, 1, 31), "LIVE_PLUS_BACKTEST")
+
+
+def test_an_all_model_series_backtest_then_model_live_publishes_no_observed_alpha(
+    tmp_path: Path,
+) -> None:
+    """Kill test: backtest then the model's own live record has no realized basis, so
+    no alpha is published and none is called a mixed-basis diagnostic."""
+
+    source = tmp_path / "hybrid-all-model"
+    target_path, days = _write_sources(source)
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    for index, row in enumerate(rows[1:], start=1):
+        row[3] = "BACKTEST" if index <= 20 else "MODEL_LIVE"
+        row[4] = "MODEL"
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source, target_path, days)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    spec["target_source"]["interval_policy"]["return_basis"] = "MIXED_NET_MODEL"
+    spec_path.write_text(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+    alpha = _available(result)["alpha"]
+    assert alpha["net_annualized"] is None and alpha["gross_annualized"] is None
+    assert alpha["net_status"] == "UNAVAILABLE_MODEL_RETURN_BASIS"
+    assert alpha["gross_status"] == "UNAVAILABLE_MODEL_RETURN_BASIS"
