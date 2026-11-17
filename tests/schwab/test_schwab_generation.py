@@ -2243,6 +2243,7 @@ def test_structure_is_typed_apart_and_only_missing_observations_are_gaps(
     assert not any(
         "hold cash only" in g for g in complete["coverage"]["structural_boundaries"]
     )
+    assert "empty_position_account_ids" not in complete
 
     cash_only_spec = _spec_with_current(tmp_path / "b")
     _without_positions_of_first_account(cash_only_spec, liquidation_available=True)
@@ -2254,6 +2255,12 @@ def test_structure_is_typed_apart_and_only_missing_observations_are_gaps(
     assert not any(
         "no reported non-cash" in g for g in cash_only["coverage"]["known_gaps"]
     )
+    # positive evidence for the ledger: exactly the account without a position row whose
+    # liquidation value is proved
+    assert len(cash_only["empty_position_account_ids"]) == 1
+    assert cash_only["empty_position_account_ids"][0] not in {
+        row["account_id"] for row in cash_only["positions"]
+    }
 
     unproved_spec = _spec_with_current(tmp_path / "c")
     _without_positions_of_first_account(unproved_spec, liquidation_available=False)
@@ -2265,3 +2272,4 @@ def test_structure_is_typed_apart_and_only_missing_observations_are_gaps(
     assert not any(
         "hold cash only" in g for g in unproved["coverage"]["structural_boundaries"]
     )
+    assert "empty_position_account_ids" not in unproved
