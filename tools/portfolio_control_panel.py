@@ -51,6 +51,7 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.core import inventory_identity
+from quant_engine.core import reuse_render
 import series_label
 import sleeve_disclosures
 import strategy_basis_lens_moves
@@ -13218,7 +13219,7 @@ def _validate_panel_data_schema(
         )
 
 
-def _rendered_files(
+def _rendered_files_live(
     report_root: Path | None,
     legacy_panel: Path,
     template_root: Path,
@@ -14026,6 +14027,19 @@ def _rendered_files(
     for index, (path, sha256) in enumerate(lens_bindings):
         bound_inputs[f"decomposition_lens:{index:02d}"] = (path, sha256)
     return files, data, bound_inputs
+
+
+def _rendered_files(*args: Any, **kwargs: Any) -> Any:
+    """Render the panel files; a PROVISIONAL refresh run reuses an earlier render of
+    unchanged inputs (#885 1d). Release runs always render live."""
+
+    return reuse_render(
+        "panel_rendered_files",
+        args,
+        kwargs,
+        repo_root=Path(__file__).resolve().parents[1],
+        compute=lambda: _rendered_files_live(*args, **kwargs),
+    )
 
 
 def _panel_id(files: Mapping[str, bytes]) -> str:

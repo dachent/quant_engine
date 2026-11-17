@@ -16101,3 +16101,88 @@ def test_a_gate_rejected_schema_three_row_publishes_no_number_outside_the_detail
     detail = row["diagnostic_detail"]
     assert detail["orthogonal_attribution"]["mode_coefficients"]
     assert detail["dynamic"]["exposure_path"]
+
+
+def _render_reuse_world(monkeypatch, tmp_path: Path):
+    state = tmp_path / "render-state"
+    state.mkdir()
+    monkeypatch.setenv("QE_RENDER_REUSE", "provisional")
+    monkeypatch.setenv("QE_RENDER_STATE_ROOT", str(state))
+    live = {"n": 0}
+    real = panel._rendered_files_live
+
+    def counting(*args, **kwargs):
+        live["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(panel, "_rendered_files_live", counting)
+    return live
+
+
+def _render_reuse_verify(inputs: dict[str, Path], candidate: Path):
+    return panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+
+
+def _render_reuse_build(inputs: dict[str, Path]):
+    return panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+
+
+def test_provisional_render_is_built_once_and_verification_is_identical(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch
+) -> None:
+    reference = _render_reuse_build(inputs)
+    full = _render_reuse_verify(inputs, Path(reference["candidate_dir"]))
+    live = _render_reuse_world(monkeypatch, tmp_path)
+    built = _render_reuse_build(inputs)
+    verified = _render_reuse_verify(inputs, Path(built["candidate_dir"]))
+    again = _render_reuse_verify(inputs, Path(built["candidate_dir"]))
+    assert live["n"] == 1  # build rendered; both verifications reused it
+    assert verified == again == full  # byte-identical to the full verification
+    assert built["panel_id"] == reference["panel_id"]
+
+
+def test_provisional_render_reuse_never_hides_a_tampered_candidate_or_input(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch
+) -> None:
+    live = _render_reuse_world(monkeypatch, tmp_path)
+    built = _render_reuse_build(inputs)
+    candidate = Path(built["candidate_dir"])
+    assert _render_reuse_verify(inputs, candidate)["all_passed"] is True
+    assert live["n"] == 1
+    page = candidate / "index.html"
+    page.write_bytes(page.read_bytes() + b" ")  # one byte on the candidate
+    with pytest.raises(panel.ControlPanelValidationError, match="deterministic"):
+        _render_reuse_verify(inputs, candidate)
+    page.write_bytes(page.read_bytes()[:-1])
+    assert _render_reuse_verify(inputs, candidate)["all_passed"] is True
+    freshness = inputs["freshness"]
+    freshness.write_bytes(freshness.read_bytes() + b"\n")  # one byte of an input
+    before = live["n"]
+    with pytest.raises(panel.ControlPanelValidationError, match="deterministic"):
+        _render_reuse_verify(inputs, candidate)
+    assert (
+        live["n"] == before + 1
+    )  # re-rendered and refused, not served from the receipt
+
+
+def test_release_runs_render_live_every_time(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch
+) -> None:
+    live = _render_reuse_world(monkeypatch, tmp_path)
+    monkeypatch.delenv("QE_RENDER_REUSE")
+    built = _render_reuse_build(inputs)
+    _render_reuse_verify(inputs, Path(built["candidate_dir"]))
+    assert live["n"] == 2
+    assert not list((tmp_path / "render-state").rglob("*"))

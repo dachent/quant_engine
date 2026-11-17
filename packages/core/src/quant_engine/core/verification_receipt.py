@@ -34,7 +34,7 @@ always runs live.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import contextvars
@@ -869,3 +869,75 @@ def run_with_receipt(
             return result
         _store(state_root, name, key, body_new)
     return result
+
+
+RENDER_REUSE_ENV = "QE_RENDER_REUSE"
+RENDER_STATE_ENV = "QE_RENDER_STATE_ROOT"
+
+
+def render_reuse_enabled() -> bool:
+    """Only the refresh driver sets this, and only for a PROVISIONAL run (#885 1d)."""
+
+    return os.environ.get(RENDER_REUSE_ENV) == "provisional" and bool(
+        os.environ.get(RENDER_STATE_ENV)
+    )
+
+
+def _argument_identity(value: object) -> object:
+    if isinstance(value, (bytes, bytearray)):
+        return {"bytes_sha256": hashlib.sha256(bytes(value)).hexdigest()}
+    if isinstance(value, os.PathLike):
+        return {"path": os.fspath(value)}
+    if isinstance(value, Mapping):
+        return {
+            str(k): _argument_identity(v) for k, v in sorted(value.items(), key=str)
+        }
+    if isinstance(value, (list, tuple)):
+        return [_argument_identity(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return {"repr": repr(value)}  # unknown type: still part of the key, never dropped
+
+
+def reuse_render(
+    name: str,
+    args: Sequence[object],
+    kwargs: Mapping[str, object],
+    *,
+    repo_root: Path,
+    compute: Callable[[], T],
+) -> T:
+    """``compute`` (a deterministic render of files it reads) once per input state.
+
+    Release runs never set ``QE_RENDER_REUSE``: they call ``compute`` directly. A hit
+    returns the pickled result of the earlier render only after the receipt's
+    read-set is re-hashed unchanged and the sidecar digest matches.
+    """
+
+    if not render_reuse_enabled():
+        return compute()
+    import pickle
+
+    state_root = Path(os.environ[RENDER_STATE_ENV])
+    identity = {
+        "args": _argument_identity(list(args)),
+        "kwargs": _argument_identity(dict(kwargs)),
+    }
+    restore = PERSIST.set(True)
+    previous = os.environ.get(MODE_ENV)
+    os.environ[MODE_ENV] = "persist"
+    try:
+        return run_with_receipt(
+            name,
+            identity,
+            repo_root=repo_root,
+            state_root=state_root,
+            compute=compute,
+            blob_codec=(lambda v: pickle.dumps(v, protocol=4), pickle.loads),
+        )
+    finally:
+        PERSIST.reset(restore)
+        if previous is None:
+            os.environ.pop(MODE_ENV, None)
+        else:
+            os.environ[MODE_ENV] = previous

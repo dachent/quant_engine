@@ -8960,3 +8960,32 @@ def test_the_positions_fact_types_declared_boundaries_apart_from_gaps() -> None:
     assert provider["structural_boundaries"] == [
         "Investor Checking is outside the accepted brokerage boundary"
     ]
+
+
+def test_provisional_report_data_is_built_once_and_tampering_is_still_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    reference = reporter.build_candidate(baseline_root, tmp_path / "reporting-full")
+    full = reporter.verify_candidate(baseline_root, Path(reference["candidate_dir"]))
+    state = tmp_path / "render-state"
+    state.mkdir()
+    monkeypatch.setenv("QE_RENDER_REUSE", "provisional")
+    monkeypatch.setenv("QE_RENDER_STATE_ROOT", str(state))
+    live = {"n": 0}
+    real = reporter.build_report_data_live
+
+    def counting(*args, **kwargs):
+        live["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(reporter, "build_report_data_live", counting)
+    built = reporter.build_candidate(baseline_root, tmp_path / "reporting")
+    candidate = Path(built["candidate_dir"])
+    first = reporter.verify_candidate(baseline_root, candidate)
+    second = reporter.verify_candidate(baseline_root, candidate)
+    assert live["n"] == 1 and first == second == full
+    (candidate / reporter.REPORT_DATA_NAME).write_text("{}", encoding="utf-8")
+    with pytest.raises(reporter.ReportValidationError, match="differs"):
+        reporter.verify_candidate(baseline_root, candidate)
+    assert live["n"] == 1  # the refusal came from the live byte compare
