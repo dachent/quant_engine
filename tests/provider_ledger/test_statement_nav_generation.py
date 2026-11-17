@@ -7,6 +7,7 @@ from datetime import date
 from decimal import Decimal
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,15 @@ from quant_engine.core import (
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from tools import statement_nav_generation as gen
+
+
+@pytest.fixture(autouse=True)
+def _forget_the_governed_root() -> Any:
+    """The governed baseline root comes from the invocation (here the environment)."""
+
+    yield
+    os.environ.pop(gen._BASELINE_ROOT_ENV, None)
+
 
 ACCOUNT = "account-0123456789abcdef"
 PLAN = "Fertility Specialists Network 401(k) Plan"
@@ -261,6 +271,8 @@ def _spec(
         else [{"account_id": ACCOUNT, "provider": alias.upper(), "role": "INVESTMENT"}],
         [{"account_id": ACCOUNT, "effective_start": census_start}],
     )
+    # the root is never part of the spec: the invocation supplies it
+    os.environ[gen._BASELINE_ROOT_ENV] = census_ref.pop("root")
     spec = {
         "as_of_date": "2026-11-06",
         "baseline": {"statement_count": len(statements)},
@@ -918,9 +930,7 @@ def test_internal_account_must_be_in_the_governed_census(tmp_path: Path) -> None
     fourth = tmp_path / "c4"
     fourth.mkdir()
     spec = _jh(fourth)
-    data = json.loads(spec.read_text())
-    data["census_catalog"]["root"] = str(fourth / "dataPortfolio" / "baseline")
-    spec.write_text(json.dumps(data))
+    os.environ[gen._BASELINE_ROOT_ENV] = str(fourth / "dataPortfolio" / "baseline")
     with pytest.raises(gen.StatementGenerationError, match="no current generation"):
         gen.build_generation(spec)
 
@@ -1131,12 +1141,11 @@ def test_an_edited_census_catalog_under_a_governed_generation_id_is_refused(
     census = {
         "catalog_sha256": ref["catalog_sha256"],
         "generation_id": ref["generation_id"],
-        "root": ref["root"],
     }
     with pytest.raises(
         gen.StatementGenerationError, match="differs from the content its generation"
     ):
-        gen._census_account_start(census, ACCOUNT, "JOHN_HANCOCK")
+        gen._census_account_start(census, ACCOUNT, "JOHN_HANCOCK", Path(ref["root"]))
 
 
 def test_the_census_root_must_be_the_governed_baseline_store(tmp_path: Path) -> None:
@@ -1149,9 +1158,12 @@ def test_the_census_root_must_be_the_governed_baseline_store(tmp_path: Path) -> 
     import shutil
 
     shutil.copytree(ref["root"], moved)
-    bad = {**ref, "root": str(moved)}
+    census = {
+        "catalog_sha256": ref["catalog_sha256"],
+        "generation_id": ref["generation_id"],
+    }
     with pytest.raises(gen.StatementGenerationError, match="governed dataPortfolio"):
-        gen._census_account_start(bad, ACCOUNT, "JOHN_HANCOCK")
+        gen._census_account_start(census, ACCOUNT, "JOHN_HANCOCK", moved)
 
 
 def test_john_hancock_printed_total_equal_to_the_closing_balance_is_still_stray() -> (
@@ -1172,3 +1184,57 @@ def test_john_hancock_printed_total_equal_to_the_closing_balance_is_still_stray(
     )
     with pytest.raises(gen.StatementGenerationError, match="no activity row accounts"):
         gen.parse_john_hancock(text)
+
+
+def test_the_spec_cannot_choose_the_census_root(tmp_path: Path) -> None:
+    """Round 5: a self-consistent scratch census (its own manifest, its own CURRENT) is
+    useless because the governed root is supplied by the invocation, never the spec."""
+
+    spec = _jh(tmp_path)
+    data = json.loads(spec.read_text())
+    assert "root" not in data["census_catalog"]
+    data["census_catalog"]["root"] = os.environ[gen._BASELINE_ROOT_ENV]
+    spec.write_text(json.dumps(data))
+    with pytest.raises(
+        gen.StatementGenerationError, match="census reference has wrong keys"
+    ):
+        gen.build_generation(spec)
+
+
+def test_a_forged_census_in_a_scratch_root_is_not_the_governed_one(
+    tmp_path: Path,
+) -> None:
+    """A scratch dataPortfolio/baseline holding a complete forged generation passes only if
+    the invocation points at it; pointed at the REAL governed root it is refused."""
+
+    real = _census(
+        tmp_path / "real",
+        [{"account_id": ACCOUNT, "provider": "JOHN HANCOCK", "role": "INVESTMENT"}],
+        [{"account_id": ACCOUNT, "effective_start": None}],
+    )
+    forged = _census(
+        tmp_path / "scratch",
+        [
+            {
+                "account_id": "account-b8bf3535fe6606b3",
+                "provider": "COMPOSER",
+                "role": "INVESTMENT",
+            }
+        ],
+        [{"account_id": "account-b8bf3535fe6606b3", "effective_start": "2025-01-01"}],
+    )
+    census = {
+        "catalog_sha256": forged["catalog_sha256"],
+        "generation_id": forged["generation_id"],
+    }
+    with pytest.raises(gen.StatementGenerationError, match="not the current authority"):
+        gen._census_account_start(
+            census, "account-b8bf3535fe6606b3", "COMPOSER", Path(real["root"])
+        )
+
+
+def test_no_governed_root_supplied_is_a_refusal(tmp_path: Path) -> None:
+    spec = _jh(tmp_path)
+    os.environ.pop(gen._BASELINE_ROOT_ENV, None)
+    with pytest.raises(gen.StatementGenerationError, match="governed baseline root"):
+        gen.build_generation(spec)

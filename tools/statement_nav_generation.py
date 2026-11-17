@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 from typing import Any
@@ -40,6 +41,7 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 SPEC_SCHEMA_VERSION = 2
+_BASELINE_ROOT_ENV = "QE_GOVERNED_BASELINE_ROOT"
 CATALOG_SCHEMA_VERSION = 1
 ADAPTER_VERSION = "0.1.0"
 PROVIDERS = {
@@ -701,24 +703,22 @@ def _composer_table_closure(
 
 
 def _census_account_start(
-    ref: object, account_id: str, label: str
+    ref: object, account_id: str, label: str, baseline_root: Path
 ) -> tuple[date | None, SourceArtifact]:
     """The account's start in the GOVERNED census: the published baseline generation.
 
-    The catalog is read from the generation the root's CURRENT pointer names (the pointer
+    The root is the governed baseline store the INVOCATION supplies (the release driver's
+    workspace), never a path the spec chooses.  The catalog is read from the generation the
+    root's CURRENT pointer names (the pointer
     must name the configured generation id and the catalog must hash to the configured
     sha256), so a copy or a hand-written catalog cannot stand in for it.  The account must
     be an INVESTMENT account of this provider in its accounts; its start is the earliest
     dated assignment.  The returned artifact identifies the census in the manifest.
     """
 
-    if not isinstance(ref, dict) or set(ref) != {
-        "catalog_sha256",
-        "generation_id",
-        "root",
-    }:
+    if not isinstance(ref, dict) or set(ref) != {"catalog_sha256", "generation_id"}:
         raise StatementGenerationError("census reference has wrong keys")
-    root = Path(_text(ref["root"], "census root"))
+    root = baseline_root
     if root.parts[-2:] != ("dataPortfolio", "baseline"):
         raise StatementGenerationError(
             "census root is not the governed dataPortfolio/baseline store"
@@ -1039,8 +1039,18 @@ def _john_hancock_activity(
     }
 
 
+def _governed_baseline_root(supplied: Path | None) -> Path:
+    """The governed dataPortfolio/baseline store, supplied by the invocation or the driver's
+    environment (QE_GOVERNED_BASELINE_ROOT): the spec cannot choose it."""
+
+    value = supplied if supplied is not None else os.environ.get(_BASELINE_ROOT_ENV)
+    if not value:
+        raise StatementGenerationError("the governed baseline root was not supplied")
+    return Path(value)
+
+
 def build_generation(
-    spec_path: Path,
+    spec_path: Path, baseline_root: Path | None = None
 ) -> tuple[dict[str, object], GenerationManifest, bytes]:
     spec = _load_spec(spec_path)
     provider = str(spec["provider"])
@@ -1063,7 +1073,10 @@ def build_generation(
     if re.fullmatch(r"account-[0-9a-f]{16}", internal) is None:
         raise StatementGenerationError("internal account ID is invalid")
     census_start, census_artifact = _census_account_start(
-        spec["census_catalog"], internal, str(meta["label"])
+        spec["census_catalog"],
+        internal,
+        str(meta["label"]),
+        _governed_baseline_root(baseline_root),
     )
     identity = _text(spec["identity"], "identity")
 
@@ -1341,10 +1354,12 @@ def latest_on_or_before(
     return max(points, key=lambda item: item["as_of_date"], default=None)
 
 
-def stage_generation_candidate(spec_path: Path, output_root: Path) -> dict[str, object]:
+def stage_generation_candidate(
+    spec_path: Path, output_root: Path, baseline_root: Path | None = None
+) -> dict[str, object]:
     """Stage one immutable candidate without advancing CURRENT.json."""
 
-    catalog, manifest, catalog_bytes = build_generation(spec_path)
+    catalog, manifest, catalog_bytes = build_generation(spec_path, baseline_root)
     provider = str(_load_spec(spec_path)["provider"])
     manifest_path = stage_generation(output_root, manifest)
     catalog_path = manifest_path.parent / str(PROVIDERS[provider]["catalog"])
@@ -1371,9 +1386,11 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     build = sub.add_parser("build", help="verify and build without writes")
     build.add_argument("spec", type=Path)
+    build.add_argument("--baseline-root", type=Path, default=None)
     stage = sub.add_parser("stage", help="create an immutable candidate")
     stage.add_argument("spec", type=Path)
     stage.add_argument("output_root", type=Path)
+    stage.add_argument("--baseline-root", type=Path, default=None)
     return parser
 
 
@@ -1381,9 +1398,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "build":
-            result = _summary(*build_generation(args.spec))
+            result = _summary(*build_generation(args.spec, args.baseline_root))
         else:
-            result = stage_generation_candidate(args.spec, args.output_root)
+            result = stage_generation_candidate(
+                args.spec, args.output_root, args.baseline_root
+            )
     except StatementGenerationError as exc:
         raise SystemExit(str(exc)) from exc
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
