@@ -55,8 +55,12 @@ def _rows(
             rows += _drawdown_rows(
                 sid, "ACCOUNT_LIVE", str(live[strategy]), "2026-02-02"
             )
-        if backtest and strategy in backtest:
-            rows += _drawdown_rows(sid, "BACKTEST", backtest[strategy], "2020-01-02")
+        # EU and VTMA require their backtest layer; a small one leaves the audit loss unchanged
+        bt = (backtest or {}).get(
+            strategy, "0.01" if series["backtest_layer_required"] else None
+        )
+        if bt is not None:
+            rows += _drawdown_rows(sid, "BACKTEST", bt, "2020-01-02")
         if not any(r["series_id"] == sid for r in rows):
             rows += _drawdown_rows(sid, "ACCOUNT_LIVE", "0.01", "2026-02-02")
     return rows
@@ -157,3 +161,29 @@ def test_the_max_drawdown_is_the_largest_peak_to_trough_loss() -> None:
         Decimal("0.244"), abs=Decimal("1e-12")
     )
     assert rule.max_drawdown([]) == 0
+
+
+def test_a_series_that_requires_its_backtest_layer_refuses_without_it() -> None:
+    # EU would otherwise fall back to 1.5 x its live drawdown, the audit constant, with no error
+    rows = [
+        r
+        for r in _rows(POLICY, AUDIT_LIVE_MDD)
+        if not (r["series_id"] == "EU [P123]" and r["evidence_layer"] == "BACKTEST")
+    ]
+    with pytest.raises(
+        rule.AdverseLossError, match="EU .P123. requires its governed backtest"
+    ):
+        rule.restate_policy(POLICY, rows)
+
+
+def test_the_policy_schema_pins_the_rule_parameters() -> None:
+    schema = json.loads(
+        (
+            POLICY_PATH.parents[1] / "schemas/portfolio/dependence-policy.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    props = schema["$defs"]["adverse_loss_rule"]["properties"]
+    assert [
+        props[k]["const"]
+        for k in ("prior_multiplier", "live_multiplier", "platform_only_uplift", "cap")
+    ] == ["1.25", "1.5", "0.05", "1"]

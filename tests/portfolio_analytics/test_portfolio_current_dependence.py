@@ -232,6 +232,7 @@ def _fixture(
                 "allocation_weight": weight,
                 "audit_adverse_loss_fraction": loss,
                 "platform_only_history": False,
+                "backtest_layer_required": False,
                 # the rule gives the stated loss: 1.25 x this prior, above 1.5 x the fixture's live drawdown
                 "prior_max_drawdown": str(Decimal(loss) / Decimal("1.25")),
             }

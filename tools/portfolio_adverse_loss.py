@@ -144,6 +144,10 @@ def restate_policy(
         series_id = str(row["series_id"])
         prior = row.get("prior_max_drawdown")
         backtest, live = _series_returns(rows, series_id)
+        if row["backtest_layer_required"] and not backtest:
+            raise AdverseLossError(
+                f"{series_id} requires its governed backtest layer, which is absent"
+            )
         backtest_mdd = max_drawdown(backtest) if backtest else None
         live_mdd = max_drawdown(live) if live else None
         loss = rule_loss(

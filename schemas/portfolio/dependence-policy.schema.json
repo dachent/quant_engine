@@ -99,6 +99,7 @@
       "required": [
         "allocation_weight",
         "audit_adverse_loss_fraction",
+        "backtest_layer_required",
         "platform_only_history",
         "prior_max_drawdown",
         "series_id",
@@ -116,6 +117,7 @@
           "pattern": "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
         },
         "platform_only_history": {"type": "boolean"},
+        "backtest_layer_required": {"type": "boolean"},
         "allocation_weight": {
           "type": "string",
           "pattern": "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
@@ -136,10 +138,10 @@
       ],
       "properties": {
         "rule_id": {"const": "underwriting_stressed_component_max_drawdown"},
-        "prior_multiplier": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$"},
-        "live_multiplier": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$"},
-        "platform_only_uplift": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$"},
-        "cap": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$"},
+        "prior_multiplier": {"const": "1.25"},
+        "live_multiplier": {"const": "1.5"},
+        "platform_only_uplift": {"const": "0.05"},
+        "cap": {"const": "1"},
         "statement": {"$ref": "#/$defs/nonempty"},
         "audit_input": {
           "type": "object",
