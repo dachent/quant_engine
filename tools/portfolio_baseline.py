@@ -5290,6 +5290,26 @@ def _fact_coverage(
     return claims, exceptions
 
 
+def _unattributed_provider_records(
+    provider_catalog: Mapping[str, Any] | None,
+) -> dict[tuple[str, str], int]:
+    """Provider-ledger flows and transactions per (account, fact) that are not MAPPED to a strategy."""
+
+    counts: dict[tuple[str, str], int] = defaultdict(int)
+    for fact_type in ("flows", "transactions"):
+        rows = (provider_catalog or {}).get(fact_type)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if (
+                isinstance(row, Mapping)
+                and row.get("account_id") is not None
+                and row.get("mapping_status") != "MAPPED"
+            ):
+                counts[(str(row["account_id"]), fact_type)] += 1
+    return dict(counts)
+
+
 def _coverage_evidence(
     accounts: Sequence[Mapping[str, Any]],
     assignments: Sequence[Mapping[str, Any]],
@@ -5300,8 +5320,13 @@ def _coverage_evidence(
     transactions: Sequence[Mapping[str, Any]],
     flows: Sequence[Mapping[str, Any]],
     as_of_date: date,
+    unattributed: Mapping[tuple[str, str], int] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Build value-free account/fact evidence without inventing completeness."""
+    """Build value-free account/fact evidence without inventing completeness.
+
+    ``unattributed`` counts, per (account, fact), the provider-ledger records that carry no
+    strategy attribution and so are not among the accepted records: a row's reason names them,
+    so an account whose events were all excluded is never described as having none."""
 
     fact_specs = {
         "nav": (nav, "as_of_date", "nav_observations", "nav", "DAILY"),
@@ -5452,6 +5477,12 @@ def _coverage_evidence(
                 )
                 authority = "ACCOUNT_REGISTRY_NO_PROVIDER_SOURCE"
                 boundary_basis = "NO_ACCEPTED_SOURCE"
+            excluded = (unattributed or {}).get((account_id, fact_type), 0)
+            if excluded:
+                missing_reason += (
+                    f"; provider ledger {fact_type} for this account: {excluded} "
+                    "carry no strategy attribution and are excluded from the accepted records"
+                )
             matrix.append(
                 {
                     "account_id": account_id,
@@ -6753,6 +6784,7 @@ def build_catalog(
             transactions,
             flows,
             as_of,
+            unattributed=_unattributed_provider_records(provider_catalog),
         )
     )
     fact_coverage, exceptions = _fact_coverage(
