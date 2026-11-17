@@ -11,6 +11,11 @@ the dashboard on every day it can value (pre-fill holdings x close + a constant 
 residual must equal the dashboard), and only then restates a fill day to its post-fill
 holdings x close.  A fill day whose closes are missing, or whose pre-fill rebuild does
 not close, is never silently restated: it keeps the dashboard value and says why.
+A fill moves holdings, not value: the restated value of a fill day must lie within
+``MAX_RESTATEMENT_CHANGE`` of the dashboard value, else the restatement is refused and the
+dashboard value kept (a close series in other units than the legs, for example split-adjusted
+closes against as-traded quantities, values the post-fill holdings at a fraction of the fund:
+TQQQ 2025-08-06, 245.08 shares x 44.42 adjusted instead of 88.84 as traded).
 A pure function of its inputs.
 """
 
@@ -25,6 +30,8 @@ from typing import Final
 CASH: Final = "$USD"
 ABS_TOLERANCE: Final = Decimal("25")
 REL_TOLERANCE: Final = Decimal("0.0005")
+# the largest change of a fill day's value a restatement may make (fill-to-close market move)
+MAX_RESTATEMENT_CHANGE: Final = Decimal("0.05")
 
 RESTATED: Final = "RESTATED_POST_FILL"
 DASHBOARD: Final = "DASHBOARD_NO_FILL"
@@ -32,6 +39,7 @@ UNRESTATED_NO_CLOSES: Final = "DASHBOARD_PRE_FILL_NO_CLOSES"
 
 
 UNRESTATED_NO_CLOSURE: Final = "DASHBOARD_REBUILD_DOES_NOT_CLOSE"
+UNRESTATED_IMPLAUSIBLE: Final = "DASHBOARD_RESTATEMENT_EXCEEDS_TOLERANCE"
 
 
 @dataclass(frozen=True)
@@ -95,5 +103,9 @@ def corrected_values(
         if post is None:
             result[day] = FundDay(nav, UNRESTATED_NO_CLOSES, residual)
             continue
-        result[day] = FundDay(post + residual, RESTATED, residual)
+        restated = post + residual
+        if abs(restated - nav) > abs(nav) * MAX_RESTATEMENT_CHANGE:
+            result[day] = FundDay(nav, UNRESTATED_IMPLAUSIBLE, residual)
+            continue
+        result[day] = FundDay(restated, RESTATED, residual)
     return result

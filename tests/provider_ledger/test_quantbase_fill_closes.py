@@ -28,12 +28,12 @@ def _world(tmp_path: Path) -> tuple[GenerationManifest, dict[str, Any]]:
     root = tmp_path / "source-runs" / RUN / "artifacts"
     (root / "csv").mkdir(parents=True)
     price = root / ledger._QUANTBASE_PRICEHISTORY
-    # 01-05 holds SHV (10 x 100 = 1000); the 01-06 fill swaps it for TQQQ (22 x 40 = 880).
+    # 01-05 holds SHV (10 x 100 = 1000); the 01-06 fill swaps it for TQQQ (22 x 44 = 968).
     price.write_text(
         "time,value,cost_basis,profit_loss\n"
         "01/05/2026,1000.00,1000.00,0\n"
         "01/06/2026,1000.00,1000.00,0\n"
-        "01/07/2026,880.00,1000.00,0\n",
+        "01/07/2026,968.00,1000.00,0\n",
         encoding="utf-8-sig",
     )
     activity = root / "csv" / "account_activity.csv"
@@ -103,7 +103,7 @@ def _observations(
 
 CLOSES = {
     "SHV": {date(2026, 1, d): Decimal("100") for d in (5, 6, 7)},
-    "TQQQ": {date(2026, 1, d): Decimal("40") for d in (5, 6, 7)},
+    "TQQQ": {date(2026, 1, d): Decimal("44") for d in (5, 6, 7)},
 }
 
 
@@ -120,7 +120,7 @@ def test_a_fill_day_is_restated_to_its_post_fill_value_with_governed_closes(
     ended that day in TQQQ, which is what 01-07 shows."""
 
     rows = _observations(tmp_path, CLOSES)
-    assert rows["2026-01-06"]["nav"]["value"] == "880.00"
+    assert rows["2026-01-06"]["nav"]["value"] == "968.00"
     assert rows["2026-01-06"]["fill_restatement"] == {
         "dashboard_value": "1000.00",
         "status": "RESTATED_POST_FILL",
@@ -146,3 +146,20 @@ def test_the_spec_pins_the_closes_and_refuses_a_hash_mismatch(tmp_path: Path) ->
         ledger._quantbase_fill_closes([{**ref, "sha256": "0" * 64}])
     with pytest.raises(ledger.ProviderLedgerError, match="duplicated"):
         ledger._quantbase_fill_closes([ref, ref])
+
+
+def test_closes_in_other_units_than_the_legs_keep_the_dashboard_value(
+    tmp_path: Path,
+) -> None:
+    """B blocker: a split-adjusted close (here half the as-traded 44) values the post-fill
+    holdings at about half the fund; the restatement is refused and the dashboard kept."""
+
+    halved = {
+        "SHV": CLOSES["SHV"],
+        "TQQQ": {date(2026, 1, d): Decimal("22") for d in (5, 6, 7)},
+    }
+    rows = _observations(tmp_path, halved)
+    assert rows["2026-01-06"]["nav"]["value"] == "1000.00"
+    assert rows["2026-01-06"]["fill_restatement"]["status"] == (
+        "DASHBOARD_RESTATEMENT_EXCEEDS_TOLERANCE"
+    )
