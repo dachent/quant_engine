@@ -285,17 +285,61 @@ def hwm_financial_acceptance(
     return PENDING_OWNER_ACCEPTANCE
 
 
+def receipt_missing_points(
+    receipts: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, str]]:
+    """The (strategy, date) missing source days the epoch HPR receipts declare."""
+
+    points: list[dict[str, str]] = []
+    for outer in receipts or []:
+        receipt = outer.get("receipt") if isinstance(outer, Mapping) else None
+        spans = (
+            receipt.get("span_return_receipts")
+            if isinstance(receipt, Mapping)
+            else None
+        )
+        for span in spans if isinstance(spans, list) else []:
+            if isinstance(span, Mapping):
+                points.append(
+                    {
+                        "strategy_id": str(outer.get("strategy_id")),
+                        "date": str(span.get("missing_source_date")),
+                    }
+                )
+    return points
+
+
 def apply_hwm_owner_acceptance(
-    proof: Mapping[str, Any], record_bytes: bytes
+    proof: Mapping[str, Any],
+    record_bytes: bytes,
+    missing_daily_points: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """The proof with its acceptance state, and the record's digest when accepted."""
+    """The proof with its acceptance state, and the record's digest when accepted.
+
+    Given the span-filled days the epoch receipts declare, the set must equal the
+    record's missing days exactly: a fourth filled day is a change the owner has not
+    accepted.  Called without them (a re-projection that cannot see the receipts) the
+    content pins alone decide, and a consumer that was published with the receipts
+    differs from it only when a gap was added: that fails closed upstream.
+    """
 
     digest = hashlib.sha256(record_bytes).hexdigest()
+    document = json.loads(record_bytes)
     state = (
-        hwm_financial_acceptance(json.loads(record_bytes), proof)
+        hwm_financial_acceptance(document, proof)
         if digest == OWNER_ACCEPTANCE_RECORD_SHA256
         else PENDING_OWNER_ACCEPTANCE
     )
+    if state == OWNER_ACCEPTED and missing_daily_points is not None:
+        recorded = sorted(
+            (str(p["strategy_id"]), str(p["date"]))
+            for p in document["accepted"]["missing_daily_points"]
+        )
+        filled = sorted(
+            (str(p["strategy_id"]), str(p["date"])) for p in missing_daily_points
+        )
+        if recorded != filled:
+            state = PENDING_OWNER_ACCEPTANCE
     out = {**proof, "financial_acceptance": state}
     if state == OWNER_ACCEPTED:
         out["owner_acceptance_sha256"] = digest

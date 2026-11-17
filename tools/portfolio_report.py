@@ -68,6 +68,7 @@ from quant_engine.portfolio_ledger import (
     PENDING_OWNER_ACCEPTANCE,
     numerical_from_governed_proof,
     proof_covers_spans,
+    receipt_missing_points,
 )
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
@@ -10007,6 +10008,7 @@ def _report_governed_hwm_proof(
     input_receipt_bytes: bytes,
     *,
     product_contract_bytes: bytes | None = None,
+    missing_daily_points: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Verify a governed PORT-HWM-4 result and project it into report data.
 
@@ -10071,7 +10073,9 @@ def _report_governed_hwm_proof(
             for row in accepted["index_path"]
         ],
     }
-    return apply_hwm_owner_acceptance(proof, HWM_OWNER_ACCEPTANCE.read_bytes())
+    return apply_hwm_owner_acceptance(
+        proof, HWM_OWNER_ACCEPTANCE.read_bytes(), missing_daily_points
+    )
 
 
 def _governed_hwm_summary_rows(proof: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -11665,6 +11669,9 @@ def build_report_data(
             hwm_governed_calendar_bytes or b"",
             hwm_governed_receipt_bytes or b"",
             product_contract_bytes=financial_input_contract_bytes,
+            missing_daily_points=receipt_missing_points(
+                catalog.get("epoch_hpr_receipts")
+            ),
         )
         if hwm_governed_result is not None
         else None
