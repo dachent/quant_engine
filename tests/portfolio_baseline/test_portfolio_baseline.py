@@ -6187,3 +6187,105 @@ def test_a_non_closing_unassigned_interval_stays_a_gap(case: str) -> None:
     assert claim["status"] == "PARTIAL"
     assert claim["disposition"]["code"] == "POOL_ONLY_UNALLOCATED_RETAINED"
     assert "closed_unassigned_intervals" not in claim["disposition"]
+
+
+def _tracker_closure(tracker_flows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The closure fixture with accepted (tracker) flows before the ledger's first leg."""
+
+    def nav_row(day: str, value: str) -> dict[str, Any]:
+        return {
+            "account_id": "sleeve",
+            "as_of_date": day,
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
+        }
+
+    def leg(account: str, day: str, amount: str) -> dict[str, Any]:
+        return {
+            "account_id": account,
+            "event_date": day,
+            "flow_type": "TRANSFER:INTERNAL:IN"
+            if float(amount) > 0
+            else "TRANSFER:INTERNAL:OUT",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        }
+
+    reference = [
+        leg("sleeve", "2025-12-01", "100"),
+        leg("other", "2025-12-01", "-100"),
+        leg("sleeve", "2026-02-01", "-90"),
+        leg("other", "2026-02-01", "90"),
+    ]
+    claims, exceptions = baseline._fact_coverage(
+        [{"account_id": "sleeve", "role": "INVESTMENT", "provider": "IBKR"}],
+        [_hist_assignment("sleeve", "2025-09-15", "2026-03-31")],
+        [],
+        tracker_flows,
+        [],
+        [],
+        0,
+        date(2026, 11, 6),
+        nav=[
+            nav_row("2025-09-15", "0"),
+            nav_row("2025-10-21", "50"),
+            nav_row("2025-12-02", "110"),
+            nav_row("2026-03-31", "0"),
+        ],
+        reference_flows=reference,
+    )
+    claim = next(
+        c for c in claims if c["fact_type"] == "historical_strategy_attribution"
+    )
+    exception = next(
+        e
+        for e in exceptions
+        if e["exception_id"] == "historical-strategy-attribution-unresolved"
+    )
+    return {"claim": claim, "exception": exception}
+
+
+def _tracker_leg(account: str, amount: str) -> dict[str, Any]:
+    return {
+        "account_id": account,
+        "event_date": "2025-10-20",
+        "flow_type": "TRANSFER_FLOW",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+    }
+
+
+def test_closure_starts_from_the_earliest_nav_and_counts_pre_ledger_transfers() -> None:
+    """The opening is the interval's earliest NAV, and a matched tracker transfer before the
+    ledger's first leg is part of the closure (the IBKR 2d0a996c +2,674.30 on 2025-10-20)."""
+
+    result = _tracker_closure(
+        [_tracker_leg("sleeve", "50"), _tracker_leg("other", "-50")]
+    )
+
+    (row,) = result["claim"]["disposition"]["closed_unassigned_intervals"]
+    assert (row["opening_nav"], row["opening_nav_date"]) == ("0", "2025-09-15")
+    assert row["net_transfers"] == "60"  # +50 tracker, +100, -90
+    assert row["implied_pnl"] == "-60"  # 0 - 0 - 60
+    assert row["transfer_count"] == 3 and row["unmatched_transfer_count"] == 0
+
+
+def test_an_unmatched_pre_ledger_transfer_keeps_the_interval_a_gap() -> None:
+    result = _tracker_closure([_tracker_leg("sleeve", "50")])
+
+    assert "closed_unassigned_intervals" not in result["claim"]["disposition"]
+    assert result["claim"]["disposition"]["code"] == "POOL_ONLY_UNALLOCATED_RETAINED"
+
+
+def test_a_closed_unassigned_interval_keeps_the_exception_and_the_effect_text_honest() -> (
+    None
+):
+    """Kill tests: the historical exception does not flip PASS while the fact is PARTIAL, and
+    the effect text does not say every interval is attributed."""
+
+    result = _tracker_closure(
+        [_tracker_leg("sleeve", "50"), _tracker_leg("other", "-50")]
+    )
+
+    assert result["exception"]["record_count"] == 1
+    assert result["exception"]["status"] == "RETAINED_WITH_EXPLICIT_DISPOSITION"
+    effect = result["claim"]["disposition"]["effect"]
+    assert "not attributed to a strategy" in effect
+    assert "Every historical" not in effect

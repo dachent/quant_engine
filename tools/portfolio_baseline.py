@@ -4983,6 +4983,7 @@ def _split_closed_unassigned(
     nav: Sequence[Mapping[str, Any]],
     reference_flows: Sequence[Mapping[str, Any]],
     as_of_date: date,
+    accepted_flows: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[list[Mapping[str, Any]], list[dict[str, Any]]]:
     """CLOSED_FLOW_CLOSED_UNASSIGNED: a closed interval that carried no strategy, shown with its closure.
 
@@ -5015,6 +5016,7 @@ def _split_closed_unassigned(
                 nav,
                 reference_flows,
                 as_of_date,
+                accepted_flows,
             )
         if row is None:
             gaps.append(item)
@@ -5040,6 +5042,7 @@ def _closure_row(
     nav: Sequence[Mapping[str, Any]],
     reference_flows: Sequence[Mapping[str, Any]],
     as_of_date: date,
+    accepted_flows: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any] | None:
     points = sorted(
         (
@@ -5079,11 +5082,32 @@ def _closure_row(
         ):
             return None
         net += amount
-    # opening = the last NAV before the first in-interval transfer (the balance the
-    # transfers act on), else the first NAV of the interval
-    first_flow = min(_date(item["event_date"], "flow.event_date") for item in own)
-    before = [pair for pair in inside if pair[0] < first_flow]
-    opening, closing = (before[-1] if before else inside[0])[1], latest[-1][1]
+    # Before the ledger's first leg only the accepted (tracker) transfers exist: each must
+    # have its exact opposite on another account the same day.
+    first_ledger_leg = min(_date(item["event_date"], "flow.event_date") for item in own)
+    earlier = [
+        item
+        for item in accepted_flows
+        if item.get("account_id") == account_id
+        and start <= _date(item["event_date"], "flow.event_date") < first_ledger_leg
+    ]
+    for flow in earlier:
+        amount = _usd_amount_value(flow.get("amount"))
+        if (
+            amount is None
+            or not str(flow.get("flow_type", "")).startswith("TRANSFER")
+            or not any(
+                other.get("account_id") != account_id
+                and other.get("event_date") == flow.get("event_date")
+                and str(other.get("flow_type", "")).startswith("TRANSFER")
+                and (counter := _usd_amount_value(other.get("amount"))) is not None
+                and abs(counter + amount) < Decimal("0.005")
+                for other in accepted_flows
+            )
+        ):
+            return None
+        net += amount
+    opening, closing = inside[0][1], latest[-1][1]
     return {
         "account_id": account_id,
         "closing_nav": decimal_text(closing),
@@ -5093,11 +5117,12 @@ def _closure_row(
         "implied_pnl": decimal_text(closing - opening - net),
         "net_transfers": decimal_text(net),
         "opening_nav": decimal_text(opening),
+        "opening_nav_date": inside[0][0].isoformat(),
         "reason": (
-            "closed account with no strategy assignment: NAV about zero at the cutoff "
-            "and every transfer has its exact counterpart leg on a tracked account"
+            "closed account that never had a strategy assignment: NAV about zero at the "
+            "cutoff and its transfers have their exact counterpart legs on tracked accounts"
         ),
-        "transfer_count": len(own),
+        "transfer_count": len(own) + len(earlier),
         "unmatched_transfer_count": 0,
     }
 
@@ -5144,7 +5169,7 @@ def _fact_coverage(
         historical_unmapped, assignments
     )
     historical_unmapped, closed_unassigned = _split_closed_unassigned(
-        historical_unmapped, assignments, nav, reference_flows, as_of_date
+        historical_unmapped, assignments, nav, reference_flows, as_of_date, flows
     )
     claims: list[dict[str, Any]] = [
         {
@@ -5205,7 +5230,7 @@ def _fact_coverage(
                 *(
                     [
                         f"{len(closed_unassigned)} closed historical interval(s) held "
-                        "capital not attributed to a strategy; each closes with no "
+                        "capital not attributed to a strategy; they close without an "
                         "external flow (closure numbers in the disposition)"
                     ]
                     if closed_unassigned
@@ -5229,7 +5254,9 @@ def _fact_coverage(
                 "effect": (
                     "Historical pool-only intervals remain visible and are excluded from strategy attribution."
                     if historical_unmapped
-                    else "Every historical interval is a strategy assignment or pool-only history that ends before the account's first strategy assignment."
+                    else "Closed historical interval(s) held capital that was not attributed to a strategy; they close without an external flow and are shown with their closure numbers."
+                    if closed_unassigned
+                    else "Pool-only history before an account's first strategy assignment is derived structural history; later intervals have accepted strategy assignments."
                     if pre_strategy
                     else "Every historical systematic interval has an accepted strategy assignment."
                 ),
@@ -5453,10 +5480,12 @@ def _fact_coverage(
         {
             "exception_id": "historical-strategy-attribution-unresolved",
             "fact_type": "historical_strategy_attribution",
-            "record_count": len(historical_unmapped),
+            "record_count": len(historical_unmapped) + len(closed_unassigned),
             "severity": "DISCLOSED_HISTORICAL_GAP",
             "status": (
-                "RETAINED_WITH_EXPLICIT_DISPOSITION" if historical_unmapped else "PASS"
+                "RETAINED_WITH_EXPLICIT_DISPOSITION"
+                if historical_unmapped or closed_unassigned
+                else "PASS"
             ),
             "authority": "effective-dated account assignment registry",
             "disposition": "POOL_ONLY_UNALLOCATED",

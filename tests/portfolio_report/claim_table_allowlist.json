@@ -160,6 +160,16 @@
    "file": "apps/portfolio-control-panel/app.js",
    "pattern": "^Money-weighted [(]on capital invested[)]: [{][}] over [{][}] days[{][}]$",
    "justification": "readout line built from the portfolio MWR block's own window_equivalent_cumulative, window_days and value; consistent by construction and recomputed in test_portfolio_twr_conventions and test_portfolio_totals (#904 item 1)"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "pattern": "^closed account that never had a strategy assignment: NAV about zero at the cutoff and its transfers have their exact counterpart legs on tracked accounts$",
+   "justification": "closure-row reason computed and kill-tested in test_closure_starts_from_the_earliest_nav_and_counts_pre_ledger_transfers and test_a_non_closing_unassigned_interval_stays_a_gap: the row exists only when every condition it names holds (#900 CLOSED_FLOW_CLOSED_UNASSIGNED)"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "pattern": "^Pool-only history before an account's first strategy assignment is derived structural history;$",
+   "justification": "effect text of the PRE_STRATEGY_HISTORY disposition, printed only when the derivation holds and kill-tested in test_pool_only_history_before_the_first_strategy_assignment_is_derived_structural (#900)"
   }
  ]
 }
