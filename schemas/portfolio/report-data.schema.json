@@ -1787,6 +1787,23 @@
             "$ref": "#/$defs/custody_handoff_reserve_member"
           }
         },
+        "part_dates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["as_of_date", "part"],
+            "properties": {
+              "as_of_date": {
+                "$ref": "#/$defs/custody_handoff_nullable_date"
+              },
+              "part": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
         "reason": {
           "type": [
             "string",

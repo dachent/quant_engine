@@ -72,7 +72,7 @@ CATALOG_SCHEMA_VERSION: Final = 1
 # A catalog that carries custody-derived cash publishes version 2: each cash line is dated
 # by the coverage that proves it and names its last event and its coverage end.
 CUSTODY_CASH_CATALOG_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "1.4.0"
+BUILDER_VERSION: Final = "1.5.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 # The provenance registry binds fifteen strategy identities: the seven current
 # strategies, the retained excluded ones, and six retired history-only records
@@ -130,6 +130,11 @@ COST_CLASS_PERCENT_RATE: Final = "PERCENT_RATE"
 COST_STATUS_DOCUMENTED_RATE: Final = "documented_rate_percent"
 COST_STATUS_TIER_UNSETTLED: Final = "documented_rate_tier_unsettled"
 FEE_TIER_UNSETTLED: Final = "TIER_UNSETTLED"
+COST_DERIVATION_METHOD: Final = "DERIVED_FROM_DOCUMENTED_RATE"
+# A cost that is not a billed dollar amount is classified, with its reason, not left as a gap.
+COST_CLASS_IN_NAV_NOT_BILLED: Final = "IN_NAV_NOT_BILLED"
+COST_CLASS_EXCLUDED_HISTORY_ONLY: Final = "EXCLUDED_DEPRECATED_HISTORY_ONLY"
+COST_CLASS_EVENT_FEE_NOT_ANNUAL: Final = "EVENT_FEE_NOT_ANNUAL"
 _FEE_PLACEMENTS: Final = frozenset(
     {"INSIDE_VEHICLE_NAV", "OUTSIDE_BILLED", "NOT_STATED_IN_DOCUMENTATION"}
 )
@@ -2021,6 +2026,7 @@ def _provider_ledger_facts(
     legacy_securities: Sequence[Mapping[str, Any]],
     baseline_as_of: date,
     retained_excluded_accounts: Collection[str] = (),
+    reserve_nav_accounts: Collection[str] = (),
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -2059,9 +2065,14 @@ def _provider_ledger_facts(
         accepted: list[dict[str, Any]] = []
         for item in _objects(catalog.get(name), f"provider-ledger.{name}"):
             account_id = _text(item.get("account_id"), f"{name}.account_id")
-            if (
-                account_id not in accepted_accounts
-                or item.get("mapping_status") != "MAPPED"
+            if account_id not in accepted_accounts:
+                continue
+            if item.get("mapping_status") != "MAPPED" and not (
+                # A reserve-pool account's NAV is an account total: it needs no
+                # strategy interval, only the AUTHORITATIVE admission window below.
+                name == "nav_observations"
+                and account_id in reserve_nav_accounts
+                and item.get("mapping_reason") == "MAPPING_NO_ACTIVE_INTERVAL"
             ):
                 continue
             day_value = item.get("as_of_date") or item.get("event_date")
@@ -2390,6 +2401,7 @@ def _allocations_and_coverage(
             costs, evidence_path, strategy_aliases, publication_date
         )
     _require_fee_rate_evidence(costs)
+    costs = _classify_excluded_history_only_costs(costs, publication_date)
     # The audit snapshot is sealed: these totals are compared with the audit's reported
     # total and with the materializer's own sum, so they are added as the audit added
     # them (see ``_snapshot_sum``), never exactly.
@@ -2402,6 +2414,172 @@ def _allocations_and_coverage(
         systematic_total,
         nav_covered,
     )
+
+
+def _cutoff_capital_values(
+    current_capital: Mapping[str, Any], cutoff: date
+) -> dict[str, tuple[Decimal, date]]:
+    """Strategy sleeve values the current capital view dates at the cutoff itself."""
+
+    values: dict[str, tuple[Decimal, date]] = {}
+    for row in _objects(
+        current_capital.get("strategies"), "current_capital.strategies"
+    ):
+        amount = row.get("current_value")
+        if (
+            row.get("status") == _CAPITAL_AVAILABLE
+            and isinstance(amount, Mapping)
+            and amount.get("value") is not None
+            and row.get("as_of_date") == cutoff.isoformat()
+        ):
+            values[str(row["strategy_id"])] = (
+                _decimal(amount["value"], "current capital value") or Decimal(0),
+                cutoff,
+            )
+    return values
+
+
+def _derive_rate_dollar_costs(
+    costs: Sequence[Mapping[str, Any]],
+    values: Mapping[str, tuple[Decimal, date]],
+    as_of: date,
+) -> list[dict[str, Any]]:
+    """Annual dollars of a documented management rate: the rate times the sleeve value.
+
+    Only the selected tier's own ``management_rate`` is used, and only where it is
+    stated: an unsettled tier, a null rate or a strategy without a sleeve value is
+    left without a dollar figure (no rate is invented).  A performance rate is a
+    share of gains over a high-water mark, not of the sleeve value, so it is never
+    priced here; a row that documents one keeps its dollar figure for the
+    management part only and names the unpriced component.  The recorded amount
+    is ``derived_annual_cost_usd``; ``annual_external_cost_usd`` stays null.
+    """
+
+    carried: list[dict[str, Any]] = []
+    for row in costs:
+        item = dict(row)
+        rates = item.get("fee_rates")
+        if (
+            isinstance(rates, dict)
+            and rates["tier"] != FEE_TIER_UNSETTLED
+            and item["annual_external_cost_usd"] is None
+        ):
+            tier_row = next(
+                r for r in rates["tier_table"] if r["tier"] == rates["tier"]
+            )
+            found_value = values.get(str(item["strategy_id"]))
+            value = found_value[0] if found_value is not None else None
+            if found_value is not None and found_value[1] != as_of:
+                raise BaselineValidationError(
+                    f"the sleeve value of {item['strategy_id']} is dated "
+                    f"{found_value[1].isoformat()}, not the {as_of.isoformat()} "
+                    "cutoff: it cannot be the base of a derived cost"
+                )
+            if tier_row["management_rate"] is not None and found_value is not None:
+                assert value is not None
+                if value < 0:
+                    raise BaselineValidationError(
+                        f"sleeve value of {item['strategy_id']} is negative"
+                    )
+                rate = Decimal(tier_row["management_rate"])
+                # the base is published to the cent and the amount is that base times
+                # the rate, so a reader reproduces it from the published figures
+                value = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
+                unpriced: list[str] = []
+                classified: list[dict[str, Any]] = []
+                if tier_row["performance_rate"] not in (None, "0"):
+                    if rates["placement"] == "INSIDE_VEHICLE_NAV":
+                        # charged inside the vehicle NAV: the strategy return is already
+                        # net of it, so it is no billed dollar cost; never rate x value
+                        classified.append(
+                            {
+                                "classification": COST_CLASS_IN_NAV_NOT_BILLED,
+                                "component": "performance_rate",
+                                "mechanism": tier_row["performance_mechanism"],
+                                "rate": tier_row["performance_rate"],
+                                "reason": (
+                                    "the documentation places the fee inside the vehicle "
+                                    "NAV; it is a share of gains, not of capital value, "
+                                    "and is not an external billed cost"
+                                ),
+                            }
+                        )
+                    else:
+                        unpriced.append("performance_rate")
+                redemption = rates.get("redemption")
+                if isinstance(redemption, dict):
+                    # billed outside the NAV, but only when units are redeemed: an
+                    # event cost with no annual run rate, never assumed to occur
+                    classified.append(
+                        {
+                            "classification": COST_CLASS_EVENT_FEE_NOT_ANNUAL,
+                            "component": "redemption_fee",
+                            "placement": redemption["placement"],
+                            "rate": redemption["rate"],
+                            "reason": (
+                                "billed when units are redeemed; an event cost, not an "
+                                "annual cost, and not priced"
+                            ),
+                        }
+                    )
+                item["derived_annual_cost_usd"] = decimal_text(
+                    (rate * value).quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
+                )
+                item["cost_derivation"] = {
+                    "as_of": as_of.isoformat(),
+                    "base_value_usd": decimal_text(value),
+                    "method": COST_DERIVATION_METHOD,
+                    "rate": tier_row["management_rate"],
+                    "rate_kind": "management_rate",
+                    "tier": rates["tier"],
+                    "unpriced_components": unpriced,
+                    "classified_components": classified,
+                }
+                settled = rates.get("derivation")
+                if isinstance(settled, dict) and settled.get("last_date"):
+                    # the tier was settled from posted fees up to this date; the
+                    # derived dollars hold if the tier is unchanged since
+                    item["cost_derivation"]["tier_settled_through"] = settled[
+                        "last_date"
+                    ]
+        carried.append(item)
+    return carried
+
+
+def _classify_excluded_history_only_costs(
+    costs: Sequence[Mapping[str, Any]], as_of: date
+) -> list[dict[str, Any]]:
+    """A cost row with no price whose strategy the governed policy excludes as a
+    deprecated or history-only record, effective by the cutoff, is a structural
+    exclusion from live costs (with the policy's own reason), not a gap."""
+
+    policy = _load_json(_HWM_POLICY_PATH, "hwm policy contract")
+    exclusions = {
+        str(row["strategy_id"]): row
+        for row in policy.get("material_perimeter", {}).get("exclusions", [])
+        if isinstance(row, dict) and "strategy_id" in row
+    }
+    carried: list[dict[str, Any]] = []
+    for row in costs:
+        item = dict(row)
+        excluded = exclusions.get(str(item["strategy_id"]))
+        reason = str(excluded.get("reason", "")) if excluded else ""
+        if (
+            excluded is not None
+            and item["annual_external_cost_usd"] is None
+            and item.get("derived_annual_cost_usd") is None
+            and not str(item.get("cost_status", "")).startswith("known")
+            and _date(excluded["effective_date"], "exclusion.effective_date") <= as_of
+            and ("deprecated" in reason.lower() or "history-only" in reason.lower())
+        ):
+            item["cost_classification"] = {
+                "classification": COST_CLASS_EXCLUDED_HISTORY_ONLY,
+                "effective_date": excluded["effective_date"],
+                "reason": reason,
+                "source": "contracts/portfolio-hwm-policy-v3.json",
+            }
+        carried.append(item)
+    return carried
 
 
 def _require_fee_rate_evidence(costs: Sequence[Mapping[str, Any]]) -> None:
@@ -4016,6 +4194,31 @@ def _build_current_capital(
             list(_AGGREGATE_COMPONENTS),
             None,
         )
+        # never a mixed-date sum labelled at one day: the oldest component date is the
+        # aggregate's date, and every contributing part's own date is listed
+        total_liquid["part_dates"] = sorted(
+            [
+                {"as_of_date": systematic["as_of_date"], "part": "systematic"},
+                *(
+                    {
+                        "as_of_date": row["as_of_date"],
+                        "part": f"retained_excluded:{row['strategy_id']}",
+                    }
+                    for row in excluded
+                ),
+                *(
+                    {
+                        "as_of_date": member["as_of_date"],
+                        "part": (
+                            f"reserve:{member.get('provider') or ''}:"
+                            f"{member['account_id']}"
+                        ),
+                    }
+                    for member in reserve.get("members", [])
+                ),
+            ],
+            key=lambda item: (str(item["as_of_date"]), item["part"]),
+        )
 
     return {
         **({"custody_authority": dict(custody_authority)} if custody_authority else {}),
@@ -4894,14 +5097,27 @@ def _positions_claim(
 
 
 def _costs_claim(costs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Costs are complete only when every sleeve cost is a known dollar amount."""
+    """Costs are complete when every sleeve cost is a known or fully derived dollar amount."""
 
-    unknown = [
-        row
-        for row in costs
-        if not str(row.get("cost_status", "")).startswith("known")
-        or row.get("annual_external_cost_usd") is None
-    ]
+    def known(row: Mapping[str, Any]) -> bool:
+        classification = row.get("cost_classification")
+        if (
+            isinstance(classification, Mapping)
+            and classification.get("classification") == COST_CLASS_EXCLUDED_HISTORY_ONLY
+            and classification.get("reason")
+        ):
+            return True
+        if str(row.get("cost_status", "")).startswith("known"):
+            return row.get("annual_external_cost_usd") is not None
+        derivation = row.get("cost_derivation")
+        return (
+            row.get("derived_annual_cost_usd") is not None
+            and isinstance(derivation, Mapping)
+            and derivation.get("method") == COST_DERIVATION_METHOD
+            and not derivation.get("unpriced_components")
+        )
+
+    unknown = [row for row in costs if not known(row)]
     complete = bool(costs) and not unknown
     return {
         "fact_type": "costs",
@@ -4915,7 +5131,7 @@ def _costs_claim(costs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "authority": "strategy cost-economics register",
             "code": "COMPLETE" if complete else "RETAINED_UNKNOWN_OR_CONDITIONAL_COSTS",
             "effect": (
-                "Costs read from the cost-economics register."
+                "Costs are known amounts from the cost-economics register, amounts derived from a documented rate at the cutoff capital value, or classified with a stated reason."
                 if complete
                 else "Gross-to-net and after-tax conclusions remain unavailable where a sleeve cost is unknown or conditional."
             ),
@@ -5332,6 +5548,7 @@ def _coverage_evidence(
     transactions: Sequence[Mapping[str, Any]],
     flows: Sequence[Mapping[str, Any]],
     as_of_date: date,
+    statement_accounts: Collection[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Build value-free account/fact evidence without inventing completeness."""
 
@@ -5417,6 +5634,7 @@ def _coverage_evidence(
             account_id = _text(account.get("account_id"), "account.account_id")
             provider_id = _text(account.get("provider"), "account.provider").upper()
             accepted = records_by_account.get(account_id, [])
+            row_cadence = cadence
             accepted_dates = sorted(
                 str(item[date_field]) for item in accepted if item.get(date_field)
             )
@@ -5458,6 +5676,10 @@ def _coverage_evidence(
                     else "LEGACY_ACCEPTED_FACTS"
                 )
                 boundary_basis = "OBSERVED_RECORDS_ONLY"
+                if fact_type == "nav" and account_id in statement_accounts:
+                    # hash-pinned periodic statement points, not a daily provider feed
+                    authority = "PINNED_STATEMENT_POINTS"
+                    row_cadence = "STATEMENT_PERIODIC"
             elif admitted:
                 status = (
                     "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
@@ -5495,7 +5717,7 @@ def _coverage_evidence(
                     ),
                     "authority": authority,
                     "boundary_basis": boundary_basis,
-                    "cadence": cadence,
+                    "cadence": row_cadence,
                     "declared_end": None,
                     "declared_start": None,
                     "disposition": disposition,
@@ -6453,13 +6675,25 @@ def _statement_reserve_facts(
         except (OSError, statement_reserve_nav.StatementReserveError) as exc:
             raise BaselineValidationError(f"statement reserve input: {exc}") from exc
         for key in merged:
-            merged[key].extend(facts[key])
+            rows = facts[key]
+            if key == "nav":
+                # lineage: the pinned statement catalog every point was read from
+                rows = [
+                    {
+                        **row,
+                        "statement_catalog_sha256": pin["sha256"],
+                        "statement_catalog_size_bytes": pin["size_bytes"],
+                    }
+                    for row in rows
+                ]
+            merged[key].extend(rows)
     return merged
 
 
 def _bind_statement_accounts(
     facts: Mapping[str, Sequence[Mapping[str, Any]]],
     accounts: Sequence[Mapping[str, Any]],
+    retained_excluded_accounts: Collection[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Re-key statement NAV points and admissions onto the census account of the provider.
 
@@ -6479,6 +6713,13 @@ def _bind_statement_accounts(
         if len(ids) != 1:
             raise BaselineValidationError(
                 "statement reserve provider does not name exactly one census account"
+            )
+        if row.get("role") == "EXCLUDED_IMMATERIAL" and ids[0] not in (
+            retained_excluded_accounts
+        ):
+            # bound anywhere else it would vanish from, or double into, the capital view
+            raise BaselineValidationError(
+                "statement excluded account is not a retained-excluded census account"
             )
         rebind[str(row["account_id"])] = ids[0]
 
@@ -6536,6 +6777,7 @@ def build_catalog(
     custody_authority: dict[str, Any] = {}
     fx_authority: dict[str, Any] = {}
     statement_excluded: list[dict[str, Any]] = []
+    statement_nav: list[dict[str, Any]] = []
     if spec["schema_version"] == 2:
         schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
             spec["provider_generations"], roots, accounts, as_of
@@ -6592,12 +6834,12 @@ def build_catalog(
             securities,
             as_of,
             retained_excluded_accounts=_retained_excluded_accounts(assignments, as_of),
+            reserve_nav_accounts=set(_reserve_accounts(assignments, as_of)),
         )
         provider_admissions = _objects(
             provider_catalog.get("admissions"), "provider-ledger.admissions"
         )
         ledger_nav = nav
-        statement_nav: list[dict[str, Any]] = []
         if "statement_reserves" in spec:
             # #900 (B): statement NAV points of reserve accounts that are not provider-ledger
             # providers, read from hash-pinned catalogs (latest on or before the cutoff).
@@ -6605,7 +6847,9 @@ def build_catalog(
                 spec["statement_reserves"], as_of
             )
             statement_nav, statement_admissions = _bind_statement_accounts(
-                statement_facts, accounts
+                statement_facts,
+                accounts,
+                _retained_excluded_accounts(assignments, as_of),
             )
             nav = [*nav, *statement_nav]
             provider_admissions = [*provider_admissions, *statement_admissions]
@@ -6761,6 +7005,11 @@ def build_catalog(
         raise BaselineValidationError(
             "current capital does not reconcile to cutoff account values"
         )
+    # Dollars of a documented rate use the cutoff sleeve value of the current capital
+    # view, never the dated allocation snapshot's value.
+    costs = _derive_rate_dollar_costs(
+        costs, _cutoff_capital_values(current_capital, as_of), as_of
+    )
     audit_snapshot = _build_audit_snapshot(
         as_of_date=source_dates["component-decision-table"],
         replay=replay,
@@ -6785,6 +7034,7 @@ def build_catalog(
             transactions,
             flows,
             as_of,
+            {str(item["account_id"]) for item in statement_nav},
         )
     )
     fact_coverage, exceptions = _fact_coverage(

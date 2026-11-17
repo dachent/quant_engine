@@ -953,6 +953,7 @@ def test_provider_coverage_retains_declared_out_of_boundary_limitations() -> Non
             "category": "PROVIDER_COVERAGE",
             "item": "synthetic",
             "known_gap": "missing activity type; checking account excluded",
+            "structural_boundaries": [],
             "status": "PARTIAL",
             "value": "ACCOUNT_LIVE",
         }
@@ -8922,3 +8923,40 @@ def test_the_unsupplied_workbook_parity_row_passes_the_observed_interval_check_a
         check(
             {**supplied, "observed_start": "2026-09-30", "observed_end": "2026-09-17"}
         )
+
+
+def test_the_positions_fact_types_declared_boundaries_apart_from_gaps() -> None:
+    """STRUCTURAL = a provider's proved structural_boundaries (typed, neutral); a GAP is
+    everything else.  The boundary is in neither row's ``known_gap`` text."""
+
+    catalog = _fact_and_provider_coverage(["a real gap"])
+    catalog["provider_coverage"][0]["coverage"]["known_gaps"] = ["a real gap"]
+    catalog["provider_coverage"][0]["coverage"]["structural_boundaries"] = [
+        "Investor Checking is outside the accepted brokerage boundary"
+    ]
+    catalog["provider_coverage"][0]["coverage"]["out_of_boundary"] = [
+        "positions were not exported"
+    ]
+    rows = reporter._coverage(catalog)
+    positions = next(
+        r for r in rows if r["category"] == "FACT_COVERAGE" and r["item"] == "positions"
+    )
+    assert positions["structural_boundaries"] == [
+        {
+            "as_of_date": "2026-09-18",
+            "provider_id": "schwab",
+            "text": "Investor Checking is outside the accepted brokerage boundary",
+        }
+    ]
+    assert "Investor Checking" not in positions["known_gap"]
+    others = [
+        r for r in rows if r["category"] == "FACT_COVERAGE" and r["item"] != "positions"
+    ]
+    assert others and all("structural_boundaries" not in r for r in others)
+    provider = next(r for r in rows if r["category"] == "PROVIDER_COVERAGE")
+    # a real out_of_boundary limitation (a missing observation) stays in known_gap text,
+    # never typed as structure; only the proved structural entry is typed apart
+    assert provider["known_gap"] == "a real gap; positions were not exported"
+    assert provider["structural_boundaries"] == [
+        "Investor Checking is outside the accepted brokerage boundary"
+    ]

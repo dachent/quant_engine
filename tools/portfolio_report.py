@@ -64,8 +64,11 @@ from quant_engine.portfolio_ledger import (
 )
 from quant_engine.portfolio_ledger import (
     assess_gap_bounds_document,
+    apply_hwm_owner_acceptance,
+    PENDING_OWNER_ACCEPTANCE,
     numerical_from_governed_proof,
     proof_covers_spans,
+    receipt_missing_points,
 )
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
@@ -200,6 +203,11 @@ HWM_GAP_BOUNDS: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
     / "portfolio-hwm-gap-bounds-v1.json"
+)
+HWM_OWNER_ACCEPTANCE: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-hwm-owner-acceptance-v1.json"
 )
 _PORTABLE_HWM_PRODUCT_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
@@ -1656,7 +1664,12 @@ COST_EVIDENCE_KEYS: Final = (
     "execution_cost",
 )
 # Present only on a percent-based cost row; equal to portfolio_attribution.COST_RATE_KEYS.
-COST_RATE_KEYS: Final = ("fee_rates",)
+COST_RATE_KEYS: Final = (
+    "cost_classification",
+    "cost_derivation",
+    "derived_annual_cost_usd",
+    "fee_rates",
+)
 
 
 def _plain_words(code: object) -> str:
@@ -1938,6 +1951,52 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
     )
     if pages:
         sentence += f"; sources: {', '.join(pages)}"
+    derived = cost.get("derived_annual_cost_usd")
+    basis = cost.get("cost_derivation")
+    if derived is not None and isinstance(basis, Mapping):
+        unpriced = basis.get("unpriced_components") or []
+        in_nav = [
+            item
+            for item in basis.get("classified_components") or []
+            if isinstance(item, Mapping)
+            and item.get("classification") == "IN_NAV_NOT_BILLED"
+        ]
+        contingent = [
+            item
+            for item in basis.get("classified_components") or []
+            if isinstance(item, Mapping)
+            and item.get("classification") == "EVENT_FEE_NOT_ANNUAL"
+        ]
+        sentence += (
+            f"; derived annual {basis.get('rate_kind', '').replace('_', ' ')} cost "
+            f"${derived} ({basis.get('method')}): "
+            f"{_percent_text(basis.get('rate'))} of ${basis.get('base_value_usd')} "
+            f"capital value at the cutoff {basis.get('as_of')}"
+        )
+        if unpriced:
+            sentence += (
+                "; "
+                + ", ".join(str(name).replace("_", " ") for name in unpriced)
+                + " is a share of gains, not of capital value, and is not priced"
+            )
+        if basis.get("tier_settled_through"):
+            sentence += (
+                f"; fee tier settled through {basis['tier_settled_through']} "
+                "(fee journals); derived dollars valid if the tier is unchanged since"
+            )
+        for item in in_nav:
+            sentence += (
+                f"; {str(item.get('component')).replace('_', ' ')} "
+                f"{_percent_text(item.get('rate'))} is IN_NAV_NOT_BILLED "
+                "(charged inside the vehicle NAV, not a billed dollar cost)"
+            )
+        for item in contingent:
+            sentence += (
+                f"; {str(item.get('component')).replace('_', ' ')} "
+                f"{_percent_text(item.get('rate'))} is EVENT_FEE_NOT_ANNUAL "
+                "(billed when units are redeemed, not an annual cost)"
+            )
+        return f"{sentence}; billed dollar amount: not published."
     return f"{sentence}; no dollar cost is published."
 
 
@@ -2000,7 +2059,10 @@ def _cutoff_cost_rate(
     }
     if amount_text is None:
         result["cost_rate_reason"] = (
-            "the cost is a documented percent rate; no dollar amount is published"
+            "the cost is a documented percent rate; its derived annual amount is carried beside the rate"
+            if cost.get("derived_annual_cost_usd") is not None
+            and result["fees_status"] == FEES_STATUS_DOCUMENTED_RATE
+            else "the cost is a documented percent rate; no dollar amount is published"
             if result["fees_status"] == FEES_STATUS_DOCUMENTED_RATE
             else "no annual cost amount is evidenced"
         )
@@ -8826,6 +8888,29 @@ def _scoped_known_gap(
     )
 
 
+def _declared_boundaries(
+    provider_coverage: Sequence[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    """Every provider's proved structural boundaries, typed, in provider order.  Only a
+    provider that proved its structure declares ``structural_boundaries``; a provider's
+    ``out_of_boundary`` statements stay limitations (some are real missing observations)."""
+
+    out: list[dict[str, str]] = []
+    for item in sorted(provider_coverage, key=lambda row: str(row.get("provider_id"))):
+        coverage = item.get("coverage")
+        if not isinstance(coverage, Mapping):
+            continue
+        for text in coverage.get("structural_boundaries", []):
+            out.append(
+                {
+                    "as_of_date": str(item.get("generation_as_of_date")),
+                    "provider_id": str(item.get("provider_id")),
+                    "text": str(text),
+                }
+            )
+    return out
+
+
 def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     provider_coverage = _objects(
@@ -8842,6 +8927,11 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 ),
                 "status": claim.get("status"),
                 "value": claim.get("record_count"),
+                **(
+                    {"structural_boundaries": _declared_boundaries(provider_coverage)}
+                    if claim.get("fact_type") == "positions"
+                    else {}
+                ),
                 **(
                     {
                         "disposition": {
@@ -8925,6 +9015,10 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "category": "PROVIDER_COVERAGE",
                 "item": item.get("provider_id"),
                 "known_gap": "; ".join(str(gap) for gap in limitations),
+                # proved structure is typed apart: it is neither a gap nor in known_gap
+                "structural_boundaries": [
+                    str(text) for text in claim.get("structural_boundaries", [])
+                ],
                 "status": claim.get("status"),
                 "value": item.get("qualification"),
                 **(
@@ -9914,6 +10008,7 @@ def _report_governed_hwm_proof(
     input_receipt_bytes: bytes,
     *,
     product_contract_bytes: bytes | None = None,
+    missing_daily_points: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Verify a governed PORT-HWM-4 result and project it into report data.
 
@@ -9945,10 +10040,10 @@ def _report_governed_hwm_proof(
         )
     except (HwmCoverageError, CapitalValidationError) as exc:
         raise ReportValidationError(f"governed HWM result is invalid: {exc}") from exc
-    return {
+    proof = {
         "schema_version": 1,
         "status": accepted["status"],
-        "financial_acceptance": "PENDING_OWNER_ACCEPTANCE",
+        "financial_acceptance": PENDING_OWNER_ACCEPTANCE,
         "assurance_profile": accepted["assurance_profile"],
         "policy_id": accepted["policy_id"],
         "policy_sha256": accepted["policy_sha256"],
@@ -9978,6 +10073,9 @@ def _report_governed_hwm_proof(
             for row in accepted["index_path"]
         ],
     }
+    return apply_hwm_owner_acceptance(
+        proof, HWM_OWNER_ACCEPTANCE.read_bytes(), missing_daily_points
+    )
 
 
 def _governed_hwm_summary_rows(proof: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -11571,6 +11669,9 @@ def build_report_data(
             hwm_governed_calendar_bytes or b"",
             hwm_governed_receipt_bytes or b"",
             product_contract_bytes=financial_input_contract_bytes,
+            missing_daily_points=receipt_missing_points(
+                catalog.get("epoch_hpr_receipts")
+            ),
         )
         if hwm_governed_result is not None
         else None
