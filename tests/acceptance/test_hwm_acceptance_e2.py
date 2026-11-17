@@ -7,6 +7,7 @@ bound or an unsafe bound each leave E2 firing.  Synthetic numbers only.
 from __future__ import annotations
 
 import copy
+import hashlib
 from datetime import date
 import json
 from pathlib import Path
@@ -23,8 +24,10 @@ from test_validate_generation import CUTOFF, _policy_fixture, build
 PATH = [
     {"as_of": "2026-01-23", "index": "100"},
     {"as_of": "2026-01-26", "index": "101"},
+    {"as_of": "2026-01-27", "index": "100.5"},  # the span-filled missing day
     {"as_of": "2026-01-28", "index": "100.00004"},
 ]
+PIN = "a" * 64
 MISSING = [{"date": "2026-01-27", "strategy_id": "alpha"}]
 
 
@@ -35,7 +38,11 @@ def proof(**over: Any) -> dict[str, Any]:
         "policy_id": "PORT-HWM-4",
         "complete_through": "2026-01-28",
         "current_index": "100.00004",
+        "current_hwm": "101.00004",
+        "maximum_drawdown": "-0.02501",
+        "policy_sha256": "p" * 64,
         "index_path": copy.deepcopy(PATH),
+        "owner_acceptance_sha256": PIN,
         **over,
     }
 
@@ -47,8 +54,11 @@ def record(**over: Any) -> dict[str, Any]:
         "policy_id": "PORT-HWM-4",
         "accepted": {
             "complete_through": "2026-01-28",
-            "index_points": 3,
+            "index_points": 4,
             "current_index_4dp": "100.0000",
+            "current_hwm_4dp": "101.0000",
+            "maximum_drawdown_4dp": "-0.0250",
+            "policy_sha256": "p" * 64,
             "missing_daily_points": copy.deepcopy(MISSING),
         },
         **over,
@@ -77,10 +87,15 @@ def reasons(**over: Any) -> list[str]:
         "panel_missing": copy.deepcopy(MISSING),
         "record": record(),
         "bounds": bounds(),
+        "pin": PIN,
         **over,
     }
     return verify_acceptance(
-        args["proof"], args["panel_missing"], args["record"], args["bounds"]
+        args["proof"],
+        args["panel_missing"],
+        args["record"],
+        args["bounds"],
+        args["pin"],
     )
 
 
@@ -103,6 +118,12 @@ def test_accepted_and_valid_clears():
         {"panel_missing": [{"date": "2026-07-03", "strategy_id": "alpha"}]},
         {"proof": proof(complete_through="2026-01-29")},
         {"proof": proof(current_index="100.0100")},
+        {"proof": proof(current_hwm="102")},
+        {"proof": proof(maximum_drawdown="-0.05")},
+        {"proof": proof(policy_sha256="q" * 64)},
+        {"pin": "b" * 64},  # the record's bytes are not the ones the proof pins
+        {"pin": None},
+        {"proof": proof(owner_acceptance_sha256=None)},
     ],
     ids=lambda o: next(iter(o)),
 )
@@ -115,16 +136,21 @@ def test_a_changed_point_count_leaves_e2_firing():
     assert reasons(proof=changed)
 
 
-def test_a_recorded_gap_the_path_actually_has_is_not_what_was_accepted():
+def test_a_recorded_gap_the_path_lacks_is_not_what_was_accepted():
     day = {
-        "date": "2026-01-26",
+        "date": "2026-01-24",
         "strategy_id": "alpha",
-    }  # a point of the proof's own path
+    }  # not a day of the proof's path
     rec = record()
     rec["accepted"]["missing_daily_points"] = [day]
-    # everything else is consistent (panel and bound name the same day): only the path rule fires
-    found = reasons(record=rec, panel_missing=[day], bounds=bounds(date="2026-01-26"))
-    assert found == ["a recorded missing day is a point of the proof's own path"]
+    found = reasons(record=rec, panel_missing=[day], bounds=bounds(date="2026-01-24"))
+    assert found == ["a recorded missing day is not a point of the proof's own path"]
+
+
+def test_the_path_must_end_on_complete_through():
+    longer = proof(index_path=PATH + [{"as_of": "2026-01-29", "index": "100"}])
+    found = reasons(proof=longer)
+    assert "the last day of the path is not complete_through" in found
 
 
 def test_the_record_must_state_missing_points():
@@ -194,7 +220,16 @@ def _context(tmp_path: Path, *, accepted: bool, rec: Any = None, bnd: Any = None
     ctx.panel["hwm_governed_proof"] = proof(
         financial_acceptance="OWNER_ACCEPTED"
         if accepted
-        else "PENDING_OWNER_ACCEPTANCE"
+        else "PENDING_OWNER_ACCEPTANCE",
+        owner_acceptance_sha256=(
+            hashlib.sha256(
+                (
+                    root / "contracts" / "portfolio-hwm-owner-acceptance-v1.json"
+                ).read_bytes()
+            ).hexdigest()
+            if rec is not False
+            else PIN
+        ),
     )
     ctx.panel["advisory"] = {
         "hwm_candidate": {"kpi": {"missing_daily_points": copy.deepcopy(MISSING)}}

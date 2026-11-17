@@ -8836,17 +8836,26 @@ def _hwm_acceptance_gaps(ctx: Context) -> list[str]:
         else Path(__file__).resolve().parents[2]
     )
 
-    def read(name: str) -> Any:
+    def read_bytes(name: str) -> bytes | None:
         try:
-            return json.loads((root / "contracts" / name).read_bytes())
-        except (OSError, ValueError):
+            return (root / "contracts" / name).read_bytes()
+        except OSError:
             return None
 
+    def read(name: str) -> Any:
+        raw = read_bytes(name)
+        try:
+            return json.loads(raw) if raw is not None else None
+        except ValueError:
+            return None
+
+    record_raw = read_bytes("portfolio-hwm-owner-acceptance-v1.json")
     return hwm_acceptance.verify_acceptance(
         _hwm_proof(ctx),
         node(ctx.panel, "advisory", "hwm_candidate", "kpi", "missing_daily_points"),
         read("portfolio-hwm-owner-acceptance-v1.json"),
         read("portfolio-hwm-gap-bounds-v1.json"),
+        hashlib.sha256(record_raw).hexdigest() if record_raw is not None else None,
     )
 
 
