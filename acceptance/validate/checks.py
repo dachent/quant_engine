@@ -35,7 +35,14 @@ import re
 from typing import Any, cast
 
 from .. import owner_view as owner_view  # re-exported: the runner uses it
-from . import facts_bindings, layers, payload_rule, shell, sleeve_basis
+from . import (
+    facts_bindings,
+    layers,
+    payload_rule,
+    shell,
+    sleeve_basis,
+    trading_week,
+)
 from . import plausibility as plausibility  # re-exported: tools/check_plausibility.py
 from .generation import (
     APP,
@@ -8675,7 +8682,10 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
             "current week must be anchored to the verified weekly-source cutoff",
         )
     expected_week_end = source_week_start + timedelta(days=6)
-    expected_partial = manifest_as_of < expected_week_end
+    # partial only while data stops before the last trading day of the week (Friday cutoff = complete)
+    expected_partial = manifest_as_of < trading_week.last_trading_day_of_week(
+        source_week_start
+    )
     if (
         current.get("week_end") != expected_week_end.isoformat()
         or current.get("data_through_date") != source_cutoff
