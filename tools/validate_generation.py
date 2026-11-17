@@ -49,6 +49,7 @@ from acceptance.validate.checks import (  # noqa: E402
     findings_document,
     load_facts_sources,
     parse_strategy_basis,
+    plausibility as plausibility,
     rollup,
     run_checks,
     to_date,
@@ -310,6 +311,14 @@ def _parser() -> argparse.ArgumentParser:
         "of each strategy's opening capital anchor for the CAGR window check",
     )
     parser.add_argument(
+        "--owner-eyes",
+        choices=("off", "warn", "block"),
+        default="warn",
+        help="the owner-eyes plausibility rules (#912): warn (default) lists their hits as "
+        "WARNING and leaves the exit status alone; block makes a hit block, after the rules "
+        "are calibrated on a release payload; off skips them",
+    )
+    parser.add_argument(
         "--admission-receipt",
         type=Path,
         help="the provider ledger's admit-or-declare-receipt.json: a finite provider "
@@ -480,6 +489,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         corrections=corrections,
         provider_ledger=provider_ledger,
         provider_receipt=provider_receipt,
+        owner_eyes=args.owner_eyes.upper(),
         strategy_basis=strategy_basis,
         sleeve_facts=sleeve_facts,
         facts_sources=facts_sources,

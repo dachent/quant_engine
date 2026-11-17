@@ -43,6 +43,7 @@ from . import (
     sleeve_basis,
     trading_week,
 )
+from . import plausibility as plausibility  # re-exported: tools/check_plausibility.py
 from .generation import (
     APP,
     PAYLOAD_FILES,
@@ -228,6 +229,11 @@ class Context:
     # The provider-ledger admit-or-declare receipt (``--admission-receipt``): the governed
     # per-item EXCLUDE dispositions. ``None`` is no receipt, which exempts nothing.
     provider_receipt: Mapping[str, Any] | None = None
+    # #912: the owner-eyes plausibility rules (``plausibility.owner_eyes``): "OFF" (a library
+    # caller with a synthetic panel), "WARN" (findings are WARNING: listed, exit status
+    # unaffected; the default of ``tools/validate_generation.py`` until the rules are
+    # calibrated on a release payload) or "BLOCK" (findings block).
+    owner_eyes: str = "OFF"
     # #624: the ``strategy-basis-declaration/1`` the generation was built with ({strategy id:
     # basis}) and the sleeve facts its sleeve epochs stand on.  ``None`` is no declaration:
     # every strategy is on its parent-account basis and nothing below changes.
@@ -10209,6 +10215,56 @@ def _payload_budget_findings(ctx: Context) -> Iterator[Finding]:
         )
 
 
+def check_plausibility_owner_eyes(ctx: Context) -> Iterator[Finding]:
+    """#912 (review Q1): the owner-eyes plausibility rules on the REAL panel payload.
+
+    Ranges, calendar truth, equalities between surfaces, dates against the cutoff and claims
+    that must be able to fail; each rule names the owner finds it catches (acceptance/
+    validate/plausibility.py, ``tools/check_plausibility.py --list``).  In WARN mode (default) a hit is a WARNING; in BLOCK mode it blocks."""
+
+    mode = str(ctx.owner_eyes).upper()
+    if mode not in plausibility.MODES:
+        raise ValueError(
+            f"owner_eyes mode {ctx.owner_eyes!r} is not one of {plausibility.MODES}"
+        )
+    if mode == "OFF":
+        return
+    klass = {r.rule_id: r.klass for r in plausibility.RULES}
+    try:
+        hits = plausibility.evaluate(ctx.panel, ctx.cutoff)
+    except Exception as exc:  # noqa: BLE001 - a wrong rule must not red a WARN run
+        if mode == "BLOCK":
+            raise
+        yield _finding(
+            "plausibility.owner_eyes",
+            WARNING,
+            "(rules)",
+            type(exc).__name__,
+            "the rules run",
+            PANEL,
+            "$",
+            (),
+            f"the owner-eyes rules crashed and were skipped: {exc}",
+        )
+        return
+    for hit in hits:
+        yield _finding(
+            "plausibility.owner_eyes",
+            WARNING
+            if mode == "WARN"
+            else NOT_READY
+            if klass.get(hit.rule) == "NOT_READY"
+            else BLOCKER_REGRESSION,
+            hit.rule,
+            jsonable(hit.observed),
+            hit.expected,
+            PANEL,
+            hit.path,
+            tuple(f"OE{n}" for n in hit.finds),
+            hit.message,
+        )
+
+
 def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
     """F4/F5: payload size and duplicate copies (never a G1 prerequisite)."""
 
@@ -12796,6 +12852,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("lint.invested_capital_vs_contributions", check_lint_invested_capital),
     ("lint.internal_tokens_displayed", check_lint_display_tokens),
     ("lint.payload_size", check_lint_payload_size),
+    ("plausibility.owner_eyes", check_plausibility_owner_eyes),
     ("correction.unresolved", check_corrections),
     ("expected", check_expected),
 )
