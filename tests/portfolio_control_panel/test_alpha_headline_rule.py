@@ -197,3 +197,23 @@ def test_extreme_loadings_and_a_negative_train_r_squared_are_flagged() -> None:
         "LARGE_EXPOSURE_CHECK_SCALE",
         "NEGATIVE_TRAIN_R_SQUARED",
     ]
+
+
+def test_the_alpha_window_is_the_training_window_not_the_whole_sample() -> None:
+    """Annualization matrix D2: a 77-observation train fit was labelled with the 277-day sample."""
+
+    row = _row("0.20", "0.05", 0)
+    row["coverage"]["observed_start"] = "2025-01-02"
+    row["interval_association"] = {
+        "buckets": [
+            {"partition": "TRAIN", "factor_anchor": "2025-01-02"},
+            {"partition": "TRAIN", "factor_anchor": "2025-04-11"},
+            {"partition": "HOLDOUT", "factor_anchor": "2026-11-06"},
+        ]
+    }
+    ctx = panel._alpha_context(row)
+    assert ctx["train_window_start"] == "2025-01-02"
+    assert ctx["train_window_end"] == "2025-04-11"
+    assert ctx["train_window_days"] == 99
+    # fitted on 99 days, so not a headline although the sample spans years
+    assert ctx["headline_status"] == "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE"

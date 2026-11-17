@@ -2354,9 +2354,10 @@
       ctx.lens_role === "HEADLINE" ? "headline alpha (accepted live series, with standard error)" : "secondary lens, not the headline alpha",
       ctx.basis_label || humanStatus(basisStatus),
       `${integer.format(ctx.window_days)} days ${formatDate(ctx.window_start)} to ${formatDate(ctx.window_end)} · n ${integer.format(ctx.n_obs)} · ${share}`,
+      number(ctx.train_window_days) == null ? null : `fitted on the training part: ${integer.format(ctx.train_window_days)} days ${formatDate(ctx.train_window_start)} to ${formatDate(ctx.train_window_end)}`,
       inferenceText ? `${tText} · ${inferenceText}` : tText,
       visibleBasis,
-    ];
+    ].filter(Boolean);
     if (ctx.headline_status === "NOT_A_HEADLINE_INCLUDES_BACKTEST") lines.push("includes hypothetical backtest: not a live result, no headline");
     if ((ctx.quality_flags || []).includes("LARGE_EXPOSURE_CHECK_SCALE")) lines.push("a loading beyond 3 times: check the series scale");
     if ((ctx.quality_flags || []).includes("NEGATIVE_TRAIN_R_SQUARED")) lines.push("training R-squared is negative: poor fit");

@@ -5623,6 +5623,24 @@ def _fit_quality_flags(row: Mapping[str, Any]) -> list[str]:
     return flags
 
 
+def _train_window(row: Mapping[str, Any], start: Any, end: Any) -> tuple[Any, Any]:
+    """First to last TRAIN anchor of the fit; the whole window when no buckets ship."""
+
+    association = _optional_mapping(row.get("interval_association")) or {}
+    buckets = association.get("buckets")
+    if not isinstance(buckets, list):
+        return start, end
+    anchors = [
+        item.get("factor_anchor")
+        for item in buckets
+        if isinstance(item, Mapping) and item.get("partition") == "TRAIN"
+    ]
+    anchors = [item for item in anchors if isinstance(item, str)]
+    if not anchors:
+        return start, end
+    return min(anchors), max(anchors)
+
+
 def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
     """What a reader needs next to an alpha tile: window, n, SE, t, backtest share, basis.
 
@@ -5709,6 +5727,14 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         or (isinstance(layers, list) and "BACKTEST" in layers)
     )
     composition_known = isinstance(backtest, int) and not isinstance(backtest, bool)
+    # the alpha is the TRAIN intercept: its window is the training buckets', not the
+    # whole sample's (factor-model audit, annualization matrix D2)
+    train_start, train_end = _train_window(row, start, end)
+    train_days = (
+        (date.fromisoformat(train_end) - date.fromisoformat(train_start)).days
+        if isinstance(train_start, str) and isinstance(train_end, str)
+        else None
+    )
     live_end = coverage.get("canonical_live_observed_end")
     window_lag_days = (
         (date.fromisoformat(live_end) - date.fromisoformat(end)).days
@@ -5730,7 +5756,7 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
     elif t_stat is None:
         headline_status = "NOT_A_HEADLINE_NO_STANDARD_ERROR"
     elif not series_label.headline_allowed(
-        _fit_segments(row, start, end, used if isinstance(used, int) else 1)
+        _fit_segments(row, train_start, train_end, used if isinstance(used, int) else 1)
     ):
         # sprint-p123's layer rule: only MODEL_LIVE / ACCOUNT_LIVE segments, over
         # at least one year
@@ -5742,6 +5768,9 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "inference": inference,
         "headline_status": headline_status,
         "window_lag_days": window_lag_days,
+        "train_window_start": train_start,
+        "train_window_end": train_end,
+        "train_window_days": train_days,
         "quality_flags": _fit_quality_flags(row),
         # one headline alpha per strategy: the fit on the accepted live return series
         # with a standard error and t-statistic; every other fit is secondary
