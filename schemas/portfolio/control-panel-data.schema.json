@@ -3811,7 +3811,7 @@
               "access": { "type": "string" },
               "estimated_size": { "type": "string" },
               "replaces": { "type": "array", "items": { "type": "string" } },
-              "status": { "enum": ["REQUESTED_NOT_DOWNLOADED", "NOT_A_DOWNLOAD_OWNER_RULING"] }
+              "status": { "enum": ["REQUESTED_NOT_DOWNLOADED", "NOT_A_DOWNLOAD_OWNER_RULING", "CLOSED_BY_CAPTURE_B_STATE_EVIDENCED_BY_ABSENCE_OF_TRADES"] }
             }
           }
         },
