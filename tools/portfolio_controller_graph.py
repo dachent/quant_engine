@@ -344,6 +344,9 @@ _PATH_STAGES = {
     # panel both read it to decide whether the numeric HWM can publish.
     "contracts/portfolio-hwm-gap-bounds-v1.json": ["report", "panel"],
     "contracts/portfolio-hwm-owner-acceptance-v1.json": ["report", "panel"],
+    # PORT-UNDERWRITE-1: the panel builder reads the underwriting policy (gap, regime benchmark series,
+    # portfolio fit) and binds its sha256 into the candidate.
+    "contracts/portfolio-strategy-underwriting-v1.json": ["panel"],
     "schemas/portfolio/strategy-return-sources.schema.json": [],
     # #567 stage 5: the effective epoch perimeter (a residual parent replaced by its
     # derived sleeves); the report, the panel and the HWM selection bind to it.

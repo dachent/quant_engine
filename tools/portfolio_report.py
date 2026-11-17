@@ -2822,6 +2822,94 @@ def _window_limit(
     }
 
 
+IMPLEMENTATION_GAP_TESTED = "tested"
+# The two statuses the implementation producer emits for a verified contract, and the two
+# return-reconciliation statuses that carry a real account-versus-model comparison.
+VERIFIED_IMPLEMENTATION_STATUSES = frozenset(
+    {
+        "VERIFIED_CAUSAL_RETURN_ATTRIBUTION",
+        "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION",
+    }
+)
+EXACT_DATE_COMPARISON_STATUSES = frozenset(
+    {
+        "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
+        "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
+    }
+)
+USABLE_RETURN_RECONCILIATION_STATUSES = frozenset(
+    {"DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV", "TESTED_EXACT_COMMON_DATES"}
+)
+IMPLEMENTATION_GAP_NOT_TESTABLE = "not_testable"
+IMPLEMENTATION_GAP_BASIS_VERIFIED = "VERIFIED_IMPLEMENTATION_RECONCILIATION"
+IMPLEMENTATION_GAP_BASIS_PROVIDER = "EXACT_DATE_PROVIDER_COMPARISON"
+IMPLEMENTATION_GAP_BASIS_NONE = "NO_COMPARATOR_ADMITTED"
+
+
+def _usable_return_reconciliation(implementation: object) -> bool:
+    """A verified implementation contract counts only when its return reconciliation has a status
+    that is an allowed status and observations (a trade deconstruction can verify while the return
+    reconciliation is unavailable)."""
+
+    if not isinstance(implementation, Mapping):
+        return False
+    # Only the row's own (top-level) reconciliation decides.  The parent-account reconciliation nested
+    # under account_basis is never consulted: a sleeve with no usable reconciliation of its own must not
+    # publish "tested" from its parent account's evidence (fail closed).
+    candidates = [implementation.get("return_reconciliation")]
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        status = str(candidate.get("status") or "")
+        observations = candidate.get("observations")
+        if (
+            status in USABLE_RETURN_RECONCILIATION_STATUSES
+            and isinstance(observations, int)
+            and not isinstance(observations, bool)
+            and observations > 0
+        ):
+            return True
+    return False
+
+
+def _implementation_gap_fields(
+    item: Mapping[str, Any],
+    comparison: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive the account-versus-model status from the row's own evidence at build time.
+
+    The status is never read from the retained audit input: that input is a dated hand
+    audit.  A verified implementation reconciliation, or an exact-date provider comparison
+    with observations, is "tested" (an unresolved version compatibility stays visible in
+    `provider_comparison_version_compatibility`); a row with no comparator at all is
+    "not_testable" and says so.  The audit token and its note are kept as provenance only.
+    """
+
+    reconciliation_status = str(item.get("implementation_reconciliation_status") or "")
+    comparison_status = str(comparison.get("status") or "")
+    observations = metrics.get("observations")
+    if (
+        reconciliation_status in VERIFIED_IMPLEMENTATION_STATUSES
+        and _usable_return_reconciliation(item.get("implementation_reconciliation"))
+    ):
+        status, basis = IMPLEMENTATION_GAP_TESTED, IMPLEMENTATION_GAP_BASIS_VERIFIED
+    elif (
+        comparison_status in EXACT_DATE_COMPARISON_STATUSES
+        and isinstance(observations, int)
+        and not isinstance(observations, bool)
+        and observations > 0
+    ):
+        status, basis = IMPLEMENTATION_GAP_TESTED, IMPLEMENTATION_GAP_BASIS_PROVIDER
+    else:
+        status, basis = IMPLEMENTATION_GAP_NOT_TESTABLE, IMPLEMENTATION_GAP_BASIS_NONE
+    return {
+        "implementation_gap_status": status,
+        "implementation_gap_basis": basis,
+        "implementation_gap_audit_status": item.get("implementation_gap_status"),
+    }
+
+
 def _merge_attribution(
     strategies: Sequence[Mapping[str, Any]],
     attribution: Mapping[str, Any],
@@ -3048,6 +3136,7 @@ def _merge_attribution(
                     "version_compatibility_status"
                 ),
                 "provider_comparison_observations": metrics.get("observations"),
+                **_implementation_gap_fields(item, comparison, metrics),
                 "provider_comparison_observed_start": metrics.get("observed_start"),
                 "provider_comparison_observed_end": metrics.get("observed_end"),
                 "provider_account_cumulative_return": metrics.get(

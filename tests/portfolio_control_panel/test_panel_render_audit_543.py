@@ -1057,9 +1057,10 @@ def test_F15_the_implementation_gap_tokens_have_labels(tmp_path: Path) -> None:
         "not_same_vintage": "Not same vintage",
     }.items():
         assert call(tmp_path, base(), "humanStatus", token) == label
-        assert call(tmp_path, base(), "toneForStatus", token) in {"positive", "warning"}
+    # owner ruling: a structural limitation (no comparator) is information, never a warning
     assert call(tmp_path, base(), "toneForStatus", "tested") == "positive"
-    assert call(tmp_path, base(), "toneForStatus", "not_testable") == "warning"
+    for token in ("not_testable", "partial_only", "not_same_vintage"):
+        assert call(tmp_path, base(), "toneForStatus", token) == "neutral"
 
 
 def test_F33_tones_come_from_an_explicit_table_and_completeness_proofs_are_not_positive(
