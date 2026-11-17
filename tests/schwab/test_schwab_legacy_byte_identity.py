@@ -32,12 +32,12 @@ RETAINED_SPEC = (
 )
 # F81B_* were recorded from the pre-change generation.py.  The synthetic fixture's
 # snapshot has every liquidation value proved, so its catalog now reports structure
-# (coverage.out_of_boundary) apart from known gaps; its digests were re-recorded for that
+# (coverage.structural_boundaries) apart from known gaps; its digests were re-recorded for that
 # change.  A generation without a proved balance still rebuilds byte for byte.
 F81B_ID_PREFIX = "f81b1f733a5b53c9e6b303c3"
 F81B_CATALOG_PREFIX = "36ae762f16c69b54b4e6946917432ddebb37bbb0bd8775f5"
-FIXTURE_ID_PREFIX = "0d6e7b2ad243ee244f2171d8"
-FIXTURE_CATALOG_PREFIX = "f4c43ad2ab0643996dd24292484b417d6692df922820bb89"
+FIXTURE_ID_PREFIX = "c0778ab1b29945186775db89"
+FIXTURE_CATALOG_PREFIX = "cb9622b8d160338b5ba11b6b27904b84b93aca7d82f52aaa"
 
 
 def _fixture_module() -> object:

@@ -2227,21 +2227,21 @@ def _without_positions_of_first_account(
     spec.write_text(json.dumps(document), encoding="utf-8")
 
 
-def test_structure_is_out_of_boundary_and_only_missing_observations_are_gaps(
+def test_structure_is_typed_apart_and_only_missing_observations_are_gaps(
     tmp_path: Path,
 ) -> None:
     """Investor Checking and an account that holds cash only (a proved liquidation value
-    and no non-cash row) are the accounts' structure, reported under ``out_of_boundary``;
+    and no non-cash row) are the accounts' structure, reported under ``structural_boundaries``;
     an account without a position row whose liquidation value is unproved stays a gap."""
 
     for name in "abc":
         (tmp_path / name).mkdir()
     complete, _, _ = build_generation(_spec_with_current(tmp_path / "a"))
     investor = "Investor Checking is outside the accepted brokerage boundary"
-    assert investor in complete["coverage"]["out_of_boundary"]
+    assert investor in complete["coverage"]["structural_boundaries"]
     assert investor not in complete["coverage"]["known_gaps"]
     assert not any(
-        "hold cash only" in g for g in complete["coverage"]["out_of_boundary"]
+        "hold cash only" in g for g in complete["coverage"]["structural_boundaries"]
     )
 
     cash_only_spec = _spec_with_current(tmp_path / "b")
@@ -2249,7 +2249,7 @@ def test_structure_is_out_of_boundary_and_only_missing_observations_are_gaps(
     cash_only, _, _ = build_generation(cash_only_spec)
     assert any(
         g.startswith("1 accepted accounts hold cash only")
-        for g in cash_only["coverage"]["out_of_boundary"]
+        for g in cash_only["coverage"]["structural_boundaries"]
     )
     assert not any(
         "no reported non-cash" in g for g in cash_only["coverage"]["known_gaps"]
@@ -2263,5 +2263,5 @@ def test_structure_is_out_of_boundary_and_only_missing_observations_are_gaps(
         in unproved["coverage"]["known_gaps"]
     )
     assert not any(
-        "hold cash only" in g for g in unproved["coverage"]["out_of_boundary"]
+        "hold cash only" in g for g in unproved["coverage"]["structural_boundaries"]
     )

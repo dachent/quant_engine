@@ -2106,7 +2106,7 @@ def build_generation(
             # byte for byte
             **(
                 {
-                    "out_of_boundary": [
+                    "structural_boundaries": [
                         "Investor Checking is outside the accepted brokerage boundary",
                         *(
                             (

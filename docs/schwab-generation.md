@@ -30,7 +30,7 @@ repeats the day before; a disagreeing repeat is a possible stale carry and prove
 verdict; the provider-quoted total is never used (it is priced at the last
 trade, not the official close). Structure is not a gap: Investor Checking and an
 account that holds cash only (a proved liquidation value and no non-cash row)
-are listed under the catalog's `coverage.out_of_boundary`, while an account
+are listed under the catalog's `coverage.structural_boundaries`, while an account
 without a position row and without a proved liquidation value stays a known gap.
 
 ## Web capture methods and boundaries

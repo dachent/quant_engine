@@ -8829,14 +8829,16 @@ def _scoped_known_gap(
 def _declared_boundaries(
     provider_coverage: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, str]]:
-    """Every provider's declared out-of-boundary statements, typed, in provider order."""
+    """Every provider's proved structural boundaries, typed, in provider order.  Only a
+    provider that proved its structure declares ``structural_boundaries``; a provider's
+    ``out_of_boundary`` statements stay limitations (some are real missing observations)."""
 
     out: list[dict[str, str]] = []
     for item in sorted(provider_coverage, key=lambda row: str(row.get("provider_id"))):
         coverage = item.get("coverage")
         if not isinstance(coverage, Mapping):
             continue
-        for text in coverage.get("out_of_boundary", []):
+        for text in coverage.get("structural_boundaries", []):
             out.append(
                 {
                     "as_of_date": str(item.get("generation_as_of_date")),
@@ -8864,7 +8866,7 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "status": claim.get("status"),
                 "value": claim.get("record_count"),
                 **(
-                    {"out_of_boundary": _declared_boundaries(provider_coverage)}
+                    {"structural_boundaries": _declared_boundaries(provider_coverage)}
                     if claim.get("fact_type") == "positions"
                     else {}
                 ),
@@ -8942,15 +8944,18 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
         )
     for item in _objects(catalog.get("provider_coverage", []), "provider_coverage"):
         claim = _object(item.get("coverage"), "provider coverage")
+        limitations = [
+            *claim.get("known_gaps", []),
+            *claim.get("out_of_boundary", []),
+        ]
         rows.append(
             {
                 "category": "PROVIDER_COVERAGE",
                 "item": item.get("provider_id"),
-                # structure is typed apart from the real gaps: out_of_boundary entries are
-                # the provider's declared boundary, not missing observations
-                "known_gap": "; ".join(str(gap) for gap in claim.get("known_gaps", [])),
-                "out_of_boundary": [
-                    str(text) for text in claim.get("out_of_boundary", [])
+                "known_gap": "; ".join(str(gap) for gap in limitations),
+                # proved structure is typed apart: it is neither a gap nor in known_gap
+                "structural_boundaries": [
+                    str(text) for text in claim.get("structural_boundaries", [])
                 ],
                 "status": claim.get("status"),
                 "value": item.get("qualification"),
