@@ -330,3 +330,41 @@ def test_the_generator_derives_exactly_what_the_builder_then_accepts(
     assert count == 1 and len(statements) == 1
     with pytest.raises(gen.IbkrGenerationError):
         gen._statements(sources, {})
+
+
+def test_a_row_order_only_difference_refuses_with_and_without_a_listing(
+    tmp_path: Path,
+) -> None:
+    usd = _cash("USD", None, None, ending="5")
+    eur = _cash("EUR", None, None, ending="7")
+    history, refresh = _pair(tmp_path, [usd, eur], [eur, usd])
+    for listed in ([], [_entry()]):
+        with pytest.raises(gen.IbkrGenerationError, match="conflicts with accepted"):
+            _merge(tmp_path, history, refresh, listed)
+
+
+def test_a_corrected_refresh_period_value_is_not_an_omission(tmp_path: Path) -> None:
+    history, refresh = _pair(
+        tmp_path, HISTORY_CASH, [_cash("USD", "-0.10", "-0.10", ending="5")]
+    )
+    corrected = _entry(
+        refresh={"broker_interest_mtd": "-0.10", "broker_interest_ytd": "-0.10"}
+    )
+    with pytest.raises(gen.IbkrGenerationError, match="conflicts with accepted"):
+        _merge(tmp_path, history, refresh, [corrected])
+
+
+def test_an_equivalence_overlap_still_counts_the_refresh_account(
+    tmp_path: Path,
+) -> None:
+    history, refresh = _pair(tmp_path, HISTORY_CASH, REFRESH_CASH)
+    (tmp_path / "h.xml").write_bytes(history["bytes"])
+    (tmp_path / "r.xml").write_bytes(refresh["bytes"])
+    sources = [
+        ("private/h.xml", "PRIMARY_FLEX_ACTIVITY", tmp_path / "h.xml"),
+        ("private/r.xml", "REFRESH_FLEX_ACTIVITY", tmp_path / "r.xml"),
+    ]
+    _statements, accounts, count = gen._statements(
+        sources, gen._parse_overlap_equivalences([_entry()])
+    )
+    assert accounts == frozenset({ACCOUNT}) and count == 1

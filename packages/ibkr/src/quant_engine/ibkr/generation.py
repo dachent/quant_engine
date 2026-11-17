@@ -447,6 +447,10 @@ def _overlap_differences(
             (right.broker_interest_mtd, right.broker_interest_ytd),
         )
         if sides[0] != sides[1]:
+            if sides[1] != (None, None):
+                # the one-day pull omits the period aggregates; a refresh that states a different
+                # value is a correction, not an omission
+                raise conflict
             differences.append(
                 {
                     "family": _OVERLAP_FAMILY_CASH,
@@ -844,6 +848,12 @@ def _statements(
                         statements[key] = statement
                     else:
                         differences = _overlap_differences(prior, statement)
+                        if not differences:
+                            # unequal yet no derivable difference (row order only): refused as
+                            # before, no listing can name it
+                            raise IbkrGenerationError(
+                                "Flex refresh conflicts with accepted overlapping history"
+                            )
                         if collect is not None:
                             for difference in differences:
                                 collect.append({"key": key, "difference": difference})
@@ -870,7 +880,10 @@ def _statements(
                                     )
                                 match["used"] = True
                         overlap_count += 1
-                        continue  # the accepted history wins over an equivalent refresh
+                        # the accepted history wins over an equivalent refresh, but the account
+                        # still has refresh coverage
+                        refresh_accounts.add(statement.raw_account_id)
+                        continue
                 statements[key] = statement
                 if accepted_role == "REFRESH_FLEX_ACTIVITY":
                     refresh_accounts.add(statement.raw_account_id)
