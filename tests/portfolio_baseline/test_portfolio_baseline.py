@@ -4241,14 +4241,14 @@ def test_allocations_stay_byte_identical_to_the_dated_audit_snapshot(
     ]
     # The nav fact claim later began disclosing calendar days missing on provider-observed
     # dates (a known_gaps line, present here because the reserve refresh admits the fixture's
-    # account-schwab-b ledger rows): that line is the only difference it adds.
+    # account-schwab-b ledger rows; #900 wording): that line is the only difference it adds.
     legacy["fact_coverage"] = [
         {
             **row,
             "known_gaps": [
                 gap
                 for gap in row.get("known_gaps", [])
-                if "NAV day(s) missing on provider-observed dates" not in gap
+                if "NAV day(s) missing for account" not in gap
             ],
         }
         if "known_gaps" in row
