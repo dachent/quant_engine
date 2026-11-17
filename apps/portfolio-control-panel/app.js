@@ -751,7 +751,7 @@
   }
 
   function renderCommand() {
-    $("#command-heading").textContent = performanceLineageMismatch ? "REPORT PERFORMANCE WITHHELD" : data.advisory.readiness.replaceAll("_", " ");
+    $("#command-heading").textContent = performanceLineageMismatch ? "REPORT PERFORMANCE WITHHELD" : `Data as of ${formatDate(data.meta.portfolio_as_of)}`;
     $("#command-reason").textContent = performanceLineageMismatch
       ? `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`
       : data.advisory.reason;
@@ -1832,11 +1832,6 @@
     }
   }
 
-  // F32: the execution effect each underwriting row declares.  A payload that declares none keeps the
-  // policy statement, and says that it is policy text.
-  const underwritingEffects = (key) => [...new Set((data.strategy_underwriting?.rows || []).map((row) => row.advisory_disposition?.[key]).filter((value) => typeof value === "string"))];
-  const advisoryExecutionEffect = () => underwritingEffects("execution_effect").join(" / ") || "NONE";
-  const advisoryExecutionEffectNote = () => (underwritingEffects("execution_effect").length ? "Read-only advisory surface; declared by every underwriting row" : "Policy statement: read-only advisory surface; no row declares an execution effect");
 
   function renderSignals() {
     const gapTested = currentStrategies().filter((row) => row.implementation_gap_status === "tested").length;
@@ -1846,7 +1841,6 @@
       ["Implementation gap tested", `${gapTested}/${data.counts.strategies}`, gapOther.length ? `Account versus model or provider evidence; not tested: ${gapOther.map(([status, count]) => `${humanStatus(status).toLowerCase()} ${integer.format(count)}`).join(", ")}` : "Account versus model or provider evidence"],
       ["Known cost status", `${knownCost}/${data.counts.strategies}`, "Unknown stays disclosed", "warning"],
       ["Reconciliations passed", `${data.counts.reconciliation_passed}/${data.counts.reconciliation_checks}`, "Accepted report checks"],
-      ["Automated action", advisoryExecutionEffect(), advisoryExecutionEffectNote(), "reserve"],
     ]);
     // A5: the account-live CAGR and strategy-level MWR each carry an annualization label
     // (basis/window, already marked "(<1 year)" when short) that must render beside the
@@ -2017,7 +2011,7 @@
       ["Model/account gaps", `${underwriting.counts.quantified_model_account_gap}/${underwriting.counts.strategies}`, "Exact-common-date totals; causes remain separate", underwritingTone(underwriting.counts.quantified_model_account_gap)],
       ["Regime comparisons", `${underwriting.counts.empirical_regime_comparison}/${underwriting.counts.strategies}`, "Pre-live thresholds and version-matched empirical range", underwritingTone(underwriting.counts.empirical_regime_comparison)],
     ]);
-    $("#underwriting-boundary").innerHTML = `<strong>${safe(underwriting.policy_id)}</strong> · policy <code>${safe(underwriting.policy_sha256.slice(0, 14))}…</code> · evidence layers are never silently concatenated. Long-history membership requires an exact version match; implementation fidelity uses account-live exact-common-date evidence. Regime underwriting admits complete accepted-calendar weeks only; partial first, last, and current weeks are excluded. Regime results are observable behavior diagnostics, not proof of hidden strategy logic. Allocation effect <strong>${safe(underwritingEffects("allocation_effect").join(" / ") || "not declared")}</strong> and execution effect <strong>${safe(underwritingEffects("execution_effect").join(" / ") || "not declared")}</strong> on every row; automatic drop, readiness, and order authority are policy-fixed at <strong class="policy-text" title="Policy statement; the payload carries no field for it">NONE</strong>.`;
+    $("#underwriting-boundary").innerHTML = `<strong>${safe(underwriting.policy_id)}</strong> · policy <code>${safe(underwriting.policy_sha256.slice(0, 14))}…</code> · evidence layers are never silently concatenated. Long-history membership requires an exact version match; implementation fidelity uses account-live exact-common-date evidence. Regime underwriting admits complete accepted-calendar weeks only; partial first, last, and current weeks are excluded. Regime results are observable behavior diagnostics, not proof of hidden strategy logic.`;
     const rows = underwriting.rows.map((row) => {
       const layers = row.evidence_layers;
       const history = row.long_history;
@@ -2913,7 +2907,7 @@
         const scoreDetail = tactical.downside_correlation_mean == null ? humanStatus(tactical.status) : `rank ${integer.format(tactical.descriptive_rank)} · downside ${decimal(tactical.downside_correlation_mean)} · Pearson ${decimal(tactical.pearson_mean)} · worst-decile ${pct(tactical.worst_decile_candidate_return_minimum)}`;
         const missing = tactical.missing_members.length ? `Missing: ${tactical.missing_members.join(", ")}` : "All cluster members measured";
         const cost = `expense ${pct(row.cost.expense_ratio)} · fixed ${row.cost.annual_fixed_cost == null ? "—" : `$${decimal(row.cost.annual_fixed_cost, 2)}`}`;
-        return `<tr><td><span class="cell-primary">${safe(row.candidate_id)}</span><span class="cell-secondary">${safe(row.ticker || row.category)}</span></td><td>${statusText(row.tier)}</td><td>${statusText(tactical.status)}<span class="cell-secondary">${safe(scoreDetail)}</span><span class="cell-secondary">${safe(missing)} · ${safe(tactical.window_start || "—")}–${safe(tactical.window_end || "—")}</span></td><td>${statusText(row.cost.status)}<span class="cell-secondary">${safe(cost)}</span><span class="cell-secondary">All-in cost unavailable without a modeled notional</span></td><td>${statusText(row.live_metrics.status)}<span class="cell-secondary">${safe(metricWindow)}</span></td><td><span class="cell-primary">${safe(row.portfolio_role)}</span><span class="cell-secondary">Allocation / execution authority NONE</span></td></tr>`;
+        return `<tr><td><span class="cell-primary">${safe(row.candidate_id)}</span><span class="cell-secondary">${safe(row.ticker || row.category)}</span></td><td>${statusText(row.tier)}</td><td>${statusText(tactical.status)}<span class="cell-secondary">${safe(scoreDetail)}</span><span class="cell-secondary">${safe(missing)} · ${safe(tactical.window_start || "—")}–${safe(tactical.window_end || "—")}</span></td><td>${statusText(row.cost.status)}<span class="cell-secondary">${safe(cost)}</span><span class="cell-secondary">All-in cost unavailable without a modeled notional</span></td><td>${statusText(row.live_metrics.status)}<span class="cell-secondary">${safe(metricWindow)}</span></td><td><span class="cell-primary">${safe(row.portfolio_role)}</span></td></tr>`;
       })
       : accepted.map((row) => `<tr><td><span class="cell-primary">${safe(row.candidate)}</span><span class="cell-secondary">${safe(row.ticker || row.category)}</span></td><td>${statusText(row.tier)}</td><td><span class="cell-primary">${safe(row.portfolio_role)}</span><span class="cell-secondary">${safe(row.philosophy_module)}</span></td><td>${safe(row.execution)}<span class="cell-secondary">${safe(row.cadence)}</span></td><td>${safe(row.principal_gap)}</td></tr>`);
     const table = $("#candidate-table");
