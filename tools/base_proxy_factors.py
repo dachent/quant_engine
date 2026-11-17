@@ -150,3 +150,67 @@ def build_factors(
         "last_date": rows[-1]["date"] if rows else None,
     }
     return rows, receipt
+
+
+def french_rf_from_text(text: str) -> dict[date, Decimal]:
+    """Daily RF (percent in the file, decimal here) from a Ken French 5-factor CSV body."""
+
+    rates: dict[date, Decimal] = {}
+    column: int | None = None
+    for line in text.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if parts and parts[0] == "" and "RF" in parts:
+            column = parts.index("RF")
+            continue
+        if column is not None and len(parts) > column and len(parts[0]) == 8:
+            if not parts[0].isdigit():
+                continue
+            day = date(int(parts[0][:4]), int(parts[0][4:6]), int(parts[0][6:]))
+            rates[day] = Decimal(parts[column]) / Decimal(100)
+    if not rates:
+        raise BaseProxyError("no RF column found in the French file")
+    return rates
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Write ``factors.csv`` (LF bytes) and a provenance receipt from pinned inputs."""
+
+    import argparse
+    import hashlib
+    import json
+    from pathlib import Path
+    import zipfile
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--capture", type=Path, required=True, help="raw Yahoo capture")
+    parser.add_argument(
+        "--french-zip",
+        type=Path,
+        required=True,
+        help="French 5-factor daily source zip",
+    )
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--receipt", type=Path, required=True)
+    args = parser.parse_args(argv)
+    payload = json.loads(args.capture.read_bytes())
+    rows = payload["rows"] if isinstance(payload, dict) else payload
+    with zipfile.ZipFile(args.french_zip) as archive:
+        text = archive.read(archive.namelist()[0]).decode("latin-1")
+    built, receipt = build_factors(rows, french_rf_from_text(text))
+    columns = ("date", "RF", *PROXIES)
+    body = "".join(",".join(row[column] for column in columns) + "\n" for row in built)
+    output = (",".join(columns) + "\n" + body).encode("utf-8")
+    args.out.write_bytes(output)
+    receipt.update(
+        capture_sha256=hashlib.sha256(args.capture.read_bytes()).hexdigest(),
+        french_source_sha256=hashlib.sha256(args.french_zip.read_bytes()).hexdigest(),
+        factors_sha256=hashlib.sha256(output).hexdigest(),
+    )
+    args.receipt.write_bytes(
+        (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -102,3 +102,20 @@ def test_a_risk_free_that_disagrees_with_bil_over_the_overlap_is_refused() -> No
 def test_too_short_an_overlap_is_refused() -> None:
     with pytest.raises(proxies.BaseProxyError, match="overlap"):
         proxies.build_factors(_rows(), _french(30))
+
+
+def test_the_french_rf_column_is_read_as_decimal_daily_returns() -> None:
+    text = (
+        "This file was created by CMPT_ME_BEME_RETS_DAILY\n\n"
+        ",Mkt-RF,SMB,HML,RMW,CMA,RF\n"
+        "20260930,  0.10, 0.2, 0.3, 0.4, 0.5, 0.017\n"
+        "20260929,  0.10, 0.2, 0.3, 0.4, 0.5, 0.016\n"
+        "\nAnnual Factors: January-December\n"
+    )
+    rates = proxies.french_rf_from_text(text)
+    assert rates == {
+        date(2026, 9, 30): Decimal("0.00017"),
+        date(2026, 9, 29): Decimal("0.00016"),
+    }
+    with pytest.raises(proxies.BaseProxyError, match="no RF"):
+        proxies.french_rf_from_text("nothing here")
