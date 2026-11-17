@@ -5020,3 +5020,57 @@ def test_provider_live_prehistory_needs_the_account_path_version() -> None:
         match="incompatible model-live entered the research series",
     ):
         _validate(uncaptured)
+
+
+def test_volatis_model_live_validates_ready_once_a_governed_quantbase_generation_carries_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Throwaway-world proof of the carrier flip (placeholder generation ids).
+
+    The release stage moves the Quantbase generation id/sha everywhere the
+    contract cites it, then flips volatis-model-live to READY/CAPTURED_GOVERNED
+    with the new admission token. The history-authority git pin is the release
+    stage's own commit-pair step, so it is bypassed here; everything else the
+    validator checks (capture/source agreement, version, interval, hand-over to
+    the account, mode admission) runs on the flipped contract.
+    """
+
+    monkeypatch.setattr(
+        contract_tool, "_verify_strategy_version_history_evidence", lambda _c: 0
+    )
+    old_id = "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe"
+    old_sha = "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c"
+    new_id = hashlib.sha256(b"throwaway-quantbase-generation").hexdigest()
+    new_sha = hashlib.sha256(b"throwaway-quantbase-manifest").hexdigest()
+    text = json.dumps(_contract())
+    assert old_id in text and old_sha in text
+    flipped = json.loads(text.replace(old_id, new_id).replace(old_sha, new_sha))
+    live = _history_correction(flipped, "volatis-provider-live")
+    row = _history_correction(flipped, "volatis-model-live")
+    row["capture"] = copy.deepcopy(live["capture"])
+    assert row["capture"]["generation_id"] == new_id
+    row["mode_admission"]["LIVE_PLUS_BACKTEST"] = (
+        contract_tool.PROVIDER_LIVE_PREHISTORY_ADMISSION
+    )
+    row["readiness"] = "READY"
+    row["blockers"] = []
+    _validate(flipped)
+
+    # the same flipped contract refuses each broken hand-over
+    late = copy.deepcopy(flipped)
+    _history_correction(late, "volatis-model-live")["interval"]["observed_end"] = (
+        "2024-10-15"
+    )
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="not strictly before the account",
+    ):
+        _validate(late)
+    gap = copy.deepcopy(flipped)
+    _history_correction(gap, "volatis-model-live")["interval"]["observed_end"] = (
+        "2024-10-01"
+    )
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError, match="leaves a gap before the account"
+    ):
+        _validate(gap)
