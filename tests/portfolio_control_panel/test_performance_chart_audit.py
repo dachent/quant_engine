@@ -813,7 +813,7 @@ def test_each_chip_live_start_and_return_are_the_same_series_live_only_line(
     ):
         chip = _chip(dom, name)
         assert (
-            f"live from {_week_start(start)}, live {_live_only_return(payload, series)}"
+            f"live from {_week_start(start)}, {_live_only_return(payload, series)} since live start"
             in chip
         ), (name, chip)
     assert "live from" not in _chip(dom, "Gamma")  # live throughout: no marker
