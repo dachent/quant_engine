@@ -587,7 +587,7 @@ class BlobVerifier(Verifier):
             on_reuse=self.reused.append,
             blob_codec=(
                 lambda value: pickle.dumps(value, protocol=4),
-                pickle.loads,
+                vr._restricted_loads,
             ),
         )
 
@@ -629,3 +629,44 @@ def test_a_changed_input_voids_a_blob_receipt_and_default_mode_writes_no_blob(
     vr.clear_memory_receipts()
     BlobVerifier(world).run()
     assert not list(vr.receipt_directory(world["state"]).glob("*.blob"))
+
+
+_FORGED_MARKER = {"ran": False}
+
+
+def _forged_call() -> str:
+    _FORGED_MARKER["ran"] = True
+    return "pwned"
+
+
+class _Forged:
+    def __reduce__(self):
+        return (_forged_call, ())
+
+
+def test_a_forged_sidecar_with_a_matching_receipt_digest_never_executes(world):
+    """The digest sits beside the blob, so a writer of the state root can forge both;
+    the loader must still refuse any callable and fall back to a live run."""
+    import pickle
+
+    v = BlobVerifier(world)
+    v.run()
+    directory = vr.receipt_directory(world["state"])
+    (blob,) = directory.glob("blob-*.blob")
+    (receipt_path,) = directory.glob("blob-*.json")
+    forged = pickle.dumps(_Forged(), protocol=4)
+    blob.write_bytes(forged)
+    document = json.loads(receipt_path.read_bytes())
+    body = document["body"]
+    body["result"] = json.dumps(
+        {"blob_sha256": __import__("hashlib").sha256(forged).hexdigest()},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    document["receipt_sha256"] = vr._sha(body)
+    receipt_path.write_bytes(json.dumps(document).encode())
+    vr.clear_memory_receipts()
+    _FORGED_MARKER["ran"] = False
+    result = v.run()
+    assert _FORGED_MARKER["ran"] is False
+    assert result["total"] == 3 and v.live == 2 and v.reused == []

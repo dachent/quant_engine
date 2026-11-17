@@ -39,9 +39,11 @@ from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import contextvars
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import pickle
 import platform
 import subprocess
 import re
@@ -49,7 +51,7 @@ import shlex
 import stat as stat_module
 import sys
 import threading
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from quant_engine.core import stage_timing
 
@@ -824,11 +826,19 @@ def run_with_receipt(
                 else _read_blob(state_root, name, key, str(body["result"]))
             )
             if blob_codec is None or blob is not None:
-                if on_reuse is not None:
-                    on_reuse(str(stored["receipt_sha256"]))
+                decoded: Any = None
                 if blob_codec is None or blob is None:
-                    return json.loads(str(body["result"]))  # type: ignore[no-any-return]
-                return blob_codec[1](blob)
+                    decoded = json.loads(str(body["result"]))
+                    usable = True
+                else:
+                    try:
+                        decoded, usable = blob_codec[1](blob), True
+                    except Exception:  # noqa: BLE001 - an undecodable blob is a miss
+                        usable = False
+                if usable:
+                    if on_reuse is not None:
+                        on_reuse(str(stored["receipt_sha256"]))
+                    return decoded  # type: ignore[no-any-return]
             still_valid = False  # blob missing or altered: recompute and replace it
     with _record() as recorder:
         result = compute()
@@ -871,6 +881,53 @@ def run_with_receipt(
     return result
 
 
+_SAFE_CLASSES = {
+    ("builtins", name)
+    for name in (
+        "dict",
+        "list",
+        "tuple",
+        "set",
+        "frozenset",
+        "bytes",
+        "bytearray",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "complex",
+        "slice",
+        "range",
+    )
+} | {
+    ("collections", "OrderedDict"),
+    ("decimal", "Decimal"),
+    ("datetime", "date"),
+    ("datetime", "datetime"),
+    ("datetime", "time"),
+    ("datetime", "timedelta"),
+    ("pathlib", "PurePosixPath"),
+    ("pathlib", "PureWindowsPath"),
+    ("pathlib", "WindowsPath"),
+    ("pathlib", "PosixPath"),
+}
+
+
+class _RestrictedUnpickler(pickle.Unpickler):
+    """Plain data only: a forged sidecar cannot name a callable to run on load."""
+
+    def find_class(self, module: str, name: str) -> object:
+        if (module, name) not in _SAFE_CLASSES:
+            raise pickle.UnpicklingError(
+                f"class not allowed in a receipt blob: {module}.{name}"
+            )
+        return super().find_class(module, name)
+
+
+def _restricted_loads(data: bytes) -> Any:
+    return _RestrictedUnpickler(io.BytesIO(data)).load()
+
+
 RENDER_REUSE_ENV = "QE_RENDER_REUSE"
 RENDER_STATE_ENV = "QE_RENDER_STATE_ROOT"
 
@@ -905,8 +962,8 @@ def reuse_render(
     kwargs: Mapping[str, object],
     *,
     repo_root: Path,
-    compute: Callable[[], T],
-) -> T:
+    compute: Callable[[], Any],
+) -> Any:
     """``compute`` (a deterministic render of files it reads) once per input state.
 
     Release runs never set ``QE_RENDER_REUSE``: they call ``compute`` directly. A hit
@@ -916,8 +973,6 @@ def reuse_render(
 
     if not render_reuse_enabled():
         return compute()
-    import pickle
-
     state_root = Path(os.environ[RENDER_STATE_ENV])
     identity = {
         "args": _argument_identity(list(args)),
@@ -933,7 +988,7 @@ def reuse_render(
             repo_root=repo_root,
             state_root=state_root,
             compute=compute,
-            blob_codec=(lambda v: pickle.dumps(v, protocol=4), pickle.loads),
+            blob_codec=(lambda v: pickle.dumps(v, protocol=4), _restricted_loads),
         )
     finally:
         PERSIST.reset(restore)
