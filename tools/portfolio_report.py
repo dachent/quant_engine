@@ -2840,21 +2840,15 @@ IMPLEMENTATION_GAP_BASIS_NONE = "NO_COMPARATOR_ADMITTED"
 
 def _usable_return_reconciliation(implementation: object) -> bool:
     """A verified implementation contract counts only when its return reconciliation has a status
-    that is not UNAVAILABLE and observations (a trade deconstruction can verify while the return
-    reconciliation is unavailable).  The AI-factor shape nests it under account_basis."""
+    that is an allowed status and observations (a trade deconstruction can verify while the return
+    reconciliation is unavailable)."""
 
     if not isinstance(implementation, Mapping):
         return False
-    # The row's own (top-level) reconciliation decides; the parent-account reconciliation nested under
-    # account_basis is consulted only when the row carries no top-level one, so a sleeve whose own
-    # reconciliation is unavailable never publishes "tested" from its parent account's evidence.
-    basis = implementation.get("account_basis")
-    if "return_reconciliation" in implementation:
-        candidates = [implementation.get("return_reconciliation")]
-    elif isinstance(basis, Mapping):
-        candidates = [basis.get("return_reconciliation")]
-    else:
-        candidates = []
+    # Only the row's own (top-level) reconciliation decides.  The parent-account reconciliation nested
+    # under account_basis is never consulted: a sleeve with no usable reconciliation of its own must not
+    # publish "tested" from its parent account's evidence (fail closed).
+    candidates = [implementation.get("return_reconciliation")]
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             continue

@@ -147,10 +147,7 @@ def test_a_verified_contract_with_an_unavailable_return_reconciliation_is_not_te
 
 def test_a_verified_contract_is_tested_from_a_usable_return_reconciliation() -> None:
     usable = {"status": "TESTED_EXACT_COMMON_DATES", "observations": 12}
-    for implementation in (
-        {"return_reconciliation": usable},
-        {"account_basis": {"return_reconciliation": usable}},
-    ):
+    for implementation in ({"return_reconciliation": usable},):
         row = _merge(
             {
                 "implementation_reconciliation_status": "VERIFIED_CAUSAL_RETURN_ATTRIBUTION",
@@ -225,3 +222,21 @@ def test_only_the_enumerated_exact_date_comparison_statuses_are_tested() -> None
             {"observations": 30},
         )
         assert row["implementation_gap_status"] == expected, status
+
+
+def test_a_nested_parent_account_reconciliation_alone_is_never_tested() -> None:
+    """Fail closed: no top-level (own) return reconciliation, however usable the parent's is."""
+
+    usable = {"status": "TESTED_EXACT_COMMON_DATES", "observations": 207}
+    row = _merge(
+        {
+            "implementation_reconciliation_status": "VERIFIED_CAUSAL_RETURN_ATTRIBUTION",
+            "implementation_reconciliation": {
+                "account_basis": {"return_reconciliation": usable}
+            },
+        },
+        {"status": "UNAVAILABLE"},
+        None,
+    )
+
+    assert row["implementation_gap_status"] == "not_testable"
