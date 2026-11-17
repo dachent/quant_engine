@@ -71,7 +71,7 @@ def test_swaps_replace_a_bundle_and_keep_the_old_one_aside(tmp_path: Path) -> No
     assert result["swaps"] == 1
     assert (new / "in" / "sector-d" / "f.csv").read_text() == "new"
     assert (new / "in" / "sector-d.superseded" / "f.csv").read_text() == "old"
-    assert str(old) in (new / "in" / "sector-d" / "p.json").read_text()
+    assert "world-old" in (new / "in" / "sector-d" / "p.json").read_text()
 
 
 def test_a_swap_outside_the_world_is_refused_and_leaves_no_world(
