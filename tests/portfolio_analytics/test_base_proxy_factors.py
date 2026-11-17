@@ -195,3 +195,40 @@ def test_a_missing_calendar_month_is_refused_by_the_month_rule() -> None:
     rows = _rows(bil_skip=(EARLIER[2],))
     with pytest.raises(proxies.BaseProxyError, match="no distribution recorded in"):
         proxies.build_factors(rows, _french(100))
+
+
+def _monthly_prices(
+    start: date, end: date, extra: dict[date, Decimal] | None = None
+) -> dict[date, tuple[Decimal, Decimal]]:
+    """Weekday prices with a distribution on the 1st business day of each month and Dec 19."""
+
+    prices: dict[date, tuple[Decimal, Decimal]] = {}
+    day, seen_month = start, None
+    while day <= end:
+        if day.weekday() < 5:
+            first = (day.year, day.month) != seen_month
+            seen_month = (day.year, day.month)
+            pays = first and day.month != 1  # no January ex-date (year-end is in Dec)
+            pays = pays or (day.month == 12 and day.day == 19)
+            prices[day] = (Decimal(90), Decimal("0.3") if pays else Decimal(0))
+        day += timedelta(days=1)
+    return prices
+
+
+def test_a_missing_early_december_distribution_is_refused() -> None:
+    """Review P1: Nov 1 -> Dec 19 is 47 days, under the 52-day gap; December still had one."""
+
+    prices = _monthly_prices(date(2023, 6, 1), date(2024, 8, 20))
+    proxies.check_dividend_record("BIL", prices)  # complete record passes
+    early_december = date(2023, 12, 1)
+    assert prices[early_december][1] > 0
+    prices[early_december] = (prices[early_december][0], Decimal(0))
+    with pytest.raises(proxies.BaseProxyError, match="no distribution recorded in"):
+        proxies.check_dividend_record("BIL", prices)
+
+
+def test_a_january_capture_needs_the_december_distributions_not_a_january_one() -> None:
+    """Review follow-on: Jan 6-31 captures were always refused (no January ex-date exists)."""
+
+    prices = _monthly_prices(date(2024, 6, 1), date(2025, 1, 20))
+    proxies.check_dividend_record("HYG", prices)

@@ -30,8 +30,8 @@ RISK_FREE_DAILY_MAX: Final = Decimal("0.005")
 MONTHLY_EX_DATE_LAST_DAY: Final = 5
 # every ex-date of the last three years must be recorded. Measured on the R3-BASE-2
 # capture, successive BIL and HYG distributions are 13-49 days apart (the longest are
-# the Dec 31 -> early February steps); one missing month gives at least 56, so 52
-# separates them: a missing month stays a price drop.
+# the Dec 31 -> early February steps); one missing month gives at least 56 EXCEPT an early-December one (Dec 1-3 ->
+# year-end is 45-47 days: caught by the two-in-December rule), so 52 separates them: a missing month stays a price drop.
 DIVIDEND_GAP_WINDOW_DAYS: Final = 1095
 MONTHLY_MAX_GAP_DAYS: Final = 52
 
@@ -87,11 +87,13 @@ def _check_dividend_record(
 
     last_price = max(prices)
     month_start = last_price.replace(day=1)
-    needed_from = (
-        month_start
-        if last_price.day > MONTHLY_EX_DATE_LAST_DAY
-        else (month_start - timedelta(days=1)).replace(day=1)
-    )
+    if last_price.month == 1:
+        # no payer goes ex in January (the year-end one is in December)
+        needed_from = date(last_price.year - 1, 12, 1)
+    elif last_price.day > MONTHLY_EX_DATE_LAST_DAY:
+        needed_from = month_start
+    else:
+        needed_from = (month_start - timedelta(days=1)).replace(day=1)
     paid = sorted(day for day, (_close, dividend) in prices.items() if dividend > 0)
     window_start = max(
         last_price - timedelta(days=DIVIDEND_GAP_WINDOW_DAYS), min(prices)
@@ -116,6 +118,10 @@ def _check_dividend_record(
         if (year, month) >= (last_price.year, last_price.month):
             break
         if (year, month) not in paid_months and month != 1:
+            missing_months.append((year, month))
+        if month == 12 and sum(1 for d in paid if (d.year, d.month) == (year, 12)) < 2:
+            # BIL and HYG pay twice in every December (early month and year-end):
+            # one missing early-December ex-date would otherwise stay a price drop
             missing_months.append((year, month))
     if missing_months:
         raise BaseProxyError(
