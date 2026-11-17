@@ -58,7 +58,7 @@ def _rows(volatis_tier: str, rates_mutator: Any = None) -> list[dict[str, Any]]:
     ]
 
 
-VALUES = {"volatis": VOLATIS_VALUE, "robuxio": ROBUXIO_VALUE}
+VALUES = {"volatis": (VOLATIS_VALUE, AS_OF), "robuxio": (ROBUXIO_VALUE, AS_OF)}
 
 
 def _derive(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -69,7 +69,7 @@ def _derive(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 def test_a_settled_management_rate_gives_annual_dollars_with_its_derivation() -> None:
     volatis = _derive(_rows("NON_QUALIFIED_FLAT"))["volatis"]
 
-    assert volatis["derived_annual_cost_usd"] == str(Decimal("0.035") * VOLATIS_VALUE)
+    assert volatis["derived_annual_cost_usd"] == "2325.99"  # 0.035 x 66456.99, cents
     assert volatis["annual_external_cost_usd"] is None
     assert volatis["cost_derivation"] == {
         "as_of": "2026-09-17",
@@ -108,12 +108,21 @@ def test_an_in_nav_performance_fee_is_classified_never_priced() -> None:
     assert robuxio["derived_annual_cost_usd"] == "0"  # management part stays visible
     derivation = robuxio["cost_derivation"]
     assert derivation["unpriced_components"] == []
-    (item,) = derivation["classified_components"]
+    item = derivation["classified_components"][0]
     assert item["classification"] == "IN_NAV_NOT_BILLED"
     assert item["component"] == "performance_rate"
     assert item["rate"] == "0.3"
     assert item["mechanism"] == "over the high-water mark"
     assert item["reason"]
+    # the documented redemption fee is billed outside the NAV but only on redemption
+    redemption = next(
+        part
+        for part in derivation["classified_components"]
+        if part["component"] == "redemption_fee"
+    )
+    assert redemption["classification"] == "CONTINGENT_ON_REDEMPTION"
+    assert redemption["rate"] == "0.005"
+    assert redemption["placement"] == "OUTSIDE_BILLED"
 
 
 def test_a_performance_fee_not_stated_inside_the_nav_stays_unpriced() -> None:
@@ -122,6 +131,51 @@ def test_a_performance_fee_not_stated_inside_the_nav_stays_unpriced() -> None:
     assert volatis["cost_derivation"]["unpriced_components"] == ["performance_rate"]
     assert volatis["cost_derivation"]["classified_components"] == []
     assert baseline._costs_claim([volatis])["status"] == "PARTIAL"
+
+
+def test_a_value_dated_before_the_cutoff_is_never_the_base() -> None:
+    stale = {"volatis": (VOLATIS_VALUE, date(2026, 8, 16))}
+    out = baseline._derive_rate_dollar_costs(_rows("NON_QUALIFIED_FLAT"), stale, AS_OF)
+    assert all("derived_annual_cost_usd" not in row for row in out)
+
+
+def _capital(value: str, day: str, status: str = "AVAILABLE") -> dict[str, Any]:
+    return {
+        "as_of_date": day,
+        "current_value": {"currency": "USD", "status": status, "value": value},
+        "status": status,
+        "strategy_id": "volatis",
+    }
+
+
+def test_the_base_is_the_cutoff_value_of_the_current_capital_view() -> None:
+    capital = {"strategies": [_capital("48057.62", "2026-09-17")]}
+    values = baseline._cutoff_capital_values(capital, AS_OF)
+    assert values == {"volatis": (Decimal("48057.62"), AS_OF)}
+    out = baseline._derive_rate_dollar_costs(_rows("NON_QUALIFIED_FLAT"), values, AS_OF)
+    volatis = next(row for row in out if row["strategy_id"] == "volatis")
+    assert volatis["derived_annual_cost_usd"] == "1682.02"  # 0.035 x 48057.62
+    assert volatis["cost_derivation"]["base_value_usd"] == "48057.62"
+
+
+def test_a_capital_row_not_dated_at_the_cutoff_gives_no_base() -> None:
+    old = {"strategies": [_capital("66593.33", "2026-08-16")]}
+    assert baseline._cutoff_capital_values(old, AS_OF) == {}
+    pending = {"strategies": [_capital("1", "2026-09-17", status="NOT_READY")]}
+    assert baseline._cutoff_capital_values(pending, AS_OF) == {}
+
+
+def test_the_catalog_derives_after_the_current_capital_and_not_in_the_cost_builder() -> None:
+    import inspect
+
+    build = inspect.getsource(baseline.build_catalog)
+    assert build.index("_build_current_capital(") < build.index(
+        "_derive_rate_dollar_costs("
+    ) < build.index("_fact_coverage(")
+    # the allocation snapshot's dated values must not feed the derivation
+    assert "_derive_rate_dollar_costs" not in inspect.getsource(
+        baseline._allocations_and_coverage
+    )
 
 
 def test_a_strategy_without_a_sleeve_value_is_not_priced() -> None:

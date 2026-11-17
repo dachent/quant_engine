@@ -134,6 +134,7 @@ COST_DERIVATION_METHOD: Final = "DERIVED_FROM_DOCUMENTED_RATE"
 # A cost that is not a billed dollar amount is classified, with its reason, not left as a gap.
 COST_CLASS_IN_NAV_NOT_BILLED: Final = "IN_NAV_NOT_BILLED"
 COST_CLASS_EXCLUDED_HISTORY_ONLY: Final = "EXCLUDED_DEPRECATED_HISTORY_ONLY"
+COST_CLASS_CONTINGENT_ON_REDEMPTION: Final = "CONTINGENT_ON_REDEMPTION"
 _FEE_PLACEMENTS: Final = frozenset(
     {"INSIDE_VEHICLE_NAV", "OUTSIDE_BILLED", "NOT_STATED_IN_DOCUMENTATION"}
 )
@@ -2394,9 +2395,6 @@ def _allocations_and_coverage(
             costs, evidence_path, strategy_aliases, publication_date
         )
     _require_fee_rate_evidence(costs)
-    costs = _derive_rate_dollar_costs(
-        costs, {key: item[0] for key, item in by_strategy.items()}, publication_date
-    )
     costs = _classify_excluded_history_only_costs(costs, publication_date)
     # The audit snapshot is sealed: these totals are compared with the audit's reported
     # total and with the materializer's own sum, so they are added as the audit added
@@ -2412,9 +2410,30 @@ def _allocations_and_coverage(
     )
 
 
+def _cutoff_capital_values(
+    current_capital: Mapping[str, Any], cutoff: date
+) -> dict[str, tuple[Decimal, date]]:
+    """Strategy sleeve values the current capital view dates at the cutoff itself."""
+
+    values: dict[str, tuple[Decimal, date]] = {}
+    for row in _objects(current_capital.get("strategies"), "current_capital.strategies"):
+        amount = row.get("current_value")
+        if (
+            row.get("status") == _CAPITAL_AVAILABLE
+            and isinstance(amount, Mapping)
+            and amount.get("value") is not None
+            and row.get("as_of_date") == cutoff.isoformat()
+        ):
+            values[str(row["strategy_id"])] = (
+                _decimal(amount["value"], "current capital value") or Decimal(0),
+                cutoff,
+            )
+    return values
+
+
 def _derive_rate_dollar_costs(
     costs: Sequence[Mapping[str, Any]],
-    values: Mapping[str, Decimal],
+    values: Mapping[str, tuple[Decimal, date]],
     as_of: date,
 ) -> list[dict[str, Any]]:
     """Annual dollars of a documented management rate: the rate times the sleeve value.
@@ -2438,8 +2457,14 @@ def _derive_rate_dollar_costs(
             and item["annual_external_cost_usd"] is None
         ):
             tier_row = next(r for r in rates["tier_table"] if r["tier"] == rates["tier"])
-            value = values.get(str(item["strategy_id"]))
-            if tier_row["management_rate"] is not None and value is not None:
+            found_value = values.get(str(item["strategy_id"]))
+            value = found_value[0] if found_value is not None else None
+            if (
+                tier_row["management_rate"] is not None
+                and found_value is not None
+                and found_value[1] == as_of
+            ):
+                assert value is not None
                 if value < 0:
                     raise BaselineValidationError(
                         f"sleeve value of {item['strategy_id']} is negative"
@@ -2459,14 +2484,32 @@ def _derive_rate_dollar_costs(
                                 "rate": tier_row["performance_rate"],
                                 "reason": (
                                     "the documentation places the fee inside the vehicle "
-                                    "NAV; it is a share of gains, not of sleeve value, "
+                                    "NAV; it is a share of gains, not of capital value, "
                                     "and is not an external billed cost"
                                 ),
                             }
                         )
                     else:
                         unpriced.append("performance_rate")
-                item["derived_annual_cost_usd"] = decimal_text(rate * value)
+                redemption = rates.get("redemption")
+                if isinstance(redemption, dict):
+                    # billed outside the NAV, but only when units are redeemed: an
+                    # event cost with no annual run rate, never assumed to occur
+                    classified.append(
+                        {
+                            "classification": COST_CLASS_CONTINGENT_ON_REDEMPTION,
+                            "component": "redemption_fee",
+                            "placement": redemption["placement"],
+                            "rate": redemption["rate"],
+                            "reason": (
+                                "billed when units are redeemed; an event cost, not an "
+                                "annual cost, and not priced"
+                            ),
+                        }
+                    )
+                item["derived_annual_cost_usd"] = decimal_text(
+                    (rate * value).quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
+                )
                 item["cost_derivation"] = {
                     "as_of": as_of.isoformat(),
                     "base_value_usd": decimal_text(value),
@@ -5041,7 +5084,7 @@ def _costs_claim(costs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "authority": "strategy cost-economics register",
             "code": "COMPLETE" if complete else "RETAINED_UNKNOWN_OR_CONDITIONAL_COSTS",
             "effect": (
-                "Costs read from the cost-economics register."
+                "Costs are known amounts from the cost-economics register, amounts derived from a documented rate at the cutoff capital value, or classified with a stated reason."
                 if complete
                 else "Gross-to-net and after-tax conclusions remain unavailable where a sleeve cost is unknown or conditional."
             ),
@@ -6855,6 +6898,11 @@ def build_catalog(
         raise BaselineValidationError(
             "current capital does not reconcile to cutoff account values"
         )
+    # Dollars of a documented rate use the cutoff sleeve value of the current capital
+    # view, never the dated allocation snapshot's value.
+    costs = _derive_rate_dollar_costs(
+        costs, _cutoff_capital_values(current_capital, as_of), as_of
+    )
     audit_snapshot = _build_audit_snapshot(
         as_of_date=source_dates["component-decision-table"],
         replay=replay,

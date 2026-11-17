@@ -356,7 +356,12 @@
   // one annual pre-tax external amount; an unpublished amount is said to be unpublished.
   // A percent-based row (documented rates) has no dollar amount by design; it says so instead of "not published".
   const isPercentCost = (row) => typeof row.cost_status === "string" && row.cost_status.startsWith("documented_rate");
-  const costAmountText = (row) => (number(row.annual_external_cost_usd) == null ? (isPercentCost(row) ? "no dollar amount (percent-based)" : "annual amount not published") : `${currencyExact(row.annual_external_cost_usd)} per year`);
+  const costAmountText = (row) => {
+    if (number(row.annual_external_cost_usd) != null) return `${currencyExact(row.annual_external_cost_usd)} per year`;
+    if (number(row.derived_annual_cost_usd) != null) return `${currencyExact(row.derived_annual_cost_usd)} per year (derived from the documented rate)`;
+    if (row.cost_classification && row.cost_classification.classification) return "excluded from live costs (deprecated record, history kept)";
+    return isPercentCost(row) ? "no dollar amount (percent-based)" : "annual amount not published";
+  };
   // N2: the producer states, per strategy row, which account scope its return, drawdown, current value and weight carry
   // (`return_scope_label`); it is printed beside the row it qualifies, verbatim.
   // T6 fix: the strategy row's mixed-basis label is not printed on an epoch row of the sleeve; such a row (it carries
@@ -385,7 +390,13 @@
   };
   const costComponentsMarkup = (row) => (Array.isArray(row.cost_components) ? row.cost_components.map((item) => `<span class="cell-secondary">${safe(costComponentLine(item))}</span>`).join("") : "");
   const costDisclosure = (row) => {
-    const amount = number(row.annual_external_cost_usd) == null ? (isPercentCost(row) ? "No dollar cost (percent-based)" : "Pre-tax cost unavailable") : `${currencyExact(row.annual_external_cost_usd)} annually`;
+    const amount = number(row.annual_external_cost_usd) != null
+      ? `${currencyExact(row.annual_external_cost_usd)} annually`
+      : number(row.derived_annual_cost_usd) != null
+        ? `${currencyExact(row.derived_annual_cost_usd)} annually (derived from the documented rate)`
+        : row.cost_classification && row.cost_classification.classification
+          ? "Excluded from live costs (deprecated record, history kept)"
+          : isPercentCost(row) ? "No dollar cost (percent-based)" : "Pre-tax cost unavailable";
     // The producer builds the percent-rate sentence from the row's own fields; it is printed verbatim.
     const rateSentence = typeof row.cost_rate_disclosure === "string" && row.cost_rate_disclosure ? `<span class="cell-secondary">${safe(row.cost_rate_disclosure)}</span>` : "";
     // N64: a rate divides by the sleeve value at the cutoff and says which date that value

@@ -1953,17 +1953,23 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
             if isinstance(item, Mapping)
             and item.get("classification") == "IN_NAV_NOT_BILLED"
         ]
+        contingent = [
+            item
+            for item in basis.get("classified_components") or []
+            if isinstance(item, Mapping)
+            and item.get("classification") == "CONTINGENT_ON_REDEMPTION"
+        ]
         sentence += (
             f"; derived annual {basis.get('rate_kind', '').replace('_', ' ')} cost "
             f"${derived} ({basis.get('method')}): "
             f"{_percent_text(basis.get('rate'))} of ${basis.get('base_value_usd')} "
-            f"sleeve value as of {basis.get('as_of')}"
+            f"capital value at the cutoff {basis.get('as_of')}"
         )
         if unpriced:
             sentence += (
                 "; "
                 + ", ".join(str(name).replace("_", " ") for name in unpriced)
-                + " is a share of gains, not of sleeve value, and is not priced"
+                + " is a share of gains, not of capital value, and is not priced"
             )
         for item in in_nav:
             sentence += (
@@ -1971,7 +1977,13 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
                 f"{_percent_text(item.get('rate'))} is IN_NAV_NOT_BILLED "
                 "(charged inside the vehicle NAV, not a billed dollar cost)"
             )
-        return f"{sentence}; no billed dollar amount is published."
+        for item in contingent:
+            sentence += (
+                f"; {str(item.get('component')).replace('_', ' ')} "
+                f"{_percent_text(item.get('rate'))} is CONTINGENT_ON_REDEMPTION "
+                "(billed when units are redeemed, not an annual cost)"
+            )
+        return f"{sentence}; billed dollar amount: not published."
     return f"{sentence}; no dollar cost is published."
 
 

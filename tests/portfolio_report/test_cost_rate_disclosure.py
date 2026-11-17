@@ -199,8 +199,8 @@ def test_a_derived_dollar_amount_is_named_with_its_rate_base_and_date() -> None:
 
     assert (
         "derived annual management rate cost $2325.99465 "
-        "(DERIVED_FROM_DOCUMENTED_RATE): 3.5% of $66456.99 sleeve value as of "
-        "2026-09-17; no billed dollar amount is published." in sentence
+        "(DERIVED_FROM_DOCUMENTED_RATE): 3.5% of $66456.99 capital value at the cutoff "
+        "2026-09-17; billed dollar amount: not published." in sentence
     )
     assert "no dollar cost is published" not in sentence
     assert "not priced" not in sentence
