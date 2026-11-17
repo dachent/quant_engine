@@ -184,3 +184,16 @@ def test_a_fit_window_that_stops_before_the_live_series_is_not_a_headline() -> N
     # a few days of lag is not stale
     row["coverage"]["observed_end"] = "2026-11-02"
     assert panel._alpha_context(row)["headline_status"] == "HEADLINE_ALLOWED"
+
+
+def test_extreme_loadings_and_a_negative_train_r_squared_are_flagged() -> None:
+    """Factor-model audit D7/D8: betas of -6.4 / +5.3 and a train R2 of -0.014 were unflagged."""
+
+    row = _row("0.20", "0.05", 0)
+    assert panel._alpha_context(row)["quality_flags"] == []
+    row["exposures"] = [{"beta": "3.49"}, {"beta": "-6.36"}]
+    row["diagnostics"] = {"train": {"r_squared": "-0.0139837"}}
+    assert panel._alpha_context(row)["quality_flags"] == [
+        "LARGE_EXPOSURE_CHECK_SCALE",
+        "NEGATIVE_TRAIN_R_SQUARED",
+    ]

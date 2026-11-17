@@ -1183,7 +1183,10 @@ def test_diagnostic_dynamic_contributions_use_changing_beta_rows(
     )
     assert row["status"] == "DIAGNOSTIC_ONLY"
     assert row["use_boundary"] == "FORENSIC_DIAGNOSTIC_NOT_PM_ACCEPTED"
-    assert row["alpha"] == model["diagnostic_outputs"]["alpha"]
+    assert row["alpha"]["net_annualized"] is None
+    assert row["alpha"]["net_status"] == "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE"
+    assert row["diagnostic_detail"]["alpha"] == model["diagnostic_outputs"]["alpha"]
+    assert row["exposures"] == []
     assert row["contribution_summary"] == {
         "alpha_mean": "0.001",
         "factor_means": {"SPY_XS": "0.005"},

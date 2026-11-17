@@ -5591,6 +5591,38 @@ def _fit_segments(
         return []
 
 
+def _gate_withheld_alpha() -> dict[str, Any]:
+    return {
+        "annualized_standard_error": None,
+        "confidence_status": "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE",
+        "gross_annualized": None,
+        "gross_status": "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE",
+        "net_annualized": None,
+        "net_status": "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE",
+        "periodic_intercept": None,
+    }
+
+
+# Factor-model audit D7/D8: a loading beyond this size, or a negative training R2,
+# is shown with a flag so a reader checks the scale and the fit before using it.
+SUSPECT_BETA_ABS: Final = Decimal(3)
+
+
+def _fit_quality_flags(row: Mapping[str, Any]) -> list[str]:
+    flags: list[str] = []
+    for item in row.get("exposures") or []:
+        beta = _alpha_decimal(item.get("beta")) if isinstance(item, Mapping) else None
+        if beta is not None and abs(beta) > SUSPECT_BETA_ABS:
+            flags.append("LARGE_EXPOSURE_CHECK_SCALE")
+            break
+    diagnostics = _optional_mapping(row.get("diagnostics")) or {}
+    train = _optional_mapping(diagnostics.get("train")) or {}
+    train_r2 = _alpha_decimal(train.get("r_squared"))
+    if train_r2 is not None and train_r2 < 0:
+        flags.append("NEGATIVE_TRAIN_R_SQUARED")
+    return flags
+
+
 def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
     """What a reader needs next to an alpha tile: window, n, SE, t, backtest share, basis.
 
@@ -5710,6 +5742,7 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "inference": inference,
         "headline_status": headline_status,
         "window_lag_days": window_lag_days,
+        "quality_flags": _fit_quality_flags(row),
         # one headline alpha per strategy: the fit on the accepted live return series
         # with a standard error and t-statistic; every other fit is secondary
         "lens_role": "HEADLINE"
@@ -5956,7 +5989,14 @@ def _factor_analysis(
             )
             rows.append(
                 {
-                    "alpha": diagnostic_alpha,
+                    # a fit the sealed gate rejected publishes status and reason, no
+                    # result: its numbers sit under a labelled diagnostic detail only
+                    "alpha": _gate_withheld_alpha(),
+                    "diagnostic_detail": {
+                        "alpha": diagnostic_alpha,
+                        "exposures": diagnostic_exposures,
+                        "warning": "COMPUTED_NOT_ACCEPTED_FOR_PM_ALPHA_OR_EXPOSURE_CONCLUSIONS",
+                    },
                     "contribution_summary": (
                         _factor_contribution_summary(model)
                         if model.get("contributions")
@@ -5971,7 +6011,7 @@ def _factor_analysis(
                     "evidence_layer": _text(
                         model.get("evidence_layer"), "model.evidence_layer"
                     ),
-                    "exposures": diagnostic_exposures,
+                    "exposures": [],
                     "model_id": model_id,
                     "model_quality": model_quality,
                     **orthogonal_surface_fields,

@@ -2358,6 +2358,8 @@
       visibleBasis,
     ];
     if (ctx.headline_status === "NOT_A_HEADLINE_INCLUDES_BACKTEST") lines.push("includes hypothetical backtest: not a live result, no headline");
+    if ((ctx.quality_flags || []).includes("LARGE_EXPOSURE_CHECK_SCALE")) lines.push("a loading beyond 3 times: check the series scale");
+    if ((ctx.quality_flags || []).includes("NEGATIVE_TRAIN_R_SQUARED")) lines.push("training R-squared is negative: poor fit");
     if (ctx.headline_status === "NOT_A_HEADLINE_MODEL_GATE_FAILED") lines.push("model failed the holdout gate: forensic only, no headline");
     if (ctx.headline_status === "NOT_A_HEADLINE_STALE_FACTOR_WINDOW") lines.push("factor window ends before the live series: no headline");
     if (ctx.headline_status === "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE") lines.push("window under a year or not a live series: no headline");
@@ -2392,9 +2394,9 @@
         const maximumVif = Math.max(...(design.vif || []).map((item) => Number(item.value)).filter(Number.isFinite), 0);
         const inference = row.diagnostics?.inference || {};
         const reason = row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · ");
-        const diagnosticBetaRows = (row.exposures || []).map((item) => `<tr><td>${safe(item.factor_id)}</td><td class="numeric">${decimal(item.beta ?? item.exposure)}</td><td>${safe(item.standard_error == null ? "Coefficient SE unavailable" : `SE ${decimal(item.standard_error)}`)}</td></tr>`);
+        const diagnosticBetaRows = (row.diagnostic_detail?.exposures || []).map((item) => `<tr><td>${safe(item.factor_id)}</td><td class="numeric">${decimal(item.beta ?? item.exposure)}</td><td>${safe(item.standard_error == null ? "Coefficient SE unavailable" : `SE ${decimal(item.standard_error)}`)}</td></tr>`);
         const diagnosticBetas = diagnosticBetaRows.length ? `<div class="panel"><div class="panel-heading"><div><div class="eyebrow">Forensic diagnostic</div><h3>Computed beta / loading</h3></div><span class="badge badge-warning">NOT PM-ACCEPTED</span></div><div class="table-wrap"><table id="factor-diagnostic-beta-table"><caption>Diagnostic factor betas</caption>${tableMarkup([["Factor"], ["Beta (return per unit factor return)", "numeric"], ["Uncertainty"]], diagnosticBetaRows)}</table></div></div>` : "";
-        const diagnosticAlpha = row.alpha || {};
+        const diagnosticAlpha = row.diagnostic_detail?.alpha || row.alpha || {};
         const diagnosticAlphaMarkup = `<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Diagnostic net alpha</div><div class="metric-value">${alphaFigure(row, diagnosticAlpha.net_annualized)}</div><div class="metric-note">${alphaEvidenceHtml(row)}</div></div><div class="metric-block"><div class="metric-label">Diagnostic gross alpha</div><div class="metric-value">${alphaFigure(row, diagnosticAlpha.gross_annualized)}</div><div class="metric-note">${safe(diagnosticAlpha.gross_status || "UNAVAILABLE")}</div></div><div class="metric-block"><div class="metric-label">Diagnostic periodic alpha</div><div class="metric-value">${pct(diagnosticAlpha.periodic_intercept, 3)}</div><div class="metric-note">${safe(diagnosticAlpha.confidence_status || "UNAVAILABLE")} · annualized SE ${pct(diagnosticAlpha.annualized_standard_error)}</div></div></div>`;
         const diagnosticSummary = row.contribution_summary;
         const diagnosticContributionRows = diagnosticSummary ? [
