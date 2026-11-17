@@ -49,8 +49,25 @@ def _composer_text(
             "Options $ --",
             "Fixed Income $ --",
             f"Total Market Value {_money(total)}",
+            "Dividend $ -- $ --",
+            "Interest** $ -- $ --",
             "Short Term",
             "Long Term",
+            "Holdings",
+            "Symbol Description Quantity Market Price Market Value Cost Price "
+            "Unrealized TD Cost Basis",
+            f"XLE SELECT SECTOR SPDR TR 1.000000000 ${long} ${long} "
+            f"${long} $0.00 ${long}",
+            *(
+                [
+                    "Transaction",
+                    "Trade Date Entry Type Side Symbol Description Quantity Price "
+                    "Amount Commission",
+                    f"{month:02d}/15/{year} Trade Entry buy XLE 0.001 $60.00 {trade} $ --",
+                ]
+                if trade != "$ --"
+                else []
+            ),
         ]
     )
 
@@ -511,3 +528,123 @@ def test_john_hancock_refuses_holdings_that_do_not_sum_to_closing() -> None:
     ).replace("$100.00", "$101.00")
     with pytest.raises(gen.StatementGenerationError, match="holdings differ"):
         gen.parse_john_hancock(text)
+
+
+def test_composer_statements_yield_dated_transactions_and_positions(
+    tmp_path: Path,
+) -> None:
+    catalog, _manifest, _bytes = gen.build_generation(_composer(tmp_path))
+
+    assert catalog["flows"] == []  # no deposit or withdrawal row in any statement
+    assert [
+        (t["event_date"], t["kind"], t["amount"]["value"])
+        for t in catalog["transactions"]
+    ] == [("2026-01-15", "TRADE:Entry:BUY", "-0.06")]
+    assert [
+        (p["as_of_date"], p["market_value"]["value"]) for p in catalog["positions"]
+    ] == [
+        ("2026-01-31", "1087.10"),
+        ("2026-02-28", "1006.48"),
+        ("2026-03-31", "1031.20"),
+    ]
+    windows = {w["period_end"]: w for w in catalog["statement_windows"]}
+    for nav in catalog["nav_observations"]:
+        day = nav["as_of_date"]
+        position = sum(
+            Decimal(p["market_value"]["value"])
+            for p in catalog["positions"]
+            if p["as_of_date"] == day
+        )
+        assert position + Decimal(windows[day]["cash_ending"]) == Decimal(
+            nav["nav"]["value"]
+        )
+        assert windows[day]["table_closure"]["trades"] == "0.00"
+
+
+def test_composer_deposit_row_is_an_exact_dated_flow(tmp_path: Path) -> None:
+    february = _composer_text(
+        2026,
+        2,
+        begin="2.80",
+        ending="7.80",
+        long="1,006.48",
+        total="1,014.28",
+    ).replace("Addition $ -- $ --", "Addition $5.00 $5.00") + "\n".join(
+        [
+            "",
+            "Deposit & Withdrawals",
+            "Trade Date Entry Type Description Net Amt Account No",
+            "02/10/2026 Deposit ACH $5.00 900000001",
+            "STATEMENT MESSAGE",
+        ]
+    )
+    march = _composer_text(
+        2026,
+        3,
+        begin="7.80",
+        ending="7.80",
+        long="1,031.20",
+        total="1,039.00",
+    )
+
+    catalog, _manifest, _bytes = gen.build_generation(
+        _composer(tmp_path, **{"1": february, "2": march})
+    )
+
+    assert [
+        (f["event_date"], f["flow_type"], f["amount"]["value"], f["timing"])
+        for f in catalog["flows"]
+    ] == [("2026-02-10", "DEPOSIT_OR_WITHDRAWAL", "5.00", "EXACT_DATE")]
+
+
+@pytest.mark.parametrize(
+    ("replace", "message"),
+    (
+        # an income row the Income Summary does not show
+        (
+            (
+                "Dividend $ -- $ --",
+                "Dividend $ -- $ --\nIncome\n"
+                "01/05/2026 Dividends XLE Cash DIV @ 1 $1.00",
+            ),
+            "income table differs",
+        ),
+        # a fee row that Cost and Fees does not show
+        (
+            (
+                "Dividend $ -- $ --",
+                "Dividend $ -- $ --\nFees\n01/05/2026 TAF fee on 2026-01-05 -$0.01",
+            ),
+            "fees table differs",
+        ),
+    ),
+)
+def test_composer_refuses_a_table_that_does_not_reproduce_its_summary(
+    tmp_path: Path, replace: tuple[str, str], message: str
+) -> None:
+    january = _composer_text(
+        2026,
+        1,
+        begin="2.86",
+        trade="-$0.06",
+        ending="2.80",
+        long="1,087.10",
+        total="1,089.90",
+    ).replace(*replace)
+
+    with pytest.raises(gen.StatementGenerationError, match=message):
+        gen.build_generation(_composer(tmp_path, **{"0": january}))
+
+
+def test_composer_refuses_holdings_that_do_not_match_the_account_summary(
+    tmp_path: Path,
+) -> None:
+    february = _composer_text(
+        2026, 2, begin="2.80", ending="2.80", long="1,006.48", total="1,009.28"
+    ).replace(
+        "XLE SELECT SECTOR SPDR TR 1.000000000 $1,006.48 $1,006.48",
+        "XLE SELECT SECTOR SPDR TR 1.000000000 $900.00 $900.00",
+    )
+
+    with pytest.raises(gen.StatementGenerationError, match="holdings table differs"):
+        gen.build_generation(_composer(tmp_path, **{"1": february}))

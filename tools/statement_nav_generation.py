@@ -259,14 +259,132 @@ def parse_composer(text: str) -> dict[str, Any]:
         + cash["ending"]
         - holdings["total"]
     )
+    income_summary = (
+        _composer_line(text, "Dividend")[0] + _composer_line(text, r"Interest\*\*")[0]
+    )
     return {
         "account_number": account.group(1),
         "period_start": date(year, month, 1),
         "period_end": date(year, month, monthrange(year, month)[1]),
         "cash": cash,
         "holdings": holdings,
+        "income_summary": income_summary,
+        "rows": _composer_rows(text),
         "cash_residual": cash_residual,
         "total_residual": total_residual,
+    }
+
+
+_COMPOSER_DATE = r"(\d\d/\d\d/\d{4})"
+_COMPOSER_AMOUNT = r"(-?\$[\d,]+\.\d\d)"
+
+
+def _composer_section(text: str, header: str) -> list[str]:
+    """The lines of every ``header`` section (a header repeats at each page break)."""
+
+    out: list[str] = []
+    inside = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped in {"Holdings", "Income", "Fees", "Transaction", "Transactions"}:
+            inside = stripped == header
+            continue
+        if stripped.startswith(("Deposit & Withdrawals", "STATEMENT MESSAGE")):
+            inside = False
+            continue
+        if inside:
+            out.append(line)
+    return out
+
+
+def _composer_rows(text: str) -> dict[str, list[dict[str, str]]]:
+    """Holdings, dated income, fees and trades read from the statement tables."""
+
+    holdings: list[dict[str, str]] = []
+    for line in _composer_section(text, "Holdings"):
+        if line.startswith(("Symbol ", "*Cash")):
+            continue
+        tokens = line.split()
+        dollars = [
+            i for i, token in enumerate(tokens) if token.lstrip("-").startswith("$")
+        ]
+        if len(tokens) < 8 or len(dollars) < 5:
+            continue
+        first = dollars[-5]
+        holdings.append(
+            {
+                "symbol": tokens[0],
+                "description": " ".join(tokens[1 : first - 1]),
+                "quantity": tokens[first - 1],
+                "price": tokens[first].replace("$", ""),
+                "market_value": tokens[first + 1].replace("$", "").replace(",", ""),
+                "cost_basis": tokens[-1].replace("$", "").replace(",", ""),
+            }
+        )
+    income: list[dict[str, str]] = []
+    for line in _composer_section(text, "Income"):
+        match = re.match(
+            rf"^{_COMPOSER_DATE} (\S+) (\S+) (.*?) {_COMPOSER_AMOUNT}$", line.strip()
+        )
+        if match:
+            income.append(
+                {
+                    "date": match.group(1),
+                    "entry": match.group(2),
+                    "symbol": match.group(3),
+                    "amount": match.group(5).replace("$", "").replace(",", ""),
+                }
+            )
+    fees: list[dict[str, str]] = []
+    for line in _composer_section(text, "Fees"):
+        match = re.match(rf"^{_COMPOSER_DATE} (.*?) {_COMPOSER_AMOUNT}$", line.strip())
+        if match:
+            fees.append(
+                {
+                    "date": match.group(1),
+                    "description": match.group(2),
+                    "amount": match.group(3).replace("$", "").replace(",", ""),
+                }
+            )
+    trades: list[dict[str, str]] = []
+    for line in _composer_section(text, "Transaction"):
+        match = re.match(
+            rf"^{_COMPOSER_DATE} Trade Entry (buy|sell) (\S+) (-?[\d.]+) "
+            rf"\$([\d,.]+) {_COMPOSER_AMOUNT} (?:\$ --|\$[\d,.]+)$",
+            line.strip(),
+        )
+        if match:
+            trades.append(
+                {
+                    "date": match.group(1),
+                    "side": match.group(2),
+                    "symbol": match.group(3),
+                    "quantity": match.group(4),
+                    "price": match.group(5).replace(",", ""),
+                    "amount": match.group(6).replace("$", "").replace(",", ""),
+                }
+            )
+    deposits: list[dict[str, str]] = []
+    block = text.split("Deposit & Withdrawals", 1)
+    if len(block) == 2:
+        for line in block[1].split("STATEMENT MESSAGE", 1)[0].split("\n"):
+            match = re.match(
+                rf"^{_COMPOSER_DATE} (.*?) {_COMPOSER_AMOUNT} (\S+)$", line.strip()
+            )
+            if match:
+                deposits.append(
+                    {
+                        "date": match.group(1),
+                        "description": match.group(2),
+                        "amount": match.group(3).replace("$", "").replace(",", ""),
+                    }
+                )
+    return {
+        "holdings": holdings,
+        "income": income,
+        "fees": fees,
+        "trades": trades,
+        "deposits": deposits,
     }
 
 
@@ -368,6 +486,177 @@ def _expected_statement_id(provider: str, start: date, end: date) -> str:
 
 
 # ---------------------------------------------------------------- build
+
+
+def _composer_table_closure(
+    statement_id: str, parsed: Mapping[str, Any]
+) -> dict[str, str]:
+    """The statement's dated tables must reproduce its own summaries, else refused."""
+
+    rows = parsed["rows"]
+
+    def total(items: Sequence[Mapping[str, str]], key: str = "amount") -> Decimal:
+        return sum((Decimal(item[key]) for item in items), _ZERO)
+
+    cash = parsed["cash"]
+    deposits = total(rows["deposits"])
+    positive = sum(
+        (
+            Decimal(item["amount"])
+            for item in rows["deposits"]
+            if Decimal(item["amount"]) > 0
+        ),
+        _ZERO,
+    )
+    holdings = parsed["holdings"]
+    position_sum = total(rows["holdings"], "market_value")
+    summary_holdings = (
+        holdings["long"]
+        + holdings["short"]
+        + holdings["options"]
+        + holdings["fixed_income"]
+    )
+    residuals = {
+        "income": total(rows["income"]) - parsed["income_summary"],
+        "fees": total(rows["fees"]) - cash["fees"],
+        "trades": total(rows["trades"]) - cash["trade"],
+        "addition": cash["addition"] - total(rows["income"]) - positive,
+        "subtraction": cash["subtraction"] - (deposits - positive),
+    }
+    for name, value in residuals.items():
+        if value != _ZERO:
+            raise StatementGenerationError(
+                f"{statement_id}: statement {name} table differs from its summary "
+                f"by {value}"
+            )
+    # each holding row is shown rounded to the cent: the sum may differ by a cent a row
+    rounding = position_sum - summary_holdings
+    if abs(rounding) > Decimal("0.01") * max(len(rows["holdings"]), 1):
+        raise StatementGenerationError(
+            f"{statement_id}: holdings table differs from the account summary "
+            f"by {rounding}"
+        )
+    return {
+        **{name: _dec(value) for name, value in residuals.items()},
+        "holdings_rounding_residual": _dec(rounding),
+    }
+
+
+def _us_date(text: str) -> str:
+    return datetime.strptime(text, "%m/%d/%Y").date().isoformat()
+
+
+def _composer_security(
+    provider: str, symbol: str, securities: dict[str, dict[str, object]]
+) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", symbol.lower()).strip("-")
+    security_id = f"security-{provider}-{slug}"
+    securities[security_id] = {
+        "currency": "USD",
+        "provider_id": provider,
+        "security_id": security_id,
+        "symbol": symbol,
+    }
+    return security_id
+
+
+def _composer_activity(
+    provider: str, account_id: str, windows: Sequence[Mapping[str, object]]
+) -> dict[str, list[dict[str, object]]]:
+    """Dated flows, transactions, positions and securities read from the statements."""
+
+    flows: list[dict[str, object]] = []
+    transactions: list[dict[str, object]] = []
+    positions: list[dict[str, object]] = []
+    securities: dict[str, dict[str, object]] = {}
+    for window in windows:
+        end = str(window["period_end"])
+        statement_id = str(window["statement_id"])
+        common = {
+            "account_id": account_id,
+            "source_artifact_id": window["source_artifact_id"],
+            "statement_id": statement_id,
+        }
+        for index, row in enumerate(window["deposit_rows"], start=1):  # type: ignore[attr-defined]
+            day = _us_date(row["date"])
+            flows.append(
+                {
+                    **common,
+                    "amount": _amount(row["amount"]),
+                    "event_date": day,
+                    "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+                    "record_id": f"{provider}:flow:{day}:{index}",
+                    "source_record_id": f"{statement_id}:deposit:{index}",
+                    "timing": "EXACT_DATE",
+                }
+            )
+        for index, row in enumerate(window["income_rows"], start=1):  # type: ignore[attr-defined]
+            day = _us_date(row["date"])
+            transactions.append(
+                {
+                    **common,
+                    "amount": _amount(row["amount"]),
+                    "event_date": day,
+                    "kind": f"CASH_ACTIVITY:{row['entry']}",
+                    "record_id": f"{provider}:txn:income:{day}:{row['symbol']}:{index}",
+                    "security_id": _composer_security(
+                        provider, row["symbol"], securities
+                    ),
+                    "source_record_id": f"{statement_id}:income:{index}",
+                }
+            )
+        for index, row in enumerate(window["fee_rows"], start=1):  # type: ignore[attr-defined]
+            day = _us_date(row["date"])
+            transactions.append(
+                {
+                    **common,
+                    "amount": _amount(row["amount"]),
+                    "event_date": day,
+                    "kind": "FEE:Fee",
+                    "record_id": f"{provider}:txn:fee:{day}:{index}",
+                    "source_record_id": f"{statement_id}:fee:{index}",
+                }
+            )
+        for index, row in enumerate(window["trade_rows"], start=1):  # type: ignore[attr-defined]
+            day = _us_date(row["date"])
+            transactions.append(
+                {
+                    **common,
+                    "amount": _amount(row["amount"]),
+                    "event_date": day,
+                    "kind": f"TRADE:Entry:{row['side'].upper()}",
+                    "price": row["price"],
+                    "quantity": row["quantity"],
+                    "record_id": f"{provider}:txn:trade:{day}:{row['symbol']}:{index}",
+                    "security_id": _composer_security(
+                        provider, row["symbol"], securities
+                    ),
+                    "source_record_id": f"{statement_id}:trade:{index}",
+                }
+            )
+        for row in window["holding_rows"]:  # type: ignore[attr-defined]
+            positions.append(
+                {
+                    **common,
+                    "as_of_date": end,
+                    "asset_category": "SECURITY",
+                    "cost_basis": _amount(row["cost_basis"]),
+                    "mark_price": row["price"],
+                    "market_value": _amount(row["market_value"]),
+                    "quantity": row["quantity"],
+                    "record_id": f"{provider}:pos:{end}:{row['symbol']}",
+                    "security_id": _composer_security(
+                        provider, row["symbol"], securities
+                    ),
+                    "source_record_id": f"{statement_id}:holding:{row['symbol']}",
+                }
+            )
+    return {
+        "flows": flows,
+        "positions": positions,
+        "securities": [securities[key] for key in sorted(securities)],
+        "transactions": transactions,
+    }
 
 
 _JH_FLOW_LABELS = {"Roth 401(k) Contribution": "CONTRIBUTION"}
@@ -554,11 +843,18 @@ def build_generation(
                     f"{statement_id}: statement arithmetic does not close"
                 )
             opening, closing = parsed["cash"]["beginning"], parsed["holdings"]["total"]
+            rows = parsed["rows"]
             detail = {
                 "cash_ending": _dec(parsed["cash"]["ending"]),
                 "cash_residual": _dec(parsed["cash_residual"]),
                 "long_market_value": _dec(parsed["holdings"]["long"]),
                 "total_residual": _dec(parsed["total_residual"]),
+                "table_closure": _composer_table_closure(statement_id, parsed),
+                "holding_rows": rows["holdings"],
+                "income_rows": rows["income"],
+                "fee_rows": rows["fees"],
+                "trade_rows": rows["trades"],
+                "deposit_rows": rows["deposits"],
             }
         start, end = parsed["period_start"], parsed["period_end"]
         if statement_id != _expected_statement_id(provider, start, end):
@@ -629,7 +925,11 @@ def build_generation(
         }
         for item in windows
     ]
-    activity = _john_hancock_activity(provider, internal, windows)
+    activity = (
+        _john_hancock_activity(provider, internal, windows)
+        if provider == "john_hancock"
+        else _composer_activity(provider, internal, windows)
+    )
     catalog: dict[str, object] = {
         **activity,
         "accounts": [
