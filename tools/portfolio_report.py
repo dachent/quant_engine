@@ -63,10 +63,9 @@ from quant_engine.portfolio_ledger import (
     validate_as_held_hwm_receipt_generation_binding,
 )
 from quant_engine.portfolio_ledger import (
-    OWNER_ACCEPTED,
     assess_gap_bounds_document,
-    hwm_financial_acceptance,
-    numerical_from_accepted_proof,
+    apply_hwm_owner_acceptance,
+    PENDING_OWNER_ACCEPTANCE,
     numerical_from_governed_proof,
     proof_covers_spans,
 )
@@ -9667,15 +9666,6 @@ def _hwm_numerical_from_envelope(
         assert reason in _HWM_NUMERICAL_REASONS, f"unknown reason code: {reason}"
         return {"hwm_numerical_status": "UNAVAILABLE", "hwm_numerical_reason": reason}
 
-    if (
-        governed_proof is not None
-        and governed_proof.get("status") == "AVAILABLE"
-        and governed_proof.get("financial_acceptance") == OWNER_ACCEPTED
-    ):
-        # The owner accepted the governed index (two missing daily points filled by
-        # span returns); its numbers are the one numeric HWM, not a second status.
-        return numerical_from_accepted_proof(governed_proof)
-
     hpr_receipts = _epoch_hpr_receipts(
         catalog,
         calculation_cutoff_date=None,
@@ -9962,12 +9952,10 @@ def _report_governed_hwm_proof(
         )
     except (HwmCoverageError, CapitalValidationError) as exc:
         raise ReportValidationError(f"governed HWM result is invalid: {exc}") from exc
-    return {
+    proof = {
         "schema_version": 1,
         "status": accepted["status"],
-        "financial_acceptance": hwm_financial_acceptance(
-            json.loads(HWM_OWNER_ACCEPTANCE.read_bytes()), accepted["policy_id"]
-        ),
+        "financial_acceptance": PENDING_OWNER_ACCEPTANCE,
         "assurance_profile": accepted["assurance_profile"],
         "policy_id": accepted["policy_id"],
         "policy_sha256": accepted["policy_sha256"],
@@ -9997,6 +9985,7 @@ def _report_governed_hwm_proof(
             for row in accepted["index_path"]
         ],
     }
+    return apply_hwm_owner_acceptance(proof, HWM_OWNER_ACCEPTANCE.read_bytes())
 
 
 def _governed_hwm_summary_rows(proof: Mapping[str, Any]) -> list[dict[str, Any]]:

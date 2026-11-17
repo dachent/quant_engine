@@ -19,6 +19,8 @@ from the point's own fields; it never trusts a stated ``cannot_create_new_high``
 
 from __future__ import annotations
 
+import hashlib
+import json
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from fractions import Fraction
 from typing import Any, Final, Mapping, Sequence
@@ -217,35 +219,71 @@ def proof_covers_spans(
 
 OWNER_ACCEPTED: Final = "OWNER_ACCEPTED"
 PENDING_OWNER_ACCEPTANCE: Final = "PENDING_OWNER_ACCEPTANCE"
-OWNER_ACCEPTED_BASIS: Final = "PORT-HWM-4_GOVERNED_OWNER_ACCEPTED"
 ACCEPTANCE_SCHEMA: Final = "portfolio-hwm-owner-acceptance/1"
 
 
-def hwm_financial_acceptance(document: Mapping[str, Any] | None, policy_id: str) -> str:
-    """The one acceptance state of a governed HWM policy, from the owner's record.
+def hwm_financial_acceptance(
+    document: Mapping[str, Any] | None, proof: Mapping[str, Any]
+) -> str:
+    """The one acceptance state of a governed HWM proof, from the owner's record.
 
-    ``OWNER_ACCEPTED`` only when a record of the supported schema names this very
-    policy and carries the decision; anything else is pending.  The state is read
-    here once; every surface prints this value and no surface states its own.
+    ``OWNER_ACCEPTED`` only when the record names this policy, carries the decision,
+    and states exactly what this proof is: the same ``complete_through``, the same
+    point count, the same index (4 decimals), and every recorded missing daily date
+    is absent from the proof's index path (a recorded gap the path does not have is
+    not what was accepted).  A proof that differs in any of them is not covered and
+    reads pending, so a later release that changes the index is never accepted
+    silently.  The state is computed here once; every surface prints this value.
     """
 
-    if (
+    if not (
         isinstance(document, Mapping)
         and document.get("schema") == ACCEPTANCE_SCHEMA
-        and document.get("policy_id") == policy_id
+        and document.get("policy_id") == proof.get("policy_id")
         and document.get("decision") == OWNER_ACCEPTED
+    ):
+        return PENDING_OWNER_ACCEPTANCE
+    accepted = document.get("accepted")
+    path = proof.get("index_path")
+    recorded = (
+        accepted.get("missing_daily_points") if isinstance(accepted, Mapping) else None
+    )
+    if (
+        not isinstance(accepted, Mapping)
+        or not isinstance(path, list)
+        or not isinstance(recorded, list)
+        or not recorded
+    ):
+        return PENDING_OWNER_ACCEPTANCE
+    try:
+        index = format(
+            Decimal(str(proof["current_index"])).quantize(Decimal("0.0001")), "f"
+        )
+    except (InvalidOperation, KeyError):
+        return PENDING_OWNER_ACCEPTANCE
+    present = {str(p.get("as_of")) for p in path if isinstance(p, Mapping)}
+    if (
+        accepted.get("complete_through") == proof.get("complete_through")
+        and accepted.get("index_points") == len(path)
+        and accepted.get("current_index_4dp") == index
+        and all(
+            isinstance(p, Mapping) and str(p.get("date")) not in present
+            for p in recorded
+        )
     ):
         return OWNER_ACCEPTED
     return PENDING_OWNER_ACCEPTANCE
 
 
-def numerical_from_accepted_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
-    """The numeric HWM of an owner-accepted governed proof (one source, one status)."""
+def apply_hwm_owner_acceptance(
+    proof: Mapping[str, Any], record_bytes: bytes
+) -> dict[str, Any]:
+    """The proof with its acceptance state, and the record's digest when accepted."""
 
-    out = numerical_from_governed_proof(proof, {"input_sha256": "", "strategies": {}})
-    out.pop("hwm_gap_bound")
-    out["hwm_numerical_basis"] = OWNER_ACCEPTED_BASIS
-    out["hwm_governed_receipt_sha256"] = proof["receipt_sha256"]
+    state = hwm_financial_acceptance(json.loads(record_bytes), proof)
+    out = {**proof, "financial_acceptance": state}
+    if state == OWNER_ACCEPTED:
+        out["owner_acceptance_sha256"] = hashlib.sha256(record_bytes).hexdigest()
     return out
 
 

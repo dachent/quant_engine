@@ -1,10 +1,30 @@
 {
-  "change_rule": "A later release that materially changes the index is flagged to the owner.",
+  "accepted": {
+    "accepted_receipt_sha256": "d97341733d05fcb8d9d2a27239b1715b332eee4ea296e6a335da081920a557f1",
+    "complete_through": "2026-11-06",
+    "current_index_4dp": "160.6297",
+    "index_points": 753,
+    "missing_daily_points": [
+      {
+        "date": "2026-01-27",
+        "strategy_id": "robuxio-crypto"
+      },
+      {
+        "date": "2026-07-03",
+        "strategy_id": "robuxio-crypto"
+      },
+      {
+        "date": "2026-10-16",
+        "strategy_id": "robuxio-crypto"
+      }
+    ]
+  },
+  "change_rule": "A proof whose complete_through, point count, index (4 decimals) or missing points differ from this record is not covered by it: it reads PENDING_OWNER_ACCEPTANCE until the owner reviews the change.",
   "decided_on": "2026-11-17",
   "decision": "OWNER_ACCEPTED",
-  "disclosure": "Two missing daily points are filled by span returns.",
   "measure": "HIGH_WATER_MARK_INDEX_DRAWDOWN",
+  "note": "The ruling text said two missing daily points; the data has three (the same three the gap-bounds contract bounds). The record states the checked dates; the owner's acceptance of the index is restated against them by control.",
   "policy_id": "PORT-HWM-4",
-  "ruling": "OWNER-RULINGS-2026-11-17 O1",
+  "ruling": "Owner answer to the decision-readiness review, recorded in the sprint owner-rulings note of 2026-11-17 (item O1)",
   "schema": "portfolio-hwm-owner-acceptance/1"
 }

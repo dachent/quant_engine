@@ -12,9 +12,10 @@ from quant_engine.portfolio_ledger.allocation import (
 
 from quant_engine.portfolio_ledger.hwm_gap_bounds import (
     OWNER_ACCEPTED,
+    PENDING_OWNER_ACCEPTANCE,
+    apply_hwm_owner_acceptance,
     assess_gap_bounds_document,
     hwm_financial_acceptance,
-    numerical_from_accepted_proof,
     numerical_from_governed_proof,
     proof_covers_spans,
 )
@@ -144,8 +145,9 @@ __all__ = [
     "run_observation_identity",
     "assess_gap_bounds_document",
     "OWNER_ACCEPTED",
+    "PENDING_OWNER_ACCEPTANCE",
+    "apply_hwm_owner_acceptance",
     "hwm_financial_acceptance",
-    "numerical_from_accepted_proof",
     "numerical_from_governed_proof",
     "proof_covers_spans",
     "Account",

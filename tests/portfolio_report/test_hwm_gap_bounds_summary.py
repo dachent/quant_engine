@@ -403,73 +403,151 @@ def test_the_pinned_bounds_name_every_hashed_evidence_input() -> None:
     assert all(len(v) == 64 and int(v, 16) >= 0 for v in evidence.values())
 
 
-ACCEPTED_PROOF: dict[str, Any] = {**PROOF, "financial_acceptance": "OWNER_ACCEPTED"}
+RECORD_PATH = REPOSITORY_ROOT / "contracts" / "portfolio-hwm-owner-acceptance-v1.json"
+RECORD_DATES = ("2026-01-27", "2026-07-03", "2026-10-16")
 
 
-def test_the_pinned_owner_acceptance_names_the_governed_policy() -> None:
-    """Owner ruling O1 (2026-11-17): one acceptance state, read from the pinned record."""
+def _record() -> dict[str, Any]:
+    return json.loads(RECORD_PATH.read_bytes())
 
-    from quant_engine.portfolio_ledger import OWNER_ACCEPTED, hwm_financial_acceptance
 
-    document = json.loads(
-        (
-            REPOSITORY_ROOT / "contracts" / "portfolio-hwm-owner-acceptance-v1.json"
-        ).read_bytes()
+def _accepted_shape_proof(**over: Any) -> dict[str, Any]:
+    """A proof shaped exactly as the record states: 753 points, none on the gap dates."""
+
+    from datetime import date, timedelta
+
+    days: list[str] = []
+    day = date(2024, 10, 15)
+    while len(days) < 753:
+        if day.isoformat() not in RECORD_DATES:
+            days.append(day.isoformat())
+        day += timedelta(days=1)
+    proof: dict[str, Any] = {
+        "policy_id": "PORT-HWM-4",
+        "complete_through": "2026-11-06",
+        "current_index": "160.6296892786988",
+        "index_path": [{"as_of": d} for d in days],
+    }
+    proof.update(over)
+    return proof
+
+
+def test_the_record_accepts_exactly_what_it_states() -> None:
+    from quant_engine.portfolio_ledger import (
+        OWNER_ACCEPTED,
+        PENDING_OWNER_ACCEPTANCE,
+        hwm_financial_acceptance,
     )
-    assert hwm_financial_acceptance(document, "PORT-HWM-4") == OWNER_ACCEPTED
-    # KILL: another policy, another schema, or no record is never an acceptance.
-    assert hwm_financial_acceptance(document, "PORT-HWM-3") == (
-        "PENDING_OWNER_ACCEPTANCE"
+
+    record = _record()
+    assert hwm_financial_acceptance(record, _accepted_shape_proof()) == OWNER_ACCEPTED
+    # KILL: anything the record does not state is pending.
+    for over in (
+        {"complete_through": "2026-11-09"},
+        {"current_index": "160.7000"},
+        {"index_path": _accepted_shape_proof()["index_path"][:-1]},
+        {"policy_id": "PORT-HWM-3"},
+        {
+            "index_path": _accepted_shape_proof()["index_path"][:-1]
+            + [{"as_of": RECORD_DATES[0]}]
+        },
+    ):
+        assert (
+            hwm_financial_acceptance(record, _accepted_shape_proof(**over))
+            == PENDING_OWNER_ACCEPTANCE
+        ), over
+    # a tampered record, another schema, no accepted block, no recorded gaps
+    for bad in (
+        {**record, "decision": "PENDING"},
+        {**record, "schema": "x"},
+        {k: v for k, v in record.items() if k != "accepted"},
+        {**record, "accepted": {**record["accepted"], "missing_daily_points": []}},
+    ):
+        assert hwm_financial_acceptance(bad, _accepted_shape_proof()) == (
+            PENDING_OWNER_ACCEPTANCE
+        )
+    assert hwm_financial_acceptance(None, _accepted_shape_proof()) == (
+        PENDING_OWNER_ACCEPTANCE
     )
-    assert hwm_financial_acceptance({**document, "schema": "x"}, "PORT-HWM-4") == (
-        "PENDING_OWNER_ACCEPTANCE"
+
+
+def test_the_acceptance_emits_the_record_digest_only_when_accepted() -> None:
+    from quant_engine.portfolio_ledger import apply_hwm_owner_acceptance
+
+    raw = RECORD_PATH.read_bytes()
+    accepted = apply_hwm_owner_acceptance(_accepted_shape_proof(), raw)
+    assert accepted["financial_acceptance"] == "OWNER_ACCEPTED"
+    assert accepted["owner_acceptance_sha256"] == hashlib.sha256(raw).hexdigest()
+    pending = apply_hwm_owner_acceptance(
+        _accepted_shape_proof(complete_through="2026-11-09"), raw
     )
-    assert hwm_financial_acceptance(
-        {**document, "decision": "PENDING"}, "PORT-HWM-4"
-    ) == ("PENDING_OWNER_ACCEPTANCE")
-    assert hwm_financial_acceptance(None, "PORT-HWM-4") == "PENDING_OWNER_ACCEPTANCE"
+    assert pending["financial_acceptance"] == "PENDING_OWNER_ACCEPTANCE"
+    assert "owner_acceptance_sha256" not in pending
 
 
 @pytest.mark.parametrize("compute", [_report, _panel])
-def test_an_owner_accepted_proof_is_the_one_numeric_hwm(
+def test_acceptance_does_not_bypass_the_bound_gate(
     compute: Any, tmp_path: Path
 ) -> None:
-    """Accepted index: summary AVAILABLE from the proof even with no envelope inputs."""
+    """KILL (review): an accepted proof with an unsafe bound is still UNAVAILABLE."""
 
-    result = compute(tmp_path, proof=ACCEPTED_PROOF, range_high="0.95")
-    assert result["hwm_numerical_status"] == "AVAILABLE"
-    assert result["hwm_numerical_basis"] == "PORT-HWM-4_GOVERNED_OWNER_ACCEPTED"
-    assert result["hwm_index"] == "1.125"
-    assert "hwm_numerical_reason" not in result
-    assert result["hwm_governed_receipt_sha256"] == "f" * 64
+    accepted = {**PROOF, "financial_acceptance": "OWNER_ACCEPTED"}
+    result = compute(tmp_path, proof=accepted, range_high="0.95")
+    assert result["hwm_numerical_status"] == "UNAVAILABLE"
 
 
-def test_report_and_panel_agree_when_accepted(tmp_path: Path) -> None:
-    assert _report(tmp_path, proof=ACCEPTED_PROOF) == _panel(
-        tmp_path, proof=ACCEPTED_PROOF
-    )
+def _candidate_proof(state: str) -> dict[str, Any]:
+    return {
+        **PROOF,
+        "financial_acceptance": state,
+        "policy_id": "PORT-HWM-4",
+        "maximum_drawdown": "-0.10",
+        "current_hwm": "117.0",
+        "evaluated_on": "2026-09-03",
+        "return_basis": "AS_HELD",
+    }
 
 
-def test_the_panel_candidate_states_the_acceptance_and_keeps_the_disclosure() -> None:
-    receipts = _receipts()
-    for state, status in (
-        ("OWNER_ACCEPTED", "OWNER_ACCEPTED"),
-        ("PENDING_OWNER_ACCEPTANCE", "CANDIDATE_PENDING_OWNER_ACCEPTANCE"),
-    ):
-        proof = {
-            **PROOF,
-            "financial_acceptance": state,
-            "policy_id": "PORT-HWM-4",
-            "maximum_drawdown": "-0.10",
-            "current_hwm": "117.0",
-            "evaluated_on": "2026-09-03",
-            "return_basis": "AS_HELD",
+def _receipts_on(dates: tuple[str, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "strategy_id": "robuxio-crypto",
+            "receipt": {
+                "span_return_receipts": [
+                    {
+                        "missing_source_date": d,
+                        "span_start_date": d,
+                        "span_end_date": d,
+                        "return": "0.01",
+                    }
+                    for d in dates
+                ]
+            },
         }
-        candidate = panel._hwm_candidate(proof, {"policy_id": "PORT-HWM-4"}, receipts)
-        assert candidate is not None
-        assert candidate["status"] == status
-        assert candidate["financial_acceptance"] == state
-        assert candidate["kpi"]["label"] == candidate["label"]
-        assert len(candidate["kpi"]["missing_daily_points"]) == len(DAYS)
-    assert "owner accepted" in panel.HWM_ACCEPTED_LABEL
-    assert "filled by span returns" in panel.HWM_ACCEPTED_LABEL
+    ]
+
+
+def test_the_panel_label_counts_the_checked_points_and_a_mismatch_raises() -> None:
+    summary = {"policy_id": "PORT-HWM-4"}
+    candidate = panel._hwm_candidate(
+        _candidate_proof("OWNER_ACCEPTED"), summary, _receipts_on(RECORD_DATES)
+    )
+    assert candidate is not None
+    assert candidate["status"] == "OWNER_ACCEPTED"
+    assert candidate["not_accepted_register"] is None
+    assert candidate["label"].endswith("filled by span returns: 3")
+    assert candidate["kpi"]["label"] == candidate["label"]
+    # KILL: the receipts disagree with the accepted dates (count or date)
+    for dates in (RECORD_DATES[:2], (*RECORD_DATES[:2], "2026-10-17")):
+        with pytest.raises(panel.ControlPanelValidationError):
+            panel._hwm_candidate(
+                _candidate_proof("OWNER_ACCEPTED"), summary, _receipts_on(dates)
+            )
+    pending = panel._hwm_candidate(
+        _candidate_proof("PENDING_OWNER_ACCEPTANCE"),
+        summary,
+        _receipts_on(RECORD_DATES),
+    )
+    assert pending is not None
+    assert pending["status"] == "CANDIDATE_PENDING_OWNER_ACCEPTANCE"
+    assert pending["not_accepted_register"] == "E2"

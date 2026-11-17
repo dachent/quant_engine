@@ -1509,7 +1509,7 @@
     const hwmGateOpen = data.advisory.hwm_numerical_status === "AVAILABLE" && hwmCandidate && !hwmCandidate.not_accepted_reason;
     const hwmOwnerAccepted = hwmCandidate?.financial_acceptance === "OWNER_ACCEPTED";
     const hwmNotAccepted = hwmOwnerAccepted
-      ? `Numeric HWM available, ${hwmAcceptanceWords}. Governed ${hwmCandidate.policy_id || "HWM"} high-water mark; two missing daily points are filled by span returns`
+      ? `Numeric HWM available, ${hwmAcceptanceWords}. Governed ${hwmCandidate.policy_id || "HWM"} high-water mark; ${(hwmCandidate.kpi?.missing_daily_points || []).length} missing daily point(s) filled by span returns`
       : hwmGateOpen
       ? `Numeric HWM available${data.hwm_summary?.hwm_gap_bound ? " with a stated bound on every missing daily point" : ""}. Governed ${hwmCandidate.policy_id || "HWM"} candidate shown, ${hwmAcceptanceWords}`
       : hwmCandidate
