@@ -633,6 +633,8 @@
   };
   const VIEW_TITLES = {
     decision: "Decision",
+    contextpack: "Context pack",
+    recommendations: "Recommendations",
     command: "Portfolio",
     capital: "Allocation & lifecycle",
     risk: "Performance & HWM",
@@ -809,6 +811,67 @@
       <section class="dec-block"><h3>What changed since last week</h3><ul class="dec-list">${changes}</ul></section>
       ${placeholders}
       <p class="dec-note">Policy ${safe(block.policy.policy_id)}, file digest ${safe(block.policy.sha256.slice(0, 12))}. No agent places trades.</p>`;
+  }
+
+  // Context pack tab: the exact text the analyst is given, with its size and a download.
+  // The text is built by the producer (tools/context_pack.py); nothing here edits it.
+  function renderContextPack() {
+    const root = $("#contextpack-root");
+    const pack = data.context_pack;
+    if (!root) return;
+    if (!pack) { root.innerHTML = '<p class="dec-missing">The context pack is not in this payload.</p>'; return; }
+    const grades = Object.entries(pack.grade_counts).map(([grade, count]) => `<span class="dec-pill">${safe(grade)} ${safe(count)}</span>`).join(" ");
+    const sizes = Object.entries(pack.section_tokens || {}).map(([id, tokens]) => `<li><span>${safe(id)}</span><span>${safe(tokens)} tokens</span></li>`).join("");
+    const holes = pack.holes.map((hole) => `<li><strong>${safe(hole.id)}</strong><span>${safe(hole.what)}</span></li>`).join("");
+    root.innerHTML = `
+      <section class="dec-block"><h3>${safe(pack.pack_id)}</h3>
+        <p class="dec-big">${safe(pack.tokens_estimate)} tokens of ${safe(pack.token_cap)} allowed</p>
+        <p class="dec-note">Core target ${safe(pack.core_target)} tokens; token counts are estimates (bytes divided by four). Cutoff ${safe(formatDate(pack.as_of))}, evaluated ${safe(formatDate(pack.evaluated_on))}, policy version ${safe(pack.policy_version)}. Facts by evidence grade: ${grades}</p>
+        <button id="contextpack-download" class="ghost-button" type="button">Download ${safe(pack.pack_id)}.md</button>
+        <button id="contextpack-copy" class="ghost-button" type="button">Copy text</button></section>
+      <section class="dec-block"><h3>Section sizes</h3><ul class="dec-list">${sizes}</ul></section>
+      <section class="dec-block"><h3>Known data holes in this pack</h3><ul class="dec-list">${holes}</ul></section>
+      <section class="dec-block"><h3>The text the analyst receives</h3><pre id="contextpack-text" class="dec-pack-text" tabindex="0"></pre></section>`;
+    $("#contextpack-text").textContent = pack.text;
+    $("#contextpack-download").addEventListener("click", () => {
+      const blob = new Blob([pack.text], { type: "text/markdown;charset=utf-8" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `${pack.pack_id}.md`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    });
+    $("#contextpack-copy").addEventListener("click", () => {
+      if (navigator.clipboard) navigator.clipboard.writeText(pack.text).then(() => showToast("Pack text copied"), () => showToast("Copy was not allowed here"));
+    });
+  }
+
+  // Recommendations tab: the append-only log folded per recommendation.
+  function renderRecommendations() {
+    const root = $("#recommendations-root");
+    const log = data.recommendations;
+    if (!root) return;
+    if (!log) { root.innerHTML = '<p class="dec-missing">The recommendation log is not in this payload.</p>'; return; }
+    const head = log.status === "LOG_BROKEN"
+      ? `<p class="dec-note dec-tone dec-bad">The log failed verification: ${safe(log.reason)}. Do not rely on it.</p>`
+      : `<p class="dec-note">Log ${safe(log.status)}: ${safe(log.rows)} rows${log.head_sha256 ? `, chain head ${safe(log.head_sha256.slice(0, 12))}` : ""}.</p>`;
+    const cards = log.records.map((rec) => {
+      const response = rec.owner_response ? `${safe(rec.owner_response.response)} on ${safe(formatDate(rec.owner_response.date))}${rec.owner_response.reason ? `: ${safe(rec.owner_response.reason)}` : ""}` : "Not answered yet";
+      const executed = rec.execution ? `${rec.execution.executed ? "Executed" : "Not executed"} on ${safe(formatDate(rec.execution.date))}${rec.execution.what ? `: ${safe(rec.execution.what)}` : ""}` : "No execution recorded";
+      const checks = rec.outcome_due.map((due) => `${safe(due.horizon_weeks)} weeks: ${due.done ? "checked" : `due ${safe(formatDate(due.due))}${rec.overdue_checks.includes(due.horizon_weeks) ? " (overdue)" : ""}`}`).join("; ");
+      const evidence = rec.evidence.map((item) => `${safe(item.fact_id)} = ${safe(item.value)}`).join("; ");
+      return `<article class="dec-card"><header><h4>${safe(rec.rec_id)}: ${safe(rec.subject)}</h4><span class="dec-pill">${safe(rec.status)}</span></header>
+        <dl>
+          <div><dt>Recommendation</dt><dd>${safe(rec.recommendation)}</dd></div>
+          <div><dt>Rationale</dt><dd>${safe(rec.rationale)}</dd></div>
+          <div><dt>Evidence (pack ${safe(rec.pack_id)}, policy version ${safe(rec.policy_version)})</dt><dd>${evidence || "none"}</dd></div>
+          <div><dt>Rule applied; would change if</dt><dd>${safe(rec.rule_ref)}; ${safe(rec.would_change_if)}</dd></div>
+          <div><dt>Owner response</dt><dd>${response}</dd></div>
+          <div><dt>Executed</dt><dd>${executed}</dd></div>
+          <div><dt>Outcome checks</dt><dd>${checks}</dd></div>
+        </dl><p class="dec-rule">${safe(rec.type)}, ${safe(rec.confidence)} confidence, ${safe(formatDate(rec.date))}, run ${safe(rec.run_id)}, ${safe(rec.model)}${rec.review_overdue ? ", review overdue" : ""}</p></article>`;
+    }).join("");
+    root.innerHTML = `${head}${cards ? `<div class="dec-cards">${cards}</div>` : '<p class="dec-none">No recommendations logged yet.</p>'}`;
   }
 
   function renderCommand() {
@@ -3780,6 +3843,8 @@
 
   const viewRenderers = {
     decision: renderDecision,
+    contextpack: renderContextPack,
+    recommendations: renderRecommendations,
     command: renderCommand,
     capital: renderCapital,
     risk: renderRisk,

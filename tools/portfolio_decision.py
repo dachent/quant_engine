@@ -659,6 +659,7 @@ def _build(
         "schema_version": SCHEMA_VERSION,
         "policy": {
             "policy_id": policy["policy_id"],
+            "policy_version": policy["policy_version"],
             "sha256": policy_sha256,
             "placeholders": sorted(
                 label

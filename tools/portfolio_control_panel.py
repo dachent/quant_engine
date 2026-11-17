@@ -51,7 +51,9 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.core import inventory_identity
+import context_pack
 import portfolio_decision
+import recommendation_log
 import series_label
 import sleeve_disclosures
 import strategy_basis_lens_moves
@@ -260,6 +262,11 @@ DECISION_POLICY: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
     / "portfolio-decision-policy-v1.json"
+)
+STRATEGY_RETURN_SOURCES: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "strategy-return-sources-v1.json"
 )
 DECISION_POLICY_SCHEMA: Final = (
     Path(__file__).resolve().parents[1]
@@ -12112,6 +12119,31 @@ def _decision_block(data: Mapping[str, Any]) -> dict[str, Any] | None:
         raise ControlPanelValidationError(f"decision block refused: {exc}") from exc
 
 
+def _context_pack_block(
+    data: Mapping[str, Any], decision_block: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Build the context pack from the finished payload (a pure function of it)."""
+
+    policy_bytes, policy_sha256 = _read_snapshot(DECISION_POLICY, "decision policy")
+    sources_bytes, _sources_sha256 = _read_snapshot(
+        STRATEGY_RETURN_SOURCES, "strategy return sources"
+    )
+    try:
+        strategies = _json_from_bytes(sources_bytes, "strategy return sources")[
+            "strategies"
+        ]
+        return context_pack.build_pack(
+            data,
+            decision_block,
+            _json_from_bytes(policy_bytes, "decision policy"),
+            policy_sha256,
+            strategies,
+            data.get("recommendations"),
+        )
+    except context_pack.PackError as exc:
+        raise ControlPanelValidationError(f"context pack refused: {exc}") from exc
+
+
 def _financial_mvp_module() -> Any:
     """Load the repository financial source binder used at the panel boundary."""
 
@@ -13473,6 +13505,13 @@ def _rendered_files(
     decision_block = _decision_block(data)
     if decision_block is not None:
         data["decision"] = decision_block
+        # The recommendation log (append-only, hash-chained) and the analysis context
+        # pack the same producer writes from this payload; the pack carries the exact
+        # text an analyst reads, never the payload itself.
+        data["recommendations"] = recommendation_log.panel_block(
+            today=decision_block["evaluated_on"]
+        )
+        data["context_pack"] = _context_pack_block(data, decision_block)
     wire_data = _panel_wire_form(data)
     _validate_panel_data_schema(
         wire_data,

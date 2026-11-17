@@ -56,7 +56,8 @@
       "reconciliation_checks": 3116,
       "replication_analysis": 1557,
       "strategy_basis_disclosure": 7747,
-      "vendor_gap_fills": 1399
+      "vendor_gap_fills": 1399,
+      "context_pack": 72519
     }
   },
   "blocks": {
@@ -110,7 +111,8 @@
     "reconciliation_checks": 4000,
     "replication_analysis": 2000,
     "strategy_basis_disclosure": 8000,
-    "vendor_gap_fills": 2000
+    "vendor_gap_fills": 2000,
+    "context_pack": 74000
   },
   "justifications": {
     "limitations": "R2.2 e78cb9f2 measured 12677 B against 11121 B at the B-integration measure (+1556 B) and 11056 B on the R2.1 panel. All growth is four existing limitation entries that now state the sleeve basis of p123-ai-factor, no entry is added and none is duplicated: flow timing bounds +527 B (the parent-account series its row is restated from), HWM member series +330 B (the sleeve series start and the days it carries no value), product perimeter +303 B (sleeve gains and entry-day differences), sleeve capital basis +461 B (gross allocations and margin-funded allocations). These disclose what changed under the restatement; trimming was declined. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block limitations.",
@@ -123,7 +125,8 @@
     "factor_analysis": "R3 generation db452885 measured 2479776 B against 2339068 B at the R3 projection (R2 b216a53e x 1.10): +140708 B (6.0%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (2505000 B, was 2363000 B) by tools/panel_payload_size.py --raise-all.",
     "leverage_disclosures": "R3 generation db452885 measured 19429280 B against 17594568 B at the R3 projection (R2 b216a53e x 1.10): +1834712 B (10.4%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (19624000 B, was 17771000 B) by tools/panel_payload_size.py --raise-all. Raised again for release A (A3 lane-replica findings): measured 22229451 B against the 20596000 B the relative rule allowed (+14.4% over the R3 measure). The growth is the E8 block: account_financing rows now carried in the leverage disclosures. No entry is duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (22452000 B) by tools/panel_payload_size.py raise_budgets.",
     "account_manifest": "R3 generation db452885 measured 1740636 B against 1713348 B at the R3 projection (R2 b216a53e x 1.10): +27288 B (1.6%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (1759000 B, was 1731000 B) by tools/panel_payload_size.py --raise-all.",
-    "portfolio_twr_cumulative": "Raised for release A (A3 findings): measured 1278 B against the 1000 B floor (committed 909 B); the block now carries the cumulative figures of the release A window. Limit = measured + 1%, rounded up to 1000 B (2000 B)."
+    "portfolio_twr_cumulative": "Raised for release A (A3 findings): measured 1278 B against the 1000 B floor (committed 909 B); the block now carries the cumulative figures of the release A window. Limit = measured + 1%, rounded up to 1000 B (2000 B).",
+    "context_pack": "New block for the analysis context pack (tools/context_pack.py): the exact text an analyst reads (about 10,000 tokens), its facts with evidence grades and the data holes. Measured 72519 B on the 330da1a0 payload; limit = measured + 1%, rounded up to 1000 B (74000 B). The pack is the decision-relevant part of the payload and replaces reading the payload itself, which no analyst can do."
   },
   "unlisted_block_max_bytes": 50000,
   "other_blocks_max_bytes": 400000,
@@ -1844,6 +1847,19 @@
           "after": 84723,
           "previous_limit": 75000,
           "limit": 86000
+        }
+      }
+    },
+    {
+      "generation": "decision pack (330da1a0 payload, this change)",
+      "margin": 0.01,
+      "rule": "limit = ceil(measured x (1 + margin) / 1000) x 1000",
+      "blocks": {
+        "context_pack": {
+          "before": 0,
+          "after": 72519,
+          "previous_limit": 0,
+          "limit": 74000
         }
       }
     }

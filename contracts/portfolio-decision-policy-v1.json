@@ -1,8 +1,18 @@
 {
   "schema_version": 1,
   "policy_id": "PORT-DECISION-1",
+  "policy_version": "1",
   "status": "OWNER_ADOPTED_DEFAULTS_2026_11_17",
   "authority": "Owner ruling O2 of 2026-11-17 adopted these defaults as starting numbers, editable in this one file. The two cap values and the allowed ages were not named in the ruling: they are placeholders marked owner_set false.",
+  "standing_rules": [
+    {"id": "SR1", "text": "Recommendations only. The owner decides and executes. Agents never place trades.", "source": "OWNER-RULINGS-2026-11-17 item 3; owner standing rule"},
+    {"id": "SR2", "text": "A partial or accepted-gap source on a live account is an error, not an accepted gap: find the data, derive it with closure checks, then name the exact pull that is missing.", "source": "owner standing rule, 2026-10"},
+    {"id": "SR3", "text": "After-tax reporting equals pre-tax reporting; this is not a gap.", "source": "owner confirmation 2026-11-12"},
+    {"id": "SR4", "text": "Never propose dropping or descoping a strategy to close a data gap.", "source": "owner standing rule"},
+    {"id": "SR5", "text": "The 15% drawdown limit is the owner's. The high-water-mark index is the official drawdown measure; flag any later material change to it.", "source": "OWNER-RULINGS-2026-11-17 items 1 and 4"},
+    {"id": "SR6", "text": "Backtest history counts as loss evidence in the restated stress number; the owner may overturn this.", "source": "control ruling 2026-11-16, OWNER-RULINGS-2026-11-17 item 4"},
+    {"id": "SR7", "text": "Give every time and ETA to the owner in CST (UTC-6).", "source": "owner standing rule, 2026-11-11"}
+  ],
   "owner_set_default_note": "Fields marked owner_set false are the builder's placeholders; the page labels them as such until the owner edits the file.",
   "limit": {
     "drawdown_limit": "0.15",
