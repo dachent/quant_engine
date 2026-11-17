@@ -126,6 +126,8 @@
     not_testable: "neutral",
     partial_only: "neutral",
     not_same_vintage: "neutral",
+    // A pull a later capture answered is information, not a defect and not an open request.
+    CLOSED_BY_CAPTURE_B_STATE_EVIDENCED_BY_ABSENCE_OF_TRADES: "neutral",
   });
   function toneForStatus(status = "") {
     if (Object.hasOwn(STATUS_TONES, String(status))) return STATUS_TONES[String(status)];
@@ -142,6 +144,7 @@
   }
 
   const STATUS_LABELS = {
+    CLOSED_BY_CAPTURE_B_STATE_EVIDENCED_BY_ABSENCE_OF_TRADES: "Closed by a later capture: state evidenced by the absence of trades",
     AVAILABLE_WITH_INFERRED_FLOW_TIMING: "Available · estimated timing",
     known_gold_api: "Known (gold API)",
     AVAILABLE_OBSERVED_BASIS: "Available: observed basis",
