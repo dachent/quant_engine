@@ -1528,9 +1528,9 @@ def _verify_public_factor_manifest(
             freshness.get("eligible_month_end"),
             f"public factor {path.name} eligible month end",
         )
+        required_month_end = _required_observation_month_end(capture_evaluation_date)
         if (
-            eligible_month_end
-            != _required_observation_month_end(capture_evaluation_date)
+            eligible_month_end < required_month_end
             or freshness.get("eligible_month") != eligible_month_end.strftime("%Y-%m")
             or (accepted_end.year, accepted_end.month)
             != (eligible_month_end.year, eligible_month_end.month)
@@ -1542,9 +1542,9 @@ def _verify_public_factor_manifest(
             freshness.get("publication_deadline"),
             f"public factor {path.name} publication deadline",
         )
-        if (
-            deadline != eligible_month_end + timedelta(days=45)
-            or deadline > capture_evaluation_date
+        if deadline != eligible_month_end + timedelta(days=45) or (
+            eligible_month_end == required_month_end
+            and deadline > capture_evaluation_date
         ):
             raise CurrentPlanError(
                 f"public factor {path.name} publication deadline has not elapsed"
