@@ -7672,8 +7672,12 @@ def test_mvp_exposes_all_nine_accepted_views() -> None:
     # appendix link: interaction_qa.mjs:878 requires zero [data-nav="candidates"]
     # elements anywhere in the document, and the last published generation
     # (41f41362) shipped none.
-    assert template.count('class="nav-item') == 10
+    # Decision, Context pack and Recommendations (the Decisions area) come first.
+    assert template.count('class="nav-item') == 13
     for view in (
+        "decision",
+        "contextpack",
+        "recommendations",
         "command",
         "capital",
         "risk",
@@ -14143,6 +14147,13 @@ def test_renderer_accepts_panel_schema21_through_26_and_refuses_27(
               null,
               { timeout: 8000 }
             );
+            // The Decision tab is the default view; the KPI probe reads the Portfolio view.
+            await page.evaluate(() => { location.hash = "#command"; });
+            await page.waitForFunction(
+              () => (document.querySelector("#command-kpis")?.textContent || "").trim().length > 0,
+              null,
+              { timeout: 8000 }
+            ).catch(() => null);
             const state = await page.evaluate(() => ({
               state: document.querySelector("#app")?.dataset.appState,
               errorVisible: !document.querySelector("#error-state").hidden,

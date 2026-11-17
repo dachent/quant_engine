@@ -130,3 +130,6 @@ salt.txt
 spec.json
 fixture-salt.txt
 fixture-spec.json
+
+# The owner-decision recommendation log is a retained, append-only record (tools/recommendation_log.py)
+!records/decisions/recommendation-log.jsonl
