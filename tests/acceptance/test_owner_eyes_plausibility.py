@@ -647,25 +647,28 @@ def test_the_rule_table_names_the_finds():
 def test_the_command_exit_codes(tmp_path):
     import check_plausibility
 
+    def run(path: Path, mode: str) -> int:
+        return check_plausibility.main(
+            ["--payload", str(path), "--cutoff", "2026-11-06", "--mode", mode]
+        )
+
     good = tmp_path / "good.json"
     good.write_text(json.dumps(clean_payload()))
-    assert (
-        check_plausibility.main(["--payload", str(good), "--cutoff", "2026-11-06"]) == 0
-    )
     bad_payload = clean_payload()
     _m_beta(bad_payload)
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps(bad_payload))
-    assert (
-        check_plausibility.main(["--payload", str(bad), "--cutoff", "2026-11-06"]) == 1
-    )
     soft = clean_payload()
     _m_undated(soft)
     notready = tmp_path / "soft.json"
     notready.write_text(json.dumps(soft))
+    assert run(good, "block") == 0 and run(good, "warn") == 0
+    assert run(bad, "block") == 1
+    assert run(notready, "block") == 3
+    # the default is warn: hits are printed and the exit status is unaffected
+    assert run(bad, "warn") == 0 and run(notready, "warn") == 0
     assert (
-        check_plausibility.main(["--payload", str(notready), "--cutoff", "2026-11-06"])
-        == 3
+        check_plausibility.main(["--payload", str(bad), "--cutoff", "2026-11-06"]) == 0
     )
     assert check_plausibility.main(["--payload", str(tmp_path / "missing.json")]) == 2
     assert check_plausibility.main(["--list"]) == 0
@@ -684,7 +687,7 @@ def test_the_real_a5_payload_fails_the_rules_for_finds_one_to_seven():
     assert {1, 2, 3, 4, 5, 6, 7} <= caught
 
 
-def _context(tmp_path: Path, *, owner_eyes: bool):
+def _context(tmp_path: Path, *, owner_eyes: str):
     import test_validate_generation as fixture
     from acceptance.validate import checks
     from acceptance.validate.generation import load_generation
@@ -699,30 +702,108 @@ def _context(tmp_path: Path, *, owner_eyes: bool):
     )
 
 
-def test_the_validator_runs_the_rules_only_when_owner_eyes_is_on(tmp_path):
+def _owner_eyes_findings(tmp_path: Path, mode: str):
     from acceptance.validate import checks
 
-    off = [
+    return [
         f
-        for f in checks.run_checks(_context(tmp_path / "a", owner_eyes=False))
+        for f in checks.run_checks(_context(tmp_path, owner_eyes=mode))
         if f.check_id == "plausibility.owner_eyes"
     ]
-    on = [
+
+
+def test_off_runs_nothing(tmp_path):
+    assert _owner_eyes_findings(tmp_path, "OFF") == []
+
+
+def test_warn_lists_every_hit_as_a_warning_that_cannot_block(tmp_path):
+    from acceptance.validate import checks
+
+    found = _owner_eyes_findings(tmp_path, "WARN")
+    assert found, "the synthetic panel's all-incomplete coverage matrix must trip PL21"
+    assert {f.klass for f in found} == {checks.WARNING}
+    assert not {f.klass for f in found} & checks.BLOCKERS
+    assert all(f.defect_ids for f in found)
+
+
+def test_block_makes_a_hit_block(tmp_path):
+    from acceptance.validate import checks
+
+    found = _owner_eyes_findings(tmp_path, "BLOCK")
+    assert {f.klass for f in found} & checks.BLOCKERS
+    assert {f.klass for f in found} <= {checks.BLOCKER_REGRESSION, checks.NOT_READY}
+
+
+def _check_errors(tmp_path: Path, mode: str):
+    from acceptance.validate import checks
+
+    return [
         f
-        for f in checks.run_checks(_context(tmp_path / "b", owner_eyes=True))
-        if f.check_id == "plausibility.owner_eyes"
+        for f in checks.run_checks(_context(tmp_path, owner_eyes=mode))
+        if f.check_id == "validator.check_error"
+        and f.entity == "plausibility.owner_eyes"
     ]
-    assert off == []
-    assert on, "the synthetic panel's all-incomplete coverage matrix must trip PL21"
-    assert {f.klass for f in on} <= {checks.BLOCKER_REGRESSION, checks.NOT_READY}
-    assert all(f.defect_ids for f in on)
 
 
-def test_the_command_turns_the_rules_on(monkeypatch):
+def test_an_unknown_mode_fails_closed(tmp_path):
+    assert len(_check_errors(tmp_path, "LOUD")) == 1
+
+
+def test_a_crashing_rule_set_cannot_red_a_warn_run_but_does_in_block(
+    tmp_path, monkeypatch
+):
+    from acceptance.validate import checks
+
+    def boom(*_a, **_k):
+        raise RuntimeError("rule bug")
+
+    monkeypatch.setattr(plausibility, "evaluate", boom)
+    found = _owner_eyes_findings(tmp_path / "w", "WARN")
+    assert [f.klass for f in found] == [checks.WARNING]
+    assert "crashed" in found[0].message
+    assert _check_errors(tmp_path / "w2", "WARN") == []
+    assert len(_check_errors(tmp_path / "b", "BLOCK")) == 1
+
+
+def test_the_runner_lists_hits_as_warnings_by_default_and_blocks_in_block(tmp_path):
+    import test_validate_generation as fixture
+    import validate_generation
+
+    def run(mode: str, sub: str) -> tuple[int, set[str]]:
+        gen = fixture.build(tmp_path / sub)
+        out = tmp_path / f"{sub}.json"
+        code = validate_generation.main(
+            [
+                str(gen),
+                "--cutoff",
+                fixture.CUTOFF,
+                "--owner-eyes",
+                mode,
+                "--out",
+                str(out),
+            ]
+        )
+        document = json.loads(out.read_bytes())
+        return code, {
+            f["class"]
+            for f in document["findings"]
+            if f["check_id"] == "plausibility.owner_eyes"
+        }
+
+    off_code, off_classes = run("off", "a")
+    warn_code, warn_classes = run("warn", "b")
+    _, block_classes = run("block", "c")
+    assert off_classes == set()
+    assert warn_classes == {"WARNING"} and warn_code == off_code
+    assert "BLOCKER_REGRESSION" in block_classes
+
+
+def test_the_command_defaults_the_rules_to_warn():
     import validate_generation
 
     source = Path(validate_generation.__file__).read_text(encoding="utf-8")
-    assert "owner_eyes=True" in source
+    assert "owner_eyes=args.owner_eyes.upper()" in source
+    assert 'default="warn"' in source
 
 
 def test_a_cagr_beside_an_under_a_year_status_is_a_hit():
@@ -785,6 +866,8 @@ def test_the_command_runs_the_consumer_check_against_a_checkout(tmp_path):
         str(payload),
         "--cutoff",
         "2026-11-06",
+        "--mode",
+        "block",
         "--repo-root",
         str(root),
     ]

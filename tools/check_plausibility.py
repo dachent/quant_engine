@@ -60,6 +60,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--json", type=Path, help="write hits and the rule table here")
     parser.add_argument("--list", action="store_true")
     parser.add_argument(
+        "--mode",
+        choices=("warn", "block"),
+        default="warn",
+        help="warn (default): print hits, exit 0; block: exit 1 on a BLOCKER hit, 3 on NOT_READY only",
+    )
+    parser.add_argument(
         "--repo-root",
         type=Path,
         help="also run the contract-consumer check (PL51) against this checkout",
@@ -107,6 +113,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 + "\n"
             ).encode()
         )
+    if args.mode == "warn":
+        return EXIT_OK
     if any(klass[h.rule] == "BLOCKER" for h in hits):
         return EXIT_BLOCKER
     return EXIT_NOT_READY if hits else EXIT_OK

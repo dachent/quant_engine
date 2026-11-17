@@ -216,6 +216,8 @@ def _rows(node: Any) -> list[Mapping[str, Any]]:
     return [r for r in node if isinstance(r, Mapping)] if isinstance(node, list) else []
 
 
+MODES = ("OFF", "WARN", "BLOCK")
+
 RULES: list[Rule] = []
 
 
