@@ -734,7 +734,7 @@
    "kinds": [
     "universal"
    ],
-   "text": "{} observations remain authoritative from inception forward."
+   "text": "live observations remain authoritative from inception forward."
   },
   {
    "file": "apps/portfolio-control-panel/app.js",
@@ -2028,6 +2028,20 @@
     "epoch"
    ],
    "text": "report_epochs are the governed epochs the report's totals use;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "model-live observations remain authoritative from inception forward."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "this result therefore equals the live-only history and is not described as a long-history result."
   }
  ]
 }

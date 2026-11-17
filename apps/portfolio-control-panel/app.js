@@ -2153,10 +2153,16 @@
     const backtestCount = Number(composition.backtest_observations_used || 0);
     const rejectedOverlap = Number(composition.overlapping_backtest_observations_rejected || 0);
     const noMatchedPrehistory = selectedFactorEvidenceMode === "LIVE_PLUS_BACKTEST" && backtestCount === 0;
+    // Whole sentences stay literals so the claim scan covers each one; the live end only chooses between them.
+    const modelLiveEnd = liveWord !== "live";
     const detail = noMatchedPrehistory
-      ? `No accepted version-matched backtest observations exist before ${liveWord} inception; this result therefore equals the ${liveWord === "live" ? "live-only" : "model-live"} history and is not described as a long-history result.`
+      ? (modelLiveEnd
+        ? "No accepted version-matched backtest observations exist before model-live inception; this result therefore equals the model-live history and is not described as a long-history result."
+        : "No accepted version-matched backtest observations exist before live inception; this result therefore equals the live-only history and is not described as a long-history result.")
       : selectedFactorEvidenceMode === "LIVE_PLUS_BACKTEST"
-        ? `Accepted version-matched backtest observations end before ${liveWord} inception; ${liveWord} observations remain authoritative from inception forward.`
+        ? (modelLiveEnd
+          ? "Accepted version-matched backtest observations end before model-live inception; model-live observations remain authoritative from inception forward."
+          : "Accepted version-matched backtest observations end before live inception; live observations remain authoritative from inception forward.")
         : "Only accepted live observations enter this result; backtest observations are excluded.";
     return `<div class="callout ${noMatchedPrehistory ? "callout-warning" : "callout-neutral"}"><strong>Evidence composition:</strong> ${integer.format(liveCount)} ${liveWord} + ${integer.format(backtestCount)} backtest observations · ${liveWord} inception ${formatDateHtml(composition.live_inception)} · ${statusText(composition.status)}. ${safe(detail)}${rejectedOverlap ? ` ${integer.format(rejectedOverlap)} overlapping backtest observations were rejected because live evidence has precedence.` : ""}${safe(rejectedBucketNote(row))}</div>`;
   }
