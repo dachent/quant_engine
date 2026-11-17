@@ -805,13 +805,6 @@
   {
    "file": "apps/portfolio-control-panel/app.js",
    "kinds": [
-    "universal"
-   ],
-   "text": "this result therefore equals the live-only history and is not described as a long-history result."
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
     "count"
    ],
    "text": "{} factor {} excluded from this fit ({});"

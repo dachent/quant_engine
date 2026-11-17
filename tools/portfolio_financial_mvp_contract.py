@@ -235,12 +235,12 @@ _MATRIXPORT_GAP_SPAN_RECEIPTS: Final = (
         "subscription_events_in_span": 0,
     },
 )
-_HISTORY_AUTHORITY_COMMIT: Final = "bf71a3992aa86bc6432379dae8a8052603b2d4a8"
+_HISTORY_AUTHORITY_COMMIT: Final = "e897d5fde2bd6a3c004f17c1ba8b739c973c8311"
 _HISTORY_AUTHORITY_RAW_SHA256: Final = (
-    "6d2f9d50e6776dec343c6f70812f1cea0238ad3de2cb227d80d718d9f24dd5ec"
+    "40f08984a717048283e8a5c8c84de5d576e64f530ebaba9f00a8047804df3ad0"
 )
 _HISTORY_AUTHORITY_SEMANTIC_SHA256: Final = (
-    "927186caf3124b87faf3e1c28db4eaa889bec31df873ae49fcbdf83b7cf7faad"
+    "9cf81279383abe8ff1c7c62a3beb78aff00a618c8ea68bb37bdd4aa0fb4c5d10"
 )
 _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
     "accepted_generation_id": (
