@@ -242,3 +242,14 @@ def test_the_uplift_applies_below_the_live_observation_minimum() -> None:
     assert _loss(full, "robuxio-crypto") == Decimal("0.44")
     # Volatis stays platform-only whatever its observation count
     assert _loss(full, "volatis-strategy") == Decimal("0.535")
+
+
+def test_every_prior_drawdown_names_its_source_and_a_hash() -> None:
+    for series in POLICY["series"]:
+        source = series["prior_max_drawdown_source"]
+        if series["prior_max_drawdown"] is None:
+            assert source is None, series["strategy_id"]
+            continue
+        assert source is not None, series["strategy_id"]
+        if source["kind"] != "GOVERNED_BACKTEST":
+            assert len(source["sha256"]) == 64, series["strategy_id"]

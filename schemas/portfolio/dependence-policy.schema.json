@@ -102,6 +102,7 @@
         "backtest_layer_required",
         "platform_only_history",
         "prior_max_drawdown",
+        "prior_max_drawdown_source",
         "series_id",
         "strategy_id"
       ],
@@ -117,6 +118,18 @@
           "pattern": "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
         },
         "platform_only_history": {"type": "boolean"},
+        "prior_max_drawdown_source": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["file", "kind", "note", "root", "sha256"],
+          "properties": {
+            "kind": {"enum": ["GOVERNED_BACKTEST", "RECOMPUTED_FROM_SERIES", "TRANSCRIBED_STATED", "VENDOR_STATED"]},
+            "file": {"$ref": "#/$defs/nonempty"},
+            "root": {"$ref": "#/$defs/nonempty"},
+            "note": {"$ref": "#/$defs/nonempty"},
+            "sha256": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]}
+          }
+        },
         "backtest_layer_required": {"type": "boolean"},
         "allocation_weight": {
           "type": "string",
