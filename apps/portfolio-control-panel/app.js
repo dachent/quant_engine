@@ -3051,7 +3051,7 @@
     renderKpis("#data-kpis", [
       ["Report generation", data.meta.report_generation_id.slice(0, 12), "Accepted local authority"],
       ["Baseline generation", data.meta.baseline_generation_id.slice(0, 12), "Hash-linked input"],
-      ["Fact status", `${cleanFacts}/${factRows.length} complete`, [structuralFacts.length ? `${structuralFacts.length} structural, not a defect (${structuralFacts.map((row) => humanStatus(row.item)).join(", ")})` : "", partialFacts.length ? `${partialFacts.length} not complete within the declared boundary (${partialFacts.map((row) => humanStatus(row.item)).join(", ")})` : ""].filter(Boolean).join(" · ") || "Every fact is complete within its declared boundary", partialFacts.length ? "warning" : "positive"],
+      ["Fact status", `${cleanFacts}/${factRows.length} complete`, [structuralFacts.length ? `${structuralFacts.length} structural, not a defect (${structuralFacts.map((row) => humanStatus(row.item)).join(", ")})` : "", partialFacts.length ? `${partialFacts.length} partial (${partialFacts.map((row) => humanStatus(row.item)).join(", ")})` : ""].filter(Boolean).join(" · ") || `${cleanFacts} of ${factRows.length} facts reported complete`, partialFacts.length ? "warning" : "positive"],
       ["External connections", "0", "Policy statement: direct-file local operation; not counted from the payload", "reserve"],
     ]);
     const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><th scope="row"><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></th><td>${structuralCoverage(row) ? `<span class="status-text neutral">${safe(humanStatus(row.status))}</span><span class="cell-secondary">Structural: ${safe(row.disposition.effect)}</span>` : statusText(row.status)}${row.escalation_required ? '<span class="cell-secondary">Escalation required</span>' : ""}</td><td>${safe(observedWindow(row))}</td><td>${safe(freshnessPolicy(row))}</td><td>${safe(row.evidence_authority || "Evidence authority not assigned")}<span class="cell-secondary">${safe(row.resolution_authority || "Resolution authority not assigned")}</span></td><td>${safe(coverageValueText(row))}</td><td>${safe(dispositionText(row.disposition))}</td><td>${safe(row.known_gap ? operatorText(row.known_gap) : "No known gap within the declared boundary")}</td></tr>`);
@@ -3733,7 +3733,7 @@
     const strategies = new Map((data.strategies || []).map((row) => [row.strategy_id, row]));
     const underwriting = new Map((data.strategy_underwriting?.rows || []).map((row) => [row.strategy_id, row]));
     const cards = block.rows.map((record) => conceptCardMarkup(record, strategies.get(record.strategy_id), underwriting.get(record.strategy_id)));
-    host.innerHTML = `<p class="cell-secondary">Concept text is the governed contract (${safe(block.source_artifact)}, sha256 ${safe(block.source_sha256.slice(0, 12))}…). A hypothesis is labelled as one; an inferred archetype is never shown as an authoritative design.</p><div class="concept-grid">${cards.join("")}</div>`;
+    host.innerHTML = `<p class="cell-secondary">Concept text is the governed contract (${safe(block.source_artifact)}, sha256 ${safe(block.source_sha256.slice(0, 12))}…). Hypotheses and inferred archetypes carry their own labels.</p><div class="concept-grid">${cards.join("")}</div>`;
   }
   // ===== END strategy concepts =====
 

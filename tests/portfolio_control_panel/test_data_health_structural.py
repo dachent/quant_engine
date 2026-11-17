@@ -68,7 +68,7 @@ def test_the_fact_tile_names_structural_and_partial_facts(tmp_path: Path) -> Non
 
     assert "1/3 complete" in tile
     assert "1 structural, not a defect (Historical strategy attribution)" in tile
-    assert "1 not complete within the declared boundary (Flows)" in tile
+    assert "1 partial (Flows)" in tile
     assert "tone-warning" in str(dom["#data-kpis"]["innerHTML"])
 
 
