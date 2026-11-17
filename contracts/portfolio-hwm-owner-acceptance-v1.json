@@ -23,8 +23,7 @@
   "decided_on": "2026-11-17",
   "decision": "OWNER_ACCEPTED",
   "measure": "HIGH_WATER_MARK_INDEX_DRAWDOWN",
-  "note": "The ruling text said two missing daily points; the data has three (the same three the gap-bounds contract bounds). The record states the checked dates; the owner's acceptance of the index is restated against them by control.",
   "policy_id": "PORT-HWM-4",
-  "ruling": "Owner answer to the decision-readiness review, recorded in the sprint owner-rulings note of 2026-11-17 (item O1)",
+  "ruling": "Sprint owner-rulings note of 2026-11-17, item O1, with its correction re-confirming THREE missing daily points (records/sprint/OWNER-RULINGS-2026-11-17.md)",
   "schema": "portfolio-hwm-owner-acceptance/1"
 }
