@@ -836,3 +836,24 @@ def test_the_account_lane_refuses_a_hole_between_its_segments(
 ) -> None:
     with pytest.raises(planner.CurrentPlanError, match="account-basis lane has a hole"):
         _ai_shaped_lane(tmp_path, monkeypatch, skip=("2025-08-01", "2025-08-29"))
+
+
+def test_provider_live_prehistory_is_not_a_model_live_research_end() -> None:
+    """Kill test: a segment labelled MODEL_LIVE under the provider-live-prehistory
+    admission (it precedes the account, which continues in the same series) must not
+    make the plan drop the account; only the model-live research admission does."""
+
+    prehistory = {
+        "evidence_layer": "MODEL_LIVE",
+        "mode_admission": "INCLUDE_PROVIDER_LIVE_PREHISTORY",
+    }
+    account = {
+        "evidence_layer": "ACCOUNT_LIVE",
+        "mode_admission": "INCLUDE_SELECTED_LIVE",
+    }
+    research = {
+        "evidence_layer": "MODEL_LIVE",
+        "mode_admission": "INCLUDE_MODEL_LIVE_RESEARCH",
+    }
+    assert not planner._has_model_live_research([prehistory, account])
+    assert planner._has_model_live_research([research])

@@ -567,9 +567,8 @@ def _layered_history_targets(
                 {"INCLUDE_SELECTED_LIVE"} if live_only_fallback else selected_admissions
             )
         ]
-        if evidence_mode == "LIVE_PLUS_BACKTEST" and any(
-            summary.get("evidence_layer") == "MODEL_LIVE"
-            for summary in selected_summaries
+        if evidence_mode == "LIVE_PLUS_BACKTEST" and _has_model_live_research(
+            selected_summaries
         ):
             # the account is not part of the research series of a strategy with an
             # admitted model-live layer, whatever its own LIVE_ONLY admission says
@@ -604,10 +603,7 @@ def _layered_history_targets(
         # model-live layer, the model's own live record for one with it admitted.
         live_layer = (
             "MODEL_LIVE"
-            if any(
-                summary.get("evidence_layer") == "MODEL_LIVE"
-                for summary in selected_summaries
-            )
+            if _has_model_live_research(selected_summaries)
             else "ACCOUNT_LIVE"
         )
         live_summaries = [
@@ -1117,6 +1113,20 @@ def _layered_history_targets(
 # Longest calendar gap tolerated between consecutive lane observations: a long weekend
 # plus a holiday, never a skipped session run.
 _LANE_MAX_GAP_DAYS = 4
+
+
+def _has_model_live_research(summaries: Sequence[Mapping[str, Any]]) -> bool:
+    """The strategy continues its backtest with the model's own live record.
+
+    Keyed on the admission, not the layer label: another strategy's provider-live
+    prehistory is also labelled MODEL_LIVE, but it comes BEFORE the account, which
+    then continues in the same series.
+    """
+
+    return any(
+        summary.get("mode_admission") == "INCLUDE_MODEL_LIVE_RESEARCH"
+        for summary in summaries
+    )
 
 
 def _series_path_sha256(rows: Sequence[Mapping[str, object]]) -> str:
