@@ -14,7 +14,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-QA = Path(__file__).resolve().parents[2] / "apps" / "portfolio-control-panel" / "interaction_qa.mjs"
+QA = (
+    Path(__file__).resolve().parents[2]
+    / "apps"
+    / "portfolio-control-panel"
+    / "interaction_qa.mjs"
+)
 
 
 def _source() -> str:
@@ -28,7 +33,9 @@ def _block(text: str, start: str, length: int) -> str:
 
 def test_max_check_expects_the_common_window_then_the_own_start_basis() -> None:
     text = _source()
-    block = _block(text, 'await page.locator(\'[data-nav="performance"]\').click();', 3200)
+    block = _block(
+        text, "await page.locator('[data-nav=\"performance\"]').click();", 3200
+    )
     # Default Max is the common window and the log axis is not forced on it.
     assert "Common window" in block
     # Own start is reached through the explicit basis control and is the log, own-first-week view.
@@ -41,7 +48,10 @@ def test_max_check_no_longer_demands_a_forced_log_axis_by_default() -> None:
     check = _block(text, "Return chart reads the union grid", 900)
     assert "Common window" in check
     # The pre-966 expectation: the default Max view is a log axis with own-first-week note.
-    assert 'returnsMax.axisLogPressed === "true" && /own first week/.test(returnsMax.note)' not in check
+    assert (
+        'returnsMax.axisLogPressed === "true" && /own first week/.test(returnsMax.note)'
+        not in check
+    )
 
 
 def test_factor_state_check_selects_a_chip_that_has_state_panels() -> None:
