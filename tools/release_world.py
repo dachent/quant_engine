@@ -19,7 +19,8 @@ manifest commands read.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -148,6 +149,48 @@ def write_roots(path: Path, data_root: Path, world: Path) -> None:
     )
 
 
+def derive_cycle_manifest(
+    base: Mapping[str, object],
+    *,
+    cycle_id: str,
+    predecessor: str,
+    generations: Mapping[str, tuple[str, str]] | None = None,
+    roots: Mapping[str, tuple[str, str]] | None = None,
+) -> dict[str, object]:
+    """A new cycle manifest from the previous one: new id and predecessor, optional provider overrides.
+
+    ``generations`` maps provider -> (generation id, manifest sha256) and switches that provider to the
+    explicit mode; ``roots`` maps provider -> (root key, relative path), for a world-local provider root.
+    Everything else is carried. The result is checked with the cycle-manifest validator.
+    """
+
+    import copy
+
+    import release_cycle_manifest
+
+    manifest = copy.deepcopy(dict(base))
+    providers = manifest["providers"]
+    assert isinstance(providers, dict)
+    for name in (*(generations or {}), *(roots or {})):
+        if name not in providers:
+            raise WorldError(f"cycle manifest has no provider {name!r}")
+    manifest["cycle_id"] = cycle_id
+    manifest["predecessor"] = {"release_id": predecessor}
+    for name, (generation_id, manifest_sha) in (generations or {}).items():
+        providers[name]["generation"] = {
+            "mode": "explicit",
+            "generation_id": generation_id,
+        }
+        providers[name]["manifest_sha256"] = manifest_sha
+    for name, (root_key, relative) in (roots or {}).items():
+        providers[name]["root"] = {"root_key": root_key, "relative": relative}
+    try:
+        release_cycle_manifest.validate_static(manifest)
+    except release_cycle_manifest.CycleManifestError as exc:
+        raise WorldError(f"derived cycle manifest is invalid: {exc}") from exc
+    return manifest
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -165,11 +208,67 @@ def _parser() -> argparse.ArgumentParser:
         help="replace a bundle or provider root inside the new world (old one kept as .superseded)",
     )
     copy.add_argument("--apply", action="store_true")
+    cm = commands.add_parser("cycle-manifest")
+    cm.add_argument("--from", dest="src", type=Path, required=True)
+    cm.add_argument("--out", type=Path, required=True)
+    cm.add_argument("--cycle-id", required=True)
+    cm.add_argument("--predecessor", required=True)
+    cm.add_argument(
+        "--generation",
+        action="append",
+        default=[],
+        metavar="PROVIDER=ID:MANIFEST_SHA256",
+    )
+    cm.add_argument(
+        "--root", action="append", default=[], metavar="PROVIDER=ROOT_KEY:RELATIVE"
+    )
     return parser
+
+
+def _pairs(items: Sequence[str], what: str) -> dict[str, tuple[str, str]]:
+    result: dict[str, tuple[str, str]] = {}
+    for item in items:
+        name, _, rest = item.partition("=")
+        left, _, right = rest.partition(":")
+        if not name or not left or not right:
+            raise WorldError(f"{what} needs NAME=A:B, got {item!r}")
+        result[name] = (left, right)
+    return result
+
+
+def _cycle_manifest(args: argparse.Namespace) -> int:
+    base = json.loads(args.src.read_bytes())
+    manifest = derive_cycle_manifest(
+        base,
+        cycle_id=args.cycle_id,
+        predecessor=args.predecessor,
+        generations=_pairs(args.generation, "--generation"),
+        roots=_pairs(args.root, "--root"),
+    )
+    raw = (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode("utf-8")
+    if args.out.exists():
+        raise WorldError(f"output exists (create-only): {args.out}")
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_bytes(raw)
+    print(
+        json.dumps(
+            {
+                "cycle_manifest": args.out.as_posix(),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+    )
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "cycle-manifest":
+        try:
+            return _cycle_manifest(args)
+        except (WorldError, OSError, ValueError) as exc:
+            print(f"release-world: FAIL: {exc}", file=sys.stderr)
+            return 1
     dirs = [name for name in args.dirs.split(",") if name]
     if not dirs and args.src.is_dir():
         dirs = sorted(p.name for p in args.src.iterdir() if p.is_dir())
