@@ -301,7 +301,7 @@
     [
       "portfolio_control_panel",
       "portfolio_cash_drag",
-      1
+      2
     ],
     [
       "portfolio_control_panel",
@@ -331,7 +331,7 @@
     [
       "portfolio_control_panel",
       "portfolio_report",
-      5
+      6
     ],
     [
       "portfolio_control_panel",
@@ -710,6 +710,11 @@
     ],
     [
       "portfolio_target_series",
+      "portfolio_attribution",
+      1
+    ],
+    [
+      "portfolio_target_series",
       "strategy_basis",
       1
     ],
@@ -1001,6 +1006,11 @@
     [
       "strategy_basis_disclosure",
       "strategy_basis",
+      1
+    ],
+    [
+      "style_capture_assemble",
+      "base_proxy_factors",
       1
     ],
     [

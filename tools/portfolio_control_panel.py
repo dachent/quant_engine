@@ -28,6 +28,7 @@ import zlib
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping, Sequence, cast
 
 from quant_engine.core import check_entry_interpreter
+from quant_engine.core import last_nyse_trading_day
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -4108,6 +4109,11 @@ def _suppress_unmatched_strategy_performance(
         row["benchmark_comparison_disposition"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["provider_comparison_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["provider_comparison_disposition"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+        if "implementation_gap_status" in row:
+            # derived from the withheld comparison evidence: withdrawn with it
+            row["implementation_gap_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+            row["implementation_gap_basis"] = None
+            row["implementation_gap_audit_status"] = None
         suppressed.append(row)
     return suppressed
 
@@ -5591,6 +5597,36 @@ def _fit_segments(
         return []
 
 
+_GATE_DYNAMIC_RESULT_KEYS: Final = (
+    "exposure_path",
+    "holdout_forecasts",
+    "largest_exposure_changes",
+)
+
+
+def _gate_forensic_dynamic(diagnostics: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The result-bearing part of the dynamic diagnostics of a gate-rejected fit."""
+
+    dynamic = _optional_mapping(diagnostics.get("dynamic"))
+    if dynamic is None:
+        return None
+    return {key: dynamic[key] for key in _GATE_DYNAMIC_RESULT_KEYS if key in dynamic}
+
+
+def _gate_public_diagnostics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
+    """Diagnostics of a gate-rejected fit without any per-date beta or forecast exposure."""
+
+    public = dict(diagnostics)
+    dynamic = _optional_mapping(public.get("dynamic"))
+    if dynamic is not None:
+        public["dynamic"] = {
+            key: value
+            for key, value in dynamic.items()
+            if key not in _GATE_DYNAMIC_RESULT_KEYS
+        }
+    return public
+
+
 def _gate_withheld_alpha() -> dict[str, Any]:
     return {
         "annualized_standard_error": None,
@@ -5610,7 +5646,8 @@ SUSPECT_BETA_ABS: Final = Decimal(3)
 
 def _fit_quality_flags(row: Mapping[str, Any]) -> list[str]:
     flags: list[str] = []
-    for item in row.get("exposures") or []:
+    detail = _optional_mapping(row.get("diagnostic_detail")) or {}
+    for item in list(row.get("exposures") or []) + list(detail.get("exposures") or []):
         beta = _alpha_decimal(item.get("beta")) if isinstance(item, Mapping) else None
         if beta is not None and abs(beta) > SUSPECT_BETA_ABS:
             flags.append("LARGE_EXPOSURE_CHECK_SCALE")
@@ -5630,12 +5667,12 @@ def _train_window(row: Mapping[str, Any], start: Any, end: Any) -> tuple[Any, An
     buckets = association.get("buckets")
     if not isinstance(buckets, list):
         return start, end
-    anchors = [
+    candidates = [
         item.get("factor_anchor")
         for item in buckets
         if isinstance(item, Mapping) and item.get("partition") == "TRAIN"
     ]
-    anchors = [item for item in anchors if isinstance(item, str)]
+    anchors: list[str] = [item for item in candidates if isinstance(item, str)]
     if not anchors:
         return start, end
     return min(anchors), max(anchors)
@@ -5735,13 +5772,26 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(train_start, str) and isinstance(train_end, str)
         else None
     )
-    live_end = coverage.get("canonical_live_observed_end")
+    fit_days = train_days if train_days is not None else days
+    # the series this fit is shown beside ends at the accepted history end; a lens
+    # that stops earlier (French files) lags it by the difference
+    reference_ends = [
+        value
+        for value in (
+            coverage.get("canonical_live_observed_end"),
+            composition.get("accepted_history_complete_through"),
+        )
+        if isinstance(value, str)
+    ]
     window_lag_days = (
-        (date.fromisoformat(live_end) - date.fromisoformat(end)).days
-        if isinstance(live_end, str) and isinstance(end, str)
+        (date.fromisoformat(max(reference_ends)) - date.fromisoformat(end)).days
+        if reference_ends and isinstance(end, str)
         else None
     )
-    if net is None and gross is None:
+    if row.get("status") == "DIAGNOSTIC_ONLY":
+        # a fit the sealed gate rejected is forensic only; its alpha is withheld
+        headline_status = "NOT_A_HEADLINE_MODEL_GATE_FAILED"
+    elif net is None and gross is None:
         headline_status = "UNAVAILABLE_NO_ALPHA"
     elif row.get("status") not in (None, "AVAILABLE"):
         # a fit the sealed holdout gate rejected is forensic only, whatever its SE
@@ -5768,6 +5818,13 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "inference": inference,
         "headline_status": headline_status,
         "window_lag_days": window_lag_days,
+        "research_lens_label": (
+            f"research lens: factor data through {end}, not a cutoff-current headline"
+            if window_lag_days is not None
+            and window_lag_days > STALE_FACTOR_WINDOW_DAYS
+            and isinstance(end, str)
+            else None
+        ),
         "train_window_start": train_start,
         "train_window_end": train_end,
         "train_window_days": train_days,
@@ -5802,9 +5859,9 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "annualisation": ALPHA_ANNUALISATION,
         "annualisation_basis": (
             None
-            if days is None
+            if fit_days is None
             else "ANNUALISED_FROM_DAYS"
-            if days < 365
+            if fit_days < 365
             else "ANNUALISED"
         ),
         "alternatives": [],
@@ -6024,18 +6081,23 @@ def _factor_analysis(
                     "diagnostic_detail": {
                         "alpha": diagnostic_alpha,
                         "exposures": diagnostic_exposures,
+                        "contribution_summary": (
+                            _factor_contribution_summary(model)
+                            if model.get("contributions")
+                            else None
+                        ),
+                        "dynamic": _gate_forensic_dynamic(diagnostics),
+                        "orthogonal_attribution": orthogonal_surface_fields.get(
+                            "orthogonal_attribution"
+                        ),
                         "warning": "COMPUTED_NOT_ACCEPTED_FOR_PM_ALPHA_OR_EXPOSURE_CONCLUSIONS",
                     },
-                    "contribution_summary": (
-                        _factor_contribution_summary(model)
-                        if model.get("contributions")
-                        else None
-                    ),
+                    "contribution_summary": None,
                     "cost_coverage": _text(
                         model.get("cost_coverage"), "model.cost_coverage"
                     ),
                     "coverage": _object(model.get("coverage"), "model.coverage"),
-                    "diagnostics": diagnostics,
+                    "diagnostics": _gate_public_diagnostics(diagnostics),
                     "estimator": estimator,
                     "evidence_layer": _text(
                         model.get("evidence_layer"), "model.evidence_layer"
@@ -6043,7 +6105,14 @@ def _factor_analysis(
                     "exposures": [],
                     "model_id": model_id,
                     "model_quality": model_quality,
-                    **orthogonal_surface_fields,
+                    **{
+                        key: (
+                            {"status": "WITHHELD_MODEL_QUALITY_GATE"}
+                            if key == "orthogonal_attribution"
+                            else value
+                        )
+                        for key, value in orthogonal_surface_fields.items()
+                    },
                     "selection_status": _text(
                         selection.get("status"), "selection.status"
                     ),
@@ -6594,6 +6663,19 @@ def _attach_alpha_alternatives(grouped: Sequence[Mapping[str, Any]]) -> None:
                     )
 
 
+# Factor-model audit D1: the economic-factor lens reads monthly-published French files
+# and ends before the cutoff, so a cutoff-current lens leads the panel.
+DEFAULT_LENS_ORDER: Final = ("ETF_STYLE", "RETURN_SECTOR", "ECONOMIC_FACTOR")
+
+
+def _current_default_lens(lenses: Sequence[Mapping[str, Any]]) -> str:
+    present = [item.get("lens_id") for item in lenses]
+    for lens_id in DEFAULT_LENS_ORDER:
+        if lens_id in present:
+            return lens_id
+    return str(present[0]) if present and present[0] else "ECONOMIC_FACTOR"
+
+
 def _decomposition_lenses_for_mode(
     root: Path,
     plan_bundle: Path,
@@ -6901,7 +6983,7 @@ def _decomposition_lenses_for_mode(
     _attach_alpha_alternatives(grouped)
     return (
         {
-            "default_lens": "ECONOMIC_FACTOR",
+            "default_lens": _current_default_lens(grouped),
             "lenses": grouped,
             "plan_bundle_id": plan_bundle.name,
             "plan_manifest_sha256": manifest_sha256,
@@ -7152,7 +7234,9 @@ def _weekly_return_analysis(
             or current_week.get("week_start") != week_start.isoformat()
             or current_week.get("week_end") != week_end.isoformat()
             or current_week.get("data_through_date") != as_of.isoformat()
-            or current_week.get("is_partial") is not (as_of < week_end)
+            # partial only while data stops before the last NYSE trading day of the week
+            or current_week.get("is_partial")
+            is not (as_of < last_nyse_trading_day(week_start + timedelta(days=4)))
             or not isinstance(weekly.get("weeks"), list)
             or week_start.isoformat() not in weekly["weeks"]
         ):
@@ -9077,6 +9161,171 @@ def _implementation_contract_context(
     return context
 
 
+def _gap_signature(
+    correlation: float | None,
+    beta: float | None,
+    tracking_error: float | None,
+    gap_policy: Mapping[str, Any],
+) -> str:
+    if (
+        correlation is not None
+        and beta is not None
+        and tracking_error is not None
+        and correlation
+        >= _finite_float(
+            gap_policy.get("path_aligned_minimum_correlation"),
+            "path_aligned_minimum_correlation",
+        )
+        and _finite_float(
+            gap_policy.get("path_aligned_beta_minimum"),
+            "path_aligned_beta_minimum",
+        )
+        <= beta
+        <= _finite_float(
+            gap_policy.get("path_aligned_beta_maximum"),
+            "path_aligned_beta_maximum",
+        )
+        and tracking_error
+        <= _finite_float(
+            gap_policy.get("path_aligned_maximum_tracking_error_annualized"),
+            "path_aligned_maximum_tracking_error_annualized",
+        )
+    ):
+        return "PATH_ALIGNED_PERSISTENT_LEVEL_DIFFERENCE"
+    if correlation is not None and correlation >= _finite_float(
+        gap_policy.get("partial_path_minimum_correlation"),
+        "partial_path_minimum_correlation",
+    ):
+        return "PARTIAL_PATH_DIVERGENCE"
+    return "MATERIAL_PATH_DIVERGENCE"
+
+
+PROXY_RECONSTRUCTED_STATUS = "DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV"
+PROXY_RECONCILIATION_STATUSES = frozenset(
+    {PROXY_RECONSTRUCTED_STATUS, "TESTED_EXACT_COMMON_DATES"}
+)
+RECONSTRUCTED_PROXY_COMPARISON_STATUS = (
+    "RECONSTRUCTED_PROXY_DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV"
+)
+
+
+def _reconstructed_proxy_reference(
+    implementation: object,
+) -> dict[str, Any] | None:
+    """The tested account-versus-model reconciliation of a strategy with no provider comparison.
+
+    A strategy whose only model is the reconstructed replica (no provider-published
+    series) still has an exact-common-date account-versus-model return reconciliation in
+    its implementation contract (a status such as DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV
+    or TESTED_EXACT_COMMON_DATES, never an UNAVAILABLE one).  That total is a real, labelled
+    gap: it is used only when no provider comparison exists, and it is named a reconstructed
+    proxy, never a provider comparison.
+    """
+
+    if not isinstance(implementation, Mapping):
+        return None
+    metrics = implementation.get("return_reconciliation")
+    if not isinstance(metrics, Mapping):
+        return None
+    if metrics.get("status") not in PROXY_RECONCILIATION_STATUSES:
+        return None
+    observations = metrics.get("observations")
+    if (
+        not isinstance(observations, int)
+        or isinstance(observations, bool)
+        or observations <= 0
+    ):
+        return None
+    if any(
+        metrics.get(key) is None
+        for key in (
+            "account_cumulative_return",
+            "model_cumulative_return",
+            "account_minus_model_cumulative",
+        )
+    ):
+        return None
+    try:
+        account = float(metrics["account_cumulative_return"])
+        model = float(metrics["model_cumulative_return"])
+        difference = float(metrics["account_minus_model_cumulative"])
+    except (TypeError, ValueError):
+        return None
+    if abs((account - model) - difference) > 1e-9:
+        return None
+    return dict(metrics)
+
+
+def _reconstructed_proxy_gap_underwriting(
+    strategy: Mapping[str, Any],
+    gap_policy: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+    strategy_name: str,
+) -> dict[str, Any]:
+    """The labelled gap against the reconstructed model (no provider comparison exists)."""
+
+    total_gap = _finite_float(
+        metrics.get("account_minus_model_cumulative"),
+        f"reconstructed proxy gap {strategy_name}",
+    )
+    correlation = _optional_float(
+        metrics.get("daily_return_correlation"), f"proxy correlation {strategy_name}"
+    )
+    beta = _optional_float(metrics.get("beta_to_model"), f"proxy beta {strategy_name}")
+    tracking_error = _optional_float(
+        metrics.get("annualized_tracking_error"),
+        f"proxy tracking error {strategy_name}",
+    )
+    import portfolio_cash_drag
+    import portfolio_report as reporter
+
+    unresolved_causes = [
+        "REFERENCE_IS_RECONSTRUCTED_PROXY_NOT_PROVIDER_PUBLISHED",
+        "REFERENCE_VERSION_COMPATIBILITY_NOT_PROVEN",
+    ]
+    if strategy.get("cash_drag_status") != portfolio_cash_drag.STATUS_EVIDENCED:
+        unresolved_causes.append("COMPLETE_DAILY_ACCOUNT_CASH_PATH_UNAVAILABLE")
+    if strategy.get("fees_status") != reporter.FEES_STATUS_EVIDENCED:
+        unresolved_causes.append("ACCOUNT_BOUND_FEE_PATH_INCOMPLETE")
+    unresolved_causes.extend(
+        [
+            "ORDER_TIMING_AND_FILL_ATTRIBUTION_UNAVAILABLE",
+            "SLIPPAGE_AND_TRADE_LEVEL_CAUSAL_ATTRIBUTION_UNAVAILABLE",
+        ]
+    )
+    return {
+        "status": "QUANTIFIED_TOTAL_CAUSAL_COMPONENTS_UNRESOLVED",
+        "comparison_status": RECONSTRUCTED_PROXY_COMPARISON_STATUS,
+        "observed_start": metrics.get("observed_start"),
+        "observed_end": metrics.get("observed_end"),
+        "observations": metrics.get("observations"),
+        "reference_cumulative_return": _number_text(
+            _finite_float(
+                metrics.get("model_cumulative_return"),
+                f"proxy model return {strategy_name}",
+            )
+        ),
+        "account_cumulative_return": _number_text(
+            _finite_float(
+                metrics.get("account_cumulative_return"),
+                f"proxy account return {strategy_name}",
+            )
+        ),
+        "total_gap": _number_text(total_gap),
+        "causally_bound_components": [],
+        "unresolved_residual": _number_text(total_gap),
+        "reconciliation_error": _number_text(0.0),
+        "signature": _gap_signature(correlation, beta, tracking_error, gap_policy),
+        "beta": None if beta is None else _number_text(beta),
+        "correlation": None if correlation is None else _number_text(correlation),
+        "tracking_error_annualized": (
+            None if tracking_error is None else _number_text(tracking_error)
+        ),
+        "unresolved_causes": unresolved_causes,
+        "cost_boundary": gap_policy.get("subscription_cost_rule"),
+    }
+
+
 def _model_account_gap_underwriting(
     strategy: Mapping[str, Any], gap_policy: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -9118,6 +9367,11 @@ def _model_account_gap_underwriting(
             }
     comparison_status = str(strategy.get("provider_comparison_status") or "UNAVAILABLE")
     available = comparison_status.startswith("DESCRIPTIVE_EXACT_DATE")
+    proxy = None if available else _reconstructed_proxy_reference(implementation)
+    if proxy is not None:
+        return _reconstructed_proxy_gap_underwriting(
+            strategy, gap_policy, proxy, strategy_name
+        )
     total_gap = (
         _optional_float(
             strategy.get("provider_cumulative_gap"),
@@ -9147,40 +9401,11 @@ def _model_account_gap_underwriting(
         if available
         else None
     )
-    if not available:
-        signature = "UNAVAILABLE_NO_ACCEPTED_MODEL_OR_PROVIDER_COMPARISON"
-    elif (
-        correlation is not None
-        and beta is not None
-        and tracking_error is not None
-        and correlation
-        >= _finite_float(
-            gap_policy.get("path_aligned_minimum_correlation"),
-            "path_aligned_minimum_correlation",
-        )
-        and _finite_float(
-            gap_policy.get("path_aligned_beta_minimum"),
-            "path_aligned_beta_minimum",
-        )
-        <= beta
-        <= _finite_float(
-            gap_policy.get("path_aligned_beta_maximum"),
-            "path_aligned_beta_maximum",
-        )
-        and tracking_error
-        <= _finite_float(
-            gap_policy.get("path_aligned_maximum_tracking_error_annualized"),
-            "path_aligned_maximum_tracking_error_annualized",
-        )
-    ):
-        signature = "PATH_ALIGNED_PERSISTENT_LEVEL_DIFFERENCE"
-    elif correlation is not None and correlation >= _finite_float(
-        gap_policy.get("partial_path_minimum_correlation"),
-        "partial_path_minimum_correlation",
-    ):
-        signature = "PARTIAL_PATH_DIVERGENCE"
-    else:
-        signature = "MATERIAL_PATH_DIVERGENCE"
+    signature = (
+        "UNAVAILABLE_NO_ACCEPTED_MODEL_OR_PROVIDER_COMPARISON"
+        if not available
+        else _gap_signature(correlation, beta, tracking_error, gap_policy)
+    )
     unresolved_causes: list[str] = []
     if available:
         if (
@@ -9762,6 +9987,9 @@ def _strategy_underwriting(
             recommendation_reasons.extend(
                 ["MODEL_ACCOUNT_GAP_AT_OR_BELOW_MINUS_FIVE_PERCENT", gap["signature"]]
             )
+            if gap.get("comparison_status") == RECONSTRUCTED_PROXY_COMPARISON_STATUS:
+                # the reference is the reconstructed replica, not a provider series: say so in the advice
+                recommendation_reasons.append("REFERENCE_IS_RECONSTRUCTED_PROXY")
         elif portfolio_fit_status == "CLUSTER_BUDGET_BREACH":
             advisory_action = "REVIEW_SHARED_CLUSTER_BUDGET_NOT_PROVIDER_LABEL"
             recommendation_reasons.append("SHARED_ECONOMIC_DRIVER_CLUSTER_BREACH")

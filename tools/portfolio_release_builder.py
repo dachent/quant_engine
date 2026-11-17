@@ -2089,6 +2089,13 @@ def _public_factor_output_alias(
         if input_key == "us_industries"
         else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
     )
+    required_month_end = eligible_month_end
+    # the admitted month is the latest published month (>= the 45-day required month)
+    eligible_month_end = date(
+        dates[-1].year + (dates[-1].month == 12), dates[-1].month % 12 + 1, 1
+    ) - timedelta(days=1)
+    if eligible_month_end < required_month_end:
+        raise VerticalBuildError("public factor month is before the required month")
     publication_deadline = eligible_month_end + timedelta(days=45)
     matches: list[str] = []
     for alias_name, output in candidates:
@@ -2114,7 +2121,10 @@ def _public_factor_output_alias(
             or (dates[-1].year, dates[-1].month)
             != (eligible_month_end.year, eligible_month_end.month)
             or freshness.get("publication_deadline") != publication_deadline.isoformat()
-            or publication_deadline > capture_evaluation_date
+            or (
+                eligible_month_end == required_month_end
+                and publication_deadline > capture_evaluation_date
+            )
         ):
             continue
         matches.append(alias_name)

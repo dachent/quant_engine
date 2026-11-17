@@ -15,7 +15,7 @@ not recorded yet is refused: its last ex-date would show as a loss.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, localcontext
 from typing import Any, Final, Mapping, Sequence
 
@@ -23,12 +23,17 @@ PROXIES: Final = {"SPY_XS": "SPY", "IWM_XS": "IWM", "HYG_XS": "HYG"}
 CASH: Final = "BIL"
 MONTHLY_PAYERS: Final = ("BIL", "HYG")
 OVERLAP_DAYS: Final = 60
-OVERLAP_TOLERANCE: Final = Decimal("0.0001")
+OVERLAP_TOLERANCE: Final = Decimal("0.00003")
 RISK_FREE_DAILY_MIN: Final = Decimal("-0.0005")
 RISK_FREE_DAILY_MAX: Final = Decimal("0.005")
-# monthly payers go ex around the first business day; no record for longer than
-# this before the last price means the provider has not posted the latest one
-MONTHLY_DIVIDEND_STALE_DAYS: Final = 35
+# monthly payers go ex in the first days of the month
+MONTHLY_EX_DATE_LAST_DAY: Final = 5
+# every ex-date of the last three years must be recorded. Measured on the R3-BASE-2
+# capture, successive BIL and HYG distributions are 13-49 days apart (the longest are
+# the Dec 31 -> early February steps); one missing month gives at least 56 EXCEPT an early-December one (Dec 1-3 ->
+# year-end is 45-47 days: caught by the two-in-December rule), so 52 separates them: a missing month stays a price drop.
+DIVIDEND_GAP_WINDOW_DAYS: Final = 1095
+MONTHLY_MAX_GAP_DAYS: Final = 52
 
 
 class BaseProxyError(ValueError):
@@ -74,15 +79,72 @@ def total_returns(
 def _check_dividend_record(
     ticker: str, prices: Mapping[date, tuple[Decimal, Decimal]]
 ) -> None:
-    paid = [day for day, (_close, dividend) in prices.items() if dividend > 0]
+    """A monthly payer's latest ex-date must be recorded once the capture is past it.
+
+    Monthly ETFs go ex in the first days of the month: a capture dated after the
+    5th must show a distribution in its own month, an earlier one in the month before.
+    """
+
     last_price = max(prices)
-    if not paid or (last_price - max(paid)).days > MONTHLY_DIVIDEND_STALE_DAYS:
+    month_start = last_price.replace(day=1)
+    if last_price.month == 1:
+        # no payer goes ex in January (the year-end one is in December)
+        needed_from = date(last_price.year - 1, 12, 1)
+    elif last_price.day > MONTHLY_EX_DATE_LAST_DAY:
+        needed_from = month_start
+    else:
+        needed_from = (month_start - timedelta(days=1)).replace(day=1)
+    paid = sorted(day for day, (_close, dividend) in prices.items() if dividend > 0)
+    window_start = max(
+        last_price - timedelta(days=DIVIDEND_GAP_WINDOW_DAYS), min(prices)
+    )
+    recent = [day for day in paid if day >= window_start]
+    gaps = [
+        (left, right)
+        for left, right in zip([window_start, *recent], recent)
+        if (right - left).days > MONTHLY_MAX_GAP_DAYS
+    ]
+    # every calendar month between the window's first and the capture's last month
+    # carries a distribution; January alone may not (the year-end one goes ex in Dec).
+    # Limit: a capture whose LAST month is December is not held to the two-in-December
+    # rule (a Dec 20+ capture missing Dec 1-3 passes); the November release capture
+    # cannot reach it.
+    # Limit: a payer that starts going ex in January in a new rate regime would hide a
+    # missed January ex-date here; only the 52-day gap check covers that, partly.
+    paid_months = {(day.year, day.month) for day in paid}
+    year, month = window_start.year, window_start.month
+    missing_months: list[tuple[int, int]] = []
+    while True:
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+        if (year, month) >= (last_price.year, last_price.month):
+            break
+        if (year, month) not in paid_months and month != 1:
+            missing_months.append((year, month))
+        if month == 12 and sum(1 for d in paid if (d.year, d.month) == (year, 12)) < 2:
+            # BIL and HYG pay twice in every December (early month and year-end):
+            # one missing early-December ex-date would otherwise stay a price drop
+            missing_months.append((year, month))
+    if missing_months:
         raise BaseProxyError(
-            f"{ticker}: no distribution recorded in the {MONTHLY_DIVIDEND_STALE_DAYS} "
-            f"days to {last_price.isoformat()} (last "
+            f"{ticker}: no distribution recorded in {missing_months[0][0]}-"
+            f"{missing_months[0][1]:02d} (and {len(missing_months) - 1} other "
+            "month(s)): its ex-date would stay a price drop in the returns"
+        )
+    if gaps:
+        raise BaseProxyError(
+            f"{ticker}: no distribution recorded between {gaps[0][0].isoformat()} "
+            f"and {gaps[0][1].isoformat()}: an earlier month is missing, so its "
+            "ex-date would stay a price drop in the returns"
+        )
+    if not paid or max(paid) < needed_from:
+        raise BaseProxyError(
+            f"{ticker}: no distribution recorded since {needed_from.isoformat()} "
+            f"(price data to {last_price.isoformat()}, last distribution "
             f"{max(paid).isoformat() if paid else 'none'}): the provider has not "
-            "posted the latest monthly distribution, so the last ex-date would show "
-            "as a loss; capture again once it is recorded"
+            "posted the latest monthly distribution, so its ex-date would show as "
+            "a loss; capture again once it is recorded"
         )
 
 
@@ -125,6 +187,11 @@ def build_factors(
         for day in calendar:
             if any(day not in returns[ticker] for ticker in PROXIES.values()):
                 continue
+            if french_last is not None and day <= french_last and day not in french_rf:
+                raise BaseProxyError(
+                    f"French RF has no value for {day.isoformat()}, inside its range "
+                    f"(last {french_last.isoformat()}): BIL is used only after that date"
+                )
             rf = french_rf[day] if day in french_rf else cash[day]
             if not RISK_FREE_DAILY_MIN <= rf <= RISK_FREE_DAILY_MAX:
                 raise BaseProxyError(
@@ -210,6 +277,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
     )
     return 0
+
+
+def price_series(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[date, tuple[Decimal, Decimal]]]:
+    """Public entry: ``{ticker: {day: (close, dividend)}}`` from raw capture rows."""
+
+    return _series(rows)
+
+
+def check_dividend_record(
+    ticker: str, prices: Mapping[date, tuple[Decimal, Decimal]]
+) -> None:
+    """Public entry to the month-aware dividend record check (raises BaseProxyError)."""
+
+    _check_dividend_record(ticker, prices)
 
 
 if __name__ == "__main__":

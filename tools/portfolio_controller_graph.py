@@ -173,6 +173,7 @@ _PATH_STAGES = {
     # Builds the style-return bundle the decomposition plan pins (calendar, return
     # columns); a change moves the plan inputs and everything downstream of them.
     "tools/portfolio_public_style_sources.py": ["analytics", "report", "panel"],
+    "tools/portfolio_public_decomposition_sources.py": ["analytics", "report", "panel"],
     # The Performance tab producer: builds one additive panel block from the weekly
     # returns, account manifest and governed HWM proof the panel already holds.
     "tools/portfolio_performance_tab.py": ["panel"],
@@ -298,6 +299,12 @@ _PATH_STAGES = {
     # Stages an unpublished public Yahoo price/FX fetch from a config; consumers read
     # only the artifacts and manifests they are handed, never this tool.
     "tools/yahoo_fetch_driver.py": [],
+    # Per-cycle input preparation (factor-model audit): builds the base proxy-factor file
+    # (total-return proxies, French RF splice) and assembles the per-group style capture
+    # into the style builder's single source.  Offline; the pipeline reads only the files
+    # and pinned manifests it is handed, never these tools.
+    "tools/base_proxy_factors.py": [],
+    "tools/style_capture_assemble.py": [],
     # Assembles the pinned attribution return-source CSV; the attribution stage reads
     # only the file and manifest the spec pins, never this tool.
     "tools/portfolio_attribution_returns.py": [],
@@ -343,6 +350,9 @@ _PATH_STAGES = {
     # #899: the pinned bounds of the missing Matrixport NAV points; the report and the
     # panel both read it to decide whether the numeric HWM can publish.
     "contracts/portfolio-hwm-gap-bounds-v1.json": ["report", "panel"],
+    # PORT-UNDERWRITE-1: the panel builder reads the underwriting policy (gap, regime benchmark series,
+    # portfolio fit) and binds its sha256 into the candidate.
+    "contracts/portfolio-strategy-underwriting-v1.json": ["panel"],
     "schemas/portfolio/strategy-return-sources.schema.json": [],
     # #567 stage 5: the effective epoch perimeter (a residual parent replaced by its
     # derived sleeves); the report, the panel and the HWM selection bind to it.

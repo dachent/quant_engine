@@ -419,3 +419,47 @@ def test_selected_point_proof_must_be_coherent(
         pass
     else:
         assert not expected
+
+
+@pytest.mark.parametrize("stamp", ["provider_generation", "derived_generation"])
+def test_a_statement_derived_financing_row_is_admitted_only_under_the_provider_generation(
+    point_stage: PointStage, tmp_path: Path, stamp: str
+) -> None:
+    """Zero-financing rows are derived from retained statements.  The materializer admits a
+    provider fact only under that provider's selected generation, so the derived id may
+    ride beside it (``observation_generation_id``) but never replace it."""
+
+    generation, authority, _ = point_stage
+    catalog = json.loads((generation / "provider-ledger.json").read_bytes())
+    nav = next(
+        row for row in catalog["nav_observations"] if row["provider_id"] == "schwab"
+    )
+    derived = "zero-financing-" + "a" * 24
+    catalog["financing_liability_observations"] = [
+        {
+            "account_id": nav["account_id"],
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "0"},
+            "as_of_date": nav["as_of_date"],
+            "classification": "ZERO_FINANCING_OBSERVED",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "generation_id": nav["generation_id"]
+            if stamp == "provider_generation"
+            else derived,
+            "mapping_reason": "ACCOUNT_LEVEL_OBSERVATION",
+            "mapping_status": "UNMAPPED",
+            "observation_generation_id": derived,
+            "provider_id": "schwab",
+            "record_id": "schwab:zero-financing:synthetic:1",
+            "source_record_id": "zero-financing:synthetic:1",
+            "strategy_id": None,
+        }
+    ]
+    forged = _forged_candidate(tmp_path, generation, authority, catalog)
+    if stamp == "provider_generation":
+        _verify(forged, authority)
+        return
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="materialized provider fact cutoff or generation differs",
+    ):
+        _verify(forged, authority)

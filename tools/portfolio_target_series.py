@@ -2044,9 +2044,9 @@ def _overlap_reconciliation(
     # sample standard deviation, like every other tracking error (#904 item 13)
     # periods a year from the overlap dates themselves: model-live provider paths
     # carry holiday zero rows (261-262 a year), not the exchange-calendar 252
-    from portfolio_attribution import _effective_periods_per_year
+    from portfolio_attribution import effective_periods_per_year
 
-    periods, _basis = _effective_periods_per_year(
+    periods, _basis = effective_periods_per_year(
         [date.fromisoformat(day) if isinstance(day, str) else day for day in common],
         252,
     )
@@ -2556,6 +2556,38 @@ def _history_contract(
     if not required_corrections <= set(corrections):
         raise TargetSeriesError("financial MVP history correction set is incomplete")
     return contract, strategies, sources, corrections
+
+
+# Longest calendar gap tolerated between model-live observations, and between the
+# last one and the cutoff: a long weekend plus a holiday, never a missing week.
+MODEL_LIVE_MAX_GAP_DAYS: Final = 4
+
+
+def _require_model_live_coverage(
+    strategy_id: str,
+    days: Sequence[date],
+    cutoff: date,
+    account_start: date | None,
+) -> None:
+    """The model-live layer replaces the account in the research series.
+
+    It must therefore reach the cutoff, leave no hole, and begin no later than the
+    account does (the account's own start is where the series used to change hands).
+    """
+
+    if (cutoff - days[-1]).days > MODEL_LIVE_MAX_GAP_DAYS:
+        raise TargetSeriesError(
+            f"model-live rows stop short of the cutoff: {strategy_id}"
+        )
+    if any(
+        (later - earlier).days > MODEL_LIVE_MAX_GAP_DAYS
+        for earlier, later in zip(days, days[1:], strict=False)
+    ):
+        raise TargetSeriesError(f"model-live rows have a hole: {strategy_id}")
+    if account_start is not None and days[0] > account_start:
+        raise TargetSeriesError(
+            f"model-live layer begins after the account: {strategy_id}"
+        )
 
 
 def _model_live_layers(
@@ -5735,6 +5767,12 @@ def build_layered_history_generation(
             raise TargetSeriesError(
                 f"model-live rows leave their window: {strategy_id}"
             )
+        _require_model_live_coverage(
+            strategy_id,
+            [date.fromisoformat(item["date"]) for item in candidates],
+            accepted_as_of,
+            first_live.get(strategy_id),
+        )
         model_live_rows[strategy_id] = [
             {
                 "series_id": item["series_id"],

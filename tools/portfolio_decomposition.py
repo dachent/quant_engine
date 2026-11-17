@@ -67,6 +67,7 @@ TARGET_HEADERS: Final = (
 )
 EVIDENCE_LAYERS: Final = {
     "ACCOUNT_LIVE",
+    "MODEL_LIVE",
     "PROVIDER_LIVE",
     "OFFICIAL_VEHICLE",
     "PREDECESSOR",
@@ -1061,10 +1062,14 @@ def _read_targets(
         backtest_bases = {
             row.return_basis for row in rows if row.evidence_layer == "BACKTEST"
         }
+        # The model's own live record is MODEL basis by definition; every other live
+        # layer is a realized path and is never MODEL.
+        model_live_only = live_layers == {"MODEL_LIVE"}
         if (
             len(return_types) != 1
             or len(live_bases) != 1
-            or "MODEL" in live_bases
+            or ("MODEL" in live_bases and not model_live_only)
+            or (model_live_only and live_bases != {"MODEL"})
             or not backtest_bases.issubset({*live_bases, "MODEL"})
         ):
             raise DecompositionError("one target series cannot mix return semantics")
@@ -1149,11 +1154,21 @@ RISK_FREE_DAILY_MAX = 0.005
 RISK_FREE_DAILY_MIN = -0.0005
 
 
+# Only the recent window is checked.  The 2007-2010 BIL price returns of the retained
+# style/base files carry tick noise and crisis-day moves beyond the bound (80 values in
+# the style file); those rows were accepted in the released history and are not what
+# this guard is for: an unposted distribution at the end of a capture.
+RISK_FREE_CHECK_WINDOW_DAYS = 1095
+
+
 def _check_risk_free(rows: Mapping[date, FactorRow]) -> None:
+    last_day = max(rows) if rows else None
     bad = sorted(
         (row.day, row.risk_free)
         for row in rows.values()
-        if not RISK_FREE_DAILY_MIN <= row.risk_free <= RISK_FREE_DAILY_MAX
+        if last_day is not None
+        and (last_day - row.day).days <= RISK_FREE_CHECK_WINDOW_DAYS
+        and not RISK_FREE_DAILY_MIN <= row.risk_free <= RISK_FREE_DAILY_MAX
     )
     if bad:
         raise DecompositionError(
@@ -2918,7 +2933,9 @@ def _dynamic_model_result(
         if live_basis == "GROSS":
             gross_alpha = annualized_observed
             gross_status = "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
-        elif live_basis is not None:
+        elif live_basis is not None and live_basis != "MODEL":
+            # an all-model series (backtest then the model's own live record) has no
+            # realized basis to attribute an observed alpha to
             net_alpha = annualized_observed
             net_status = "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
     elif observed_basis == "GROSS":
@@ -3975,7 +3992,9 @@ def _model_result(
         if live_basis == "GROSS":
             gross_alpha = annualized_observed
             gross_status = "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
-        elif live_basis is not None:
+        elif live_basis is not None and live_basis != "MODEL":
+            # an all-model series (backtest then the model's own live record) has no
+            # realized basis to attribute an observed alpha to
             net_alpha = annualized_observed
             net_status = "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
     elif observed_basis == "GROSS":
@@ -4316,7 +4335,9 @@ def _account_basis_coverage(
     if window_end is not None:
         limit = _day(window_end, "account-basis window end")
         rows = [row for row in rows if row.day <= limit]
-    live = [row for row in rows if row.evidence_layer != "BACKTEST"]
+    # the lane's own account observations; backtest and model-live rows are its
+    # research prehistory
+    live = [row for row in rows if row.evidence_layer == "ACCOUNT_LIVE"]
     figures: dict[str, str | None] = {
         "target_cumulative_return": None,
         "target_current_drawdown": None,
