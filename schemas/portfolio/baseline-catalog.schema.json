@@ -985,7 +985,7 @@
         "admission_effective_end": {"type": ["string", "null"], "format": "date"},
         "admission_effective_start": {"type": ["string", "null"], "format": "date"},
         "authority": {"type": "string", "minLength": 1},
-        "boundary_basis": {"enum": ["OBSERVED_RECORDS_ONLY", "EFFECTIVE_DATED_ADMISSION_NOT_COMPLETENESS", "NO_ACCEPTED_SOURCE"]},
+        "boundary_basis": {"enum": ["OBSERVED_RECORDS_ONLY", "EFFECTIVE_DATED_ADMISSION_NOT_COMPLETENESS", "NO_ACCEPTED_SOURCE", "LEDGER_CLOSURE"]},
         "cadence": {"enum": ["DAILY", "EVENT_STREAM", "SNAPSHOT"]},
         "declared_end": {"type": ["string", "null"], "format": "date"},
         "declared_start": {"type": ["string", "null"], "format": "date"},

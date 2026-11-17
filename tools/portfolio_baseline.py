@@ -5290,6 +5290,21 @@ def _fact_coverage(
     return claims, exceptions
 
 
+def _ledger_completeness(
+    provider_catalog: Mapping[str, Any] | None,
+) -> dict[tuple[str, str], Mapping[str, Any]]:
+    """The ledger's per (account, fact) closure verdicts, when it evaluated declarations."""
+
+    rows = (provider_catalog or {}).get("event_completeness")
+    if not isinstance(rows, list):
+        return {}
+    return {
+        (str(row["account_id"]), str(row["fact_type"])): row
+        for row in rows
+        if isinstance(row, Mapping)
+    }
+
+
 def _unattributed_provider_records(
     provider_catalog: Mapping[str, Any] | None,
 ) -> dict[tuple[str, str], int]:
@@ -5321,6 +5336,7 @@ def _coverage_evidence(
     flows: Sequence[Mapping[str, Any]],
     as_of_date: date,
     unattributed: Mapping[tuple[str, str], int] | None = None,
+    completeness: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Build value-free account/fact evidence without inventing completeness.
 
@@ -5484,6 +5500,27 @@ def _coverage_evidence(
                 )
                 authority = "ACCOUNT_REGISTRY_NO_PROVIDER_SOURCE"
                 boundary_basis = "NO_ACCEPTED_SOURCE"
+            declared_start: str | None = None
+            declared_end: str | None = None
+            proof = (completeness or {}).get((account_id, fact_type))
+            if proof is not None and proof.get("status") == "DECLARED_COMPLETE":
+                # the ledger evaluated the declaration's closure on its own rows: every check passed
+                status = "DECLARED_COMPLETE"
+                disposition = "DECLARED_COMPLETE_BY_LEDGER_CLOSURE"
+                authority = "PROVIDER_LEDGER_CLOSURE"
+                boundary_basis = "LEDGER_CLOSURE"
+                declared_start = str(proof["declared_start"])
+                declared_end = str(proof["declared_end"])
+                missing_reason = (
+                    f"completeness proved by ledger closure {proof['closure']}"
+                )
+            elif proof is not None:
+                failed = ", ".join(
+                    f"{check['check']} ({check['failures']})"
+                    for check in proof.get("checks", [])
+                    if check.get("status") != "PASS"
+                )
+                missing_reason += f"; completeness declaration not proved by ledger closure; failed: {failed}"
             if excluded:
                 missing_reason += (
                     f"; provider ledger {fact_type} for this account: {excluded} "
@@ -5501,8 +5538,8 @@ def _coverage_evidence(
                     "authority": authority,
                     "boundary_basis": boundary_basis,
                     "cadence": cadence,
-                    "declared_end": None,
-                    "declared_start": None,
+                    "declared_end": declared_end,
+                    "declared_start": declared_start,
                     "disposition": disposition,
                     "fact_type": fact_type,
                     "missing_interval_end": None,
@@ -6795,6 +6832,7 @@ def build_catalog(
             flows,
             as_of,
             unattributed=_unattributed_provider_records(ledger_catalog),
+            completeness=_ledger_completeness(ledger_catalog),
         )
     )
     fact_coverage, exceptions = _fact_coverage(

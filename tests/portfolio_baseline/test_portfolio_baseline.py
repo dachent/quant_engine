@@ -5981,7 +5981,11 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
     assert members["account-jh"]["as_of_date"] == "2026-06-30"
 
 
-def _matrix_row(unattributed: Any, accepted: list[dict[str, Any]]) -> dict[str, Any]:
+def _matrix_row(
+    unattributed: Any,
+    accepted: list[dict[str, Any]],
+    completeness: Any = None,
+) -> dict[str, Any]:
     account = {
         "account_id": "account-reserve",
         "base_currency": "USD",
@@ -6006,6 +6010,7 @@ def _matrix_row(unattributed: Any, accepted: list[dict[str, Any]]) -> dict[str, 
         flows=[],
         as_of_date=date(2026, 7, 30),
         **({} if unattributed is None else {"unattributed": unattributed}),
+        **({} if completeness is None else {"completeness": completeness}),
     )
     return next(row for row in matrix if row["fact_type"] == "transactions")
 
@@ -6074,3 +6079,92 @@ def test_unattributed_provider_records_counts_only_records_that_are_not_mapped()
     }
     assert baseline._unattributed_provider_records(None) == {}
     assert baseline._unattributed_provider_records({"transactions": "x"}) == {}
+
+
+def _closure_row(
+    status: str, failed: list[tuple[str, int]] | None = None
+) -> dict[str, Any]:
+    checks = [
+        {
+            "check": "STATEMENT_TOTALS_EQUAL_LEDGER_FLOWS",
+            "status": "PASS",
+            "failures": 0,
+        }
+    ]
+    checks += [
+        {"check": name, "status": "FAIL", "failures": n} for name, n in failed or []
+    ]
+    return {
+        "account_id": "account-reserve",
+        "fact_type": "transactions",
+        "status": status,
+        "closure": "IBKR_CHANGE_IN_NAV_FLOW_TIE_OUT",
+        "declared_start": "2026-01-02",
+        "declared_end": "2026-07-30",
+        "checks": checks,
+    }
+
+
+def test_a_ledger_closure_proof_declares_the_row_complete() -> None:
+    row = _matrix_row(
+        None,
+        [],
+        {("account-reserve", "transactions"): _closure_row("DECLARED_COMPLETE")},
+    )
+    assert row["status"] == "DECLARED_COMPLETE"
+    assert (row["declared_start"], row["declared_end"]) == ("2026-01-02", "2026-07-30")
+    assert row["boundary_basis"] == "LEDGER_CLOSURE"
+    assert row["authority"] == "PROVIDER_LEDGER_CLOSURE"
+    assert row["missing_intervals"] == [] and row["unavailable_amount_count"] == 0
+    assert baseline._declares_complete(row, date(2026, 7, 30))
+    # the proof is for one account and fact only
+    other = _matrix_row(
+        None, [], {("account-other", "transactions"): _closure_row("DECLARED_COMPLETE")}
+    )
+    assert other["status"] == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+
+
+def test_a_failed_closure_never_declares_and_names_what_failed() -> None:
+    plain = _matrix_row(None, [])
+    failed = _matrix_row(
+        None,
+        [],
+        {
+            ("account-reserve", "transactions"): _closure_row(
+                "CLOSURE_FAILED", [("NAV_ON_EVERY_MARKET_DAY", 39)]
+            )
+        },
+    )
+    assert failed["status"] == plain["status"]
+    assert failed["declared_start"] is None and failed["declared_end"] is None
+    assert failed["missing_interval_reason"].endswith(
+        "completeness declaration not proved by ledger closure; failed: NAV_ON_EVERY_MARKET_DAY (39)"
+    )
+    assert not baseline._declares_complete(failed, date(2026, 7, 30))
+
+
+def test_a_closure_proof_does_not_hide_unavailable_amounts() -> None:
+    row = _matrix_row(
+        None,
+        [
+            {
+                "account_id": "account-reserve",
+                "amount": {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+                "event_date": "2026-02-01",
+                "record_id": "t-1",
+            }
+        ],
+        {("account-reserve", "transactions"): _closure_row("DECLARED_COMPLETE")},
+    )
+    # the consumer's own rule still refuses a row with an unavailable amount
+    assert row["unavailable_amount_count"] == 1
+    assert not baseline._declares_complete(row, date(2026, 7, 30))
+
+
+def test_ledger_completeness_reads_only_the_ledgers_event_completeness_rows() -> None:
+    row = _closure_row("DECLARED_COMPLETE")
+    assert baseline._ledger_completeness({"event_completeness": [row]}) == {
+        ("account-reserve", "transactions"): row
+    }
+    assert baseline._ledger_completeness({}) == {}
+    assert baseline._ledger_completeness(None) == {}
