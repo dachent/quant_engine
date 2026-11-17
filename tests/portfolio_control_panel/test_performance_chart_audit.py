@@ -711,3 +711,31 @@ def test_gridline_labels_print_every_tick_exactly(tmp_path: Path) -> None:
     assert _eval(tmp_path, "perfTickDecimals([0.8, 1, 1.2])") == 2
     assert _eval(tmp_path, "perfTickDecimals([10, 12.5, 15, 17.5])") == 1
     assert _eval(tmp_path, "perfTickDecimals([10, 20, 30])") == 0
+
+
+def test_an_unknown_origin_label_is_named_and_not_drawn_as_live(
+    tmp_path: Path,
+) -> None:
+    payload = _payload(anchor=100)
+    for mode in {
+        id(m): m for m in payload["performance_tab"]["modes"].values()
+    }.values():
+        for line in mode["lines"]:
+            line["origin"] = [
+                [start, end, "WEIRD_ORIGIN" if flag == "ACCOUNT_LIVE" else flag]
+                for start, end, flag in line.get("origin", [])
+            ]
+    dom = _run(tmp_path, payload, ['perfZoom = "Max"'])
+    note = _text(dom, "#perf-returns-note")
+    assert (
+        "Unrecognised origin label WEIRD_ORIGIN: drawn dashed, not as live evidence."
+        in note
+    )
+    assert "live evidence starts" not in dom["#perf-returns-chart"]["innerHTML"]
+
+
+def test_a_flat_week_prints_zero_not_negative_zero(tmp_path: Path) -> None:
+    assert _eval(tmp_path, "perfPercent(0.99999)") == "0.0%"
+    assert _eval(tmp_path, "perfPercent(1.00001)") == "0.0%"
+    assert _eval(tmp_path, "perfPercent(1.05)") == "+5.0%"
+    assert _eval(tmp_path, "perfPercent(0.95)") == "-5.0%"

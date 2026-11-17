@@ -3221,7 +3221,7 @@
     return 4;
   }
   const perfTickLabel = (tick, digits = null) => (tick >= 10000 ? perfCompact.format(tick) : digits != null ? tick.toFixed(digits) : tick < 10 ? tick.toFixed(2) : integer.format(tick));
-  const perfPercent = (value) => { const percent = (value - 1) * 100; const text = Math.abs(percent) >= 100000 ? perfCompact.format(percent) : percent.toFixed(1); return `${percent > 0 ? "+" : ""}${text}%`; };
+  const perfPercent = (value) => { const percent = (value - 1) * 100; const text = Math.abs(percent) >= 100000 ? perfCompact.format(percent) : percent.toFixed(1); return Number(text) === 0 ? "0.0%" : `${percent > 0 ? "+" : ""}${text}%`; };
   const perfIsLive = (origin) => origin == null || origin === "ACCOUNT_LIVE" || origin === "LIVE";
   // First live week of a line that has earlier non-live weeks (backtest or model); null when it is live throughout.
   function perfLiveStart(line, startByEnd) {
@@ -3486,6 +3486,8 @@
     const styleNote = presentOrigins.length
       ? presentOrigins.map((origin) => `${perfOriginStyle(origin).name} = ${humanStatus(origin).toLowerCase()}`).join(", ")
       : "";
+    const unknownOrigins = [...new Set(rebased.flatMap((line) => line.points.map((point) => point.origin)).filter((origin) => origin != null && !Object.hasOwn(PERF_ORIGIN_STYLES, origin)))];
+    const unknownNote = unknownOrigins.length ? ` Unrecognised origin label${unknownOrigins.length === 1 ? "" : "s"} ${safe(unknownOrigins.join(", "))}: drawn dashed, not as live evidence.` : "";
     const anchorSetBy = built.anchorDate ? `, set by ${safe(built.anchorName)}` : "";
     const rebaseNote = own
       ? `Own-start view, log axis: each line is rebased to 1.00 at the start of its own first week${built.unionStart ? ` (the grid begins ${safe(formatDate(built.unionStart))})` : ""}, so lines cover different windows (each chip names its own); this is not a like-for-like comparison.`
@@ -3495,7 +3497,7 @@
     const anchorNote = built.anchorDate ? ` Group anchor <strong>${safe(formatDate(built.anchorDate))}</strong>: the first week every strategy line has data${anchorSetBy}.` : "";
     const benchmarkNote = " SPY and SPXL are the benchmark's own weekly total return, rebased the same way (the dollar chart below puts the same cash flows into the benchmark instead).";
     const basesNote = " The equal-weight line here is one portfolio basis; the governed index and the money-weighted return are different bases and appear in the value readout below.";
-    $("#perf-returns-note").innerHTML = `${rebaseNote}${anchorNote} Total return, weekly points, as published by the producer; a line draws nothing before its own first week. A dot marks where a line's live evidence begins.${styleNote ? ` Line style: solid = live account evidence, ${safe(styleNote)}.` : ""}${benchmarkNote}${basesNote}${built.gaps.length ? ` Weeks with no data inside a line (not zero): ${safe(built.gaps.join(", "))}.` : ""}${built.partial ? ` The last week is partial (data through ${safe(formatDate(built.dataThrough))}).` : ""}${built.definitions.length ? `<details class="perf-definitions"><summary>Line definitions and basis notes</summary>${safe(built.definitions.join(" "))}</details>` : ""}`;
+    $("#perf-returns-note").innerHTML = `${rebaseNote}${anchorNote} Total return, weekly points, as published by the producer; a line draws nothing before its own first week. A dot marks where a line's live evidence begins.${styleNote ? ` Line style: solid = live account evidence, ${safe(styleNote)}.` : ""}${benchmarkNote}${basesNote}${unknownNote}${built.gaps.length ? ` Weeks with no data inside a line (not zero): ${safe(built.gaps.join(", "))}.` : ""}${built.partial ? ` The last week is partial (data through ${safe(formatDate(built.dataThrough))}).` : ""}${built.definitions.length ? `<details class="perf-definitions"><summary>Line definitions and basis notes</summary>${safe(built.definitions.join(" "))}</details>` : ""}`;
     // A zoom longer than the common history says so: explicit state on the button and in the window line, never silent.
     const windowNote = $("#perf-window-note");
     if (windowNote) {
