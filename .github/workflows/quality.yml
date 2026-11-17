@@ -235,6 +235,8 @@ jobs:
           tools/p123_cdp_recorder.py
           tools/p123_book_identity_check.py
           tools/p123_har_admit.py
+          tools/base_proxy_factors.py
+          tools/style_capture_assemble.py
           tools/yahoo_fetch_driver.py
           tools/tt_source_manifest_builder.py
           tools/tt_order_planner.py
