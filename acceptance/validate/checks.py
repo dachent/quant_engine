@@ -37,6 +37,7 @@ from typing import Any, cast
 from .. import owner_view as owner_view  # re-exported: the runner uses it
 from . import (
     facts_bindings,
+    hwm_acceptance,
     layers,
     payload_rule,
     shell,
@@ -8812,6 +8813,43 @@ def _incomplete_series_count(
     return gaps + max(0, declared - len(unavailable))
 
 
+def _hwm_proof(ctx: Context) -> Mapping[str, Any] | None:
+    proof = ctx.panel.get("hwm_governed_proof") or ctx.report.get("hwm_governed_proof")
+    return proof if isinstance(proof, Mapping) else None
+
+
+def _hwm_claims_acceptance(ctx: Context) -> bool:
+    proof = _hwm_proof(ctx)
+    return (
+        proof is not None
+        and proof.get("financial_acceptance") == hwm_acceptance.OWNER_ACCEPTED
+    )
+
+
+def _hwm_acceptance_gaps(ctx: Context) -> list[str]:
+    """E2 clears only when the owner's record, the gap bounds and the proof all agree
+    (acceptance/validate/hwm_acceptance.py); a non-empty list is why it does not."""
+
+    root = (
+        ctx.repo_root
+        if ctx.repo_root is not None
+        else Path(__file__).resolve().parents[2]
+    )
+
+    def read(name: str) -> Any:
+        try:
+            return json.loads((root / "contracts" / name).read_bytes())
+        except (OSError, ValueError):
+            return None
+
+    return hwm_acceptance.verify_acceptance(
+        _hwm_proof(ctx),
+        node(ctx.panel, "advisory", "hwm_candidate", "kpi", "missing_daily_points"),
+        read("portfolio-hwm-owner-acceptance-v1.json"),
+        read("portfolio-hwm-gap-bounds-v1.json"),
+    )
+
+
 def check_completeness(ctx: Context) -> Iterator[Finding]:
     """E1-E8: required outputs that are unavailable, as NOT_READY register entries."""
 
@@ -8834,7 +8872,10 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
             "current holdings lack tickers",
         )
     status = node(ctx.report, "hwm_summary", "hwm_numerical_status")
-    if status is not None and status != "AVAILABLE":
+    acceptance_gaps = (
+        _hwm_acceptance_gaps(ctx) if status not in (None, "AVAILABLE") else []
+    )
+    if status is not None and status != "AVAILABLE" and acceptance_gaps:
         yield _finding(
             "completeness.required_outputs",
             NOT_READY,
@@ -8842,6 +8883,11 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
             {
                 "hwm_numerical_status": status,
                 "reason": node(ctx.report, "hwm_summary", "hwm_numerical_reason"),
+                **(
+                    {"owner_acceptance_not_covering": acceptance_gaps}
+                    if _hwm_claims_acceptance(ctx)
+                    else {}
+                ),
             },
             "AVAILABLE",
             REPORT,
