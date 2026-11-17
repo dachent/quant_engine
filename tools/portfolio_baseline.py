@@ -9,7 +9,7 @@ walks a directory or calls a provider.
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
 import csv
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
@@ -5337,6 +5337,18 @@ def _unattributed_provider_records(
     return dict(counts)
 
 
+def _canonical_amount(amount: Any) -> str:
+    """An AVAILABLE amount as canonical decimal text, so 1.0, 1.00 and 1E0 compare equal."""
+
+    if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
+        return "None"
+    try:
+        value = Decimal(str(amount.get("value")))
+    except InvalidOperation:
+        return "None"
+    return format(value.normalize(), "f") if value != 0 else "0"
+
+
 def _coverage_evidence(
     accounts: Sequence[Mapping[str, Any]],
     assignments: Sequence[Mapping[str, Any]],
@@ -5515,7 +5527,57 @@ def _coverage_evidence(
             declared_start: str | None = None
             declared_end: str | None = None
             proof = (completeness or {}).get((account_id, fact_type))
+            proof_gap: str | None = None
             if proof is not None and proof.get("status") == "DECLARED_COMPLETE":
+                # the closure proved the ledger's rows: the accepted records of this interval must
+                # be exactly those rows, and none may have been excluded
+                lo, hi = str(proof["declared_start"]), str(proof["declared_end"])
+                # a multiset of (id, date, amount): a duplicated id, a changed amount or a moved
+                # date is a difference; a record without a date cannot be placed in the interval
+                proven_rows = proof.get("proven_records")
+
+                def keyed(item: Mapping[str, Any]) -> tuple[str, ...]:
+                    if proven_rows is None:
+                        return (str(item.get("record_id")),)
+                    amount = item.get(amount_field)
+                    return (
+                        str(item.get("record_id")),
+                        str(item.get(date_field)),
+                        _canonical_amount(amount),
+                    )
+
+                accepted_keys: Counter[tuple[str, ...]] = Counter(
+                    keyed(item)
+                    for item in accepted
+                    if item.get(date_field) and lo <= str(item[date_field]) <= hi
+                )
+                undated = sum(1 for item in accepted if not item.get(date_field))
+                if proven_rows is None:
+                    proven_keys: Counter[tuple[str, ...]] = Counter(
+                        (str(x),) for x in proof.get("proven_record_ids", [])
+                    )
+                else:
+                    proven_keys = Counter(
+                        (
+                            str(row["record_id"]),
+                            str(row["event_date"]),
+                            str(row["amount"]),
+                        )
+                        for row in proven_rows
+                    )
+                if excluded or undated or accepted_keys != proven_keys:
+                    proof_gap = (
+                        f"; ledger closure {proof['closure']} proved the provider event stream "
+                        f"but the accepted records differ: "
+                        f"{sum((proven_keys - accepted_keys).values())} proven records are not "
+                        f"accepted, {sum((accepted_keys - proven_keys).values())} accepted "
+                        f"records are not proven, {undated} accepted records carry no date"
+                    )
+            if (
+                proof is not None
+                and proof.get("status") == "DECLARED_COMPLETE"
+                and proof_gap is None
+            ):
                 # the ledger evaluated the declaration's closure on its own rows: every check passed
                 status = "DECLARED_COMPLETE"
                 disposition = "DECLARED_COMPLETE_BY_LEDGER_CLOSURE"
@@ -5526,12 +5588,24 @@ def _coverage_evidence(
                 missing_reason = (
                     f"completeness proved by ledger closure {proof['closure']}"
                 )
+                before = sum(
+                    1
+                    for item in accepted
+                    if item.get(date_field) and str(item[date_field]) < lo
+                )
+                if before:
+                    missing_reason += (
+                        f"; {before} accepted records dated before the declared start "
+                        f"{declared_start} lie outside the declaration"
+                    )
+            elif proof_gap is not None:
+                missing_reason += proof_gap
             elif proof is not None and proof.get("status") in _TYPED_OUTCOME_STATUS:
                 # governed, evidence-cited outcome that proves nothing about completeness
                 status, disposition = _TYPED_OUTCOME_STATUS[str(proof["status"])]
                 authority = "GOVERNED_DECLARATION"
                 missing_reason = (
-                    f"governed declaration {proof['status']}: {proof['ruling']}"
+                    f"governed declaration {proof['status']}: {proof['citation']}"
                 )
             elif proof is not None:
                 failed = ", ".join(

@@ -25,7 +25,7 @@ def _entry(**over: Any) -> dict[str, Any]:
         "declared_end": END.isoformat(),
         "closure": ec.CLOSURE_IBKR_FLOWS,
         "evidence_refs": [{"path": "C:/evidence/flex.xml", "sha256": SHA}],
-        "ruling": "owner ruling 2026-11-17",
+        "citation": "owner ruling 2026-11-17",
     }
     entry.update(over)
     return entry
@@ -85,6 +85,7 @@ def _run(
     nav_values: dict[str, dict[date, Decimal | None]] | None = None,
     positions: list[dict[str, Any]] | None = None,
     transactions: list[dict[str, Any]] | None = None,
+    closed_dates: dict[str, date] | None = None,
 ) -> list[dict[str, Any]]:
     if nav_values is None:
         days = nav_days if nav_days is not None else {A: set(_days()), B: set(_days())}
@@ -101,6 +102,7 @@ def _run(
         transactions=transactions or [],
         account_provider={A: "ibkr", B: "ibkr", "account-schwab": "schwab"},
         as_of_date=as_of,
+        closed_dates=closed_dates,
     )
 
 
@@ -214,7 +216,7 @@ def test_loader_is_strict() -> None:
             "invalid field set",
         ),
         (_doc({**good, "extra": 1}), "invalid field set"),
-        (_doc({k: v for k, v in good.items() if k != "ruling"}), "invalid field set"),
+        (_doc({k: v for k, v in good.items() if k != "citation"}), "invalid field set"),
         (_doc(good, copy.deepcopy(good)), "repeats"),
         (_doc({**good, "closure": "OTHER"}), "closure does not fit"),
         (_doc({**good, "fact_type": "transactions"}), "closure does not fit"),
@@ -225,7 +227,7 @@ def test_loader_is_strict() -> None:
             _doc({**good, "evidence_refs": [{"path": "x", "sha256": "zz"}]}),
             "evidence refs",
         ),
-        (_doc({**good, "ruling": "  "}), "ruling"),
+        (_doc({**good, "citation": "  "}), "citation"),
     ]
     for raw, message in bad:
         with pytest.raises(ec.EventCompletenessError, match=message):
@@ -251,6 +253,7 @@ def _closed_world(
     after_flow: bool = False,
     after_position: date | None = None,
     after_tx: date | None = None,
+    closed: date | None = date(2026, 2, 10),
 ) -> dict[str, Any]:
     nav: dict[date, Decimal | None] = {}
     for day in _market(LONG_START, last):
@@ -277,6 +280,7 @@ def _closed_world(
     return {
         "nav": nav,
         "cin": cin,
+        "closed": closed,
         "flows": flows,
         "positions": (
             [{"account_id": A, "as_of_date": after_position.isoformat()}]
@@ -302,6 +306,7 @@ def _closed_run(world: dict[str, Any]) -> dict[str, Any]:
         positions=world["positions"],
         transactions=world["transactions"],
         as_of=LONG_END,
+        closed_dates={A: world["closed"]} if world.get("closed") else None,
     )[0]
 
 
@@ -363,6 +368,9 @@ def test_a_gap_in_the_middle_is_not_a_closure_even_when_the_nav_is_zero_either_s
         "position_after_settling",
         "transaction_after_settling",
         "nav_just_above_dust",
+        "no_broker_closure_fact",
+        "closure_before_settling",
+        "closure_after_last_observation",
     ],
 )
 def test_the_closed_rule_refuses_each_way_the_closure_could_be_vacuous(
@@ -381,6 +389,13 @@ def test_the_closed_rule_refuses_each_way_the_closure_could_be_vacuous(
         kwargs = {"after_tx": date(2026, 2, 9)}
     elif variant == "nav_just_above_dust":
         kwargs = {"dust": "0.02"}
+    elif variant == "no_broker_closure_fact":
+        # data simply stops: a missing deposit would be invisible, so absence is not closure
+        kwargs = {"closed": None}
+    elif variant == "closure_before_settling":
+        kwargs = {"closed": date(2026, 1, 20)}
+    elif variant == "closure_after_last_observation":
+        kwargs = {"closed": date(2026, 3, 20)}
     row = _closed_run(_closed_world(**kwargs))
     assert row["status"] == ec.CLOSURE_FAILED
     assert not any(c["check"] == "CLOSED_ACCOUNT_DERIVED" for c in row["checks"])
@@ -405,17 +420,270 @@ def test_a_typed_outcome_is_recorded_but_never_complete(outcome: str) -> None:
         ("account-statements", "positions", outcome)
     ]
     assert rows[0]["status"] != ec.DECLARED_COMPLETE
-    assert rows[0]["checks"] == [] and rows[0]["ruling"]
+    assert rows[0]["checks"] == [] and rows[0]["citation"]
     assert rows[0]["evidence_refs"] == [{"path": "C:/evidence/flex.xml", "sha256": SHA}]
 
 
-def test_a_typed_outcome_still_needs_evidence_a_ruling_and_a_known_fact() -> None:
+def test_a_typed_outcome_still_needs_evidence_a_citation_and_a_known_fact() -> None:
     good = _entry(fact_type="positions", closure="EXCLUDED_BY_RULING")
     assert ec.load_declaration(_doc(good))[0].closure == "EXCLUDED_BY_RULING"
     for bad, message in [
         ({**good, "evidence_refs": []}, "evidence refs"),
-        ({**good, "ruling": ""}, "ruling"),
+        ({**good, "citation": ""}, "citation"),
         ({**good, "fact_type": "dividends"}, "fact type is unknown"),
     ]:
         with pytest.raises(ec.EventCompletenessError, match=message):
             ec.load_declaration(_doc(bad))
+
+
+# --- Schwab empty position set -------------------------------------------------------------
+
+
+SCH = "account-schwab"
+S_START = date(2026, 1, 5)
+S_FREEZE = date(2026, 2, 2)
+S_END = date(2026, 3, 31)
+
+
+def _schwab_world(**over: Any) -> dict[str, Any]:
+    nav: dict[date, Decimal | None] = {}
+    for day in _market(S_START, S_END):
+        nav[day] = Decimal("3.81") if day >= S_FREEZE else Decimal(1000) + len(nav)
+    world: dict[str, Any] = {
+        "nav": nav,
+        "transactions": [
+            {
+                "account_id": SCH,
+                "event_date": S_FREEZE.isoformat(),
+                "security_id": "sec-1",
+            },
+            {"account_id": SCH, "event_date": "2026-01-20", "security_id": "sec-1"},
+            {
+                "account_id": SCH,
+                "event_date": "2026-03-10",
+                "security_id": None,
+            },  # cash only
+        ],
+        "positions": [],
+        "empty_accounts": [SCH],
+        "start": S_FREEZE,
+        "end": S_END,
+    }
+    world.update(over)
+    return world
+
+
+def _schwab_run(world: dict[str, Any]) -> dict[str, Any]:
+    entry = _entry(
+        account_id=SCH,
+        fact_type="positions",
+        closure=ec.CLOSURE_SCHWAB_EMPTY,
+        declared_start=world["start"].isoformat(),
+        declared_end=world["end"].isoformat(),
+    )
+    return ec.evaluate(
+        ec.load_declaration(_doc(entry)),
+        flows=[],
+        change_in_nav_by_provider={},
+        nav_values_by_account={SCH: world["nav"]},
+        account_provider={SCH: "schwab", A: "ibkr"},
+        as_of_date=S_END,
+        positions=world["positions"],
+        transactions=world["transactions"],
+        empty_position_accounts=world["empty_accounts"],
+    )[0]
+
+
+def test_a_frozen_nav_with_no_later_security_activity_proves_an_empty_position_set() -> (
+    None
+):
+    row = _schwab_run(_schwab_world())
+    assert row["status"] == ec.DECLARED_COMPLETE and _failed(row) == []
+    frozen = next(c for c in row["checks"] if c["check"] == "NAV_FROZEN_UNBROKEN")
+    assert frozen["frozen_since"] == "2026-02-02"
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected"),
+    [
+        ("security_activity_after_freeze", "NO_SECURITY_ACTIVITY_AFTER_NAV_FROZE"),
+        ("nav_moves_inside_the_run", "NAV_FROZEN_UNBROKEN"),
+        ("run_too_short", "NAV_FROZEN_UNBROKEN"),
+        ("missing_day_in_run", "NAV_FROZEN_UNBROKEN"),
+        (
+            "position_row_since_last_activity",
+            "NO_POSITION_ROWS_SINCE_LAST_SECURITY_ACTIVITY",
+        ),
+        ("starts_before_freeze", "INTERVAL_STARTS_AT_OR_AFTER_FREEZE"),
+        ("nav_stops_before_declared_end", "NAV_OBSERVED_TO_DECLARED_END"),
+        ("unavailable_nav", "NAV_FROZEN_UNBROKEN"),
+        (
+            "catalog_does_not_list_the_account",
+            "POSITION_SET_POSITIVELY_EMPTY_IN_PROVIDER_CATALOG",
+        ),
+        (
+            "catalog_lists_another_account",
+            "POSITION_SET_POSITIVELY_EMPTY_IN_PROVIDER_CATALOG",
+        ),
+        (
+            "nothing_but_the_frozen_nav",
+            "POSITION_SET_POSITIVELY_EMPTY_IN_PROVIDER_CATALOG",
+        ),
+    ],
+)
+def test_each_way_an_empty_position_set_could_pass_vacuously_is_refused(
+    variant: str, expected: str
+) -> None:
+    world = _schwab_world()
+    if variant == "security_activity_after_freeze":
+        world["transactions"].append(
+            {"account_id": SCH, "event_date": "2026-03-02", "security_id": "sec-2"}
+        )
+    elif variant == "nav_moves_inside_the_run":
+        world["nav"][date(2026, 3, 9)] = Decimal("3.82")
+    elif variant == "run_too_short":
+        world = _schwab_world()
+        world["nav"] = {
+            day: (Decimal("3.81") if day >= date(2026, 3, 20) else Decimal(1000) + i)
+            for i, day in enumerate(_market(S_START, S_END))
+        }
+        world["start"] = date(2026, 3, 20)
+        world["transactions"] = [
+            {"account_id": SCH, "event_date": "2026-03-20", "security_id": "sec-1"}
+        ]
+    elif variant == "missing_day_in_run":
+        world["nav"].pop(date(2026, 2, 18))
+    elif variant == "position_row_since_last_activity":
+        world["positions"] = [{"account_id": SCH, "as_of_date": "2026-02-02"}]
+    elif variant == "starts_before_freeze":
+        world["start"] = date(2026, 1, 20)
+    elif variant == "nav_stops_before_declared_end":
+        world["nav"] = {d: v for d, v in world["nav"].items() if d <= date(2026, 3, 20)}
+    elif variant == "unavailable_nav":
+        world["nav"][date(2026, 3, 9)] = None
+    elif variant == "catalog_does_not_list_the_account":
+        world["empty_accounts"] = []
+    elif variant == "catalog_lists_another_account":
+        world["empty_accounts"] = ["account-other"]
+    elif variant == "nothing_but_the_frozen_nav":
+        # transactions and positions emptied: absence alone is not proof
+        world["transactions"] = []
+        world["positions"] = []
+        world["empty_accounts"] = []
+    row = _schwab_run(world)
+    assert row["status"] == ec.CLOSURE_FAILED
+    assert expected in _failed(row)
+
+
+def test_the_schwab_closure_only_covers_a_schwab_account() -> None:
+    entry = _entry(
+        fact_type="positions",
+        closure=ec.CLOSURE_SCHWAB_EMPTY,
+        declared_start=S_FREEZE.isoformat(),
+        declared_end=S_END.isoformat(),
+    )
+    row = ec.evaluate(
+        ec.load_declaration(_doc(entry)),
+        flows=[],
+        change_in_nav_by_provider={},
+        nav_values_by_account={A: {}},
+        account_provider={A: "ibkr"},
+        as_of_date=S_END,
+    )[0]
+    assert row["status"] == ec.CLOSURE_FAILED
+    assert _failed(row) == ["ACCOUNT_BELONGS_TO_CLOSURE_PROVIDER"]
+
+
+def test_a_closure_row_names_the_records_it_proved() -> None:
+    day = _days()[1]
+    flows = [_flow(A, day, "1000"), _flow(B, day, "7")]
+    rows = _run([_entry()], flows, _cin(A, {day: "1000"}))
+    assert rows[0]["status"] == ec.DECLARED_COMPLETE
+    assert rows[0]["proven_record_ids"] == [f"{A}:{day}:1000:DEPOSIT_OR_WITHDRAWAL"]
+    # only the account's own flows inside the interval are named
+    out = _run([_entry()], [_flow(A, date(2025, 12, 1), "5")], _cin(A))
+    assert out[0]["proven_record_ids"] == []
+
+
+def test_a_nonzero_internal_cash_transfer_component_must_tie_to_the_ledger_flows() -> (
+    None
+):
+    day = _days()[2]
+    cin = _cin(A)
+    for row in cin:
+        if row["accounting_date"] == day.isoformat():
+            row["components"].append(
+                {"source_component_key": "internalCashTransfers", "value": "40"}
+            )
+    broken = _run([_entry()], [], cin)[0]
+    assert "STATEMENT_TOTALS_EQUAL_LEDGER_FLOWS" in _failed(broken)
+    flows = [
+        _flow(A, day, "40", "TRANSFER:INTERNAL:IN"),
+        _flow(B, day, "-40", "TRANSFER:INTERNAL:OUT"),
+    ]
+    assert _run([_entry()], flows, cin)[0]["status"] == ec.DECLARED_COMPLETE
+
+
+# --- flows before the declared start --------------------------------------------------------
+
+
+def _later_declaration(**over: Any) -> dict[str, Any]:
+    return _entry(declared_start=_days()[2].isoformat(), **over)
+
+
+def test_a_flow_before_the_declared_start_refuses_when_statements_covered_that_time() -> (
+    None
+):
+    # the account has statement rows for every day (including before the declared start):
+    # a flow on the first day sits in covered history outside the claim: refused, named
+    early = _days()[0]
+    flows = [_flow(A, early, "300")]
+    row = _run([_later_declaration()], flows, _cin(A, {early: "300"}))[0]
+    assert row["status"] == ec.CLOSURE_FAILED
+    check = next(
+        c
+        for c in row["checks"]
+        if c["check"] == "NO_FLOWS_BEFORE_DECLARED_START_WITH_STATEMENT_COVERAGE"
+    )
+    assert check["status"] == "FAIL" and check["flows_before_start"] == 1
+    assert check["record_ids"] == [flows[0]["record_id"]]
+    # declaring from the first day instead proves the same flow and completes
+    ok = _run([_entry()], flows, _cin(A, {early: "300"}))[0]
+    assert ok["status"] == ec.DECLARED_COMPLETE
+
+
+def test_flows_before_any_statement_coverage_are_disclosed_not_refused() -> None:
+    early = date(2025, 12, 1)
+    flows = [_flow(A, early, "300")]
+    row = _run(
+        [_later_declaration()],
+        flows,
+        [r for r in _cin(A) if r["accounting_date"] >= _days()[2].isoformat()],
+    )[0]
+    check = next(
+        c
+        for c in row["checks"]
+        if c["check"] == "NO_FLOWS_BEFORE_DECLARED_START_WITH_STATEMENT_COVERAGE"
+    )
+    assert check["status"] == "PASS"
+    assert (
+        check["flows_before_start"] == 1 and check["statement_days_before_start"] == 0
+    )
+    # the earlier flow is not among the records the closure proved
+    assert row["proven_record_ids"] == []
+
+
+def test_a_complete_flow_closure_names_each_proven_record_with_date_and_canonical_amount() -> (
+    None
+):
+    early = _days()[0]
+    flows = [_flow(A, early, "300.0")]
+    row = _run([_entry()], flows, _cin(A, {early: "300"}))[0]
+    assert row["status"] == ec.DECLARED_COMPLETE
+    assert row["proven_records"] == [
+        {
+            "record_id": flows[0]["record_id"],
+            "event_date": early.isoformat(),
+            "amount": "300",
+        }
+    ]

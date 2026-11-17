@@ -18,7 +18,7 @@ Closure ``IBKR_CHANGE_IN_NAV_FLOW_TIE_OUT`` (flows): over the declared interval
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -32,7 +32,11 @@ SCHEMA_VERSION: Final = 1
 DECLARED_COMPLETE: Final = "DECLARED_COMPLETE"
 CLOSURE_FAILED: Final = "CLOSURE_FAILED"
 CLOSURE_IBKR_FLOWS: Final = "IBKR_CHANGE_IN_NAV_FLOW_TIE_OUT"
-_CLOSURES: Final = {CLOSURE_IBKR_FLOWS: ("ibkr", "flows")}
+CLOSURE_SCHWAB_EMPTY: Final = "SCHWAB_EMPTY_POSITION_SET"
+_CLOSURES: Final = {
+    CLOSURE_IBKR_FLOWS: ("ibkr", "flows"),
+    CLOSURE_SCHWAB_EMPTY: ("schwab", "positions"),
+}
 # Typed outcomes that are NOT completeness: the evidence files are cited by hash and the ledger
 # verifies each file, but nothing is proved about the events themselves.
 OUTCOME_CAPTURED_NOT_ADMITTED: Final = "CAPTURED_NOT_ADMITTED"
@@ -46,7 +50,11 @@ _FLOW_TYPES: Final = frozenset(
         "TRANSFER:INTERNAL:OUT",
     }
 )
-_STATEMENT_FLOW_KEYS: Final = ("depositsWithdrawals", "assetTransfers")
+_STATEMENT_FLOW_KEYS: Final = (
+    "depositsWithdrawals",
+    "assetTransfers",
+    "internalCashTransfers",
+)
 # A closed account is derived, never declared: its NAV settles to dust (at most this many dollars)
 # and stays there with no position, transaction or flow after the settling day, for a stretch long
 # enough that a missing observation cannot pass as a closure.
@@ -60,7 +68,7 @@ _ENTRY_KEYS: Final = {
     "declared_end",
     "closure",
     "evidence_refs",
-    "ruling",
+    "citation",
 }
 
 
@@ -76,7 +84,7 @@ class Declaration:
     declared_end: date
     closure: str
     evidence_refs: tuple[tuple[str, str], ...]
-    ruling: str
+    citation: str
 
 
 def _day(value: object, name: str) -> date:
@@ -137,9 +145,11 @@ def load_declaration(raw: bytes) -> tuple[Declaration, ...]:
             )
         ):
             raise EventCompletenessError("declaration evidence refs are invalid")
-        ruling = entry["ruling"]
-        if not isinstance(ruling, str) or not ruling.strip():
-            raise EventCompletenessError("declaration needs a ruling citation")
+        citation = entry["citation"]
+        if not isinstance(citation, str) or not citation.strip():
+            raise EventCompletenessError(
+                "declaration needs a citation naming its authority"
+            )
         out.append(
             Declaration(
                 account,
@@ -148,7 +158,7 @@ def load_declaration(raw: bytes) -> tuple[Declaration, ...]:
                 end,
                 closure,
                 tuple((item["path"], item["sha256"]) for item in refs),
-                ruling,
+                citation,
             )
         )
     return tuple(out)
@@ -233,8 +243,13 @@ def closed_since(
     positions: Sequence[Mapping[str, Any]],
     transactions: Sequence[Mapping[str, Any]],
     flows: Sequence[Mapping[str, Any]],
+    broker_closed_date: date | None = None,
 ) -> tuple[date, date] | None:
-    """(settled day, last observed day) when the account is derivably closed, else None.
+    """(settled day, last observed day) when the account is closed, else None.
+
+    Absence of data is never a closure: the broker's own closure date (``broker_closed_date``,
+    AccountInformation dateClosed carried by the provider catalog) must be stated and must lie on
+    or after the settled day and not after the last observed day.
 
     The trailing run of NAV observations is at most ``CLOSED_NAV_TOLERANCE`` in size; the run
     starts on the settled day Z and covers at least ``CLOSED_MIN_ZERO_MARKET_DAYS`` market
@@ -276,7 +291,119 @@ def closed_since(
         or after(flows, "event_date")
     ):
         return None
+    if broker_closed_date is None or not settled <= broker_closed_date <= last:
+        return None
     return settled, last
+
+
+def _amount_text(amount: Any) -> str | None:
+    """A canonical decimal text of an AVAILABLE amount (1.0, 1.00 and 1E0 compare equal)."""
+
+    if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
+        return None
+    value = _decimal(amount.get("value"), "amount")
+    return format(value.normalize(), "f") if value != 0 else "0"
+
+
+def _evaluate_schwab_empty(
+    declaration: Declaration,
+    nav_values: Mapping[date, Decimal | None],
+    positions: Sequence[Mapping[str, Any]],
+    transactions: Sequence[Mapping[str, Any]],
+    as_of_date: date,
+    empty_position_accounts: Collection[str] = (),
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The position set is empty from the settled day to the cutoff.
+
+    Derived from the ledger rows alone: the account's last security activity (any transaction
+    that names a security) is not after the day its NAV froze; the NAV is one unchanged
+    observed value on every market day from that day to the last observation, for at least
+    ``CLOSED_MIN_ZERO_MARKET_DAYS`` market days (a held position would move it); and the ledger
+    holds no position row of the account on or after the last security activity.  The cited
+    evidence files (for example a live balances capture) are hash-verified by the ledger but are
+    not read here.
+    """
+
+    start, end = declaration.declared_start, declaration.declared_end
+    account = declaration.account_id
+    checks: list[dict[str, Any]] = []
+
+    def record(name: str, failures: int, detail: dict[str, Any] | None = None) -> None:
+        checks.append(
+            {
+                "check": name,
+                "status": "PASS" if failures == 0 else "FAIL",
+                "failures": failures,
+                **(detail or {}),
+            }
+        )
+
+    record("INTERVAL_REACHES_CUTOFF", 0 if end >= as_of_date else 1)
+    own_tx = [
+        _day(t["event_date"], "transaction event_date")
+        for t in transactions
+        if t.get("account_id") == account
+        and t.get("security_id") is not None
+        and t.get("event_date") is not None
+    ]
+    last_security = max(own_tx) if own_tx else None
+    days = sorted(nav_values)
+    run: list[date] = []
+    for day in reversed(days):
+        value = nav_values[day]
+        if value is None or (run and value != nav_values[run[-1]]):
+            break
+        run.append(day)
+    run.reverse()
+    settled = run[0] if run else None
+    last_observed = run[-1] if run else None
+    market = _market_days(settled, last_observed) if settled and last_observed else []
+    unbroken = bool(run) and all(day in set(run) for day in market)
+    record(
+        "NAV_FROZEN_UNBROKEN",
+        0 if run and unbroken and len(market) >= CLOSED_MIN_ZERO_MARKET_DAYS else 1,
+        {
+            "frozen_since": settled.isoformat() if settled else None,
+            "market_days": len(market),
+        },
+    )
+    record(
+        "NAV_OBSERVED_TO_DECLARED_END",
+        0 if last_observed is not None and last_observed >= end else 1,
+    )
+    record(
+        "NO_SECURITY_ACTIVITY_AFTER_NAV_FROZE",
+        0
+        if settled is not None and (last_security is None or last_security <= settled)
+        else 1,
+        {
+            "last_security_activity": last_security.isoformat()
+            if last_security
+            else None
+        },
+    )
+    record(
+        "INTERVAL_STARTS_AT_OR_AFTER_FREEZE",
+        0 if settled is not None and start >= settled else 1,
+    )
+    floor = last_security or start
+    stale_positions = [
+        p
+        for p in positions
+        if p.get("account_id") == account
+        and p.get("as_of_date") is not None
+        and _day(p["as_of_date"], "position as_of_date") >= floor
+    ]
+    record("NO_POSITION_ROWS_SINCE_LAST_SECURITY_ACTIVITY", len(stale_positions))
+    # absence of position rows proves nothing where the provider's position snapshot does not
+    # cover the account (an account holding securities may be missing from it too): the provider
+    # catalog must positively list the account as holding no position (its liquidation value
+    # closed to the native cash balance with no holdings)
+    record(
+        "POSITION_SET_POSITIVELY_EMPTY_IN_PROVIDER_CATALOG",
+        0 if account in set(empty_position_accounts) else 1,
+    )
+    return checks, []
 
 
 def _evaluate_ibkr_flows(
@@ -287,7 +414,9 @@ def _evaluate_ibkr_flows(
     positions: Sequence[Mapping[str, Any]],
     transactions: Sequence[Mapping[str, Any]],
     as_of_date: date,
-) -> list[dict[str, Any]]:
+    closed_dates: Mapping[str, date] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    closed_dates = closed_dates or {}
     start, end = declaration.declared_start, declaration.declared_end
     account = declaration.account_id
     checks: list[dict[str, Any]] = []
@@ -306,7 +435,12 @@ def _evaluate_ibkr_flows(
     nav_days = set(nav_values)
     interval_nav = {day for day in nav_days if start <= day <= end}
     closure = closed_since(
-        account, nav_values, positions=positions, transactions=transactions, flows=flows
+        account,
+        nav_values,
+        positions=positions,
+        transactions=transactions,
+        flows=flows,
+        broker_closed_date=closed_dates.get(account),
     )
     coverage_end = end
     if closure is not None and start <= closure[1] < end:
@@ -376,7 +510,28 @@ def _evaluate_ibkr_flows(
         and start <= _day(f.get("event_date"), "flow event_date") <= end
     ]
     record("INTERNAL_TRANSFERS_PAIRED", len(unpaired))
-    return checks
+    # a flow dated before the declared start, where the statements already covered the account, is
+    # a hole in the claim's boundary: the declaration must start at or before it (refused, named).
+    # Without any statement day before the start the earlier flows lie outside statement
+    # coverage: not refused, disclosed (flows_before_start) and left out of the claim.
+    earlier = sorted(
+        str(f.get("record_id"))
+        for f in own
+        if _day(f.get("nav_recognition_date") or f.get("event_date"), "flow date")
+        < start
+    )
+    covered_before = sum(1 for day in statement if day < start)
+    record(
+        "NO_FLOWS_BEFORE_DECLARED_START_WITH_STATEMENT_COVERAGE",
+        len(earlier) if covered_before else 0,
+        {
+            "flows_before_start": len(earlier),
+            "statement_days_before_start": covered_before,
+            "record_ids": earlier[:5],
+        },
+    )
+    proven = sorted(str(f["record_id"]) for f in in_interval if f.get("record_id"))
+    return checks, proven
 
 
 def evaluate(
@@ -389,6 +544,8 @@ def evaluate(
     as_of_date: date,
     positions: Sequence[Mapping[str, Any]] = (),
     transactions: Sequence[Mapping[str, Any]] = (),
+    empty_position_accounts: Collection[str] = (),
+    closed_dates: Mapping[str, date] | None = None,
 ) -> list[dict[str, Any]]:
     """One row per declaration: ``DECLARED_COMPLETE`` only if every closure check passes."""
 
@@ -408,12 +565,13 @@ def evaluate(
                     ],
                     "fact_type": declaration.fact_type,
                     "provider_id": account_provider.get(declaration.account_id),
-                    "ruling": declaration.ruling,
+                    "citation": declaration.citation,
                     "status": declaration.closure,
                 }
             )
             continue
         provider, fact = _CLOSURES[declaration.closure]
+        proven_ids: list[str] = []
         if account_provider.get(declaration.account_id) != provider:
             checks = [
                 {
@@ -422,8 +580,17 @@ def evaluate(
                     "failures": 1,
                 }
             ]
+        elif declaration.closure == CLOSURE_SCHWAB_EMPTY:
+            checks, proven_ids = _evaluate_schwab_empty(
+                declaration,
+                nav_values_by_account.get(declaration.account_id, {}),
+                positions,
+                transactions,
+                as_of_date,
+                empty_position_accounts,
+            )
         else:
-            checks = _evaluate_ibkr_flows(
+            checks, proven_ids = _evaluate_ibkr_flows(
                 declaration,
                 flows,
                 change_in_nav_by_provider.get(provider, ()),
@@ -431,8 +598,10 @@ def evaluate(
                 positions,
                 transactions,
                 as_of_date,
+                closed_dates,
             )
         passed = all(item["status"] == "PASS" for item in checks)
+        by_id = {str(f.get("record_id")): f for f in flows}
         rows.append(
             {
                 "account_id": declaration.account_id,
@@ -446,7 +615,17 @@ def evaluate(
                 ],
                 "fact_type": fact,
                 "provider_id": provider,
-                "ruling": declaration.ruling,
+                "citation": declaration.citation,
+                "proven_record_ids": proven_ids,
+                "proven_records": [
+                    {
+                        "record_id": rid,
+                        "event_date": str(by_id[rid].get("event_date")),
+                        "amount": _amount_text(by_id[rid].get("amount")),
+                    }
+                    for rid in proven_ids
+                    if rid in by_id
+                ],
                 "status": DECLARED_COMPLETE if passed else CLOSURE_FAILED,
             }
         )
