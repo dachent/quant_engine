@@ -1025,9 +1025,12 @@ def test_current_dependence_builds_and_verifies_from_real_synthetic_authorities(
     # Moved again when the dependence source began projecting that prehistory
     # instead of dropping it: the hybrid mode had been live-only whatever it
     # was labelled, because only INCLUDE_SELECTED_LIVE segments were selected.
+    # Moved again when the source began carrying the admitted model-live segment:
+    # the real contract now pins the EU model-live identity, so its rows travel in
+    # the hybrid projection (and the synthetic returns shift with the series set).
     assert (
         receipt["returns_sha256"]
-        == "712e27bc20a1e5cd58ac8b51946cc3b6efede0a91881e39954008a28b3c87155"
+        == "56564a08bef340c1d2a18b0fb201ac939dc7a5f53a0be22651848b101088649f"
     )
     assert receipt["allocation_authority"] == {
         "as_of_date": "2026-01-02",

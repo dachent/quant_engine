@@ -520,7 +520,8 @@ def test_the_hybrid_lane_splits_the_backtest_at_the_parent_start_not_the_sleeve_
     sleeve = strategy_basis.rows_from_sleeve_facts(_bytes(_facts()), AI)
     parent = _ledger_rows(world)
     assert parent[0]["date"] < sleeve[0]["date"]
-    backtest_days = ["2025-12-30", "2025-12-31", parent[0]["date"]]
+    # the last two backtest sessions precede the account by no more than a long weekend
+    backtest_days = ["2025-12-31", "2026-01-02", parent[0]["date"]]
     assert backtest_days[-1] < sleeve[0]["date"]
     projection = [
         {
@@ -548,8 +549,8 @@ def test_the_hybrid_lane_splits_the_backtest_at_the_parent_start_not_the_sleeve_
     )
     rows = lanes[SERIES]["rows"]
     assert [r["date"] for r in rows if r["evidence_layer"] == "BACKTEST"] == [
-        "2025-12-30",
         "2025-12-31",
+        "2026-01-02",
     ]
     assert [r["date"] for r in rows if r["evidence_layer"] == "ACCOUNT_LIVE"] == [
         r["date"] for r in parent
