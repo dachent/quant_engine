@@ -1075,7 +1075,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "9cf81279383abe8ff1c7c62a3beb78aff00a618c8ea68bb37bdd4aa0fb4c5d10"
+        "f75abff29f9c1572eb234d4cd0568e3048469c8f86b427e47c3e639f7d2513f7"
     )
 
 
@@ -3071,6 +3071,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "p123-ai-factor:backtest-not-admitted",
         "p123-eu:account-live",
         "p123-eu:backtest",
+        "p123-eu:model-live",
         "qsi:account-live",
         "qsi:backtest",
         "robuxio-crypto:account-live",
