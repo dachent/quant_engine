@@ -4977,6 +4977,131 @@ def _split_pre_strategy_history(
     )
 
 
+def _split_closed_unassigned(
+    historical: Sequence[Mapping[str, Any]],
+    assignments: Sequence[Mapping[str, Any]],
+    nav: Sequence[Mapping[str, Any]],
+    reference_flows: Sequence[Mapping[str, Any]],
+    as_of_date: date,
+) -> tuple[list[Mapping[str, Any]], list[dict[str, Any]]]:
+    """CLOSED_FLOW_CLOSED_UNASSIGNED: a closed interval that carried no strategy, shown with its closure.
+
+    Only a pool-only interval of an account that never has a strategy row, whose NAV is
+    about zero at the cutoff and whose every in-interval transfer has the exact opposite
+    leg on another account.  The closure numbers (opening/closing NAV, net flows, implied
+    P&L) are listed, never hidden; any other interval stays a gap.
+    """
+
+    strategy_accounts = {
+        str(item["account_id"])
+        for item in assignments
+        if item.get("mapping_status") == "MAPPED" and item.get("strategy_id")
+    }
+    gaps: list[Mapping[str, Any]] = []
+    closed: list[dict[str, Any]] = []
+    for item in historical:
+        account_id = str(item["account_id"])
+        start, end = item.get("effective_start"), item.get("effective_end")
+        row = None
+        if (
+            account_id not in strategy_accounts
+            and start is not None
+            and end is not None
+        ):
+            row = _closure_row(
+                account_id,
+                _date(start, "assignment.effective_start"),
+                _date(end, "assignment.effective_end"),
+                nav,
+                reference_flows,
+                as_of_date,
+            )
+        if row is None:
+            gaps.append(item)
+        else:
+            closed.append(row)
+    return gaps, sorted(closed, key=lambda r: (r["account_id"], r["effective_start"]))
+
+
+def _usd_amount_value(amount: object) -> Decimal | None:
+    if (
+        not isinstance(amount, Mapping)
+        or amount.get("status") != "AVAILABLE"
+        or amount.get("currency") != "USD"
+    ):
+        return None
+    return _decimal(amount.get("value"), "flow.amount")
+
+
+def _closure_row(
+    account_id: str,
+    start: date,
+    end: date,
+    nav: Sequence[Mapping[str, Any]],
+    reference_flows: Sequence[Mapping[str, Any]],
+    as_of_date: date,
+) -> dict[str, Any] | None:
+    points = sorted(
+        (
+            (_date(item["as_of_date"], "nav.as_of_date"), value)
+            for item in nav
+            if item.get("account_id") == account_id
+            and (value := _usd_nav_value(item)) is not None
+        ),
+        key=lambda pair: pair[0],
+    )
+    inside = [pair for pair in points if start <= pair[0] <= end]
+    latest = [pair for pair in points if pair[0] <= as_of_date]
+    if not inside or not latest or abs(latest[-1][1]) >= Decimal(1):
+        return None
+    own = [
+        item
+        for item in reference_flows
+        if item.get("account_id") == account_id
+        and start <= _date(item["event_date"], "flow.event_date") <= end
+    ]
+    if not own:
+        return None
+    net = Decimal(0)
+    for flow in own:
+        amount = _usd_amount_value(flow.get("amount"))
+        if (
+            amount is None
+            or not str(flow.get("flow_type", "")).startswith("TRANSFER:INTERNAL:")
+            or not any(
+                other.get("account_id") != account_id
+                and other.get("event_date") == flow.get("event_date")
+                and str(other.get("flow_type", "")).startswith("TRANSFER:INTERNAL:")
+                and (counter := _usd_amount_value(other.get("amount"))) is not None
+                and abs(counter + amount) < Decimal("0.005")
+                for other in reference_flows
+            )
+        ):
+            return None
+        net += amount
+    # opening = the last NAV before the first in-interval transfer (the balance the
+    # transfers act on), else the first NAV of the interval
+    first_flow = min(_date(item["event_date"], "flow.event_date") for item in own)
+    before = [pair for pair in inside if pair[0] < first_flow]
+    opening, closing = (before[-1] if before else inside[0])[1], latest[-1][1]
+    return {
+        "account_id": account_id,
+        "closing_nav": decimal_text(closing),
+        "closing_nav_date": latest[-1][0].isoformat(),
+        "effective_end": end.isoformat(),
+        "effective_start": start.isoformat(),
+        "implied_pnl": decimal_text(closing - opening - net),
+        "net_transfers": decimal_text(net),
+        "opening_nav": decimal_text(opening),
+        "reason": (
+            "closed account with no strategy assignment: NAV about zero at the cutoff "
+            "and every transfer has its exact counterpart leg on a tracked account"
+        ),
+        "transfer_count": len(own),
+        "unmatched_transfer_count": 0,
+    }
+
+
 def _fact_coverage(
     accounts: Sequence[Mapping[str, Any]],
     assignments: Sequence[Mapping[str, Any]],
@@ -4991,6 +5116,7 @@ def _fact_coverage(
     costs: Sequence[Mapping[str, Any]] = (),
     fx_admission: Mapping[str, Any] | None = None,
     coverage_matrix: Sequence[Mapping[str, Any]] | None = None,
+    reference_flows: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     investment_count = sum(1 for item in accounts if item["role"] == "INVESTMENT")
     investment_ids = {
@@ -5016,6 +5142,9 @@ def _fact_coverage(
         (current_unmapped if active else historical_unmapped).append(item)
     historical_unmapped, pre_strategy = _split_pre_strategy_history(
         historical_unmapped, assignments
+    )
+    historical_unmapped, closed_unassigned = _split_closed_unassigned(
+        historical_unmapped, assignments, nav, reference_flows, as_of_date
     )
     claims: list[dict[str, Any]] = [
         {
@@ -5078,6 +5207,8 @@ def _fact_coverage(
                 "code": (
                     "POOL_ONLY_UNALLOCATED_RETAINED"
                     if historical_unmapped
+                    else "CLOSED_FLOW_CLOSED_UNASSIGNED"
+                    if closed_unassigned
                     else "PRE_STRATEGY_HISTORY"
                     if pre_strategy
                     else "COMPLETE"
@@ -5090,6 +5221,11 @@ def _fact_coverage(
                     else "Every historical systematic interval has an accepted strategy assignment."
                 ),
                 **({"structural_intervals": pre_strategy} if pre_strategy else {}),
+                **(
+                    {"closed_unassigned_intervals": closed_unassigned}
+                    if closed_unassigned
+                    else {}
+                ),
             },
             "record_count": len(historical_unmapped),
         },
@@ -6829,6 +6965,7 @@ def build_catalog(
         costs=costs,
         fx_admission=fx_authority or None,
         coverage_matrix=fact_coverage_matrix,
+        reference_flows=reference_flows,
     )
     unmapped = [
         *sorted(

@@ -6079,3 +6079,108 @@ def test_a_current_pool_only_interval_is_never_derived_history() -> None:
     )
     assert current["status"] == "PARTIAL"
     assert current["record_count"] == 1
+
+
+def _closure_claim(
+    *,
+    nav_last: str = "0",
+    flows: list[dict[str, Any]] | None = None,
+    extra_assignments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    def nav_row(day: str, value: str) -> dict[str, Any]:
+        return {
+            "account_id": "sleeve",
+            "as_of_date": day,
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
+        }
+
+    def flow(account: str, day: str, kind: str, amount: str) -> dict[str, Any]:
+        return {
+            "account_id": account,
+            "event_date": day,
+            "flow_type": kind,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        }
+
+    if flows is None:
+        flows = [
+            flow("sleeve", "2025-12-01", "TRANSFER:INTERNAL:IN", "100"),
+            flow("other", "2025-12-01", "TRANSFER:INTERNAL:OUT", "-100"),
+            flow("sleeve", "2026-02-01", "TRANSFER:INTERNAL:OUT", "-90"),
+            flow("other", "2026-02-01", "TRANSFER:INTERNAL:IN", "90"),
+        ]
+    assignments = [
+        _hist_assignment("sleeve", "2025-09-15", "2026-03-31"),
+        *(extra_assignments or []),
+    ]
+    accounts = [{"account_id": "sleeve", "role": "INVESTMENT", "provider": "IBKR"}]
+    claims, _ = baseline._fact_coverage(
+        accounts,
+        assignments,
+        [],
+        [],
+        [],
+        [],
+        0,
+        date(2026, 11, 6),
+        nav=[
+            nav_row("2025-11-20", "10"),
+            nav_row("2025-12-02", "110"),
+            nav_row("2026-03-31", nav_last),
+        ],
+        reference_flows=flows,
+    )
+    return next(
+        c for c in claims if c["fact_type"] == "historical_strategy_attribution"
+    )
+
+
+def test_a_closed_unassigned_interval_is_disclosed_with_its_closure() -> None:
+    claim = _closure_claim()
+
+    assert claim["disposition"]["code"] == "CLOSED_FLOW_CLOSED_UNASSIGNED"
+    (row,) = claim["disposition"]["closed_unassigned_intervals"]
+    assert (row["opening_nav"], row["net_transfers"], row["closing_nav"]) == (
+        "10",
+        "10",
+        "0",
+    )
+    assert row["implied_pnl"] == "-20"  # 0 - 10 - 10, shown, never hidden
+    assert row["transfer_count"] == 2 and row["unmatched_transfer_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("nav_not_zero", "unmatched_transfer", "external_flow", "has_strategy"),
+)
+def test_a_non_closing_unassigned_interval_stays_a_gap(case: str) -> None:
+    """Kill tests: every way the closure can fail leaves the interval a gap."""
+
+    def flow(account: str, day: str, kind: str, amount: str) -> dict[str, Any]:
+        return {
+            "account_id": account,
+            "event_date": day,
+            "flow_type": kind,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        }
+
+    kwargs: dict[str, Any] = {}
+    if case == "nav_not_zero":
+        kwargs["nav_last"] = "55"
+    elif case == "unmatched_transfer":
+        kwargs["flows"] = [flow("sleeve", "2025-12-01", "TRANSFER:INTERNAL:IN", "100")]
+    elif case == "external_flow":
+        kwargs["flows"] = [
+            flow("sleeve", "2025-12-01", "EXTERNAL_PROVIDER_TRANSFER", "-100"),
+            flow("other", "2025-12-01", "TRANSFER:INTERNAL:IN", "100"),
+        ]
+    else:
+        kwargs["extra_assignments"] = [
+            _hist_assignment("sleeve", "2025-12-15", None, "qsi")
+        ]
+
+    claim = _closure_claim(**kwargs)
+
+    assert claim["status"] == "PARTIAL"
+    assert claim["disposition"]["code"] == "POOL_ONLY_UNALLOCATED_RETAINED"
+    assert "closed_unassigned_intervals" not in claim["disposition"]
