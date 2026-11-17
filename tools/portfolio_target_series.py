@@ -580,8 +580,17 @@ STRATEGY_HISTORY_STATUSES: Final = frozenset(
         "ACCEPTED_EXACT_VERSION_HISTORY",
         "ACCEPTED_EXACT_VERSION_PLUS_GOVERNED_SIGNAL_PRICE_EXTENSION",
         "ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
+        "ACCEPTED_PROVIDER_LIVE_PREHISTORY_NO_BACKTEST",
     }
 )
+# The Volatis research series is the provider's own fund value strictly before the
+# account was funded (labelled MODEL_LIVE, no backtest exists), then the account.
+# This is a separate admission from the p123 model-live shape (backtest, then model
+# live, account never in the series); the values mirror the contract tool.
+PROVIDER_LIVE_PREHISTORY_STATUS: Final = "ACCEPTED_PROVIDER_LIVE_PREHISTORY_NO_BACKTEST"
+PROVIDER_LIVE_PREHISTORY_ADMISSION: Final = "INCLUDE_PROVIDER_LIVE_PREHISTORY"
+PROVIDER_LIVE_PREHISTORY_STRATEGIES: Final = frozenset({"volatis-strategy"})
+PROVIDER_LIVE_PREHISTORY_MAX_GAP_DAYS: Final = 5
 
 
 class TargetSeriesError(ValueError):
@@ -2596,6 +2605,8 @@ def _model_live_layers(
     for row in corrections.values():
         if not isinstance(row, Mapping) or row.get("evidence_layer") != "MODEL_LIVE":
             continue
+        if str(row.get("strategy_id")) in PROVIDER_LIVE_PREHISTORY_STRATEGIES:
+            continue
         interval = row.get("interval")
         modes = row.get("mode_admission")
         if not isinstance(interval, Mapping) or not isinstance(modes, Mapping):
@@ -2611,6 +2622,40 @@ def _model_live_layers(
             start,
             row.get("readiness") == "READY"
             and modes.get("LIVE_PLUS_BACKTEST") == "INCLUDE_MODEL_LIVE_RESEARCH",
+        )
+    return layers
+
+
+def _provider_live_prehistory_layers(
+    corrections: Mapping[str, Mapping[str, Any]],
+) -> dict[str, tuple[date, date, bool]]:
+    """Provider-live prehistory per owning strategy: window and whether admitted."""
+
+    layers: dict[str, tuple[date, date, bool]] = {}
+    for row in corrections.values():
+        if not isinstance(row, Mapping) or row.get("evidence_layer") != "MODEL_LIVE":
+            continue
+        strategy_id = str(row.get("strategy_id"))
+        if strategy_id not in PROVIDER_LIVE_PREHISTORY_STRATEGIES:
+            continue
+        interval = row.get("interval")
+        modes = row.get("mode_admission")
+        if not isinstance(interval, Mapping) or not isinstance(modes, Mapping):
+            raise TargetSeriesError("provider-live prehistory correction is invalid")
+        try:
+            start = date.fromisoformat(str(interval.get("observed_start")))
+            end = date.fromisoformat(str(interval.get("observed_end")))
+        except ValueError as exc:
+            raise TargetSeriesError(
+                "provider-live prehistory window is invalid"
+            ) from exc
+        if strategy_id in layers:
+            raise TargetSeriesError("provider-live prehistory is declared twice")
+        layers[strategy_id] = (
+            start,
+            end,
+            row.get("readiness") == "READY"
+            and modes.get("LIVE_PLUS_BACKTEST") == PROVIDER_LIVE_PREHISTORY_ADMISSION,
         )
     return layers
 
@@ -5693,6 +5738,9 @@ def build_layered_history_generation(
             raise TargetSeriesError("strategy history series lacks product mapping")
         definition = history_definitions[series_id]
         definition_version = str(definition["strategy_version"])
+        if definition.get("history_status") == PROVIDER_LIVE_PREHISTORY_STATUS:
+            # not a backtest: its rows are MODEL_LIVE and are admitted below
+            continue
         # Segment rows retain the design reference. The distinct QSI source
         # version and its revised history remain bound in the raw bundle/proof.
         if version_status_by_strategy[mapped_strategy_id] != "EVIDENCED" or (
@@ -5775,6 +5823,70 @@ def build_layered_history_generation(
                 "return_type": "TOTAL",
             }
             for item in candidates
+        ]
+
+    # Provider-live prehistory (Volatis): the provider's own fund value strictly
+    # before the account was funded, then the account continues in the same
+    # series.  Admitted only where the contract admits it, under the same version
+    # as the account path, with no gap beyond one provider interval.
+    prehistory_rows: dict[str, list[dict[str, str]]] = {}
+    for strategy_id, (
+        pre_start,
+        pre_end,
+        pre_admitted,
+    ) in _provider_live_prehistory_layers(corrections).items():
+        if not pre_admitted:
+            continue
+        pre_series_id = series_by_strategy[strategy_id]
+        pre_candidates = sorted(
+            history_model_live_rows.get(pre_series_id, []),
+            key=lambda item: item["date"],
+        )
+        if not pre_candidates:
+            raise TargetSeriesError(
+                f"admitted provider-live prehistory has no rows: {strategy_id}"
+            )
+        if len({item["date"] for item in pre_candidates}) != len(pre_candidates):
+            raise TargetSeriesError(
+                f"duplicate provider-live prehistory return: {strategy_id}"
+            )
+        live_start = first_live.get(strategy_id)
+        pre_first = date.fromisoformat(pre_candidates[0]["date"])
+        pre_last = date.fromisoformat(pre_candidates[-1]["date"])
+        if (
+            live_start is None
+            or pre_first < pre_start
+            or pre_last > pre_end
+            or pre_last >= live_start
+            or (live_start - pre_last).days > PROVIDER_LIVE_PREHISTORY_MAX_GAP_DAYS
+            or any(
+                _decimal(item["return"], "provider-live prehistory return") <= -1
+                for item in pre_candidates
+            )
+        ):
+            raise TargetSeriesError(
+                f"provider-live prehistory leaves its window: {strategy_id}"
+            )
+        if (
+            version_status_by_strategy[strategy_id] != "EVIDENCED"
+            or str(history_definitions[pre_series_id]["strategy_version"])
+            != version_by_strategy[strategy_id]
+        ):
+            raise TargetSeriesError(
+                f"provider-live prehistory version differs: {strategy_id}"
+            )
+        prehistory_rows[strategy_id] = [
+            {
+                "series_id": pre_series_id,
+                "date": item["date"],
+                "return": format(
+                    _decimal(item["return"], "provider-live prehistory return"), "f"
+                ),
+                "evidence_layer": "MODEL_LIVE",
+                "return_basis": "MODEL",
+                "return_type": "TOTAL",
+            }
+            for item in pre_candidates
         ]
 
     account_source = sources["owner-account-live-history"]
@@ -5900,6 +6012,20 @@ def build_layered_history_generation(
                 frequency=account_frequency if is_ledger_model else backtest_frequency,
             )
         )
+    for strategy_id, rows in prehistory_rows.items():
+        segment_rows.extend(
+            _segment_rows(
+                rows,
+                strategy_id=strategy_id,
+                strategy_version=version_by_strategy[strategy_id],
+                segment_id=f"{strategy_id}:provider-live-prehistory",
+                source_id="quantbase-account-generation",
+                source_generation_id=quantbase_generation,
+                mode_admission=PROVIDER_LIVE_PREHISTORY_ADMISSION,
+                calendar=quantbase_calendar,
+                frequency=quantbase_frequency,
+            )
+        )
     for strategy_id, rows in unadmitted_backtests.items():
         normalized = [
             {
@@ -5953,7 +6079,11 @@ def build_layered_history_generation(
             row
             for row in segment_rows
             if row["mode_admission"]
-            in {"INCLUDE_MODEL_LIVE_RESEARCH", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+            in {
+                "INCLUDE_MODEL_LIVE_RESEARCH",
+                "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+                PROVIDER_LIVE_PREHISTORY_ADMISSION,
+            }
             or (
                 # The account is in the research series only where the strategy
                 # has no model-live layer to continue on.
@@ -7919,7 +8049,11 @@ def validate_layered_history_generation(
         {field: row[field] for field in CORRELATION_FIELDS_V2}
         for row in segments
         if row["mode_admission"]
-        in {"INCLUDE_MODEL_LIVE_RESEARCH", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+        in {
+            "INCLUDE_MODEL_LIVE_RESEARCH",
+            "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+            PROVIDER_LIVE_PREHISTORY_ADMISSION,
+        }
         or (
             row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
             and row["strategy_id"] not in model_live_layers
@@ -7970,7 +8104,12 @@ def validate_layered_history_generation(
         # Each owner layer has exactly one admission: the account is the selected
         # live path, the model's own record is the research series' live leg.
         if (segment_row["evidence_layer"] == "MODEL_LIVE") != (
-            segment_row["mode_admission"] == "INCLUDE_MODEL_LIVE_RESEARCH"
+            segment_row["mode_admission"]
+            == (
+                PROVIDER_LIVE_PREHISTORY_ADMISSION
+                if strategy_id in PROVIDER_LIVE_PREHISTORY_STRATEGIES
+                else "INCLUDE_MODEL_LIVE_RESEARCH"
+            )
         ) or (segment_row["evidence_layer"] == "ACCOUNT_LIVE") != (
             segment_row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
         ):
@@ -8013,6 +8152,43 @@ def validate_layered_history_generation(
             ):
                 raise TargetSeriesError(
                     "admitted backtest version differs from model live"
+                )
+        prehistory = sorted(
+            [
+                row
+                for row in rows
+                if row["mode_admission"] == PROVIDER_LIVE_PREHISTORY_ADMISSION
+            ],
+            key=lambda row: row["date"],
+        )
+        if prehistory:
+            declared_pre = _provider_live_prehistory_layers(corrections).get(
+                strategy_id
+            )
+            if declared_pre is None or not declared_pre[2]:
+                raise TargetSeriesError(
+                    "provider-live prehistory rows lack an admitted layer"
+                )
+            if (
+                backtest
+                or model_live
+                or not live
+                or any(
+                    row["strategy_version"] != live[0]["strategy_version"]
+                    for row in prehistory
+                )
+                or date.fromisoformat(prehistory[0]["date"]) < declared_pre[0]
+                or date.fromisoformat(prehistory[-1]["date"]) > declared_pre[1]
+                or date.fromisoformat(prehistory[-1]["date"])
+                >= date.fromisoformat(live[0]["date"])
+                or (
+                    date.fromisoformat(live[0]["date"])
+                    - date.fromisoformat(prehistory[-1]["date"])
+                ).days
+                > PROVIDER_LIVE_PREHISTORY_MAX_GAP_DAYS
+            ):
+                raise TargetSeriesError(
+                    "provider-live prehistory does not hand over to the account"
                 )
         if backtest and strategy_id in model_live_layers:
             # The backtest hands over to the model's live record: it must end
@@ -8304,6 +8480,16 @@ def validate_layered_history_generation(
                 expected_layer = "PROVIDER_LIVE"
                 expected_admission = "EXCLUDE_COMPARISON_ONLY"
                 expected_basis = "NET"
+            elif (
+                segment_id == f"{strategy_id}:provider-live-prehistory"
+                and _provider_live_prehistory_layers(corrections).get(
+                    strategy_id, (None, None, False)
+                )[2]
+            ):
+                source_id = "quantbase-account-generation"
+                expected_layer = "MODEL_LIVE"
+                expected_admission = PROVIDER_LIVE_PREHISTORY_ADMISSION
+                expected_basis = "MODEL"
             elif (
                 segment_id == f"{strategy_id}:model-live"
                 and model_live_layers.get(strategy_id, (None, False))[1]
@@ -9459,6 +9645,28 @@ def _strategy_history_returns(
         grouped[series_id].append(dict(row))
 
     for series_id, definition in definitions.items():
+        if definition.get("history_status") == PROVIDER_LIVE_PREHISTORY_STATUS:
+            # Every row of this series is MODEL_LIVE: its own declared window and
+            # count are checked, and it can never carry a BACKTEST row.
+            live_rows = sorted(
+                (model_live_out or {}).get(series_id, []),
+                key=lambda item: item["date"],
+            )
+            if (
+                grouped[series_id]
+                or len(live_rows) != definition["return_observations"]
+                or definition.get("model_live_observations")
+                != definition["return_observations"]
+                or live_rows[0]["date"] != definition["observed_start"]
+                or live_rows[-1]["date"] != definition["observed_end"]
+                or definition.get("model_live_start") != definition["observed_start"]
+                or definition.get("model_live_end") != definition["observed_end"]
+            ):
+                raise TargetSeriesError(
+                    f"strategy history provider-live prehistory differs: {series_id}"
+                )
+            grouped[series_id] = []
+            continue
         accepted = sorted(grouped[series_id], key=lambda item: item["date"])
         if len(accepted) != definition["return_observations"]:
             raise TargetSeriesError(

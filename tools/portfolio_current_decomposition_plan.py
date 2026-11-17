@@ -513,6 +513,9 @@ def _layered_history_targets(
             # an admitted model-live layer continues the backtest; the account is
             # never part of that research series
             "INCLUDE_MODEL_LIVE_RESEARCH",
+            # provider-live prehistory (before the account was funded); the
+            # account continues in the same series
+            "INCLUDE_PROVIDER_LIVE_PREHISTORY",
         }
     )
     for strategy_id, series_id in planned:
