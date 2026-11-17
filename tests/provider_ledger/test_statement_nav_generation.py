@@ -967,3 +967,20 @@ def test_john_hancock_label_text_swapped_with_columns_aligned_is_refused() -> No
         )
         with pytest.raises(gen.StatementGenerationError, match="fixed row order"):
             gen.parse_john_hancock(swapped)
+
+
+def test_john_hancock_negative_contribution_is_refused() -> None:
+    """Semantics: a Roth contribution never carries a negative amount, whatever the order."""
+
+    text = _jh_text(
+        date(2026, 1, 1),
+        date(2026, 3, 31),
+        opening="1,000.00",
+        items=["-500.00", "-2.00"],
+        closing="498.00",
+        labels=["Roth 401(k) Contribution", "General Administrative Charge"],
+    )
+    with pytest.raises(
+        gen.StatementGenerationError, match="contribution row is negative"
+    ):
+        gen.parse_john_hancock(text)

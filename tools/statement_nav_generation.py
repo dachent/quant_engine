@@ -267,6 +267,12 @@ def _jh_labelled_items(
     ]
     _jh_check_fund_split(positioned, items, opening, closing, labels)
     _jh_check_summary(lines, labels, items)
+    for label, item in zip(labels, items, strict=True):
+        # semantics: a contribution is never a negative amount
+        if label == "Roth 401(k) Contribution" and item < _ZERO:
+            raise StatementGenerationError(
+                "John Hancock contribution row is negative: label and amount do not agree"
+            )
     return list(zip(labels, items, strict=True))
 
 
