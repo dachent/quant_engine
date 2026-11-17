@@ -1784,6 +1784,8 @@ def check_required_sections(ctx: Context) -> Iterator[Finding]:
         "manifest": ctx.gen.manifest,
     }
     for label, file, keys in _REQUIRED_SECTIONS:
+        if label == "manifest" and ctx.gen.candidate_only:
+            continue
         for key in keys:
             if key not in documents[label]:
                 yield _finding(
@@ -1800,6 +1802,8 @@ def check_required_sections(ctx: Context) -> Iterator[Finding]:
 
 
 def check_generation_id(ctx: Context) -> Iterator[Finding]:
+    if ctx.gen.candidate_only:
+        return  # no manifest yet: the findings-panel stage checks the published one
     manifest_id = ctx.gen.manifest.get("generation_id")
     if manifest_id != ctx.gen.generation_id:
         yield _finding(
@@ -1904,9 +1908,15 @@ def check_nested_generation_ids(ctx: Context) -> Iterator[Finding]:
 
     for file, document in (
         (CANDIDATE, ctx.gen.candidate),
-        (
-            GENERATION_MANIFEST,
-            {k: v for k, v in ctx.gen.manifest.items() if k != "artifacts"},
+        *(
+            ()
+            if ctx.gen.candidate_only
+            else (
+                (
+                    GENERATION_MANIFEST,
+                    {k: v for k, v in ctx.gen.manifest.items() if k != "artifacts"},
+                ),
+            )
         ),
         (PANEL, node(ctx.panel, "meta")),
         (PANEL, node(ctx.panel, "account_manifest")),
@@ -8543,6 +8553,22 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
             )
         return
 
+    if ctx.gen.candidate_only and not artifacts:
+        # A panel CANDIDATE has no manifest yet (G2, before publication), so no artifact can be
+        # bound. The manifest-bound identity (one artifact, its hash) is judged on the published
+        # generation at the findings-panel stage, where this requirement is unchanged. Here the
+        # source is the panel's own declaration, so every panel-only check below still runs:
+        # the declared source cutoff against the last completed week, the current-week record
+        # and its visibility, and that the panel declares a well-formed source hash.
+        artifacts = [
+            {
+                "artifact_id": source_artifact_id,
+                "as_of_date": weekly.get("as_of_date"),
+                "sha256": weekly.get("source_sha256"),
+                "schema": {"name": "portfolio-weekly-returns", "version": "2"},
+                "size_bytes": 1,
+            }
+        ]
     if len(artifacts) != 1:
         yield _finding(
             "dates.weekly_current_week",

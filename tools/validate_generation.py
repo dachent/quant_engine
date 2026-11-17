@@ -290,6 +290,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("generation_dir", type=Path)
     parser.add_argument("--expected", type=Path, help="expected-baseline JSON")
+    parser.add_argument(
+        "--candidate",
+        action="store_true",
+        help="the directory is a panel CANDIDATE (G2, before publication): it has no "
+        "generation.json, so the checks that compare the manifest with the files are "
+        "not run; they run on the published generation at the findings-panel stage",
+    )
     parser.add_argument("--out", type=Path, help="findings document path")
     parser.add_argument("--details-out", type=Path, help="findings with messages")
     parser.add_argument(
@@ -450,8 +457,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             discover=not args.no_discover,
             crosswalk_path=args.crosswalk,
             release_pointer_path=args.release_pointer,
+            candidate_only=args.candidate,
         )
-        generation_id = generation.manifest.get("generation_id")
+        generation_id = (
+            generation.gen_dir.name
+            if args.candidate
+            else generation.manifest.get("generation_id")
+        )
         if not isinstance(generation_id, str) or not generation_id:
             raise ContractError("generation.json has no generation_id")
         cutoff_text, cutoff_source = next(
