@@ -2595,7 +2595,7 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
     MISSING_ON_PROVIDER_OBSERVED_DATE days: with the reserve refresh (the ledger NAV rows
     admitted for reserve-pool accounts) the fixture's account-schwab-b has one provider-observed
     day (2026-07-02) with no NAV observation, so fact_coverage[nav].known_gaps gained exactly one
-    line; nothing else in the catalog differs (catalog 9be761a4... -> 98205cbc...)."""
+    line; nothing else in the catalog differs (catalog 9be761a4... -> 325fbba2..., nav-gap wording of #900 / #1008)."""
     spec_path, _spec_data = _spec(tmp_path)
     output_root = tmp_path / "private-output"
     evidence = baseline.stage_baseline(spec_path, output_root)
@@ -2605,11 +2605,11 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
     assert b'"hwm_inputs"' not in catalog_bytes
     assert (
         hashlib.sha256(catalog_bytes).hexdigest()
-        == "98205cbcba50d8306d6091a473d16e2db04b51301fbfc37ae448a96d3896d6fd"
+        == "325fbba283604662cadf551a763bb7e541fff05a90a7d856aa12b4c4fbb11ef3"
     )
     assert (
         hashlib.sha256(manifest_bytes).hexdigest()
-        == "e6878ea7afe4fc9f8b01f64d71397ceec3938984462902ff64cc775d1484d92b"
+        == "720b03f215200a7ccde1a5161e94bd5b52ce96e00c1348ad06e548ad914e7814"
     )
 
 

@@ -167,11 +167,6 @@
    "justification": "performance-chart state text describing the view the reader selected (basis, zoom, empty selection); true by the control state and exercised in test_performance_chart_audit.py and the Chromium rotation, with dates and day counts printed from the payload's own week grid and group anchor through the placeholders"
   },
   {
-   "file": "tools/portfolio_baseline.py",
-   "pattern": "^[{][}] NAV day[(]s[)] missing on provider-observed dates for account",
-   "justification": "known-gap disclosure line composed from the calendar rows it names (count, account, provider, first/last date); true by construction and it reports a gap, so it makes no completeness claim to test"
-  },
-  {
    "file": "apps/portfolio-control-panel/app.js",
    "pattern": "^factor data through [{][}], [{][}] days before the [{][}] cutoff;",
    "justification": "lens-header note composed from the lens's own as_of_date and the portfolio cutoff, printed only when the lens ends more than 10 days before it; the figures are the same two dates the header already shows and their difference (factor-model audit D1, stale lens labelling)"
