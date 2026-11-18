@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "contract_id": "PORT-KNOWN-ISSUES-1",
+  "release": "B",
+  "as_of": "2026-11-17",
+  "authority": "Disclosure of known defects in a committed release. Source: records/sprint/B-KNOWN-ISSUES-DISCLOSURE.md (sprint-ledger, from control's list). Each entry is shown to the analyst under DO NOT RELY ON in the context pack. Append an entry when a defect is found; set status to FIXED (with fixed_in) when a later release removes it; never delete an entry.",
+  "entry_shape": {
+    "id": "KI-NN, unique, never reused",
+    "status": "OPEN | FIXED",
+    "verification": "BYTES (checked against files) | CONTROL (control's tracking, not re-verified)",
+    "do_not_rely": "One sentence for the analyst: what not to rely on.",
+    "effect": "What is wrong and its size.",
+    "affected_paths": "Payload paths or surfaces the defect touches (empty if it is a wording or scope limit).",
+    "fix": {"ticket": "issue or PR number or null", "release": "release expected to fix it", "note": "what the fix is"}
+  },
+  "issues": [
+    {
+      "id": "KI-01",
+      "status": "OPEN",
+      "verification": "BYTES",
+      "do_not_rely": "The Schwab coverage sentence that says 2 accepted accounts hold cash only: it counts account 691, which holds a money-market position of about 70,856 USD, and the 691 positions were never captured.",
+      "effect": "A wrong sentence in the downloadable payload JSON only; it is not rendered and no number, status or panel screen depends on it. The matrix cells for the two accounts say NO_ACCEPTED_FACT_PATH and name the gap.",
+      "affected_paths": ["coverage[*].structural_boundaries", "fact_coverage_matrix positions row structural_boundaries"],
+      "fix": {"ticket": null, "release": "F1", "note": "governed empty-position account list (054 only), a real 691 position row, new Schwab generation"}
+    },
+    {
+      "id": "KI-02",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "Annualised figures on the 14 panel rows (and 62 analytics rows) that scale by 252 periods a year where 242 or 260 apply.",
+      "effect": "Annualised figures on those rows are slightly mis-scaled.",
+      "affected_paths": [],
+      "fix": {"ticket": "#904", "release": "F1", "note": "annualization fix"}
+    },
+    {
+      "id": "KI-03",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "Any factor-based statistic as covering October and November 2026: factor data end on 2026-09-30.",
+      "effect": "Factor-based statistics do not cover Oct-Nov 2026.",
+      "affected_paths": ["factor_analysis"],
+      "fix": {"ticket": null, "release": "F1", "note": "later factor capture"}
+    },
+    {
+      "id": "KI-04",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "Pre-2011 excess returns: the 2007-2010 style and sector risk-free rate is a price-return proxy (BIL), not a total-return series.",
+      "effect": "Excess returns before 2011 use a proxy risk-free rate.",
+      "affected_paths": ["factor_analysis"],
+      "fix": {"ticket": null, "release": "F1", "note": "total-return risk-free construction"}
+    },
+    {
+      "id": "KI-05",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "The as-of date on total liquid capital: it is the oldest component's date (2025-11-24, a 0.19 USD Echotrade balance), not the cutoff.",
+      "effect": "The as-of label is the oldest component's date; the amounts are unaffected.",
+      "affected_paths": ["capital_status"],
+      "fix": {"ticket": null, "release": "F1", "note": "label rule: oldest-component wording"}
+    },
+    {
+      "id": "KI-06",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "The wording 'no reported events' for the 558 provider transactions that have events but no strategy attribution.",
+      "effect": "The matrix says no events where events exist but none is attributed to a strategy.",
+      "affected_paths": ["fact_coverage_matrix"],
+      "fix": {"ticket": null, "release": "F1", "note": "typed status for events not attributed (ledger bundle, PR 1003)"}
+    },
+    {
+      "id": "KI-07",
+      "status": "OPEN",
+      "verification": "BYTES",
+      "do_not_rely": "Volatis values on fill days: the fill-day restatement is not applied, so those days carry the dashboard value before the fill (for example 2025-08-06 shows 21,771.95 where the restated figure is 10,903.65).",
+      "effect": "Volatis fill days use the dashboard NAV, as in release A5; the fill-closes pin carries split-adjusted closes against as-traded quantities.",
+      "affected_paths": ["strategy returns for volatis-strategy"],
+      "fix": {"ticket": "#909", "release": "F1", "note": "as-traded closes pin, guards, deposit-day netting"}
+    },
+    {
+      "id": "KI-08",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "AI Factor and EU rows as account-basis figures: they are on the model (restated to the sleeve) basis.",
+      "effect": "Those rows are model basis, as the AI Factor basis ruling of 2026-11-02 (B) directs.",
+      "affected_paths": ["strategies p123-ai-factor, p123-eu"],
+      "fix": {"ticket": null, "release": "F1", "note": "per the basis ruling, as queued"}
+    },
+    {
+      "id": "KI-09",
+      "status": "OPEN",
+      "verification": "BYTES",
+      "do_not_rely": "Schwab account 691 as covered for positions: its positions cell has no accepted fact path.",
+      "effect": "Holdings against signals for that account cannot be checked from the payload.",
+      "affected_paths": ["fact_coverage_matrix positions row"],
+      "fix": {"ticket": null, "release": "F1", "note": "691 position row"}
+    },
+    {
+      "id": "KI-10",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "Robuxio return spans as complete: span wording and coverage are open.",
+      "effect": "Return-span wording and coverage for Robuxio are not closed.",
+      "affected_paths": ["strategies robuxio-crypto"],
+      "fix": {"ticket": null, "release": "F1", "note": "control's item 9 (p123 owner)"}
+    }
+  ]
+}

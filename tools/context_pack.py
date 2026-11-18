@@ -125,6 +125,46 @@ class PackError(ValueError):
     """The pack cannot be built or failed validation."""
 
 
+KNOWN_ISSUES_PATH = ROOT / "contracts" / "portfolio-known-issues-v1.json"
+_ISSUE_ID = re.compile(r"KI-\d{2,}")
+
+
+def known_issue_lines(contract: Mapping[str, Any]) -> list[str]:
+    """One DO NOT RELY line per OPEN known issue of the governed list; a malformed list refuses the pack."""
+
+    issues = contract.get("issues")
+    if contract.get("schema_version") != 1 or not isinstance(issues, list):
+        raise PackError(
+            "known-issues contract: schema_version 1 and an issues list are required"
+        )
+    seen: set[str] = set()
+    lines: list[str] = []
+    for issue in issues:
+        if not isinstance(issue, Mapping):
+            raise PackError("known-issues contract: every issue must be an object")
+        issue_id = str(issue.get("id", ""))
+        if not _ISSUE_ID.fullmatch(issue_id) or issue_id in seen:
+            raise PackError(f"known-issues contract: bad or repeated id {issue_id!r}")
+        seen.add(issue_id)
+        status = issue.get("status")
+        if status not in ("OPEN", "FIXED"):
+            raise PackError(
+                f"known-issues contract: {issue_id} status must be OPEN or FIXED"
+            )
+        text = issue.get("do_not_rely")
+        if not isinstance(text, str) or not text.strip():
+            raise PackError(
+                f"known-issues contract: {issue_id} has no do_not_rely text"
+            )
+        if status == "OPEN":
+            fix = issue.get("fix") if isinstance(issue.get("fix"), Mapping) else {}
+            ticket = f", fix {fix['ticket']}" if fix.get("ticket") else ""
+            lines.append(
+                f"{issue_id} ({issue.get('verification', 'CONTROL')}{ticket}): {_clean(text)}"
+            )
+    return lines
+
+
 def _clean(text: str) -> str:
     """Undo a double-encoded dash or quote (a UTF-8 file read through cp1252)."""
 
@@ -618,6 +658,7 @@ def build_pack(
     strategy_sources: Sequence[Mapping[str, Any]],
     recommendations: Mapping[str, Any] | None = None,
     prior_pack: Mapping[str, Any] | None = None,
+    known_issues: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     facts = build_facts(data, decision)
     p = decision["portfolio"]
@@ -784,7 +825,18 @@ def build_pack(
             )
         ),
     )
-    add("do_not_rely", "DO NOT RELY ON", "\n".join(f"- {d}" for d in DO_NOT_RELY))
+    issue_lines = known_issue_lines(known_issues) if known_issues is not None else []
+    add(
+        "do_not_rely",
+        "DO NOT RELY ON",
+        "\n".join(f"- {d}" for d in DO_NOT_RELY)
+        + (
+            "\nKnown issues of this release (governed list, contracts/portfolio-known-issues-v1.json):\n"
+            + "\n".join(f"- {line}" for line in issue_lines)
+            if issue_lines
+            else ""
+        ),
+    )
     all_text = "\n".join(s["text"] for s in sections)
     used = sorted(set(_TOKEN.findall(all_text)) | set(_SINGLE.findall(all_text)))
     missing = [t for t in used if t not in GLOSSARY and t not in CAVEATS]
@@ -912,7 +964,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )["strategies"]
     prior = json.loads(args.prior_pack.read_bytes()) if args.prior_pack else None
     pack = build_pack(
-        data, decision, policy, sha, sources, data.get("recommendations"), prior
+        data,
+        decision,
+        policy,
+        sha,
+        sources,
+        data.get("recommendations"),
+        prior,
+        json.loads(KNOWN_ISSUES_PATH.read_bytes()),
     )
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "context-pack.md").write_bytes(pack["text"].encode("utf-8"))

@@ -271,6 +271,9 @@ DECISION_POLICY: Final = (
     / "contracts"
     / "portfolio-decision-policy-v1.json"
 )
+KNOWN_ISSUES: Final = (
+    Path(__file__).resolve().parents[1] / "contracts" / "portfolio-known-issues-v1.json"
+)
 STRATEGY_RETURN_SOURCES: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -12415,6 +12418,7 @@ def _context_pack_block(
     sources_bytes, _sources_sha256 = _read_snapshot(
         STRATEGY_RETURN_SOURCES, "strategy return sources"
     )
+    issues_bytes, _issues_sha256 = _read_snapshot(KNOWN_ISSUES, "known issues")
     try:
         strategies = _json_from_bytes(sources_bytes, "strategy return sources")[
             "strategies"
@@ -12426,6 +12430,8 @@ def _context_pack_block(
             policy_sha256,
             strategies,
             data.get("recommendations"),
+            None,
+            _json_from_bytes(issues_bytes, "known issues"),
         )
     except context_pack.PackError as exc:
         raise ControlPanelValidationError(f"context pack refused: {exc}") from exc

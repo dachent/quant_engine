@@ -47,7 +47,16 @@ def _sources() -> list:
 def _pack(data: dict | None = None, prior=None, recs=None) -> dict:
     data = data if data is not None else _payload()
     decision = pd.build_decision(data, _policy(), _sha())
-    return cp.build_pack(data, decision, _policy(), _sha(), _sources(), recs, prior)
+    return cp.build_pack(
+        data,
+        decision,
+        _policy(),
+        _sha(),
+        _sources(),
+        recs,
+        prior,
+        json.loads(cp.KNOWN_ISSUES_PATH.read_bytes()),
+    )
 
 
 def _fact(pack: dict, fact_id: str) -> dict:

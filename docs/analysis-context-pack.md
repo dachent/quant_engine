@@ -43,3 +43,20 @@ D model, vendor or backtest (context only); P policy constant or rule output.
 - The payload has no model weekly series for most strategies, so account-versus-model for last week and 4 weeks
   shows the account return and no gap; the since-start gap comes from the pinned audit (grade C).
 - The prior worst drawdowns are in the policy file (from the 2026-11 correlation-one audit) until the payload carries them.
+
+## Known issues of a release (governed list)
+
+`contracts/portfolio-known-issues-v1.json` lists the defects disclosed for the committed release. The pack's
+**DO NOT RELY ON** section prints one line per `OPEN` entry after the general rules. An entry has: `id` (`KI-NN`,
+never reused), `status` (`OPEN` or `FIXED`), `verification` (`BYTES` checked against files, or `CONTROL` taken from
+control's tracking), `do_not_rely` (the sentence the analyst reads), `effect`, `affected_paths`, and
+`fix` {`ticket`, `release`, `note`}. Append an entry when a defect is found; set `FIXED` when a later release removes
+it; never delete one. A malformed list refuses the pack. Source of the first ten entries:
+`records/sprint/B-KNOWN-ISSUES-DISCLOSURE.md` (the resolved Schwab 054 ladder item is not listed).
+
+## Weekly questions and the acceptance check
+
+The five weekly questions (limit status, rebalance, strategy status, what changed, what not to trust) are answered from
+the pack text alone. `tests/portfolio_control_panel/test_known_issues_and_weekly_questions.py` is the deterministic floor:
+each answer must be present in its section with cited fact ids that exist in the pack. A live model run uses
+`python tools/context_pack.py --payload dashboard_data.json --out DIR` and reads `context-pack.md` only.
