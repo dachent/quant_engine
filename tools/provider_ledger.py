@@ -1589,15 +1589,17 @@ def _matrixport_positions(
         current = _observed_decimal(
             rec.get("current_share"), "matrixport current_share"
         )
-        events = _observed_decimal(rec.get("event_share_sum"), "matrixport event_share")
+        event_sum = _observed_decimal(
+            rec.get("event_share_sum"), "matrixport event_share"
+        )
         opening = _observed_decimal(
             rec.get("unexplained_opening_share"), "matrixport opening share"
         )
         if (
             current is None
-            or events is None
+            or event_sum is None
             or opening is None
-            or current != events
+            or current != event_sum
             or opening != 0
             or current != api_share.get(key)
         ):
@@ -1663,7 +1665,7 @@ def _matrixport_positions(
                             "status": "UNAVAILABLE",
                             "value": None,
                         },
-                        "provider_id": "matrixport",
+                        "provider_id": _MATRIXPORT,
                         "quantity": format(share.normalize(), "f"),
                         "record_id": f"matrixport:position:{source_id}",
                         "security_id": "security-matrixport-"
@@ -1725,7 +1727,7 @@ def _matrixport_positions(
                         "status": "AVAILABLE",
                         "value": format(native.normalize(), "f"),
                     },
-                    "provider_id": "matrixport",
+                    "provider_id": _MATRIXPORT,
                     "quantity": format(share.normalize(), "f"),
                     "unit_nav": format(unit_nav.normalize(), "f"),
                     "record_id": f"matrixport:position:{source_id}",
