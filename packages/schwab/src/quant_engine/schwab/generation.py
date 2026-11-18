@@ -196,8 +196,91 @@ def _load_spec(path: Path) -> dict[str, Any]:
         keys.add("current_snapshot")
         if "transaction_history_manifest" in spec:
             keys.add("transaction_history_manifest")
+        if "declared_empty_position_accounts" in spec:
+            keys.add("declared_empty_position_accounts")
     _strict(spec, keys, "spec")
     return spec
+
+
+def _declared_empty_accounts(
+    value: object,
+    *,
+    roots: Mapping[str, Path],
+    generation_as_of: date,
+    account_ids: set[str],
+) -> tuple[list[str], list[SourceArtifact]]:
+    """Accounts the spec declares to hold no position, each with a hash-pinned evidence file.
+
+    The catalog lists an account as having an empty position set only on this governed evidence
+    (for example a live balances capture whose Market Value is zero), never by inferring it from
+    the absence of position rows: an account whose positions page was not captured also has none.
+    """
+
+    if value is None:
+        return [], []
+    items = _objects(value, "declared_empty_position_accounts")
+    accounts: list[str] = []
+    artifacts: list[SourceArtifact] = []
+    for item in items:
+        _strict(
+            item,
+            {
+                "account_id",
+                "artifact_id",
+                "expected_sha256",
+                "expected_size_bytes",
+                "relative_path",
+                "root_id",
+                "statement",
+            },
+            "declared_empty_position_accounts item",
+        )
+        account_id = _text(
+            item["account_id"], "declared_empty_position_accounts.account_id"
+        )
+        if account_id not in account_ids:
+            raise SchwabGenerationError(
+                "declared empty position account is not an accepted account"
+            )
+        if account_id in accounts:
+            raise SchwabGenerationError("declared empty position account is duplicated")
+        _text(item["statement"], "declared_empty_position_accounts.statement")
+        root_id = _text(item["root_id"], "declared_empty_position_accounts.root_id")
+        if root_id not in roots:
+            raise SchwabGenerationError(
+                "declared empty position evidence root is unknown"
+            )
+        path = _source_path(
+            roots[root_id],
+            _relative(
+                item["relative_path"], "declared_empty_position_accounts.relative_path"
+            ),
+        )
+        actual_hash, actual_size = hash_file(path)
+        expected_hash = _text(
+            item["expected_sha256"], "declared_empty_position_accounts.expected_sha256"
+        )
+        if _SHA256.fullmatch(expected_hash) is None or actual_hash != expected_hash:
+            raise SchwabGenerationError("declared empty position evidence hash differs")
+        if actual_size != _integer(
+            item["expected_size_bytes"],
+            "declared_empty_position_accounts.expected_size_bytes",
+        ):
+            raise SchwabGenerationError("declared empty position evidence size differs")
+        accounts.append(account_id)
+        artifacts.append(
+            SourceArtifact(
+                artifact_id=_relative(
+                    item["artifact_id"], "declared_empty_position_accounts.artifact_id"
+                ),
+                sha256=actual_hash,
+                size_bytes=actual_size,
+                as_of_date=generation_as_of,
+                schema_name="schwab-live-balances-evidence",
+                schema_version="1",
+            )
+        )
+    return sorted(accounts), artifacts
 
 
 def _roots(value: object) -> dict[str, Path]:
@@ -1918,6 +2001,19 @@ def build_generation(
         artifacts = tuple(
             sorted((*artifacts, current_artifact), key=lambda item: item.artifact_id)
         )
+    declared_empty_accounts, declared_empty_artifacts = _declared_empty_accounts(
+        spec.get("declared_empty_position_accounts"),
+        roots=roots,
+        generation_as_of=generation_as_of,
+        account_ids=set(crosswalk.values()),
+    )
+    if declared_empty_artifacts:
+        artifacts = tuple(
+            sorted(
+                (*artifacts, *declared_empty_artifacts),
+                key=lambda item: item.artifact_id,
+            )
+        )
     txn_partial_gap: dict[str, object] | None = None
     expected_export_record_count: int | None = None
     if sources.get("MANUAL_TRANSACTION_JSON_ALL"):
@@ -2023,17 +2119,13 @@ def build_generation(
     # cash, closed against its native balance) and no non-cash position row holds cash only:
     # that is the account's structure, not a missing observation.
     positioned_accounts = {str(item["account_id"]) for item in positions}
-    cash_only_accounts = (
-        sorted(
-            str(item["account_id"])
-            for item in current_accounts
-            if _object(item["liquidation_value"], "liquidation_value")["status"]
-            == "AVAILABLE"
-            and str(item["account_id"]) not in positioned_accounts
+    # governed evidence only (see ``_declared_empty_accounts``); an account that also has a
+    # position row contradicts its own evidence and refuses
+    if set(declared_empty_accounts) & positioned_accounts:
+        raise SchwabGenerationError(
+            "a declared empty position account has a position row"
         )
-        if current_accounts is not None
-        else []
-    )
+    cash_only_accounts = declared_empty_accounts
     cash_only_count = len(cash_only_accounts)
     structure_reported = (
         current_accounts is not None and current_balance_available_count > 0
@@ -2112,8 +2204,8 @@ def build_generation(
                         *(
                             (
                                 f"{cash_only_count} accepted accounts hold cash only: "
-                                "no non-cash position row exists for them (liquidation "
-                                "value proved against the native balance)",
+                                "a hash-pinned live balances capture shows no holding and no non-cash "
+                                "position row exists for them",
                             )
                             if cash_only_count
                             else ()

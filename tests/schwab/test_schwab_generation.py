@@ -2201,8 +2201,8 @@ def test_valuation_cutoff_must_be_a_canonical_iso_date(tmp_path: Path) -> None:
 
 
 def _without_positions_of_first_account(
-    spec: Path, *, liquidation_available: bool
-) -> None:
+    spec: Path, *, liquidation_available: bool, declare_empty: bool = False
+) -> str:
     document = json.loads(spec.read_text(encoding="utf-8"))
     source_root = Path(document["roots"]["source"])
     snapshot_path = source_root / document["current_snapshot"]["relative_path"]
@@ -2224,7 +2224,27 @@ def _without_positions_of_first_account(
     ).hexdigest()
     document["current_snapshot"]["expected_size_bytes"] = len(payload)
     document["baseline"]["position_count"] -= 1
+    if declare_empty:
+        evidence = source_root / "balances-evidence.txt"
+        evidence.write_bytes(b"Market Value 0.00 Cash 100.00")
+        document["declared_empty_position_accounts"] = [
+            _empty_declaration(first, evidence)
+        ]
     spec.write_text(json.dumps(document), encoding="utf-8")
+    return str(first)
+
+
+def _empty_declaration(account: str, evidence: Path) -> dict[str, object]:
+    payload = evidence.read_bytes()
+    return {
+        "account_id": account,
+        "artifact_id": "evidence/balances-evidence.txt",
+        "expected_sha256": hashlib.sha256(payload).hexdigest(),
+        "expected_size_bytes": len(payload),
+        "relative_path": evidence.name,
+        "root_id": "source",
+        "statement": "live balances capture: Market Value zero",
+    }
 
 
 def test_structure_is_typed_apart_and_only_missing_observations_are_gaps(
@@ -2234,7 +2254,7 @@ def test_structure_is_typed_apart_and_only_missing_observations_are_gaps(
     and no non-cash row) are the accounts' structure, reported under ``structural_boundaries``;
     an account without a position row whose liquidation value is unproved stays a gap."""
 
-    for name in "abc":
+    for name in "abcdef":
         (tmp_path / name).mkdir()
     complete, _, _ = build_generation(_spec_with_current(tmp_path / "a"))
     investor = "Investor Checking is outside the accepted brokerage boundary"
@@ -2246,8 +2266,15 @@ def test_structure_is_typed_apart_and_only_missing_observations_are_gaps(
     assert "empty_position_account_ids" not in complete
 
     cash_only_spec = _spec_with_current(tmp_path / "b")
-    _without_positions_of_first_account(cash_only_spec, liquidation_available=True)
+    first = _without_positions_of_first_account(
+        cash_only_spec, liquidation_available=True, declare_empty=True
+    )
     cash_only, _, _ = build_generation(cash_only_spec)
+    assert cash_only["empty_position_account_ids"] == [first]
+    assert any(
+        row["artifact_id"] == "evidence/balances-evidence.txt"
+        for row in cash_only["source_artifacts"]
+    )
     assert any(
         g.startswith("1 accepted accounts hold cash only")
         for g in cash_only["coverage"]["structural_boundaries"]
@@ -2273,3 +2300,58 @@ def test_structure_is_typed_apart_and_only_missing_observations_are_gaps(
         "hold cash only" in g for g in unproved["coverage"]["structural_boundaries"]
     )
     assert "empty_position_account_ids" not in unproved
+
+
+def test_no_position_row_alone_never_lists_an_account_as_empty(tmp_path: Path) -> None:
+    """The earlier rule (proved liquidation value and no position row) is gone: an account whose
+    positions page was never captured has no row either (691 holds SWVXX 70,856.25)."""
+
+    spec = _spec_with_current(tmp_path)
+    _without_positions_of_first_account(spec, liquidation_available=True)
+    catalog, _, _ = build_generation(spec)
+    assert "empty_position_account_ids" not in catalog
+    assert not any(
+        "hold cash only" in g for g in catalog["coverage"]["structural_boundaries"]
+    )
+    assert any(
+        "no reported non-cash position row" in g
+        for g in catalog["coverage"]["known_gaps"]
+    )
+
+
+def test_a_declared_empty_account_needs_true_evidence_and_no_position_row(
+    tmp_path: Path,
+) -> None:
+    for name in "abcd":
+        (tmp_path / name).mkdir()
+
+    def declared(directory: str, mutate: Any) -> Path:
+        spec = _spec_with_current(tmp_path / directory)
+        document = json.loads(spec.read_text(encoding="utf-8"))
+        source_root = Path(document["roots"]["source"])
+        snapshot = json.loads(
+            (source_root / document["current_snapshot"]["relative_path"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        account = snapshot["accounts"][0][
+            "account_id"
+        ]  # this account HAS a position row
+        evidence = source_root / "balances-evidence.txt"
+        evidence.write_bytes(b"Market Value 0.00")
+        entry = _empty_declaration(account, evidence)
+        mutate(entry)
+        document["declared_empty_position_accounts"] = [entry]
+        spec.write_text(json.dumps(document), encoding="utf-8")
+        return spec
+
+    with pytest.raises(SchwabGenerationError, match="has a position row"):
+        build_generation(declared("a", lambda e: None))
+    with pytest.raises(SchwabGenerationError, match="hash differs"):
+        build_generation(declared("b", lambda e: e.update(expected_sha256="0" * 64)))
+    with pytest.raises(SchwabGenerationError, match="not an accepted account"):
+        build_generation(
+            declared("c", lambda e: e.update(account_id="account-unknown"))
+        )
+    with pytest.raises(SchwabGenerationError, match="size differs"):
+        build_generation(declared("d", lambda e: e.update(expected_size_bytes=1)))
