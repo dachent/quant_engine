@@ -1464,8 +1464,10 @@ def _matrixport_positions(
     ``symbol`` is the product name from ``csv/holdings.csv`` (the unit is the share).
 
     Scope, stated plainly: the SHARE series is checked on every day against the cumulative
-    subscription/redemption events of ``csv/position_events.csv`` (events are extractor-derived;
-    their total is tied to the API holding), and the first held day must be the first event day.
+    subscription/redemption events of ``csv/position_events.csv`` (events are extractor-derived
+    and NOT independent of the extractor: only their total is tied to the API holding, so a
+    consistent rewrite of holdings and events that preserves the total is not detected), and the
+    first held day must be the first event day.
     The VALUE is checked per day only for consistency with the published unit NAV, and against
     the API-reported holding value on the LAST day only (2%); there is no independent per-day
     value source, so a value scaled under 2% consistently across all days is not detected.
