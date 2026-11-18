@@ -588,7 +588,11 @@ def _holes(data: Mapping[str, Any]) -> list[dict[str, str]]:
             {
                 "what": f"Pull {pull.get('pull_id')}: {_clean(str(pull.get('title')))[:170]}",
                 "blocks": f"account-versus-model terms ({', '.join(pull.get('replaces') or [])})",
-                "closes_by": f"{pull.get('access')}; status {pull.get('status')}",
+                "closes_by": (
+                    f"owner ruling: not a download; status {pull.get('status')}"
+                    if pull.get("status") == "NOT_A_DOWNLOAD_OWNER_RULING"
+                    else f"{pull.get('access')}; status {pull.get('status')}"
+                ),
             }
         )
     cs = data.get("capital_status") or {}

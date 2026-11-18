@@ -245,3 +245,22 @@ def test_a_closed_pull_is_not_a_data_hole_and_an_open_one_is() -> None:
     data["model_vs_actual"] = mva
     whats = " | ".join(h["what"] for h in cp._holes(data))
     assert "X-OPEN" in whats and "X-CLOSED" not in whats
+
+
+def test_an_owner_ruling_pull_stays_a_hole_and_says_it_is_not_a_download() -> None:
+    data = dict(_data())
+    data["model_vs_actual"] = {
+        "pulls": [
+            {
+                "pull_id": "X-RULING",
+                "title": "owner ruling pull",
+                "replaces": ["fx"],
+                "access": "no download",
+                "status": "NOT_A_DOWNLOAD_OWNER_RULING",
+            }
+        ]
+    }
+    holes = [h for h in cp._holes(data) if "X-RULING" in h["what"]]
+    assert len(holes) == 1
+    assert holes[0]["closes_by"].startswith("owner ruling: not a download")
+    assert "to download" not in holes[0]["closes_by"]
