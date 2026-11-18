@@ -15907,6 +15907,48 @@ def test_model_vs_actual_rides_through_the_real_render_schema_and_pin(
         )
 
 
+def test_the_underwriting_references_use_the_blocks_own_as_of_through_the_real_render(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reference lookup receives the panel's own as-of sources and the pinned input."""
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_mva_synthetic_refs", Path(__file__).with_name("test_model_vs_actual.py")
+    )
+    assert spec is not None and spec.loader is not None
+    mva_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mva_tests)
+    staged = tmp_path / "audit-bridges.json"
+    staged.write_bytes(mva_tests.synthetic_staged_bytes())
+    pin = hashlib.sha256(staged.read_bytes()).hexdigest()
+    seen: list[tuple[Any, bytes, str, Any]] = []
+    real = panel.model_account_gap_references_for
+
+    def spy(panel_like: Any, raw: bytes, sha: str, ids: Any) -> dict[str, Any]:
+        seen.append((panel_like, raw, sha, ids))
+        return real(panel_like, raw, sha, ids)  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(panel, "model_account_gap_references_for", spy)
+    _files, data, _bound = panel._rendered_files(
+        inputs["report"],
+        inputs["legacy"],
+        panel.DEFAULT_TEMPLATE_ROOT,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        model_vs_actual_input=(staged, pin),
+    )
+
+    assert len(seen) == 1
+    panel_like, raw, sha, ids = seen[0]
+    assert (raw, sha) == (staged.read_bytes(), pin)
+    assert tuple(ids) == panel.REPLICA_REFERENCE_STRATEGY_IDS
+    # the as-of the lookup cuts off at is the one the block cuts its own windows at
+    mva = panel._model_vs_actual_module
+    assert mva._as_of(panel_like) == data["model_vs_actual"]["as_of"]  # noqa: SLF001
+
+
 def test_vendor_gap_fills_input_is_pinned_bound_and_closed_against_receipts(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:

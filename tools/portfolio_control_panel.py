@@ -136,8 +136,7 @@ else:
 if TYPE_CHECKING:
     from portfolio_model_vs_actual import (
         build_model_vs_actual,
-        model_account_gap_reference,
-        parse_audit_input,
+        model_account_gap_references as model_account_gap_references_for,
     )
 else:
     try:
@@ -147,8 +146,9 @@ else:
             raise
         _model_vs_actual_module = import_module("portfolio_model_vs_actual")
     build_model_vs_actual = _model_vs_actual_module.build_model_vs_actual
-    model_account_gap_reference = _model_vs_actual_module.model_account_gap_reference
-    parse_audit_input = _model_vs_actual_module.parse_audit_input
+    model_account_gap_references_for = (
+        _model_vs_actual_module.model_account_gap_references
+    )
 
 if TYPE_CHECKING:
     from portfolio_vendor_nav_gap_fill import build_vendor_gap_fills
@@ -9236,6 +9236,10 @@ RECONSTRUCTED_PROXY_COMPARISON_STATUS = (
 # The model-versus-actual replica of the same strategy and window: the underwriting row
 # publishes this figure; the signal-state proxy above rides along only as a cross-check.
 REPLICA_REFERENCE_COMPARISON_STATUS = "AUDIT_REPLICA_REFERENCE_NOT_PROVIDER_PUBLISHED"
+# Strategies whose underwriting gap is taken from the model-versus-actual replica.  A
+# strategy joins deliberately: the audit comparator saying "not provider-published" is
+# not enough to swap a published reference.
+REPLICA_REFERENCE_STRATEGY_IDS = ("grizzlybears-vtma",)
 RECONSTRUCTED_REFERENCE_COMPARISON_STATUSES = frozenset(
     {RECONSTRUCTED_PROXY_COMPARISON_STATUS, REPLICA_REFERENCE_COMPARISON_STATUS}
 )
@@ -9372,7 +9376,7 @@ def _replica_reference_gap_underwriting(
     total_gap = _finite_float(reference.get("gap"), "replica gap")
     uncertainty = reference.get("uncertainty_pp")
     range_text = (
-        f" before 2026-04-08 the replica carries a proxy range of about +/-{uncertainty:g} pp"
+        f" per the audit's own note the replica carries a proxy range of about +/-{uncertainty:g} pp"
         if isinstance(uncertainty, (int, float)) and not isinstance(uncertainty, bool)
         else ""
     )
@@ -10986,7 +10990,8 @@ def _panel_data(
     hwm_basis: tuple[Mapping[str, Any], Mapping[str, date], frozenset[str]]
     | None = None,
     strategy_basis_declaration: bytes | None = None,
-    model_account_gap_references: Mapping[str, Mapping[str, Any]] | None = None,
+    model_vs_actual_gap_input: tuple[bytes, str] | None = None,
+    capital_for_as_of: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -11824,6 +11829,24 @@ def _panel_data(
         raise ControlPanelValidationError(
             "panel capital identity differs: " + "; ".join(capital_problems)
         )
+    # The block cuts its windows at the invested-capital completeness date, else the
+    # weekly-returns as-of: the reference lookup uses exactly those two values.
+    model_account_gap_references: dict[str, Mapping[str, Any]] = {}
+    if model_vs_actual_gap_input is not None:
+        try:
+            model_account_gap_references = model_account_gap_references_for(
+                {
+                    "invested_capital": capital_for_as_of,
+                    "weekly_returns": accepted_weekly_returns,
+                },
+                model_vs_actual_gap_input[0],
+                model_vs_actual_gap_input[1],
+                REPLICA_REFERENCE_STRATEGY_IDS,
+            )
+        except ValueError as exc:
+            raise ControlPanelValidationError(
+                f"model_vs_actual input is not usable: {exc}"
+            ) from exc
     strategy_underwriting, underwriting_policy_hash = _strategy_underwriting(
         strategies,
         accepted_decomposition_lenses,
@@ -13707,25 +13730,16 @@ def _rendered_files(
             authority_path, authority_label
         )
     # The underwriting gap of a strategy with no provider comparison uses the model figure
-    # of its model-versus-actual primary window, so the two sections cannot disagree.
-    model_account_gap_references: dict[str, Mapping[str, Any]] = {}
+    # of its model-versus-actual primary window (see _panel_data), so the two sections
+    # cannot disagree; the audit bytes are read here, once, with the same refusal.
+    model_vs_actual_gap_input: tuple[bytes, str] | None = None
     if model_vs_actual_input is not None:
         try:
-            audit_input = parse_audit_input(
-                model_vs_actual_input[0].read_bytes(), model_vs_actual_input[1]
+            model_vs_actual_gap_input = (
+                model_vs_actual_input[0].read_bytes(),
+                model_vs_actual_input[1],
             )
-            for audit_strategy in audit_input["strategies"]:
-                reference = model_account_gap_reference(
-                    model_vs_actual_input[0].read_bytes(),
-                    model_vs_actual_input[1],
-                    str(audit_strategy.get("strategy_id")),
-                    _text(report.get("as_of_date"), "report.as_of_date"),
-                )
-                if reference is not None:
-                    model_account_gap_references[
-                        str(audit_strategy.get("strategy_id"))
-                    ] = reference
-        except (OSError, ValueError) as exc:
+        except OSError as exc:
             raise ControlPanelValidationError(
                 f"model_vs_actual input is not usable: {exc}"
             ) from exc
@@ -13781,7 +13795,8 @@ def _rendered_files(
         strategy_basis_declaration=_report_strategy_basis_declaration(
             report, report_path
         ),
-        model_account_gap_references=model_account_gap_references,
+        model_vs_actual_gap_input=model_vs_actual_gap_input,
+        capital_for_as_of=invested_capital,
     )
     if invested_capital is not None:
         data["invested_capital"] = invested_capital

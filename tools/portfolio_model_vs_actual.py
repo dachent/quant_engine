@@ -203,6 +203,9 @@ def model_account_gap_reference(
             model = _num(w.get("model_return_pct"), "model_return_pct")
             account = _num(w.get("account_return_pct"), "account_return_pct")
             comparator = _mapping(item.get("comparator"), "comparator")
+            if comparator.get("provider_published") is not False:
+                # an incomplete comparator never becomes a replica reference
+                return None
             ranges = [
                 float(m.group(1))
                 for note in item.get("notes") or []
@@ -221,10 +224,39 @@ def model_account_gap_reference(
                 "comparator_description": _text(
                     comparator.get("description"), "comparator description"
                 ),
-                "provider_published": comparator.get("provider_published") is True,
+                "provider_published": False,
                 "uncertainty_pp": max(ranges) if ranges else None,
             }
     return None
+
+
+def model_account_gap_references(
+    panel: Mapping[str, Any],
+    audit_input_raw: bytes,
+    audit_input_sha256: str,
+    strategy_ids: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    """The references of the named strategies, cut off exactly as the block cuts its windows.
+
+    The cutoff is the block's own ``_as_of(panel)`` (invested-capital completeness date,
+    else the weekly-returns as-of), so a window the block withholds can never drive an
+    underwriting row.  Only the named strategies are looked up: a strategy joins the list
+    deliberately, never because its audit comparator happens to say not provider-published.
+    """
+
+    cutoff = _as_of(panel)
+    audit = parse_audit_input(audit_input_raw, audit_input_sha256)
+    present = {str(item.get("strategy_id")) for item in audit["strategies"]}
+    found: dict[str, dict[str, Any]] = {}
+    for strategy_id in strategy_ids:
+        if strategy_id not in present:
+            continue
+        reference = model_account_gap_reference(
+            audit_input_raw, audit_input_sha256, strategy_id, cutoff
+        )
+        if reference is not None:
+            found[strategy_id] = reference
+    return found
 
 
 # ------------------------------------------------------------- governed context

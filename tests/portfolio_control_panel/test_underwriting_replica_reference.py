@@ -183,3 +183,46 @@ def test_a_provider_comparison_still_wins_over_the_replica() -> None:
 
     assert gap["total_gap"] == "-0.05"
     assert gap["comparison_status"] == "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED"
+
+
+def test_a_comparator_without_provider_published_gives_no_reference() -> None:
+    raw, sha, audit = _audit_with_v6_window()
+    s2 = next(s for s in audit["strategies"] if s["strategy_id"] == "s2")
+    del s2["comparator"]["provider_published"]
+    raw, sha = mva_tests._raw(audit)  # noqa: SLF001
+    mva = panel.__dict__["_model_vs_actual_module"]
+
+    assert mva.model_account_gap_reference(raw, sha, "s2", CUTOFF) is None
+
+
+def test_the_references_are_cut_off_by_the_blocks_own_as_of() -> None:
+    raw, sha, _audit = _audit_with_v6_window()
+    mva = panel.__dict__["_model_vs_actual_module"]
+
+    def refs(complete_through: str, ids: tuple[str, ...] = ("s2",)) -> dict[str, Any]:
+        return mva.model_account_gap_references(
+            {"invested_capital": {"complete_through": complete_through}},
+            raw,
+            sha,
+            ids,
+        )
+
+    assert set(refs("2026-11-06")) == {"s2"}
+    # the block withholds a window ending after its as-of: no reference either
+    assert refs("2026-11-05") == {}
+    # only the named strategies are looked up, an unnamed one never joins
+    assert refs("2026-11-06", ("s1",)) == {}
+    assert refs("2026-11-06", ("unknown",)) == {}
+    assert panel.REPLICA_REFERENCE_STRATEGY_IDS == ("grizzlybears-vtma",)
+
+
+def test_the_references_refuse_a_wrong_pin_and_a_panel_without_an_as_of() -> None:
+    raw, sha, _audit = _audit_with_v6_window()
+    mva = panel.__dict__["_model_vs_actual_module"]
+
+    with pytest.raises(mva.ModelVsActualError):
+        mva.model_account_gap_references(
+            {"invested_capital": {"complete_through": CUTOFF}}, raw, "0" * 64, ("s2",)
+        )
+    with pytest.raises(mva.ModelVsActualError):
+        mva.model_account_gap_references({}, raw, sha, ("s2",))
