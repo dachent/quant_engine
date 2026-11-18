@@ -34,7 +34,7 @@ D model, vendor or backtest (context only); P policy constant or rule output.
   The chain detects any change before the last line; the last line is pinned only by the head digest the panel
   and the pack show, so record it (`--head`) when you want that line pinned too.
 - Append with `python tools/recommendation_log.py append --row-json FILE`. Rows are written as LF bytes.
-- The log lives in the repository records directory. Copy it with each release's evidence (retained-artifacts rule).
+- The log file `records/decisions/recommendation-log.jsonl` is NOT committed: the repository boundary check forbids data-format files outside exact synthetic fixtures, and a missing file reads as an empty log. It is a retained record: keep it in OneDrive with each release's evidence (retained-artifacts rule) and pass `--log PATH` to the tool, or place it at the default path before a run.
 
 ## Known limits of v0
 

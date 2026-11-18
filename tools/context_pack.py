@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 1
 CORE_TOKEN_TARGET = 25_000
 HARD_TOKEN_CAP = 40_000
-CHARS_PER_TOKEN = 4  # an estimate: ceil(utf-8 bytes / 4)
+CHARS_PER_UNIT = 4  # an estimate: ceil(utf-8 bytes / 4)
 
 GRADES = {
     "A": "Reconciled to statements with closure.",
@@ -110,7 +110,7 @@ GLOSSARY: dict[str, str] = {
     "WITHDRAWN": "Recommendation status: withdrawn.",
 }
 
-_TOKEN = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
+_STATUS_WORD = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
 _SINGLE = re.compile(
     r"\b(NORMAL|HOLD|WATCH|REDUCE|EXIT|PARTIAL|CURRENT|STALE|INACTIVE|UNSET|VERIFIED|EMPTY|OPEN|CLOSED)\b"
 )
@@ -838,7 +838,7 @@ def build_pack(
         ),
     )
     all_text = "\n".join(s["text"] for s in sections)
-    used = sorted(set(_TOKEN.findall(all_text)) | set(_SINGLE.findall(all_text)))
+    used = sorted(set(_STATUS_WORD.findall(all_text)) | set(_SINGLE.findall(all_text)))
     missing = [t for t in used if t not in GLOSSARY and t not in CAVEATS]
     glossary_lines = [f"- {t}: {GLOSSARY[t]}" for t in used if t in GLOSSARY]
     glossary_lines += [f"- {t}: (no glossary entry)" for t in missing]
@@ -855,7 +855,7 @@ def build_pack(
     )
     pack_id = "PACK-" + hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
     text = body + f"\n\nPack id: {pack_id}\n"
-    tokens = math.ceil(len(text.encode("utf-8")) / CHARS_PER_TOKEN)
+    tokens = math.ceil(len(text.encode("utf-8")) / CHARS_PER_UNIT)
     pack = {
         "schema_version": SCHEMA_VERSION,
         "pack_id": pack_id,
@@ -867,7 +867,7 @@ def build_pack(
         "token_cap": HARD_TOKEN_CAP,
         "core_target": CORE_TOKEN_TARGET,
         "section_tokens": {
-            s["id"]: math.ceil(len(s["text"].encode("utf-8")) / CHARS_PER_TOKEN)
+            s["id"]: math.ceil(len(s["text"].encode("utf-8")) / CHARS_PER_UNIT)
             for s in sections
         },
         "grade_counts": {g: sum(1 for f in facts if f["grade"] == g) for g in GRADES},
@@ -891,7 +891,7 @@ def validate_pack(
         failures.append(
             f"{pack['tokens_estimate']} tokens exceeds the hard cap {HARD_TOKEN_CAP}"
         )
-    for token in sorted(set(_TOKEN.findall(text)) | set(_SINGLE.findall(text))):
+    for token in sorted(set(_STATUS_WORD.findall(text)) | set(_SINGLE.findall(text))):
         if token not in GLOSSARY and token not in CAVEATS:
             failures.append(f"token {token} has no glossary entry")
     ids = {f["id"] for f in pack["facts"]}
