@@ -584,3 +584,31 @@ def test_position_closes_are_introduced_by_the_flag_not_only_carried(
             world["provenance"],
             quantbase_position_closes=empty,
         )
+
+
+def test_the_event_completeness_declaration_is_pinned_and_carried(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """Like account_roles: pinned by path/sha256/size when given, carried from the predecessor
+    spec when not given again, absent otherwise (the spec, hence every id, is what it was)."""
+
+    assert "event_completeness_declaration" not in _build(world)["spec"]
+    declaration = tmp_path / "completeness.json"
+    declaration.write_bytes(b'{"schema_version": 1, "declarations": []}')
+    spec = tool.build(
+        world["resolved"],
+        world["predecessor"],
+        world["out"],
+        world["provenance"],
+        event_completeness_declaration=declaration,
+    )["spec"]
+    pin = spec["event_completeness_declaration"]
+    assert set(pin) == {"path", "sha256", "size_bytes"}
+    assert pin["sha256"] == hashlib.sha256(declaration.read_bytes()).hexdigest()
+    carried = tool.build(
+        world["resolved"],
+        {**world["predecessor"], "event_completeness_declaration": pin},
+        world["out"],
+        world["provenance"],
+    )["spec"]
+    assert carried["event_completeness_declaration"] == pin

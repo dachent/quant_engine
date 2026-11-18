@@ -144,8 +144,8 @@
       1
     ],
     [
-      "decision_refresh",
-      "release_cycle_manifest",
+      "event_completeness",
+      "leverage_disclosure",
       1
     ],
     [
@@ -755,6 +755,11 @@
     ],
     [
       "provider_ledger",
+      "event_completeness",
+      1
+    ],
+    [
+      "provider_ledger",
       "quantbase_fund_days",
       1
     ],
@@ -975,11 +980,6 @@
     ],
     [
       "release_spec_remap",
-      "release_cycle_manifest",
-      1
-    ],
-    [
-      "release_world",
       "release_cycle_manifest",
       1
     ],

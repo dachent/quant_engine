@@ -191,6 +191,9 @@ _PATH_STAGES = {
     "tools/portfolio_cash_drag_spec.py": ["panel"],
     # Imported by the ledger builder (fill-day restatement) and the baseline (statement points).
     "tools/quantbase_fund_days.py": list(_STAGE_ORDER),
+    # Ledger-side completeness closures (declaration key, closure verdict rows) read by the baseline;
+    # same reach as the ledger code it is imported by.
+    "tools/event_completeness.py": list(_STAGE_ORDER),
     # Imported by the ledger builder (provider-observed zero-financing days).
     "tools/zero_financing_statements.py": list(_STAGE_ORDER),
     "tools/statement_reserve_nav.py": list(_STAGE_ORDER[1:]),

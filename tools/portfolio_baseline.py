@@ -9,7 +9,7 @@ walks a directory or calls a provider.
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
 import csv
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
@@ -5539,6 +5539,65 @@ def _fact_coverage(
     return claims, exceptions
 
 
+_TYPED_OUTCOME_STATUS: Final = {
+    "CAPTURED_NOT_ADMITTED": (
+        "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF",
+        "RETAINED_CAPTURED_NOT_ADMITTED",
+    ),
+    "EXCLUDED_BY_RULING": (
+        "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF",
+        "RETAINED_EXCLUDED_BY_RULING",
+    ),
+}
+
+
+def _ledger_completeness(
+    provider_catalog: Mapping[str, Any] | None,
+) -> dict[tuple[str, str], Mapping[str, Any]]:
+    """The ledger's per (account, fact) closure verdicts, when it evaluated declarations."""
+
+    rows = (provider_catalog or {}).get("event_completeness")
+    if not isinstance(rows, list):
+        return {}
+    return {
+        (str(row["account_id"]), str(row["fact_type"])): row
+        for row in rows
+        if isinstance(row, Mapping)
+    }
+
+
+def _unattributed_provider_records(
+    provider_catalog: Mapping[str, Any] | None,
+) -> dict[tuple[str, str], int]:
+    """Provider-ledger flows and transactions per (account, fact) that are not MAPPED to a strategy."""
+
+    counts: dict[tuple[str, str], int] = defaultdict(int)
+    for fact_type in ("flows", "transactions"):
+        rows = (provider_catalog or {}).get(fact_type)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if (
+                isinstance(row, Mapping)
+                and row.get("account_id") is not None
+                and row.get("mapping_status") != "MAPPED"
+            ):
+                counts[(str(row["account_id"]), fact_type)] += 1
+    return dict(counts)
+
+
+def _canonical_amount(amount: Any) -> str:
+    """An AVAILABLE amount as canonical decimal text, so 1.0, 1.00 and 1E0 compare equal."""
+
+    if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
+        return "None"
+    try:
+        value = Decimal(str(amount.get("value")))
+    except InvalidOperation:
+        return "None"
+    return format(value.normalize(), "f") if value != 0 else "0"
+
+
 def _coverage_evidence(
     accounts: Sequence[Mapping[str, Any]],
     assignments: Sequence[Mapping[str, Any]],
@@ -5550,8 +5609,14 @@ def _coverage_evidence(
     flows: Sequence[Mapping[str, Any]],
     as_of_date: date,
     statement_accounts: Collection[str] = frozenset(),
+    unattributed: Mapping[tuple[str, str], int] | None = None,
+    completeness: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Build value-free account/fact evidence without inventing completeness."""
+    """Build value-free account/fact evidence without inventing completeness.
+
+    ``unattributed`` counts, per (account, fact), the provider-ledger records that carry no
+    strategy attribution and so are not among the accepted records: a row's reason names them,
+    so an account whose events were all excluded is never described as having none."""
 
     fact_specs = {
         "nav": (nav, "as_of_date", "nav_observations", "nav", "DAILY"),
@@ -5660,6 +5725,7 @@ def _coverage_evidence(
                 if isinstance(item.get(amount_field), Mapping)
                 and item[amount_field].get("status") != "AVAILABLE"
             )
+            excluded = (unattributed or {}).get((account_id, fact_type), 0)
             if accepted:
                 status = (
                     "OBSERVED_WITH_UNAVAILABLE_AMOUNTS_NOT_COMPLETENESS_PROOF"
@@ -5682,16 +5748,22 @@ def _coverage_evidence(
                     authority = "PINNED_STATEMENT_POINTS"
                     row_cadence = "STATEMENT_PERIODIC"
             elif admitted:
-                status = (
-                    "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
-                    if cadence == "EVENT_STREAM"
-                    else "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF"
-                )
-                disposition = (
-                    "RETAINED_UNATTESTED_EVENT_INTERVAL"
-                    if cadence == "EVENT_STREAM"
-                    else "RETAINED_NO_REPORTED_FACT"
-                )
+                if excluded and cadence == "EVENT_STREAM":
+                    # events exist in the provider ledger but none is attributed to a strategy:
+                    # they are neither accepted nor absent
+                    status = "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF"
+                    disposition = "RETAINED_PROVIDER_EVENTS_NOT_ATTRIBUTED"
+                else:
+                    status = (
+                        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+                        if cadence == "EVENT_STREAM"
+                        else "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF"
+                    )
+                    disposition = (
+                        "RETAINED_UNATTESTED_EVENT_INTERVAL"
+                        if cadence == "EVENT_STREAM"
+                        else "RETAINED_NO_REPORTED_FACT"
+                    )
                 missing_reason = (
                     "an effective-dated provider admission exists, but it is not a "
                     "fact completeness declaration"
@@ -5707,6 +5779,116 @@ def _coverage_evidence(
                 )
                 authority = "ACCOUNT_REGISTRY_NO_PROVIDER_SOURCE"
                 boundary_basis = "NO_ACCEPTED_SOURCE"
+            declared_start: str | None = None
+            declared_end: str | None = None
+            proof = (completeness or {}).get((account_id, fact_type))
+            proof_gap: str | None = None
+            if proof is not None and proof.get("status") == "DECLARED_COMPLETE":
+                # the closure proved the ledger's rows: the accepted records of this interval must
+                # be exactly those rows, and none may have been excluded
+                lo, hi = str(proof["declared_start"]), str(proof["declared_end"])
+                # a multiset of (id, date, amount): a duplicated id, a changed amount or a moved
+                # date is a difference; a record without a date cannot be placed in the interval
+                proven_rows = proof.get("proven_records")
+
+                def keyed(item: Mapping[str, Any]) -> tuple[str, ...]:
+                    amount = item.get(amount_field)
+                    return (
+                        str(item.get("record_id")),
+                        str(item.get(date_field)),
+                        _canonical_amount(amount),
+                    )
+
+                accepted_keys: Counter[tuple[str, ...]] = Counter(
+                    keyed(item)
+                    for item in accepted
+                    if item.get(date_field) and lo <= str(item[date_field]) <= hi
+                )
+                undated = sum(1 for item in accepted if not item.get(date_field))
+                proven_keys: Counter[tuple[str, ...]] = Counter(
+                    (
+                        str(row["record_id"]),
+                        str(row["event_date"]),
+                        str(row["amount"]),
+                    )
+                    for row in (proven_rows or [])
+                )
+                before_start = sum(
+                    1
+                    for item in accepted
+                    if item.get(date_field) and str(item[date_field]) < lo
+                )
+                covered_before = any(
+                    check.get("check")
+                    == "NO_FLOWS_BEFORE_DECLARED_START_WITH_STATEMENT_COVERAGE"
+                    and int(check.get("statement_days_before_start") or 0) > 0
+                    for check in proof.get("checks", [])
+                )
+                if proven_rows is None:
+                    # a closure row without the proven (id, date, amount) records cannot be
+                    # compared: refused, never reduced to ids alone
+                    proof_gap = f"; the ledger closure row has an absent proven record list: {proof['closure']}"
+                elif before_start and covered_before:
+                    # accepted records dated before the declared start, where the statements
+                    # already covered that time, sit in covered history outside the claim
+                    proof_gap = (
+                        f"; {before_start} accepted records dated before the declared start "
+                        f"{proof['declared_start']} lie in the statement history outside the declaration"
+                    )
+                elif excluded or undated or accepted_keys != proven_keys:
+                    proof_gap = (
+                        f"; ledger closure {proof['closure']} proved the provider event stream "
+                        f"but the accepted records differ: "
+                        f"{sum((proven_keys - accepted_keys).values())} proven records are not "
+                        f"accepted, {sum((accepted_keys - proven_keys).values())} accepted "
+                        f"records are not proven, {undated} accepted records lack a date"
+                    )
+            if (
+                proof is not None
+                and proof.get("status") == "DECLARED_COMPLETE"
+                and proof_gap is None
+            ):
+                # the ledger evaluated the declaration's closure on its own rows: every check passed
+                status = "DECLARED_COMPLETE"
+                disposition = "DECLARED_COMPLETE_BY_LEDGER_CLOSURE"
+                authority = "PROVIDER_LEDGER_CLOSURE"
+                boundary_basis = "LEDGER_CLOSURE"
+                declared_start = str(proof["declared_start"])
+                declared_end = str(proof["declared_end"])
+                missing_reason = (
+                    f"completeness proved by ledger closure {proof['closure']}"
+                )
+                before = sum(
+                    1
+                    for item in accepted
+                    if item.get(date_field) and str(item[date_field]) < lo
+                )
+                if before:
+                    missing_reason += (
+                        f"; {before} accepted records dated before the declared start "
+                        f"{declared_start} lie outside the declaration"
+                    )
+            elif proof_gap is not None:
+                missing_reason += proof_gap
+            elif proof is not None and proof.get("status") in _TYPED_OUTCOME_STATUS:
+                # governed, evidence-cited outcome that proves nothing about completeness
+                status, disposition = _TYPED_OUTCOME_STATUS[str(proof["status"])]
+                authority = "GOVERNED_DECLARATION"
+                missing_reason = (
+                    f"governed declaration {proof['status']}: {proof['citation']}"
+                )
+            elif proof is not None:
+                failed = ", ".join(
+                    f"{check['check']} ({check['failures']})"
+                    for check in proof.get("checks", [])
+                    if check.get("status") != "PASS"
+                )
+                missing_reason += f"; completeness declaration not proved by ledger closure; failed: {failed}"
+            if excluded:
+                missing_reason += (
+                    f"; provider ledger {fact_type} for this account: {excluded} "
+                    "lack a strategy attribution and are left out of the accepted records"
+                )
             matrix.append(
                 {
                     "account_id": account_id,
@@ -5719,8 +5901,8 @@ def _coverage_evidence(
                     "authority": authority,
                     "boundary_basis": boundary_basis,
                     "cadence": row_cadence,
-                    "declared_end": None,
-                    "declared_start": None,
+                    "declared_end": declared_end,
+                    "declared_start": declared_start,
                     "disposition": disposition,
                     "fact_type": fact_type,
                     "missing_interval_end": None,
@@ -6778,6 +6960,9 @@ def build_catalog(
     custody_authority: dict[str, Any] = {}
     fx_authority: dict[str, Any] = {}
     statement_excluded: list[dict[str, Any]] = []
+    ledger_catalog: Mapping[str, Any] | None = (
+        None  # the provider-ledger catalog, when this spec has one
+    )
     statement_nav: list[dict[str, Any]] = []
     if spec["schema_version"] == 2:
         schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
@@ -6817,6 +7002,7 @@ def build_catalog(
             custody_authority=custody_authority,
             fx_authority=fx_authority,
         )
+        ledger_catalog = provider_catalog
         (
             nav,
             flows,
@@ -7036,6 +7222,8 @@ def build_catalog(
             flows,
             as_of,
             {str(item["account_id"]) for item in statement_nav},
+            unattributed=_unattributed_provider_records(ledger_catalog),
+            completeness=_ledger_completeness(ledger_catalog),
         )
     )
     fact_coverage, exceptions = _fact_coverage(

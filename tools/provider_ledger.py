@@ -32,6 +32,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import account_financing
+import event_completeness
 import quantbase_fund_days
 import zero_financing_statements
 
@@ -3376,6 +3377,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "quantbase_fill_closes",
             "quantbase_position_closes",
             "zero_financing_observations",
+            "event_completeness_declaration",
         )
         allowed.update(
             frozenset({*expected, *subset})
@@ -5040,6 +5042,45 @@ def _quantbase_fill_closes(
             raise ProviderLedgerError(f"{key} is empty")
         out[symbol] = series
     return out
+
+
+def _event_completeness_declaration(
+    value: object, as_of: date
+) -> tuple[tuple[event_completeness.Declaration, ...], SourceArtifact]:
+    """The pinned governed completeness declaration and its manifest artifact."""
+
+    ref = _object(value, "event_completeness_declaration")
+    if set(ref) != {"path", "sha256", "size_bytes"}:
+        raise ProviderLedgerError("event_completeness_declaration keys differ")
+    path = _absolute_regular_path(ref["path"], "event_completeness_declaration.path")
+    raw = path.read_bytes()
+    if (
+        hashlib.sha256(raw).hexdigest() != ref["sha256"]
+        or len(raw) != ref["size_bytes"]
+    ):
+        raise ProviderLedgerError("event_completeness_declaration identity differs")
+    try:
+        declarations = event_completeness.load_declaration(raw)
+    except event_completeness.EventCompletenessError as exc:
+        raise ProviderLedgerError(
+            f"event_completeness_declaration is invalid: {exc}"
+        ) from exc
+    for declaration in declarations:
+        # every cited evidence file must exist with exactly the cited bytes
+        for evidence_path, evidence_sha in declaration.evidence_refs:
+            cited = _absolute_regular_path(evidence_path, "declaration evidence")
+            if hashlib.sha256(cited.read_bytes()).hexdigest() != evidence_sha:
+                raise ProviderLedgerError(
+                    "event_completeness_declaration evidence differs from its cited bytes"
+                )
+    return declarations, SourceArtifact(
+        artifact_id="event-completeness/declaration",
+        sha256=hashlib.sha256(raw).hexdigest(),
+        size_bytes=len(raw),
+        as_of_date=as_of,
+        schema_name="event-completeness-declaration",
+        schema_version=str(event_completeness.SCHEMA_VERSION),
+    )
 
 
 def _reserve_nav_windows(value: object) -> dict[str, list[tuple[date, date, str]]]:
@@ -11973,6 +12014,31 @@ def _generation_as_of_date(
     return max(financial_cutoff, *(artifact.as_of_date for artifact in artifacts))
 
 
+def _own_account_items(
+    provider_id: str,
+    catalog: Mapping[str, Any],
+    items: Sequence[Any],
+    key: str | None,
+) -> list[Any]:
+    """Catalog-level account facts (closure dates, empty position sets) of one provider.
+
+    Each item must name an account of the same provider catalog: a provider cannot assert a
+    closure or an empty position set for another provider's account.
+    """
+
+    own = {
+        str(account["account_id"])
+        for account in _objects(catalog.get("accounts", []), f"{provider_id}.accounts")
+    }
+    for item in items:
+        account_id = str(item[key] if key is not None else item)
+        if account_id not in own:
+            raise ProviderLedgerError(
+                f"{provider_id} catalog names an account outside its own accounts: {account_id}"
+            )
+    return list(items)
+
+
 @_catalog_decimal_context
 def build_catalog(
     spec_path: Path,
@@ -12153,6 +12219,69 @@ def build_catalog(
                 for row in projected
             )
         provider_artifacts.extend(zero_artifacts)
+
+    completeness_rows: list[dict[str, Any]] | None = None
+    if "event_completeness_declaration" in spec:
+        declarations, declaration_artifact = _event_completeness_declaration(
+            spec["event_completeness_declaration"], as_of
+        )
+        nav_values: dict[str, dict[date, Decimal | None]] = defaultdict(dict)
+        account_provider: dict[str, str] = {}
+        for nav_row in combined.get("nav_observations", []):
+            account_ = str(nav_row["account_id"])
+            amount_ = nav_row.get("nav")
+            nav_values[account_][_day(nav_row["as_of_date"], "nav as_of_date")] = (
+                _decimal(amount_["value"], "nav value")
+                if isinstance(amount_, Mapping) and amount_.get("status") == "AVAILABLE"
+                else None
+            )
+            account_provider[account_] = str(nav_row["provider_id"])
+        try:
+            completeness_rows = event_completeness.evaluate(
+                declarations,
+                flows=combined.get("flows", []),
+                change_in_nav_by_provider={
+                    provider_id_: _objects(
+                        catalog_.get("change_in_nav_observations", []),
+                        f"{provider_id_}.change_in_nav_observations",
+                    )
+                    for provider_id_, catalog_ in catalogs.items()
+                },
+                nav_values_by_account=nav_values,
+                account_provider=account_provider,
+                as_of_date=as_of,
+                positions=combined.get("positions", []),
+                transactions=combined.get("transactions", []),
+                closed_dates={
+                    str(item["account_id"]): _day(
+                        item["closed_date"], "closed_accounts.closed_date"
+                    )
+                    for provider_id_, catalog_ in catalogs.items()
+                    for item in _own_account_items(
+                        provider_id_,
+                        catalog_,
+                        _objects(
+                            catalog_.get("closed_accounts", []), "closed_accounts"
+                        ),
+                        "account_id",
+                    )
+                },
+                empty_position_accounts=sorted(
+                    {
+                        str(account_id)
+                        for provider_id_, catalog_ in catalogs.items()
+                        for account_id in _own_account_items(
+                            provider_id_,
+                            catalog_,
+                            list(catalog_.get("empty_position_account_ids", [])),
+                            None,
+                        )
+                    }
+                ),
+            )
+        except event_completeness.EventCompletenessError as exc:
+            raise ProviderLedgerError(f"event_completeness: {exc}") from exc
+        provider_artifacts.append(declaration_artifact)
 
     authoritative_strategy_ids = {
         str(row.get("strategy_id"))
@@ -12554,6 +12683,10 @@ def build_catalog(
         "strategy_returns": strategy_returns,
         "transactions": combined.get("transactions", []),
     }
+    if (
+        completeness_rows is not None
+    ):  # absent otherwise: ids of other specs do not move
+        catalog["event_completeness"] = completeness_rows
     if fx_rates is not None:
         catalog["portfolio_fx_generation"] = {
             "generation_id": fx_rates[0],
