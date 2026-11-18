@@ -224,6 +224,7 @@ _PATH_STAGES = {
     "tools/release_preflight_g2.py": [],
     "tools/release_fresh_world.py": [],
     "tools/release_cycle_manifest.py": [],
+    "tools/decision_refresh.py": [],
     "tools/release_cycle_seeds.py": [],
     "tools/release_ledger_spec.py": [],
     "tools/release_prepare_inputs.py": [],
