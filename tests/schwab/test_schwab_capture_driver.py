@@ -852,7 +852,7 @@ _PINNED = (
     ),
     (
         "packages/schwab/src/quant_engine/schwab/generation.py",
-        "d84b1d4ccab7d099bd0399d9fffb0d2acffa2f8e99228e2423c37eb83605191a",
+        "191e888b0694a53b377c395f406c32214c6873f7b8c7917f0907e8f25b4615bf",
     ),
     (
         "packages/schwab/src/quant_engine/schwab/__init__.py",
