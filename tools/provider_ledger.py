@@ -1679,6 +1679,10 @@ def _matrixport_capital_anchors(
     return anchors
 
 
+# real fills run 13:00-22:59 UTC (the fund trades a few minutes before the US close)
+_QUANTBASE_LATEST_FILL_UTC_HOUR: Final = 23
+
+
 def _quantbase_restated_days(
     manifest: GenerationManifest,
     root: Path,
@@ -1714,6 +1718,14 @@ def _quantbase_restated_days(
         if quantity is None:
             continue
         stamp = _utc_timestamp(filled_at, "quantbase order filled_at")
+        if int(stamp[11:13]) >= _QUANTBASE_LATEST_FILL_UTC_HOUR:
+            # the fill day is the UTC calendar day while the dashboard is dated by the US calendar
+            # day: a fill this late could belong to the next dashboard day
+            raise ProviderLedgerError(
+                f"quantbase order filled_at {filled_at} is at or after "
+                f"{_QUANTBASE_LATEST_FILL_UTC_HOUR}:00 UTC: its calendar day is ambiguous against "
+                "the dashboard day"
+            )
         legs.append(
             (date.fromisoformat(stamp[:10]), str(row.get("symbol") or ""), quantity)
         )
@@ -1724,7 +1736,22 @@ def _quantbase_restated_days(
             dashboard[_quantbase_day(price_row["time"], "quantbase Volatis time")] = (
                 value
             )
-    return quantbase_fund_days.corrected_values(dashboard, legs, fill_closes)
+    corrected = quantbase_fund_days.corrected_values(dashboard, legs, fill_closes)
+    if not quantbase_fund_days.closes_reproduce_the_dashboard(corrected, legs):
+        valued, failed = quantbase_fund_days.non_fill_closure_failures(corrected, legs)
+        if valued < quantbase_fund_days.MIN_NON_FILL_DAYS:
+            raise ProviderLedgerError(
+                "quantbase_fill_closes cannot be trusted: only "
+                f"{valued} non-fill days are valued (at least "
+                f"{quantbase_fund_days.MIN_NON_FILL_DAYS} are needed to show that the closes "
+                "reproduce the dashboard)"
+            )
+        raise ProviderLedgerError(
+            "quantbase_fill_closes do not reproduce the dashboard on non-fill days "
+            f"({failed} of {valued} valued days fail the holdings x close rebuild): the "
+            "close series is in other units than the order quantities (split-adjusted?)"
+        )
+    return corrected
 
 
 def _quantbase_nav_observations(
