@@ -423,7 +423,11 @@
           ? "Excluded from live costs (deprecated record, history kept)"
           : isPercentCost(row) ? "No dollar cost (percent-based)" : "Pre-tax cost unavailable";
     // The producer builds the percent-rate sentence from the row's own fields; it is printed verbatim.
-    const rateSentence = typeof row.cost_rate_disclosure === "string" && row.cost_rate_disclosure ? `<span class="cell-secondary">${safe(row.cost_rate_disclosure)}</span>` : "";
+    const classification = row.cost_classification && row.cost_classification.classification ? row.cost_classification : null;
+    const classificationLine = classification
+      ? `<span class="cell-secondary">${safe(`${humanStatus(classification.classification)} · ruling ${classification.ruling_reference || "not stated"}${classification.ruling_url ? ` (${classification.ruling_url})` : ""} · ${classification.reason || ""}`)}</span>`
+      : "";
+    const rateSentence = (typeof row.cost_rate_disclosure === "string" && row.cost_rate_disclosure ? `<span class="cell-secondary">${safe(row.cost_rate_disclosure)}</span>` : "") + classificationLine;
     // N64: a rate divides by the sleeve value at the cutoff and says which date that value
     // and the cost schedule carry.  A report older than schema 4 publishes neither date.
     const rateStatus = typeof row.cost_rate_status === "string" ? row.cost_rate_status : null;
@@ -459,7 +463,7 @@
     // A5: `benchmark_annualization.label` already encodes basis/window (and "(<1 year)"
     // when short); render it beside the annualized figure it describes.
     const benchmarkAnnualizedLabel = row.benchmark_annualization?.label;
-    return `${assignment}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.benchmark_comparison_observed_start)}–${formatDateHtml(row.benchmark_comparison_observed_end)} · ${integer.format(row.benchmark_comparison_observations || 0)} observations</span><span class="cell-secondary">Strategy ${pct(row.benchmark_account_cumulative_return)} · benchmark ${pct(row.benchmark_reference_cumulative_return)} · gap ${ppFromFraction(row.benchmark_cumulative_gap)} · active annualized ${pct(row.benchmark_active_return_annualized)}${annualizationSuffix(benchmarkAnnualizedLabel)}</span><span class="cell-secondary">Tracking error ${pct(row.benchmark_tracking_error_annualized)} · information ratio ${decimal(row.benchmark_information_ratio)} · beta ${decimal(row.benchmark_beta)} · correlation ${decimal(row.benchmark_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.benchmark_upside_capture)} · down capture ${pct(row.benchmark_downside_capture)} · relative drawdown ${pct(row.benchmark_relative_drawdown)}</span><span class="cell-secondary">${safe(row.benchmark_comparison_disposition)}</span>${reason}`;
+    return `${assignment}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.benchmark_comparison_observed_start)}–${formatDateHtml(row.benchmark_comparison_observed_end)} · ${integer.format(row.benchmark_comparison_observations || 0)} observations</span><span class="cell-secondary">Strategy ${pct(row.benchmark_account_cumulative_return)} · benchmark ${pct(row.benchmark_reference_cumulative_return)} · gap ${ppFromFraction(row.benchmark_cumulative_gap)} · active annualized ${pct(row.benchmark_active_return_annualized)}${annualizationSuffix(benchmarkAnnualizedLabel)}</span><span class="cell-secondary">Tracking error ${pct(row.benchmark_tracking_error_annualized)} · information ratio ${decimal(row.benchmark_information_ratio)} · beta ${decimal(row.benchmark_beta)} · correlation ${decimal(row.benchmark_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.benchmark_upside_capture)} · down capture ${pct(row.benchmark_downside_capture)} · relative drawdown ${pct(row.benchmark_relative_drawdown)} · cash drag ${statusText(row.benchmark_cash_drag_status)}${row.benchmark_cash_drag_reason ? ` · ${safe(row.benchmark_cash_drag_reason)}` : ""}</span><span class="cell-secondary">${safe(row.benchmark_comparison_disposition)}</span>${reason}`;
   };
   const hwmQualification = (row) => {
     if (performanceLineageMismatch) return { status: "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH", note: performanceLineageReason };

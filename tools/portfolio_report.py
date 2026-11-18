@@ -1678,6 +1678,31 @@ def _plain_words(code: object) -> str:
     return str(code).replace("_", " ").lower()
 
 
+def _cash_drag_fields(
+    provider_comparison: Mapping[str, Any], benchmark_comparison: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Cash drag status and reason of both comparisons of one strategy row.
+
+    The row's ``cash_drag_*`` keys are the provider comparison's; the benchmark
+    comparison has its own status (a provider row can be unavailable where the
+    benchmark row is evidenced), so it is carried beside it, not dropped."""
+
+    return {
+        "cash_drag_status": provider_comparison.get("cash_drag_status"),
+        "cash_drag_reason": provider_comparison.get("cash_drag_reason"),
+        "benchmark_cash_drag_status": benchmark_comparison.get("cash_drag_status"),
+        "benchmark_cash_drag_reason": benchmark_comparison.get("cash_drag_reason"),
+    }
+
+
+def _retained_cost_fields(cost_row: Mapping[str, Any]) -> dict[str, Any]:
+    """A retained or history-only strategy row carries its cost classification (and
+    the ruling reference inside it) when the baseline states one, not a blank."""
+
+    classification = cost_row.get("cost_classification")
+    return {"cost_classification": classification} if classification else {}
+
+
 def cost_components(cost: Mapping[str, Any]) -> list[dict[str, Any]]:
     """The structured cost pieces of one strategy row, every word taken from data.
 
@@ -3212,8 +3237,7 @@ def _merge_attribution(
                 "provider_upside_capture": metrics.get("upside_capture"),
                 "provider_downside_capture": metrics.get("downside_capture"),
                 "provider_relative_drawdown": metrics.get("relative_drawdown"),
-                "cash_drag_status": comparison.get("cash_drag_status"),
-                "cash_drag_reason": comparison.get("cash_drag_reason"),
+                **_cash_drag_fields(comparison, benchmark_comparison),
                 "legacy_baseline_disposition": comparison.get(
                     "legacy_baseline_disposition"
                 ),
@@ -8452,6 +8476,7 @@ def _strategies(
                 **live_boundary_basis,
                 "cost_evidence_status": EVIDENCE_STATUS_UNAVAILABLE,
                 "benchmark_evidence_status": EVIDENCE_STATUS_UNAVAILABLE,
+                **_retained_cost_fields(cost_row),
                 "source_route_status": source_route.get("status", "UNAVAILABLE"),
                 "source_route_ids": source_route.get("source_ids", []),
                 "strategy_evidence_layers": layer_inventory,

@@ -4096,6 +4096,8 @@ def _suppress_unmatched_strategy_performance(
             "provider_comparison_version_compatibility",
             "cash_drag_status",
             "cash_drag_reason",
+            "benchmark_cash_drag_status",
+            "benchmark_cash_drag_reason",
             "legacy_baseline_disposition",
             "annual_external_cost_rate_pre_tax",
             "cost_rate_status",
