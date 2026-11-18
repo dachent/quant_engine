@@ -1458,10 +1458,17 @@ def _matrixport_positions(
     as ``api_reported_value_gap_usd`` on the last row (disclosed, not a refusal).  A day with no
     ``nav_daily`` row and a native value is refused (``MATRIXPORT_POSITIONS_NAV_DAILY_ABSENT``);
     an active day with no native value (a provider gap) is typed ``NATIVE_VALUE_ABSENT``
-    (``UNAVAILABLE``), more than 5% of them is refused, as are unexplained calendar gaps
+    (``UNAVAILABLE``), more than max(3, 1% of days) of them is refused, as are unexplained calendar gaps
     (including a tail short of the declared boundary), a NAV day without positions and the
     reverse, and an API holding value that differs from the last derived value by over 2%.
     ``symbol`` is the product name from ``csv/holdings.csv`` (the unit is the share).
+
+    Scope, stated plainly: the SHARE series is checked on every day against the cumulative
+    subscription/redemption events of ``csv/position_events.csv`` (events are extractor-derived;
+    their total is tied to the API holding), and the first held day must be the first event day.
+    The VALUE is checked per day only for consistency with the published unit NAV, and against
+    the API-reported holding value on the LAST day only (2%); there is no independent per-day
+    value source, so a value scaled under 2% consistently across all days is not detected.
     """
 
     if fx_rates is None:
@@ -1530,6 +1537,27 @@ def _matrixport_positions(
         },
         "matrixport holding reconciliation",
     )
+    event_rows = _verified_csv_rows(
+        _exact_file(
+            run_root, Path("csv/position_events.csv"), "matrixport position events"
+        ),
+        _find_manifest_artifact(
+            manifest, "csv/position_events.csv", "matrixport position events"
+        ).sha256,
+        {"product_id", "share_delta", "utc_date"},
+        "matrixport position events",
+    )
+    events: dict[str, list[tuple[date, Decimal]]] = defaultdict(list)
+    for event in event_rows:
+        delta = _observed_decimal(event.get("share_delta"), "matrixport share_delta")
+        if delta is None:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_SHARE_ANCHOR: a position event has no share delta"
+            )
+        events[_text(event.get("product_id"), "matrixport event product_id")].append(
+            (_day(event.get("utc_date"), "matrixport event utc_date"), delta)
+        )
+    day_share: dict[tuple[str, date], Decimal] = {}
     product_names: dict[str, str] = {}
     api_share: dict[str, Decimal] = {}
     api_value: dict[str, Decimal] = {}
@@ -1611,6 +1639,7 @@ def _matrixport_positions(
                 continue
             product_id = _text(row.get("product_id"), "matrixport holding product_id")
             active_days.add(day)
+            day_share[(product_id, day)] = share
             if native is None:
                 # Active share but no native value: the NAV builder has no day here either.
                 # The position is typed UNAVAILABLE (never dropped, never valued).
@@ -1708,6 +1737,27 @@ def _matrixport_positions(
                     "value_basis": "NAV_SHARE_PRODUCT",
                 }
             )
+    for (key, day), share_on_day in sorted(day_share.items()):
+        cumulative = sum(
+            (delta for event_day, delta in events.get(key, []) if event_day <= day),
+            Decimal(0),
+        )
+        if share_on_day != cumulative:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_SHARE_ANCHOR: the share on "
+                f"{day.isoformat()} differs from the cumulative subscription events"
+            )
+    for key in {key for (key, _day_value) in day_share}:
+        first_event = min(
+            (event_day for event_day, delta in events.get(key, []) if delta > 0),
+            default=None,
+        )
+        first_held = min(day for (k, day) in day_share if k == key)
+        if first_event is None or first_held != first_event:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_GAP: the first held day "
+                f"{first_held.isoformat()} is not the first subscription event day"
+            )
     for key, (last_day, last_share, last_value) in last_row.items():
         if last_share != api_share.get(key):
             raise ProviderLedgerError(
@@ -1741,10 +1791,10 @@ def _matrixport_positions(
         for row_out in positions
         if row_out["closure_status"] != "CONSISTENT_WITH_PUBLISHED_NAV"
     )
-    if positions and Decimal(typed) > Decimal(len(positions)) * Decimal("0.05"):
+    if typed > max(3, len(positions) // 100):
         raise ProviderLedgerError(
-            "MATRIXPORT_POSITIONS_TOO_MANY_GAPS: more than 5% of position days lack "
-            f"a published unit NAV or native value ({typed} of {len(positions)})"
+            "MATRIXPORT_POSITIONS_TOO_MANY_GAPS: more provider-gap position days "
+            f"than the allowance (3 or 1%): {typed} of {len(positions)}"
         )
     navs = _matrixport_nav_observations(
         generation_id,

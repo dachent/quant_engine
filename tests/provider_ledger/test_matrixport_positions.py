@@ -118,6 +118,7 @@ def _setup(
     event_share: str | None = None,
     boundary: str | None = None,
     api_balance: str | None = None,
+    event_day: str | None = None,
 ) -> tuple[GenerationManifest, dict[str, Any]]:
     csv_dir = tmp_path / "output" / RUN_ID / "csv"
     csv_dir.mkdir(parents=True)
@@ -144,6 +145,15 @@ def _setup(
         f"{api_share},{event_share or api_share},{PRODUCT},0\n",
         encoding="utf-8-sig",
     )
+    event_day = event_day or min(
+        line.split(",")[14] for line in rows if line.split(",")[12] != "0"
+    )
+    events = csv_dir / "position_events.csv"
+    events.write_text(
+        "event_type,product_id,share_delta,utc_date\n"
+        f"subscription,{PRODUCT},{api_share},{event_day}\n",
+        encoding="utf-8-sig",
+    )
     catalog = {
         "catalog_schema_version": 2,
         "observed_boundary_date": boundary or max(line.split(",")[14] for line in rows),
@@ -155,6 +165,7 @@ def _setup(
             (published, "csv/nav_daily.csv"),
             (anchors, "csv/holdings.csv"),
             (reconciliation, "csv/holding_reconciliation.csv"),
+            (events, "csv/position_events.csv"),
         ),
         catalog,
     )
@@ -330,7 +341,7 @@ def test_a_consistent_nav_forgery_fails_against_the_api_holding_value(
 
 def test_too_many_native_absent_days_are_refused(tmp_path: Path) -> None:
     days = _span(10)
-    rows = [_row(day, "10", native="" if day in days[:3] else None) for day in days]
+    rows = [_row(day, "10", native="" if day in days[:4] else None) for day in days]
     with pytest.raises(
         ledger.ProviderLedgerError, match="MATRIXPORT_POSITIONS_TOO_MANY_GAPS"
     ):
@@ -346,6 +357,38 @@ def test_a_consistent_share_forgery_fails_against_the_api_share(tmp_path: Path) 
         ledger.ProviderLedgerError, match="MATRIXPORT_POSITIONS_SHARE_ANCHOR"
     ):
         _positions(tmp_path, rows, _fx({day: "1" for day in days}))
+
+
+def test_a_consistent_share_forgery_on_middle_days_fails_the_event_series(
+    tmp_path: Path,
+) -> None:
+    # Share and native doubled on one middle day only; the last day still equals the API share.
+    days = _span(5)
+    rows = [_row(day, "10", share="200" if day == days[2] else SHARE) for day in days]
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="MATRIXPORT_POSITIONS_SHARE_ANCHOR"
+    ):
+        _positions(tmp_path, rows, _fx({day: "1" for day in days}))
+
+
+def test_a_head_cut_before_the_first_subscription_event_is_refused(
+    tmp_path: Path,
+) -> None:
+    days = _span(6)
+    rows = [_row(day, "10") for day in days[2:]]
+    nav_rows = [_nav_row(day, "10") for day in days]
+    manifest, catalog = _setup(tmp_path, rows, nav_rows, event_day=days[0])
+    with pytest.raises(ledger.ProviderLedgerError, match="MATRIXPORT_POSITIONS_GAP"):
+        ledger._matrixport_positions(  # noqa: SLF001
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {ACCOUNT},
+            STRATEGIES,
+            {},
+            fx_rates=_fx({day: "1" for day in days}),
+        )
 
 
 def test_unreconciled_event_shares_are_refused(tmp_path: Path) -> None:
@@ -514,6 +557,7 @@ def test_the_real_run_is_consistent_and_types_its_provider_gaps(tmp_path: Path) 
         "nav_daily.csv",
         "holdings.csv",
         "holding_reconciliation.csv",
+        "position_events.csv",
     ):
         target = csv_dir / name
         target.write_bytes((source / name).read_bytes())
