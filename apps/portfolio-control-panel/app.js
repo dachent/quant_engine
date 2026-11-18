@@ -420,7 +420,11 @@
           ? "Excluded from live costs (deprecated record, history kept)"
           : isPercentCost(row) ? "No dollar cost (percent-based)" : "Pre-tax cost unavailable";
     // The producer builds the percent-rate sentence from the row's own fields; it is printed verbatim.
-    const rateSentence = typeof row.cost_rate_disclosure === "string" && row.cost_rate_disclosure ? `<span class="cell-secondary">${safe(row.cost_rate_disclosure)}</span>` : "";
+    const classification = row.cost_classification && row.cost_classification.classification ? row.cost_classification : null;
+    const classificationLine = classification
+      ? `<span class="cell-secondary">${safe(`${humanStatus(classification.classification)} · ruling ${classification.ruling_reference || "not stated"}${classification.ruling_url ? ` (${classification.ruling_url})` : ""} · ${classification.reason || ""}`)}</span>`
+      : "";
+    const rateSentence = (typeof row.cost_rate_disclosure === "string" && row.cost_rate_disclosure ? `<span class="cell-secondary">${safe(row.cost_rate_disclosure)}</span>` : "") + classificationLine;
     // N64: a rate divides by the sleeve value at the cutoff and says which date that value
     // and the cost schedule carry.  A report older than schema 4 publishes neither date.
     const rateStatus = typeof row.cost_rate_status === "string" ? row.cost_rate_status : null;
