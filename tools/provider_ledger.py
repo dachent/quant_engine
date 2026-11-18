@@ -6196,6 +6196,9 @@ def _schwab_position_observation(
                     valuation_cutoff=valuation_cutoff,
                     snapshot_day=day,
                     artifact_ids={a.artifact_id for a in artifacts},
+                    nav_observations=_objects(
+                        catalog.get("nav_observations", []), label
+                    ),
                 )
             )
         except schwab.SchwabDerivedPositionError as exc:

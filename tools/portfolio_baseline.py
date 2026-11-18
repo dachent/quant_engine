@@ -1670,6 +1670,9 @@ def _schwab_facts(
                             catalog.get("source_artifacts"), "Schwab artifacts"
                         )
                     },
+                    nav_observations=_objects(
+                        catalog.get("nav_observations", []), "Schwab NAV"
+                    ),
                 )
             )
         except (schwab.SchwabDerivedPositionError, ValueError) as exc:

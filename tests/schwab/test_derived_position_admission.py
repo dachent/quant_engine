@@ -159,3 +159,16 @@ def test_two_holdings_close_to_one_total() -> None:
         row["closure"]["holdings_usd"] = "150"
         row["closure"]["positions_total_usd"] = "155.73"
     assert len(_admit([a, b])) == 2
+
+
+def test_a_nav_observed_at_the_cutoff_must_equal_the_positions_total() -> None:
+    row = _row()
+    total = row["closure"]["positions_total_usd"]
+    ok = {"account_id": ACCOUNT, "as_of_date": "2026-11-06", "nav": {"value": total}}
+    assert _admit([row], nav_observations=[ok])
+    bad = {**ok, "nav": {"value": "1.00"}}
+    with pytest.raises(SchwabDerivedPositionError, match="observed at the cutoff"):
+        _admit([row], nav_observations=[bad])
+    # another day or another account is not a cutoff observation of this account
+    other = [{**bad, "as_of_date": "2026-11-05"}, {**bad, "account_id": "account-x"}]
+    assert _admit([row], nav_observations=other)

@@ -267,6 +267,7 @@ def admit_derived_position_rows(
     valuation_cutoff: date,
     snapshot_day: date,
     artifact_ids: Collection[str],
+    nav_observations: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Mapping[str, Any]]:
     """Re-verify catalog position rows derived at the cutoff from a later snapshot.
 
@@ -275,7 +276,8 @@ def admit_derived_position_rows(
     position at the cutoff plus the flows after it equal the captured position only when
     those flows are nil, so the account must have no transaction dated in
     ``(cutoff, history_through]`` and the days from the history to the capture must be
-    covered by an earlier independent market value equal to the holdings.  Returns the
+    covered by an earlier independent market value equal to the holdings.  A NAV
+    observation of the account on the cutoff day must equal the positions total.  Returns the
     admitted rows by record id (empty when ``rows`` is empty).
     """
 
@@ -389,6 +391,18 @@ def admit_derived_position_rows(
             raise SchwabDerivedPositionError(
                 "the account has transactions after the cutoff: the snapshot is not the cutoff"
             )
+        for observation in nav_observations:
+            nav = observation.get("nav")
+            if (
+                str(observation.get("account_id")) == account_id
+                and observation.get("as_of_date") == valuation_cutoff.isoformat()
+                and isinstance(nav, Mapping)
+                and nav.get("status", "AVAILABLE") == "AVAILABLE"
+                and _decimal_text(nav.get("value"), "NAV value") != total
+            ):
+                raise SchwabDerivedPositionError(
+                    "the account value observed at the cutoff differs from the positions total"
+                )
         days = closure["earlier_market_value_days"]
         if not isinstance(days, list):
             raise SchwabDerivedPositionError("closure earlier days are invalid")
