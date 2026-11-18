@@ -569,6 +569,11 @@ def test_a_derived_position_is_admitted_with_its_evidence_class_end_to_end(
     "override",
     [
         {"evidence_class": "WCH_CURRENT"},
+        {"observed_at": CLOCK},
+        {"average_price": "1"},
+        {"strategy_id": "strategy-x"},
+        {"market_value": {"currency": "EUR", "status": "AVAILABLE", "value": "100"}},
+        {"__late_transaction__": True},
         {"closure": {**DERIVED_CLOSURE, "positions_total_usd": "102.00"}},
         {"closure": {**DERIVED_CLOSURE, "earlier_market_value_days": []}},
         {"closure": {**DERIVED_CLOSURE, "history_through": "2026-09-16"}},

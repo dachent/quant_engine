@@ -1004,7 +1004,7 @@
     const asOf = typeof row.as_of_date === "string" && row.as_of_date !== "" ? row.as_of_date.slice(0, 10) : "";
     return `${humanStatus(row.value_basis.basis)}${asOf ? ` as of ${formatDate(asOf)}` : ""}${seen && seen !== asOf ? ` (observed ${formatDate(seen)})` : ""}`;
   };
-  const positionBasisNote = (row) => (row.value_basis ? `<span class="cell-secondary"${valueBasisTitle(row)}>${safe(valueBasisLabel(row))}</span>` : row.as_of_basis ? `<span class="cell-secondary"${valueBasisTitle(row)}>${safe(humanStatus(row.as_of_basis))}${row.capture_date ? ` · captured ${safe(formatDate(row.capture_date))}` : ""}</span>` : "");
+  const positionBasisNote = (row) => (row.basis_note ? `<span class="cell-secondary" title="${safe(row.basis_note)}">${safe(row.basis_note)}</span>` : row.value_basis ? `<span class="cell-secondary"${valueBasisTitle(row)}>${safe(valueBasisLabel(row))}</span>` : row.as_of_basis ? `<span class="cell-secondary"${valueBasisTitle(row)}>${safe(humanStatus(row.as_of_basis))}${row.capture_date ? ` · captured ${safe(formatDate(row.capture_date))}` : ""}</span>` : "");
 
   // An account NAV row whose value the report declares derived says so beside the figure, with the same label and
   // tooltip a position row carries.  The account_summary row is the source: it is matched by account id, and for an

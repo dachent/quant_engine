@@ -6195,7 +6195,7 @@ def _schwab_position_observation(
                     transactions=_objects(catalog.get("transactions"), label),
                     valuation_cutoff=valuation_cutoff,
                     snapshot_day=day,
-                    artifact_ids={a.artifact_id for a in artifacts},
+                    artifact_schemas={a.artifact_id: a.schema_name for a in artifacts},
                     transaction_history=_object(
                         _object(catalog.get("coverage"), label).get(
                             "transaction_history"
@@ -6690,6 +6690,7 @@ def _project_account_facts(
                     capture_date=row["capture_date"],
                     closure=row["closure"],
                     evidence_class=row["evidence_class"],
+                    residual_reallocation_window_days=schwab.residual_window_days(row),
                     source_artifact_id=row["source_artifact_id"],
                     valuation_cutoff=row["as_of_date"],
                 )

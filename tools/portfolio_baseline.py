@@ -1664,8 +1664,12 @@ def _schwab_facts(
                     snapshot_day=datetime.fromisoformat(
                         _text(snapshot.get("observed_at"), "Schwab snapshot clock")
                     ).date(),
-                    artifact_ids={
-                        str(a["artifact_id"])
+                    artifact_schemas={
+                        str(a["artifact_id"]): str(
+                            _object(a.get("schema"), "Schwab artifact schema").get(
+                                "name"
+                            )
+                        )
                         for a in _objects(
                             catalog.get("source_artifacts"), "Schwab artifacts"
                         )
@@ -1705,6 +1709,11 @@ def _schwab_facts(
             "symbol": symbol,
         }
         record = dict(item)
+        if item.get("record_id") in admitted_derived:
+            # the admitted key set is exactly the derived one; state what stays inferred
+            record["residual_reallocation_window_days"] = schwab.residual_window_days(
+                item
+            )
         mapping_status, strategy_id = _strategy_for_date(assignments, account_id, as_of)
         record.update(
             {

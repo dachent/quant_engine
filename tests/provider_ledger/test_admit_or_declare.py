@@ -895,6 +895,25 @@ def _staged_observation(
                 if schwab_derived is not None:
                     # the empty account holds a $1.00 fund derived at the cutoff
                     derived_account = account
+                    export_id = "evidence/positions-export.csv"
+                    page_id = f"evidence/balances-{schwab_point_capture[:10]}.txt"
+                    bind(
+                        export_id,
+                        root / "evidence/positions-export.csv",
+                        b"export",
+                        "schwab-positions-export",
+                    )
+                    bind(
+                        page_id,
+                        root / "evidence/balances-page.txt",
+                        b"page",
+                        "schwab-live-balances-evidence",
+                    )
+                    catalog["source_artifacts"] = [
+                        *catalog["source_artifacts"],
+                        artifacts[-2].to_dict(),
+                        artifacts[-1].to_dict(),
+                    ]
                     derived_security = (
                         "security-schwab-" + hashlib.sha256(b"SWVXX").hexdigest()[:24]
                     )
@@ -929,11 +948,21 @@ def _staged_observation(
                             canonical_json_bytes(derived_identity)
                         ).hexdigest()[:24],
                         "security_id": derived_security,
-                        "source_artifact_id": point_artifact.artifact_id,
+                        "source_artifact_id": export_id,
                         "strategy_id": None,
                         "symbol": "SWVXX",
                     }
-                    derived_row.update(schwab_derived)
+                    overrides = dict(schwab_derived)
+                    if overrides.pop("__late_transaction__", False):
+                        catalog["transactions"] = [
+                            *catalog.get("transactions", []),
+                            {
+                                "account_id": derived_account,
+                                "event_date": "2026-09-18",
+                                "record_id": "synthetic-late-transaction",
+                            },
+                        ]
+                    derived_row.update(overrides)
                     catalog["coverage"] = {
                         **(catalog.get("coverage") or {}),
                         "transaction_history": {

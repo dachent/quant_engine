@@ -242,6 +242,35 @@ _CLOSURE_KEYS: Final = frozenset(
         "positions_total_usd",
     }
 )
+_ROW_KEYS: Final = frozenset(
+    {
+        "account_id",
+        "as_of_basis",
+        "as_of_date",
+        "capture_date",
+        "closure",
+        "evidence_class",
+        "mapping_status",
+        "market_value",
+        "quantity",
+        "record_id",
+        "security_id",
+        "source_artifact_id",
+        "strategy_id",
+        "symbol",
+    }
+)
+_VALUE_KEYS: Final = frozenset({"currency", "status", "value"})
+_EXPORT_SCHEMA: Final = "schwab-positions-export"
+_BALANCES_SCHEMA: Final = "schwab-live-balances-evidence"
+_TRANSACTION_DATE_FIELDS: Final = (
+    "event_date",
+    "settle_date",
+    "effective_date",
+    "value_date",
+    "accounting_date",
+    "trade_date",
+)
 
 
 def _decimal_text(value: object, name: str) -> Decimal:
@@ -251,12 +280,31 @@ def _decimal_text(value: object, name: str) -> Decimal:
 
 
 def _day(value: object, name: str) -> date:
+    """A canonical ISO date text (``YYYY-MM-DD``), nothing looser."""
+
     if not isinstance(value, str):
         raise SchwabDerivedPositionError(f"{name} is not a date text")
     try:
-        return date.fromisoformat(value)
+        parsed = date.fromisoformat(value)
     except ValueError as exc:
         raise SchwabDerivedPositionError(f"{name} is not a date") from exc
+    if parsed.isoformat() != value:
+        raise SchwabDerivedPositionError(f"{name} is not a canonical ISO date")
+    return parsed
+
+
+def residual_window_days(row: Mapping[str, Any]) -> list[str]:
+    """The days no transaction page and no observation proves for a derived row.
+
+    The history ends at ``history_through``; the first independent observation after it is
+    on the first earlier day.  Between them a reallocation that keeps the account total
+    unchanged (a purchase of a fund with cash, a switch between funds) cannot be seen.
+    Empty when the history reaches the capture day.
+    """
+
+    closure = row["closure"]
+    days = sorted(closure["earlier_market_value_days"])
+    return [closure["history_through"], days[0]] if days else []
 
 
 def admit_derived_position_rows(
@@ -266,37 +314,51 @@ def admit_derived_position_rows(
     transactions: Sequence[Mapping[str, Any]],
     valuation_cutoff: date,
     snapshot_day: date,
-    artifact_ids: Collection[str],
+    artifact_schemas: Mapping[str, str],
     transaction_history: Mapping[str, Any],
-    nav_observations: Sequence[Mapping[str, Any]] = (),
+    nav_observations: Sequence[Mapping[str, Any]],
 ) -> dict[str, Mapping[str, Any]]:
     """Re-verify catalog position rows derived at the cutoff from a later snapshot.
 
-    The generation derived each row once; a ledger that consumes the catalog re-checks the
-    same closure on the catalog bytes alone and refuses on any difference.  The derived
-    position at the cutoff plus the flows after it equal the captured position only when
-    those flows are nil, so the account must have no transaction dated in
-    ``(cutoff, history_through]`` and the days from the history to the capture must be
-    covered by an earlier independent market value equal to the holdings.  The catalog states the account's transaction history, spanning the cutoff to
-    ``history_through``.  A NAV
-    observation of the account on the cutoff day must equal the positions total.  Returns the
-    admitted rows by record id (empty when ``rows`` is empty).
+    The generation derived each row once; a consumer of the catalog re-checks what the
+    catalog bytes alone can show and refuses on any difference:
+
+    * the row has exactly the derived key set (no observation clock, no average price) and
+      canonical text for ids and dates;
+    * a $1.00 USD holding valued at its quantity; unmapped;
+    * the export closes (holdings + cash == positions total) and the holdings of the
+      account sum to it;
+    * the catalog's transaction history of the account spans the cutoff to
+      ``history_through``, and no transaction of the account is dated (any of its date
+      fields) after the cutoff;
+    * exactly one available NAV observation of the account exists on the cutoff day and it
+      equals the positions total;
+    * the source artifact is a positions export; every earlier day has a balances page in
+      the catalog whose id carries that day, inside ``(history_through, capture]``.
+
+    What stays unproven is a reallocation inside the account between ``history_through``
+    and the first earlier day that keeps its total: ``residual_window_days`` names it.
+    Returns the admitted rows by record id (empty when ``rows`` is empty).
     """
 
     accepted = set(accepted_accounts)
-    known_artifacts = set(artifact_ids)
     admitted: dict[str, Mapping[str, Any]] = {}
     by_account: dict[str, list[Mapping[str, Any]]] = {}
     captures: dict[str, date] = {}
+    export_owner: dict[str, str] = {}
     for row in rows:
-        record_id = row.get("record_id")
-        account_id = row.get("account_id")
-        symbol = row.get("symbol")
+        if set(row) != _ROW_KEYS:
+            raise SchwabDerivedPositionError("derived position key set differs")
+        record_id = row["record_id"]
+        account_id = row["account_id"]
+        symbol = row["symbol"]
         if (
             not isinstance(record_id, str)
             or not isinstance(account_id, str)
             or not isinstance(symbol, str)
             or not symbol
+            or account_id != account_id.strip()
+            or symbol != symbol.strip()
         ):
             raise SchwabDerivedPositionError("derived position identity is invalid")
         if account_id not in accepted:
@@ -304,15 +366,15 @@ def admit_derived_position_rows(
                 "derived position account is not an accepted account"
             )
         if (
-            row.get("evidence_class") != DERIVED_BASIS
-            or row.get("as_of_basis") != DERIVED_BASIS
+            row["evidence_class"] != DERIVED_BASIS
+            or row["as_of_basis"] != DERIVED_BASIS
         ):
             raise SchwabDerivedPositionError("derived position evidence class differs")
-        if row.get("as_of_date") != valuation_cutoff.isoformat():
+        if row["as_of_date"] != valuation_cutoff.isoformat():
             raise SchwabDerivedPositionError(
                 "derived position date is not the valuation cutoff"
             )
-        capture = _day(row.get("capture_date"), "derived position capture_date")
+        capture = _day(row["capture_date"], "derived position capture_date")
         if not (valuation_cutoff < capture and snapshot_day <= capture):
             raise SchwabDerivedPositionError(
                 "derived position capture day is not later than the cutoff and the snapshot"
@@ -321,16 +383,18 @@ def admit_derived_position_rows(
             raise SchwabDerivedPositionError(
                 "derived positions of an account disagree on their capture day"
             )
-        if row.get("security_id") != _security_id(symbol):
+        if row["security_id"] != _security_id(symbol):
             raise SchwabDerivedPositionError("derived position security differs")
-        if (
-            row.get("mapping_status") != "UNMAPPED"
-            or row.get("strategy_id") is not None
-        ):
+        if row["mapping_status"] != "UNMAPPED" or row["strategy_id"] is not None:
             raise SchwabDerivedPositionError("derived position must be unmapped")
-        if row.get("source_artifact_id") not in known_artifacts:
+        source = row["source_artifact_id"]
+        if artifact_schemas.get(source) != _EXPORT_SCHEMA:
             raise SchwabDerivedPositionError(
-                "derived position source artifact is not a catalog artifact"
+                "derived position source is not a catalog positions export"
+            )
+        if export_owner.setdefault(source, account_id) != account_id:
+            raise SchwabDerivedPositionError(
+                "one positions export cannot stand for two accounts"
             )
         identity = {
             "account_id": account_id,
@@ -344,24 +408,25 @@ def admit_derived_position_rows(
         )
         if record_id != expected_id or record_id in admitted:
             raise SchwabDerivedPositionError("derived position record id differs")
-        value = row.get("market_value")
-        quantity = _decimal_text(row.get("quantity"), "derived position quantity")
+        value = row["market_value"]
+        quantity = _decimal_text(row["quantity"], "derived position quantity")
         if (
             not isinstance(value, Mapping)
-            or value.get("status") != "AVAILABLE"
-            or value.get("currency") != "USD"
-            or _decimal_text(value.get("value"), "derived position value") != quantity
+            or set(value) != _VALUE_KEYS
+            or value["status"] != "AVAILABLE"
+            or value["currency"] != "USD"
+            or _decimal_text(value["value"], "derived position value") != quantity
         ):
             raise SchwabDerivedPositionError(
-                "derived position is not a $1.00 holding valued at its quantity"
+                "derived position is not a $1.00 USD holding valued at its quantity"
             )
         admitted[record_id] = row
         by_account.setdefault(account_id, []).append(row)
     for account_id, group in by_account.items():
-        closure = group[0].get("closure")
+        closure = group[0]["closure"]
         if not isinstance(closure, Mapping) or set(closure) != _CLOSURE_KEYS:
             raise SchwabDerivedPositionError("derived position closure is invalid")
-        if any(item.get("closure") != closure for item in group):
+        if any(item["closure"] != closure for item in group):
             raise SchwabDerivedPositionError(
                 "derived positions of an account disagree on their closure"
             )
@@ -375,17 +440,14 @@ def admit_derived_position_rows(
             raise SchwabDerivedPositionError(
                 "derived positions do not close to the captured positions total"
             )
-        through = _day(closure["history_through"], "closure history_through")
         capture_date = captures[account_id]
+        through = _day(closure["history_through"], "closure history_through")
         if not valuation_cutoff <= through <= capture_date:
             raise SchwabDerivedPositionError(
                 "derived position history does not reach the cutoff or passes the capture"
             )
-        history = (
-            transaction_history.get("accounts", {}).get(account_id)
-            if isinstance(transaction_history.get("accounts"), Mapping)
-            else None
-        )
+        accounts = transaction_history.get("accounts")
+        history = accounts.get(account_id) if isinstance(accounts, Mapping) else None
         if not isinstance(history, Mapping):
             raise SchwabDerivedPositionError(
                 "the catalog states no transaction history for the account"
@@ -397,30 +459,48 @@ def admit_derived_position_rows(
             raise SchwabDerivedPositionError(
                 "the account's transaction history does not span the cutoff to history_through"
             )
-        later = [
-            t
-            for t in transactions
-            if str(t.get("account_id")) == account_id
-            and valuation_cutoff
-            < _day(t.get("event_date"), "transaction date")
-            <= through
-        ]
-        if later:
-            raise SchwabDerivedPositionError(
-                "the account has transactions after the cutoff: the snapshot is not the cutoff"
-            )
-        for observation in nav_observations:
-            nav = observation.get("nav")
-            if (
-                str(observation.get("account_id")) == account_id
-                and observation.get("as_of_date") == valuation_cutoff.isoformat()
-                and isinstance(nav, Mapping)
-                and nav.get("status", "AVAILABLE") == "AVAILABLE"
-                and _decimal_text(nav.get("value"), "NAV value") != total
-            ):
+        for transaction in transactions:
+            owner = transaction.get("account_id")
+            if not isinstance(owner, str):
+                continue
+            if owner != owner.strip() and owner.strip() == account_id:
                 raise SchwabDerivedPositionError(
-                    "the account value observed at the cutoff differs from the positions total"
+                    "a transaction account id is not canonical"
                 )
+            if owner != account_id:
+                continue
+            for field in _TRANSACTION_DATE_FIELDS:
+                if transaction.get(field) in {None, ""}:
+                    if field == "event_date":
+                        raise SchwabDerivedPositionError(
+                            "a transaction of the account has no event date"
+                        )
+                    continue
+                dated = _day(transaction[field], f"transaction {field}")
+                if valuation_cutoff < dated:
+                    raise SchwabDerivedPositionError(
+                        "the account has transactions after the cutoff: "
+                        "the snapshot is not the cutoff"
+                    )
+        navs = [
+            observation
+            for observation in nav_observations
+            if observation.get("account_id") == account_id
+            and observation.get("as_of_date") == valuation_cutoff.isoformat()
+        ]
+        if len(navs) != 1:
+            raise SchwabDerivedPositionError(
+                "the account must have exactly one NAV observation on the cutoff day"
+            )
+        nav = navs[0].get("nav")
+        if (
+            not isinstance(nav, Mapping)
+            or nav.get("status") != "AVAILABLE"
+            or _decimal_text(nav.get("value"), "NAV value") != total
+        ):
+            raise SchwabDerivedPositionError(
+                "the account value observed at the cutoff differs from the positions total"
+            )
         days = closure["earlier_market_value_days"]
         if not isinstance(days, list):
             raise SchwabDerivedPositionError("closure earlier days are invalid")
@@ -433,4 +513,12 @@ def admit_derived_position_rows(
             raise SchwabDerivedPositionError(
                 "an earlier observation day lies outside the history-to-capture window"
             )
+        for day in observed:
+            if not any(
+                schema == _BALANCES_SCHEMA and day.isoformat() in artifact_id
+                for artifact_id, schema in artifact_schemas.items()
+            ):
+                raise SchwabDerivedPositionError(
+                    f"no catalog balances page carries the earlier day {day.isoformat()}"
+                )
     return admitted

@@ -60,7 +60,12 @@ def _facts(row: dict[str, Any], **catalog_over: Any) -> list[dict[str, Any]]:
                 "account_id": ACCOUNT,
                 "as_of_date": "2026-11-01",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
-            }
+            },
+            {
+                "account_id": ACCOUNT,
+                "as_of_date": CUTOFF,
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "105.73"},
+            },
         ],
         "coverage": {
             "known_gaps": [],
@@ -77,7 +82,13 @@ def _facts(row: dict[str, Any], **catalog_over: Any) -> list[dict[str, Any]]:
             "observed_at": "2026-11-08T23:15:39+00:00",
             "valuation_cutoff": CUTOFF,
         },
-        "source_artifacts": [{"artifact_id": ARTIFACT}],
+        "source_artifacts": [
+            {"artifact_id": ARTIFACT, "schema": {"name": "schwab-positions-export"}},
+            {
+                "artifact_id": "evidence/balances-2026-11-14.txt",
+                "schema": {"name": "schwab-live-balances-evidence"},
+            },
+        ],
     }
     catalog.update(catalog_over)
     return baseline._schwab_facts(
@@ -102,6 +113,10 @@ def test_a_derived_position_keeps_its_evidence_class_in_the_baseline() -> None:
         lambda r: r.update(evidence_class="WCH_CURRENT"),
         lambda r: r["closure"].update(positions_total_usd="106.00"),
         lambda r: r["closure"].update(earlier_market_value_days=[]),
+        lambda r: r.update(observed_at="2026-11-08T23:15:39+00:00"),
+        lambda r: r.update(average_price="1"),
+        lambda r: r["market_value"].update(currency="EUR"),
+        lambda r: r.update(strategy_id="strategy-x"),
         lambda r: r.update(source_artifact_id="evidence/other.csv"),
     ],
 )
@@ -132,3 +147,20 @@ def test_a_transaction_after_the_cutoff_refuses_the_derived_position() -> None:
     late = {"account_id": ACCOUNT, "event_date": "2026-11-07", "record_id": "t-late"}
     with pytest.raises(baseline.BaselineValidationError, match="after the cutoff"):
         _facts(_derived_row(), transactions=[late])
+
+
+def test_the_baseline_row_names_the_residual_reallocation_window() -> None:
+    (row,) = _facts(_derived_row())
+    assert row["residual_reallocation_window_days"] == ["2026-11-08", "2026-11-14"]
+
+
+def test_a_missing_cutoff_day_nav_refuses_the_derived_position() -> None:
+    nav = [
+        {
+            "account_id": ACCOUNT,
+            "as_of_date": "2026-11-01",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+        }
+    ]
+    with pytest.raises(baseline.BaselineValidationError, match="exactly one NAV"):
+        _facts(_derived_row(), nav_observations=nav)

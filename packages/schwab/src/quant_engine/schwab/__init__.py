@@ -14,6 +14,7 @@ from quant_engine.schwab.derived_positions import (
     DERIVED_BASIS,
     SchwabDerivedPositionError,
     admit_derived_position_rows,
+    residual_window_days,
 )
 from quant_engine.schwab.generation import (
     SchwabGenerationError,
@@ -35,6 +36,7 @@ __all__ = [
     "build_generation",
     "current_snapshot_bytes",
     "publish_generation_candidate",
+    "residual_window_days",
     "read_current_snapshot",
     "read_holdings_v2_current_snapshot",
     "read_web_current_snapshot",

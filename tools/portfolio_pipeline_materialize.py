@@ -1222,7 +1222,10 @@ def _schwab_selected_point_positions(
                     transactions=source["transactions"],
                     valuation_cutoff=valuation_cutoff,
                     snapshot_day=day,
-                    artifact_ids={a["artifact_id"] for a in source["source_artifacts"]},
+                    artifact_schemas={
+                        a["artifact_id"]: a["schema"]["name"]
+                        for a in source["source_artifacts"]
+                    },
                     transaction_history=source["coverage"]["transaction_history"],
                     nav_observations=source["nav_observations"],
                 )
@@ -1251,6 +1254,9 @@ def _schwab_selected_point_positions(
                     "evidence_layer": "ACCOUNT_LIVE",
                     "provider_id": point_provider,
                     "record_id": "schwab:" + record_id,
+                    "residual_reallocation_window_days": schwab.residual_window_days(
+                        native
+                    ),
                     "source_record_id": record_id,
                     "generation_id": manifest.generation_id,
                     "valuation_cutoff": valuation_cutoff.isoformat(),
