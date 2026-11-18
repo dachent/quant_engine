@@ -1415,6 +1415,10 @@ def _product_name(names: Mapping[str, str], product_id: str) -> str:
 # same hash-bound daily_holdings.csv rows and the same admitted daily FX, so they must agree to
 # the cent; a difference beyond this half cent is a builder or source defect and is refused.
 MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD: Final = Decimal("0.005")
+# The API-reported current holding value is an independent endpoint; it need not equal the derived
+# value to the cent (the real run differs by well under 1%) but a gross difference (a consistent
+# NAV forgery) is refused.
+MATRIXPORT_POSITIONS_API_VALUE_TOLERANCE: Final = Decimal("0.02")
 
 
 def _matrixport_positions(
@@ -1452,9 +1456,11 @@ def _matrixport_positions(
     (``csv/holding_reconciliation.csv``): the last day's share must equal both, with no
     unexplained opening share.  The API-reported current value (``holding_balance``) is carried
     as ``api_reported_value_gap_usd`` on the last row (disclosed, not a refusal).  A day with no
-    ``nav_daily`` row is typed ``NAV_DAILY_ABSENT``, an active day with no native value is
-    typed ``NATIVE_VALUE_ABSENT`` (``UNAVAILABLE``); more than 5% of active days absent is
-    refused, as are unexplained calendar gaps, a NAV day without positions and the reverse.
+    ``nav_daily`` row and a native value is refused (``MATRIXPORT_POSITIONS_NAV_DAILY_ABSENT``);
+    an active day with no native value (a provider gap) is typed ``NATIVE_VALUE_ABSENT``
+    (``UNAVAILABLE``), more than 5% of them is refused, as are unexplained calendar gaps
+    (including a tail short of the declared boundary), a NAV day without positions and the
+    reverse, and an API holding value that differs from the last derived value by over 2%.
     ``symbol`` is the product name from ``csv/holdings.csv`` (the unit is the share).
     """
 
@@ -1682,11 +1688,7 @@ def _matrixport_positions(
                         "status": "AVAILABLE",
                         "value": format(value.normalize(), "f"),
                     },
-                    "closure_status": (
-                        "NAV_DAILY_ABSENT"
-                        if published is None
-                        else "CONSISTENT_WITH_PUBLISHED_NAV"
-                    ),
+                    "closure_status": "CONSISTENT_WITH_PUBLISHED_NAV",
                     "native_value": {
                         "currency": currency,
                         "status": "AVAILABLE",
@@ -1720,6 +1722,20 @@ def _matrixport_positions(
                     (api_value[key] - last_value).normalize(), "f"
                 )
                 break
+        if api_value[key] != 0 and (
+            abs(api_value[key] - last_value) / abs(api_value[key])
+            > MATRIXPORT_POSITIONS_API_VALUE_TOLERANCE
+        ):
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_API_VALUE_ANCHOR: the last derived value differs "
+                f"from the API-reported holding value by over "
+                f"{MATRIXPORT_POSITIONS_API_VALUE_TOLERANCE:.0%}"
+            )
+    if unclosed:
+        raise ProviderLedgerError(
+            "MATRIXPORT_POSITIONS_NAV_DAILY_ABSENT: valued days with no published unit "
+            "NAV: " + ", ".join(d.isoformat() for d in sorted(unclosed))
+        )
     typed = sum(
         1
         for row_out in positions
@@ -1755,12 +1771,18 @@ def _matrixport_positions(
     # admitted FX end) must have a holdings row; a missing run of days is refused, not passed.
     if active_days:
         window_end = min(
-            max(active_days),
             _day(
                 catalog.get("observed_boundary_date"),
                 "matrixport observed_boundary_date",
             ),
+            fx_end,
+            financial_cutoff if financial_cutoff is not None else fx_end,
         )
+        if max(day for (_product, day) in held_days) < window_end:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_GAP: the holdings end before the declared "
+                f"boundary {window_end.isoformat()}"
+            )
         missing = sorted(
             {
                 day

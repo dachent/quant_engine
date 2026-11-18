@@ -116,6 +116,8 @@ def _setup(
     nav_rows: list[str] | None = None,
     api_share: str = SHARE,
     event_share: str | None = None,
+    boundary: str | None = None,
+    api_balance: str | None = None,
 ) -> tuple[GenerationManifest, dict[str, Any]]:
     csv_dir = tmp_path / "output" / RUN_ID / "csv"
     csv_dir.mkdir(parents=True)
@@ -127,11 +129,13 @@ def _setup(
     published.write_text(
         NAV_HEADER + "\n" + "\n".join(nav_rows) + "\n", encoding="utf-8-sig"
     )
+    last = rows[-1].split(",")
+    balance = api_balance or format(Decimal(api_share) * Decimal(last[8] or "0"), "f")
     anchors = csv_dir / "holdings.csv"
     name = '[{"language":"en-US","text":"Test Product"}]'.replace('"', '""')
     anchors.write_text(
         "currency,display_name,holding_balance,product_id,shares\n"
-        f'USDT,"{name}",0,{PRODUCT},{api_share}\n',
+        f'USDT,"{name}",{balance},{PRODUCT},{api_share}\n',
         encoding="utf-8-sig",
     )
     reconciliation = csv_dir / "holding_reconciliation.csv"
@@ -142,7 +146,7 @@ def _setup(
     )
     catalog = {
         "catalog_schema_version": 2,
-        "observed_boundary_date": "2026-11-07",
+        "observed_boundary_date": boundary or max(line.split(",")[14] for line in rows),
         "source_run_id": RUN_ID,
     }
     return (
@@ -259,33 +263,78 @@ def test_a_published_unit_nav_that_disagrees_with_the_holdings_fails(
         _positions(tmp_path, rows, _fx({"2026-11-06": "1"}), nav_rows=nav_rows)
 
 
-def test_a_day_without_a_published_unit_nav_is_typed_not_silent(
-    tmp_path: Path,
-) -> None:
+def test_a_valued_day_without_a_published_unit_nav_is_refused(tmp_path: Path) -> None:
     days = _span(30)
     rows = [_row(day, "10") for day in days]
     nav_rows = [_nav_row(day, "10") for day in days if day != "2026-11-06"]
-    positions = _positions(
-        tmp_path, rows, _fx({day: "1" for day in days}), nav_rows=nav_rows
-    )
-    status = {p["as_of_date"]: p["closure_status"] for p in positions}
-    assert status["2026-11-06"] == "NAV_DAILY_ABSENT"
-    assert list(status.values()).count("CONSISTENT_WITH_PUBLISHED_NAV") == 29
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="MATRIXPORT_POSITIONS_NAV_DAILY_ABSENT.*2026-11-06",
+    ):
+        _positions(tmp_path, rows, _fx({day: "1" for day in days}), nav_rows=nav_rows)
 
 
-def test_too_many_untyped_days_are_refused(tmp_path: Path) -> None:
-    # A product-id mismatch would otherwise type every day absent and still pass.
+def test_a_product_id_mismatch_in_nav_daily_is_refused(tmp_path: Path) -> None:
     days = _span(10)
     rows = [_row(day, "10") for day in days]
+    nav_rows = [_nav_row(day, "10").replace(PRODUCT, "1") for day in days]
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="MATRIXPORT_POSITIONS_NAV_DAILY_ABSENT"
+    ):
+        _positions(tmp_path, rows, _fx({day: "1" for day in days}), nav_rows=nav_rows)
+
+
+def test_a_cut_tail_short_of_the_declared_boundary_is_refused(tmp_path: Path) -> None:
+    days = _span(10)
+    rows = [_row(day, "10") for day in days[:6]]
+    nav_rows = [_nav_row(day, "10") for day in days]
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="MATRIXPORT_POSITIONS_GAP|SNAPSHOT_DATE_MISMATCH",
+    ):
+        manifest, catalog = _setup(tmp_path, rows, nav_rows, boundary=days[-1])
+        ledger._matrixport_positions(  # noqa: SLF001
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {ACCOUNT},
+            STRATEGIES,
+            {},
+            fx_rates=_fx({day: "1" for day in days}),
+        )
+
+
+def test_a_consistent_nav_forgery_fails_against_the_api_holding_value(
+    tmp_path: Path,
+) -> None:
+    # nav doubled in both files and native_value doubled: per-day checks and shares agree, only
+    # the API-reported holding value (another endpoint) disagrees.
+    days = _span(3)
+    rows = [_row(day, "20") for day in days]
+    manifest, catalog = _setup(tmp_path, rows, api_balance="1000")
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="MATRIXPORT_POSITIONS_API_VALUE_ANCHOR"
+    ):
+        ledger._matrixport_positions(  # noqa: SLF001
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {ACCOUNT},
+            STRATEGIES,
+            {},
+            fx_rates=_fx({day: "1" for day in days}),
+        )
+
+
+def test_too_many_native_absent_days_are_refused(tmp_path: Path) -> None:
+    days = _span(10)
+    rows = [_row(day, "10", native="" if day in days[:3] else None) for day in days]
     with pytest.raises(
         ledger.ProviderLedgerError, match="MATRIXPORT_POSITIONS_TOO_MANY_GAPS"
     ):
-        _positions(
-            tmp_path,
-            rows,
-            _fx({day: "1" for day in days}),
-            nav_rows=[_nav_row(days[0], "10").replace(PRODUCT, "1")],
-        )
+        _positions(tmp_path, rows, _fx({day: "1" for day in days}))
 
 
 def test_a_consistent_share_forgery_fails_against_the_api_share(tmp_path: Path) -> None:
@@ -455,7 +504,7 @@ REAL = os.environ.get("QE_MATRIXPORT_RUN_CSV_DIR")
     not REAL,
     reason="QE_MATRIXPORT_RUN_CSV_DIR names a real run's csv directory (opt-in)",
 )
-def test_the_real_run_closes_independently_and_types_its_gaps(tmp_path: Path) -> None:
+def test_the_real_run_is_consistent_and_types_its_provider_gaps(tmp_path: Path) -> None:
     source = Path(str(REAL))
     csv_dir = tmp_path / "output" / RUN_ID / "csv"
     csv_dir.mkdir(parents=True)
@@ -493,6 +542,5 @@ def test_the_real_run_closes_independently_and_types_its_gaps(tmp_path: Path) ->
     assert len({p["security_id"] for p in positions}) == 1
     assert {p["closure_status"] for p in positions} <= {
         "CONSISTENT_WITH_PUBLISHED_NAV",
-        "NAV_DAILY_ABSENT",
         "NATIVE_VALUE_ABSENT",
     }
