@@ -1395,6 +1395,165 @@ def _matrixport_nav_observations(
     return observations
 
 
+# Closure between a day's position rows and the same day's account NAV: both are built from the
+# same hash-bound daily_holdings.csv rows and the same admitted daily FX, so they must agree to
+# the cent; a difference beyond this half cent is a builder or source defect and is refused.
+MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD: Final = Decimal("0.005")
+
+
+def _matrixport_positions(
+    generation_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ]
+    | None = None,
+    financial_cutoff: date | None = None,
+    cutoff_findings: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Admit Matrixport's daily NAV-share holding rows as account positions.
+
+    One row per day and product from ``csv/daily_holdings.csv`` (the account holds a single
+    NAV-share product valued in USDT): ``quantity`` is the share count, ``market_value`` the
+    native value converted with the admitted daily FX, the same conversion the account NAV
+    uses.  Positions exist only on the contract-FX path that admits the USD NAV.  Every day
+    that has a NAV observation must close against its position rows to within
+    ``MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD`` or the build refuses.
+    """
+
+    if fx_rates is None:
+        return []
+    account_id = _CSV_FACT_ACCOUNT[_MATRIXPORT]
+    source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
+    run_root = root / "output" / source_run_id
+    artifact_id = "csv/daily_holdings.csv"
+    artifact = _find_manifest_artifact(
+        manifest, artifact_id, "matrixport daily holdings"
+    )
+    rows = _verified_csv_rows(
+        _exact_file(run_root, Path(artifact_id), "matrixport daily holdings"),
+        artifact.sha256,
+        {"currency", "native_value", "product_id", "share", "utc_date"},
+        "matrixport daily holdings",
+    )
+    fx_end = _admitted_fx_end(fx_rates)
+    positions: list[dict[str, Any]] = []
+    totals: dict[date, Decimal] = defaultdict(Decimal)
+    seen: set[tuple[date, str]] = set()
+    with localcontext() as context:
+        context.prec = 80
+        for row in rows:
+            day = _day(row.get("utc_date"), "matrixport daily holdings utc_date")
+            if financial_cutoff is not None and day > financial_cutoff:
+                continue
+            share = _observed_decimal(
+                row.get("share"), "matrixport daily holdings share"
+            )
+            if share is None:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_ACCOUNT_COMPONENT_INVALID: active share is absent"
+                )
+            if share == 0:
+                continue
+            native = _observed_decimal(
+                row.get("native_value"), "matrixport native holding value"
+            )
+            if native is None or day > fx_end:
+                # No native value to convert, or no admitted USD conversion: no position
+                # row (the NAV builder dispositions the same rows).
+                continue
+            product_id = _text(row.get("product_id"), "matrixport holding product_id")
+            if (day, product_id) in seen:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_POSITIONS_DUPLICATE: more than one holding row exists "
+                    "for a product and date"
+                )
+            seen.add((day, product_id))
+            currency = _text(row.get("currency"), "matrixport holding currency")
+            if currency == "USD":
+                value, fx_evidence = native, []
+            else:
+                fx = _daily_fx_evidence(currency, day, fx_rates)
+                value, fx_evidence = native * Decimal(str(fx["rate"])), [fx]
+            totals[day] += value
+            strategy_id, mapping_status = _mapped_strategy_for_account(
+                account_id, day, accounts, strategies, assignments
+            )
+            source_id = f"{day.isoformat()}:{product_id}"
+            positions.append(
+                {
+                    "account_id": account_id,
+                    "as_of_date": day.isoformat(),
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "generation_id": generation_id,
+                    "mapping_status": mapping_status,
+                    "market_value": {
+                        "currency": "USD",
+                        "status": "AVAILABLE",
+                        "value": format(value.normalize(), "f"),
+                    },
+                    "native_value": {
+                        "currency": currency,
+                        "status": "AVAILABLE",
+                        "value": format(native.normalize(), "f"),
+                    },
+                    "provider_id": "matrixport",
+                    "quantity": format(share.normalize(), "f"),
+                    "record_id": f"matrixport:position:{source_id}",
+                    "security_id": "security-matrixport-"
+                    + hashlib.sha256(product_id.encode("utf-8")).hexdigest()[:24],
+                    "source_artifact_id": artifact_id,
+                    "source_record_id": source_id,
+                    "strategy_id": strategy_id,
+                    "symbol": currency,
+                    "valuation_fx": fx_evidence,
+                    "value_basis": "NAV_SHARE_PRODUCT",
+                }
+            )
+    navs = _matrixport_nav_observations(
+        generation_id,
+        manifest,
+        catalog,
+        root,
+        accounts,
+        strategies,
+        assignments,
+        fx_rates=fx_rates,
+        financial_cutoff=financial_cutoff,
+        cutoff_findings=None,
+    )
+    nav_days: dict[date, Decimal] = {}
+    for observation in navs:
+        nav_value = _observed_decimal(observation["nav"], "matrixport account NAV")
+        if nav_value is None:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_NAV_CLOSURE: an account NAV is unavailable"
+            )
+        nav_days[date.fromisoformat(str(observation["as_of_date"]))] = nav_value
+    for day in sorted(nav_days):
+        if day not in totals:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_NAV_CLOSURE: a NAV day has no position rows: "
+                f"{day.isoformat()}"
+            )
+        if abs(totals[day] - nav_days[day]) > MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_NAV_CLOSURE: position rows differ from the "
+                f"account NAV on {day.isoformat()} by more than "
+                f"{MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD} USD"
+            )
+    return [
+        row for row in positions if date.fromisoformat(row["as_of_date"]) in nav_days
+    ]
+
+
 def _matrixport_capital_anchors(
     generation_id: str,
     manifest: GenerationManifest,
