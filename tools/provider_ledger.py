@@ -1832,10 +1832,45 @@ def _quantbase_nav_observations(
     return observations
 
 
-#: Relative tolerance of the holdings value against the strategy NAV of the same day.
-_QUANTBASE_POSITIONS_TOLERANCE: Final = Decimal("0.005")
+#: The snapshot's lines must sum to the strategy NAV of its day to the cent.
+_QUANTBASE_SNAPSHOT_CENT: Final = Decimal("0.01")
+#: A holding valued at an earlier cutoff from the NAV must imply a price within this
+#: relative distance of the snapshot price (an independent test of the share count).
+_QUANTBASE_IMPLIED_PRICE_TOLERANCE: Final = Decimal("0.01")
 _QUANTBASE_HOLDINGS: Final = "csv/dashboard_Volatis_Strategy_holdings.csv"
 _QUANTBASE_REBALANCES: Final = "csv/volatis_strategy_rebalance_history.csv"
+_QUANTBASE_ACTIVITY_DATES: Final = (
+    "filled_at",
+    "completed_at",
+    "date",
+    "time",
+    "created_at",
+)
+
+
+def _quantbase_snapshot_day(catalog: Mapping[str, Any]) -> date:
+    """The New York day the holdings snapshot was captured, from the capture itself.
+
+    Not the generation's as-of date: a generation can carry an earlier as-of than the
+    moment its holdings file was captured.
+    """
+
+    for dataset in _objects(catalog.get("datasets", []), "quantbase.datasets"):
+        if dataset.get("relative_path") != _QUANTBASE_HOLDINGS:
+            continue
+        if dataset.get("snapshot_kind") != "CAPTURE_TIME_SNAPSHOT":
+            raise ProviderLedgerError(
+                "quantbase holdings are not a capture-time snapshot"
+            )
+        captured = datetime.fromisoformat(
+            _utc_timestamp(
+                dataset.get("captured_at"), "quantbase holdings captured_at"
+            ).replace("Z", "+00:00")
+        )
+        return captured.astimezone(ZoneInfo("America/New_York")).date()
+    raise ProviderLedgerError(
+        "quantbase holdings capture time is absent from the catalog"
+    )
 
 
 def _quantbase_positions(
@@ -1847,18 +1882,27 @@ def _quantbase_positions(
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
     financial_cutoff: date | None = None,
+    fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None,
 ) -> list[dict[str, Any]]:
     """The Volatis strategy's holdings at the cutoff, from the capture-time snapshot.
 
-    Quantbase publishes holdings only as the snapshot taken when the run was
-    captured (``manifest.as_of_date``), not as a daily series.  The snapshot stands
-    for the cutoff holdings only when nothing traded between them: any rebalance
-    row or filled order dated after the cutoff (and not after the snapshot) refuses
-    the build.  The snapshot's own value is closed against the strategy NAV of its
-    day.  When the cutoff precedes the snapshot the single risky holding is valued
-    at the cutoff as the strategy NAV of that day less the cash line (the cash line
-    is exact and the NAV is the sum of the lines), labelled as derived; more than
-    one risky holding cannot be valued that way and refuses.
+    Quantbase publishes holdings only as the snapshot taken when the run was captured
+    (the New York day of the holdings dataset's ``captured_at``), not as a daily series.
+    The snapshot stands for the cutoff holdings only when nothing happened in the
+    account between the cutoff and the capture: any rebalance row, and any account
+    activity of any type (a fill, a dividend, a journal, a fee), dated after the cutoff
+    and not after the snapshot day refuses the build.  The snapshot's lines must sum to
+    the strategy NAV of its day to the cent.  When the cutoff precedes the snapshot the
+    single risky holding is valued as the strategy NAV of the cutoff less the exact cash
+    line, labelled derived, and that value must imply a price within one percent of the
+    snapshot price (so a wrong share count cannot pass); more than one risky holding
+    cannot be valued that way and refuses.
+
+    The share count is tested against an INDEPENDENT price when the governed closes
+    (``fill_closes``) hold the symbol's official close of the day the position is valued:
+    shares times that close must match the value within 0.1 percent, else the build
+    refuses.  Without such a close the row says ``independent_price_check`` is
+    ``UNAVAILABLE``, so a closure that declares completeness can require ``PASSED``.
     """
 
     if not any(
@@ -1867,6 +1911,7 @@ def _quantbase_positions(
     ):
         # An earlier capture carries no holdings file: no positions fact, not an error.
         return []
+    snapshot_day = _quantbase_snapshot_day(catalog)
     account_id = _CSV_FACT_ACCOUNT[_QUANTBASE]
     run_id = _run_id(
         _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
@@ -1885,7 +1930,6 @@ def _quantbase_positions(
             name,
         )
 
-    snapshot_day = manifest.as_of_date
     cutoff_day = (
         snapshot_day
         if financial_cutoff is None
@@ -1917,7 +1961,6 @@ def _quantbase_positions(
         )
     }
     last_rebalance: date | None = None
-    last_order: date | None = None
     for row in rebalances:
         day = _day(row["date"], "quantbase rebalance date")
         if cutoff_day < day <= snapshot_day:
@@ -1926,47 +1969,61 @@ def _quantbase_positions(
             )
         if day <= cutoff_day and (last_rebalance is None or day > last_rebalance):
             last_rebalance = day
+    last_activity: date | None = None
     for row in activity:
-        filled_at = str(row.get("filled_at") or "").strip()
-        if row.get("activity_type") == "order" and filled_at:
-            filled_day = datetime.fromisoformat(
-                _utc_timestamp(filled_at, "quantbase order filled_at").replace(
-                    "Z", "+00:00"
-                )
-            ).date()
-            if cutoff_day < filled_day <= snapshot_day:
-                raise ProviderLedgerError(
-                    "quantbase holdings snapshot postdates an order after the cutoff"
-                )
-            if filled_day <= cutoff_day and (
-                last_order is None or filled_day > last_order
-            ):
-                last_order = filled_day
+        # An activity's effective day is the latest of the dates it carries: an order is
+        # filled_at, a dividend date, a journal completed_at, anything else created_at.
+        days = [
+            datetime.fromisoformat(
+                _utc_timestamp(
+                    str(row[column]).strip(), f"quantbase activity {column}"
+                ).replace("Z", "+00:00")
+            )
+            .astimezone(ZoneInfo("America/New_York"))
+            .date()
+            for column in _QUANTBASE_ACTIVITY_DATES
+            if str(row.get(column) or "").strip()
+        ]
+        if not days:
+            raise ProviderLedgerError("quantbase account activity row has no date")
+        activity_day = max(days)
+        if cutoff_day < activity_day <= snapshot_day:
+            raise ProviderLedgerError(
+                "quantbase account has activity after the cutoff "
+                f"({row.get('activity_type')}): the snapshot is not the cutoff holdings"
+            )
+        if activity_day <= cutoff_day and (
+            last_activity is None or activity_day > last_activity
+        ):
+            last_activity = activity_day
     cash = Decimal(0)
-    risky: list[tuple[str, Decimal, Decimal, str]] = []
+    risky: list[tuple[str, Decimal, Decimal, Decimal]] = []
     for row in holdings:
         symbol = _text(row.get("symbol"), "quantbase holding symbol")
         value = _observed_decimal(row.get("value"), "quantbase holding value")
         quantity = _observed_decimal(row.get("quantity"), "quantbase holding quantity")
-        if value is None or quantity is None:
+        price = _observed_decimal(row.get("latest_price"), "quantbase holding price")
+        if value is None or quantity is None or price is None:
             raise ProviderLedgerError("quantbase holding amount is unavailable")
         if symbol == "$USD":
             cash += value
         else:
-            risky.append((symbol, quantity, value, str(row["latest_price"])))
+            risky.append((symbol, quantity, value, price))
     snapshot_nav = navs.get(snapshot_day)
     if snapshot_nav is None or snapshot_nav <= 0:
         raise ProviderLedgerError(
             "quantbase strategy NAV is absent on the snapshot day"
         )
     snapshot_total = cash + sum((v for _s, _q, v, _p in risky), Decimal(0))
-    if (
-        abs(snapshot_total - snapshot_nav)
-        > _QUANTBASE_POSITIONS_TOLERANCE * snapshot_nav
-    ):
+    if abs(snapshot_total - snapshot_nav) > _QUANTBASE_SNAPSHOT_CENT:
         raise ProviderLedgerError(
             "quantbase holdings do not close against the strategy NAV"
         )
+    for symbol, quantity, value, price in risky:
+        if abs(quantity * price - value) > _QUANTBASE_SNAPSHOT_CENT * 2:
+            raise ProviderLedgerError(
+                f"quantbase holding {symbol} quantity times price differs from its value"
+            )
     derived = cutoff_day != snapshot_day
     cutoff_nav = navs.get(cutoff_day)
     if derived:
@@ -1974,33 +2031,61 @@ def _quantbase_positions(
             raise ProviderLedgerError(
                 "quantbase holdings cannot be valued at the cutoff"
             )
-        values = {risky[0][0]: cutoff_nav - cash}
+        symbol, quantity, _value, snapshot_price = risky[0]
+        derived_value = cutoff_nav - cash
+        implied = derived_value / quantity
+        if (
+            abs(implied - snapshot_price)
+            > _QUANTBASE_IMPLIED_PRICE_TOLERANCE * snapshot_price
+        ):
+            raise ProviderLedgerError(
+                "quantbase cutoff value implies a price far from the snapshot price: "
+                "the share count or the cutoff NAV is wrong"
+            )
+        values = {symbol: derived_value}
     else:
         values = {symbol: value for symbol, _q, value, _p in risky}
+    independent: dict[str, dict[str, str]] = {}
+    for symbol, quantity, _value, _price in risky:
+        close = (fill_closes or {}).get(symbol, {}).get(cutoff_day)
+        if close is None:
+            independent[symbol] = {"status": "UNAVAILABLE"}
+            continue
+        if abs(quantity * close - values[symbol]) > Decimal("0.001") * values[symbol]:
+            raise ProviderLedgerError(
+                f"quantbase holding {symbol} differs from its shares times the "
+                "official close of the cutoff"
+            )
+        independent[symbol] = {
+            "status": "PASSED",
+            "close": format(close, "f"),
+            "close_date": cutoff_day.isoformat(),
+        }
     strategy_id, mapping_status = _mapped_strategy_for_account(
         account_id, cutoff_day, accounts, strategies, assignments
     )
     artifact_id = f"source/{_QUANTBASE_HOLDINGS}"
-    # The proofs are the snapshot lines summing to the snapshot NAV and nothing
-    # trading between the cutoff and the snapshot; the value at an earlier cutoff is
-    # derived from that NAV, so its difference from the NAV proves nothing by itself.
+    # The proofs: the snapshot lines sum to the snapshot NAV to the cent, quantity times
+    # price equals each value, nothing happened after the cutoff, and (when derived) the
+    # value implies a price near the snapshot price.
     closure = {
         "cash_usd": format(cash, "f"),
         "usd_cash": format(cash, "f"),
         "nav_usd": format(cutoff_nav if derived else snapshot_nav, "f"),
         "nav_date": cutoff_day.isoformat(),
+        "snapshot_day": snapshot_day.isoformat(),
         "snapshot_nav_usd": format(snapshot_nav, "f"),
         "snapshot_total_usd": format(snapshot_total, "f"),
         "snapshot_difference_usd": format(snapshot_total - snapshot_nav, "f"),
-        "snapshot_relative_difference": format(
-            abs(snapshot_total - snapshot_nav) / snapshot_nav, "f"
-        ),
         "last_rebalance_date": (
             last_rebalance.isoformat() if last_rebalance is not None else None
         ),
-        "last_order_date": last_order.isoformat() if last_order is not None else None,
+        "last_activity_date": (
+            last_activity.isoformat() if last_activity is not None else None
+        ),
         "activity_after_cutoff_count": 0,
-        "relative_tolerance": str(_QUANTBASE_POSITIONS_TOLERANCE),
+        "cent_tolerance": str(_QUANTBASE_SNAPSHOT_CENT),
+        "implied_price_tolerance": str(_QUANTBASE_IMPLIED_PRICE_TOLERANCE),
     }
     rows: list[dict[str, Any]] = []
     for symbol, quantity, _value, price in risky:
@@ -2011,12 +2096,23 @@ def _quantbase_positions(
                 "as_of_date": cutoff_day.isoformat(),
                 "as_of_basis": "CAPTURE_TIME_SNAPSHOT_NO_ACTIVITY_SINCE_CUTOFF",
                 "capture_date": snapshot_day.isoformat(),
-                "closure": closure,
+                "closure": {
+                    **closure,
+                    "independent_price_check": independent[symbol]["status"],
+                    **(
+                        {
+                            "independent_close": independent[symbol]["close"],
+                            "independent_close_date": independent[symbol]["close_date"],
+                        }
+                        if independent[symbol]["status"] == "PASSED"
+                        else {}
+                    ),
+                },
                 "evidence_class": "CAPTURE_TIME_SNAPSHOT",
                 "evidence_layer": "ACCOUNT_LIVE",
                 "generation_id": generation_id,
                 "mapping_status": mapping_status,
-                "mark_price": price,
+                "mark_price": format(price, "f"),
                 "market_value": {
                     "currency": "USD",
                     "status": "AVAILABLE",
@@ -2027,7 +2123,7 @@ def _quantbase_positions(
                 "record_id": f"quantbase:position:{source_id}",
                 "security_id": "security-quantbase-"
                 + hashlib.sha256(f"quantbase:{symbol}".encode()).hexdigest()[:24],
-                "snapshot_price": price,
+                "snapshot_price": format(price, "f"),
                 "source_artifact_id": artifact_id,
                 "source_record_id": source_id,
                 "strategy_id": strategy_id,
@@ -5640,6 +5736,7 @@ def _csv_quantbase_positions(ctx: _CsvFactContext) -> list[dict[str, Any]]:
         ctx.strategies,
         ctx.assignments,
         financial_cutoff=ctx.financial_cutoff,
+        fill_closes=ctx.fill_closes,
     )
 
 
