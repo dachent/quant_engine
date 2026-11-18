@@ -21,11 +21,15 @@ from quant_engine.schwab import (
 ACCOUNT = "account-1825d6880d891d57"
 CUTOFF = date(2026, 11, 6)
 SNAPSHOT = date(2026, 11, 8)
-ARTIFACT = "evidence/positions.csv"
+ARTIFACT = "evidence/schwab-691-2026-11-17/positions.csv"
 PAGE = "evidence/schwab-691-2026-11-14/balances.txt"
+OTHER_PAGE = "evidence/schwab-live-2026-11-12/balances-054.txt"
+CAPTURE_PAGE = "evidence/schwab-691-2026-11-17/balances-691.txt"
 SCHEMAS = {
     ARTIFACT: "schwab-positions-export",
     PAGE: "schwab-live-balances-evidence",
+    OTHER_PAGE: "schwab-live-balances-evidence",
+    CAPTURE_PAGE: "schwab-live-balances-evidence",
 }
 HISTORY = {
     "accounts": {
@@ -150,6 +154,12 @@ REFUSED = {
     ),
     "earlier day equals history_through": _mutate(
         ("closure", "earlier_market_value_days"), ["2026-11-08"]
+    ),
+    "earlier day only on another account's page": _mutate(
+        ("closure", "earlier_market_value_days"), ["2026-11-12"]
+    ),
+    "earlier day is the capture day": _mutate(
+        ("closure", "earlier_market_value_days"), ["2026-11-17"]
     ),
     "earlier day has no catalog page": _mutate(
         ("closure", "earlier_market_value_days"), ["2026-11-15"]
@@ -339,3 +349,35 @@ def test_two_holdings_close_to_one_total() -> None:
         row["closure"]["holdings_usd"] = "150"
         row["closure"]["positions_total_usd"] = "155.73"
     assert len(_admit([a, b], nav_observations=[_nav("155.73")])) == 2
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        "evidence/schwab-6910-2026-11-14/balances.txt",
+        "evidence/xschwab-691-2026-11-14/balances.txt",
+        "evidence/schwab-691-2026-11-14/deeper/balances.txt",
+        "evidence/schwab-692-2026-11-14/balances.txt",
+    ],
+)
+def test_an_earlier_page_must_sit_in_this_accounts_folder_for_that_day(
+    page: str,
+) -> None:
+    schemas = {k: v for k, v in SCHEMAS.items() if k != PAGE}
+    schemas[page] = "schwab-live-balances-evidence"
+    with pytest.raises(
+        SchwabDerivedPositionError, match="balances page of this account"
+    ):
+        _admit([_row()], artifact_schemas=schemas)
+
+
+def test_the_export_folder_must_name_the_account_tag_and_the_capture_day() -> None:
+    row = _row()
+    row["source_artifact_id"] = "evidence/positions.csv"
+    schemas = {**SCHEMAS, "evidence/positions.csv": "schwab-positions-export"}
+    with pytest.raises(SchwabDerivedPositionError, match="export folder"):
+        _admit([row], artifact_schemas=schemas)
+    row["source_artifact_id"] = "evidence/schwab-691-2026-11-16/positions.csv"
+    schemas = {**SCHEMAS, row["source_artifact_id"]: "schwab-positions-export"}
+    with pytest.raises(SchwabDerivedPositionError, match="export folder"):
+        _admit([row], artifact_schemas=schemas)

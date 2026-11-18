@@ -15,7 +15,7 @@ from quant_engine.core import canonical_json_bytes
 ACCOUNT = "account-schwab"
 CUTOFF = "2026-11-06"
 DERIVED = "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT"
-ARTIFACT = "evidence/positions.csv"
+ARTIFACT = "evidence/schwab-691-2026-11-17/positions.csv"
 
 
 def _derived_row() -> dict[str, Any]:
@@ -85,7 +85,7 @@ def _facts(row: dict[str, Any], **catalog_over: Any) -> list[dict[str, Any]]:
         "source_artifacts": [
             {"artifact_id": ARTIFACT, "schema": {"name": "schwab-positions-export"}},
             {
-                "artifact_id": "evidence/balances-2026-11-14.txt",
+                "artifact_id": "evidence/schwab-691-2026-11-14/balances.txt",
                 "schema": {"name": "schwab-live-balances-evidence"},
             },
         ],

@@ -895,8 +895,8 @@ def _staged_observation(
                 if schwab_derived is not None:
                     # the empty account holds a $1.00 fund derived at the cutoff
                     derived_account = account
-                    export_id = "evidence/positions-export.csv"
-                    page_id = f"evidence/balances-{schwab_point_capture[:10]}.txt"
+                    export_id = "evidence/schwab-691-2026-09-25/positions-export.csv"
+                    page_id = "evidence/schwab-691-2026-09-20/balances-page.txt"
                     bind(
                         export_id,
                         root / "evidence/positions-export.csv",
@@ -927,10 +927,10 @@ def _staged_observation(
                         "account_id": derived_account,
                         "as_of_basis": "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT",
                         "as_of_date": schwab_valuation_cutoff,
-                        "capture_date": schwab_point_capture[:10],
+                        "capture_date": "2026-09-25",
                         "closure": {
                             "cash_usd": "0.00",
-                            "earlier_market_value_days": [schwab_point_capture[:10]],
+                            "earlier_market_value_days": ["2026-09-20"],
                             "history_through": schwab_valuation_cutoff,
                             "holdings_usd": "100",
                             "positions_total_usd": "100.00",

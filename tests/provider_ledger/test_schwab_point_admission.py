@@ -513,7 +513,7 @@ def test_the_ledger_refuses_a_derived_position_row_without_a_valuation_cutoff(
 
 DERIVED_CLOSURE = {
     "cash_usd": "0.00",
-    "earlier_market_value_days": ["2026-09-18"],
+    "earlier_market_value_days": ["2026-09-20"],
     "history_through": "2026-09-17",
     "holdings_usd": "100",
     "positions_total_usd": "100.00",
@@ -578,6 +578,7 @@ def test_a_derived_position_is_admitted_with_its_evidence_class_end_to_end(
         {"closure": {**DERIVED_CLOSURE, "earlier_market_value_days": []}},
         {"closure": {**DERIVED_CLOSURE, "history_through": "2026-09-16"}},
         {"capture_date": "2026-09-17"},
+        {"closure": {**DERIVED_CLOSURE, "earlier_market_value_days": ["2026-09-25"]}},
         {"source_artifact_id": "web/not-a-catalog-artifact.json"},
         {
             "quantity": "101",

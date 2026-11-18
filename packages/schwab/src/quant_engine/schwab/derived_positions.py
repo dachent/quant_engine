@@ -262,6 +262,7 @@ _ROW_KEYS: Final = frozenset(
 )
 _VALUE_KEYS: Final = frozenset({"currency", "status", "value"})
 _EXPORT_SCHEMA: Final = "schwab-positions-export"
+_FOLDER: Final = re.compile(r"(?:^|/)schwab-([^/-]+)-(\d{4}-\d{2}-\d{2})/[^/]+$")
 _BALANCES_SCHEMA: Final = "schwab-live-balances-evidence"
 _TRANSACTION_DATE_FIELDS: Final = (
     "event_date",
@@ -294,7 +295,11 @@ def _day(value: object, name: str) -> date:
 
 
 def residual_window_days(row: Mapping[str, Any]) -> list[str]:
-    """The days no transaction page and no observation proves for a derived row.
+    """The days no transaction page proves for a derived row (a boundary, not the whole doubt).
+
+    Page-verified boundary only: it names where the history ends and the capture begins;
+    a same-total reallocation inside it is undetectable, and a page equal in total after
+    it does not shrink it.
 
     The history ends at ``history_through``.  Up to the capture a reallocation that keeps
     the account total unchanged (a purchase of a fund with cash, a switch between funds)
@@ -523,16 +528,26 @@ def admit_derived_position_rows(
             raise SchwabDerivedPositionError(
                 "no independent observation covers the days after the history"
             )
-        if any(not through < day <= capture_date for day in observed):
+        if any(not through < day < capture_date for day in observed):
             raise SchwabDerivedPositionError(
                 "an earlier observation day lies outside the history-to-capture window"
             )
+        # The pages of one account sit in folders named for it: the export's folder
+        # carries the account tag and the capture day, an earlier page's folder the same
+        # tag and its own day.  Another account's page, or the capture's own, does not tie.
+        folder = _FOLDER.search(group[0]["source_artifact_id"])
+        if folder is None or folder.group(2) != capture_date.isoformat():
+            raise SchwabDerivedPositionError(
+                "the positions export folder does not name its account tag and capture day"
+            )
+        tag = re.escape(folder.group(1))
         for day in observed:
+            pattern = re.compile(rf"(?:.*/)?schwab-{tag}-{day.isoformat()}/[^/]+")
             if not any(
-                schema == _BALANCES_SCHEMA and day.isoformat() in artifact_id
+                schema == _BALANCES_SCHEMA and pattern.fullmatch(artifact_id)
                 for artifact_id, schema in artifact_schemas.items()
             ):
                 raise SchwabDerivedPositionError(
-                    f"no catalog balances page carries the earlier day {day.isoformat()}"
+                    f"no catalog balances page of this account carries the earlier day {day.isoformat()}"
                 )
     return admitted
