@@ -46,6 +46,9 @@ python tools/decision_refresh.py late-cm --from <last cm> --out <D>/cm/cycle-man
   --captured-at-utc <T> --refresh-started-at-utc <T> --cycle-id refresh-<D>-<sha8> --predecessor <last release id>
 ```
 
+### Tested read-only on 2026-11-17 (Path A, release B's own cycle manifest, scratch outputs only)
+`release_world.py cycle-manifest --from <B cm> --out ... --cycle-id ... --predecessor ...` wrote a manifest; `release_cycle_manifest.py validate`/`resolve` from the newer tools clone then **refused it**: `COVERAGE_BEFORE_CUTOFF: alpaca: observed coverage ends 2026-07-17, before the cutoff 2026-11-06`. The Alpaca generation is historical only, so the manifest of every refresh must declare `"cutoff_coverage": "NOT_REQUIRED"` with a `cutoff_coverage_reason` on `alpaca` (add it by hand after step 5). With that, `validate` printed `OK (7 providers verified)` and `resolve` wrote the resolved cycle. Path B's `late-cm` on the same manifest refused for a different reason: B's world-local roots are named `matrixport` / `schwab`, and `decision_refresh` requires the real leaf (`dataMatrixport`, `dataSchwab`). The first late-bound refresh will therefore get a different ledger id than B for identical data; that is expected for a provisional run.
+
 ## 6. Validate and resolve (tools clone first as a coverage check, then the frozen tree)
 ```bash
 H=$(sha256sum <cm> | cut -d' ' -f1)
