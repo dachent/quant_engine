@@ -200,7 +200,9 @@ def test_financial_outcomes_rebuilds_the_alternatives_the_panel_attaches() -> No
         base["alpha_context"] = panel._alpha_context(base)
         return base
 
-    unavailable = row("us-economic", "UNAVAILABLE", alpha=None, unavailable_reasons=["X"])
+    unavailable = row(
+        "us-economic", "UNAVAILABLE", alpha=None, unavailable_reasons=["X"]
+    )
     style = row("multi-asset-style", "AVAILABLE")
     grouped = [
         {
