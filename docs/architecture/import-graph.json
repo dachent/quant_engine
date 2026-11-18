@@ -144,6 +144,11 @@
       1
     ],
     [
+      "decision_refresh",
+      "release_cycle_manifest",
+      1
+    ],
+    [
       "event_completeness",
       "leverage_disclosure",
       1
@@ -980,6 +985,11 @@
     ],
     [
       "release_spec_remap",
+      "release_cycle_manifest",
+      1
+    ],
+    [
+      "release_world",
       "release_cycle_manifest",
       1
     ],
