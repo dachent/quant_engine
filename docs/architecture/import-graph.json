@@ -144,6 +144,11 @@
       1
     ],
     [
+      "decision_refresh",
+      "release_cycle_manifest",
+      1
+    ],
+    [
       "gate_profile",
       "verify_release_restore",
       1
