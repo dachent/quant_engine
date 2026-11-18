@@ -195,3 +195,30 @@ def test_a_world_local_provider_root_must_keep_the_real_leaf_name() -> None:
             predecessor="y",
             roots={"alpaca": ("world", "alpaca")},
         )
+
+
+def test_a_sibling_world_with_the_same_prefix_is_not_rewritten(tmp_path: Path) -> None:
+    old, new = _world(tmp_path, "world-B"), tmp_path / "world-X"
+    sibling = tmp_path / "world-B2"
+    forward, sib = (str(p).replace("\\", "/") for p in (old, sibling))
+    escaped_sib = str(sibling).replace("/", "\\").replace("\\", "\\\\")
+    (old / "cm" / "seed.json").write_text(
+        json.dumps(
+            {"own": forward + "/in/x", "sibling": sib + "/in/y", "esc": escaped_sib}
+        ),
+        encoding="utf-8",
+    )
+    tool.copy_world(old, new, ["cm"])
+    out = json.loads((new / "cm" / "seed.json").read_text(encoding="utf-8"))
+    assert out["own"] == str(new).replace("\\", "/") + "/in/x"
+    assert out["sibling"] == sib + "/in/y"  # untouched, not "world-X2/in/y"
+    assert out["esc"] == escaped_sib
+
+
+def test_rewrite_text_matches_whole_path_segments_only() -> None:
+    old, new = Path("/w/world-B"), Path("/w/world-X")
+    assert tool.rewrite_text("/w/world-B/a /w/world-B2/a /w/world-B", old, new) == (
+        "/w/world-X/a /w/world-B2/a /w/world-X"
+    )
+    assert tool.names_leaf("/w/world-B/a", "world-B")
+    assert not tool.names_leaf("/w/world-B2/a", "world-B")

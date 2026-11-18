@@ -23,6 +23,7 @@ from collections.abc import Mapping, Sequence
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -45,8 +46,22 @@ def rewrite_text(text: str, old: Path, new: Path) -> str:
 
     pairs = list(zip(spellings(old), spellings(new), strict=True))
     for before, after in sorted(pairs, key=lambda pair: -len(pair[0])):
-        text = text.replace(before, after)
+        # a path-segment boundary: ``world-B`` must not match inside the sibling ``world-B2``
+        pattern = re.compile(re.escape(before) + _NOT_NAME_CHAR)
+        text = pattern.sub(lambda _match: after, text)
     return text
+
+
+_NOT_NAME_CHAR = r"(?![A-Za-z0-9._-])"
+
+
+def names_leaf(text: str, leaf: str) -> bool:
+    """True when ``text`` still names the directory ``leaf`` as a whole path segment (not a longer sibling name)."""
+
+    return (
+        re.search(r"(?<![A-Za-z0-9._-])" + re.escape(leaf) + _NOT_NAME_CHAR, text)
+        is not None
+    )
 
 
 def plan(src: Path, dst: Path, dirs: Sequence[str]) -> list[str]:
@@ -115,7 +130,7 @@ def copy_world(
                     changed.encode("utf-8")
                 )  # bytes: no newline translation
                 rewritten += 1
-            if leaf in changed:
+            if names_leaf(changed, leaf):
                 raise WorldError(
                     f"{path.relative_to(dst).as_posix()} still names the old world {leaf!r} "
                     "in a spelling this tool does not rewrite"
