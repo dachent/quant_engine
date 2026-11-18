@@ -410,6 +410,26 @@ def _pinned_text(
     return path.read_text(encoding="utf-8-sig"), artifact
 
 
+def _history_bound(
+    account_id: str,
+    transactions: Sequence[Mapping[str, object]],
+    coverage: Mapping[str, object] | None,
+) -> date | None:
+    """The last day the generation's transaction bytes cover for the account."""
+
+    if coverage is not None:
+        accounts = _object(coverage["accounts"], "transaction history coverage")
+        entry = accounts.get(account_id)
+        if entry is None:
+            return None
+        return _date(
+            _object(entry, "coverage account")["effective_end"],
+            "coverage effective_end",
+        )
+    days = [date.fromisoformat(str(t["event_date"])) for t in transactions]
+    return max(days) if days else None
+
+
 def _derived_position_rows(
     value: object,
     *,
@@ -418,6 +438,9 @@ def _derived_position_rows(
     account_ids: set[str],
     transactions: Sequence[Mapping[str, object]],
     declared_empty: Sequence[str],
+    suffix_by_account: Mapping[str, str],
+    valuation_cutoff: date,
+    history_coverage: Mapping[str, object] | None,
 ) -> tuple[list[dict[str, object]], list[SourceArtifact]]:
     """Position rows carried back to the cutoff from a later pinned positions export.
 
@@ -501,6 +524,11 @@ def _derived_position_rows(
                 history_transactions=transactions,
                 history_through=_date(
                     item["history_through"], "derived_position_rows.history_through"
+                ),
+                account_suffix=suffix_by_account.get(account_id, ""),
+                valuation_cutoff=valuation_cutoff,
+                history_bound=_history_bound(
+                    account_id, transactions, history_coverage
                 ),
                 earlier_market_value=earlier,
                 balances_account_value=account_value,
@@ -2352,6 +2380,9 @@ def build_generation(
         account_ids=set(crosswalk.values()),
         transactions=transactions,
         declared_empty=declared_empty_accounts,
+        suffix_by_account={internal: ext[-3:] for ext, internal in crosswalk.items()},
+        valuation_cutoff=current_valuation_cutoff or generation_as_of,
+        history_coverage=transaction_history_coverage,
     )
     if derived_rows:
         positions = [*positions, *derived_rows]

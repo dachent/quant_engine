@@ -25,6 +25,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
+import re
 from typing import Any, Final
 
 DERIVED_BASIS: Final = "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT"
@@ -54,6 +55,12 @@ def _security_id(symbol: str) -> str:
     return f"security-schwab-{hashlib.sha256(symbol.encode()).hexdigest()[:24]}"
 
 
+_EXPORT_HEADER: Final = re.compile(
+    r'^"?Positions for account .*\.\.\.(\d{3}) as of [^,]*, (\d{4})/(\d{2})/(\d{2})',
+    re.M,
+)
+
+
 def _read_export(text: str) -> list[dict[str, str]]:
     lines = [line for line in text.replace("\r\n", "\n").split("\n")]
     start = next(
@@ -76,10 +83,41 @@ def derive_positions_at_cutoff(
     history_transactions: Sequence[Mapping[str, Any]],
     history_through: date,
     earlier_market_value: Mapping[str, Decimal],
+    account_suffix: str,
+    valuation_cutoff: date,
+    history_bound: date | None,
     balances_account_value: Decimal | None = None,
 ) -> list[dict[str, Any]]:
-    """The cutoff position rows of ``account_id``, or an error saying why not."""
+    """The cutoff position rows of ``account_id``, or an error saying why not.
 
+    ``account_suffix``, ``valuation_cutoff`` and ``history_bound`` come from the
+    generation's own bytes (crosswalk, current snapshot, transaction coverage), never
+    from the spec: the export's own header must name that account and the capture day,
+    the cutoff must be the generation's valuation day, and ``history_through`` must not
+    claim more days than the transactions actually cover.
+    """
+
+    header = _EXPORT_HEADER.search(export_text)
+    if header is None:
+        raise SchwabDerivedPositionError("positions export header names no account/day")
+    if header.group(1) != account_suffix:
+        raise SchwabDerivedPositionError(
+            "positions export is for a different account than the derived row"
+        )
+    if date(int(header.group(2)), int(header.group(3)), int(header.group(4))) != (
+        capture_date
+    ):
+        raise SchwabDerivedPositionError(
+            "positions export day differs from the declared capture date"
+        )
+    if cutoff != valuation_cutoff:
+        raise SchwabDerivedPositionError(
+            "derived cutoff is not the generation valuation day"
+        )
+    if history_bound is None or history_through > history_bound:
+        raise SchwabDerivedPositionError(
+            "history_through is later than the transactions the generation covers"
+        )
     if not cutoff <= history_through:
         raise SchwabDerivedPositionError("history does not reach the cutoff")
     later = [

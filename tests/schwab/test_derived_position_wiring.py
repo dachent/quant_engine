@@ -34,6 +34,9 @@ EXPORT = "\n".join(
 BALANCES = "Account Value\n$1,005.00\nCash & Cash Investments\n$5.00\nMarket Value\n$1,000.00\n"
 
 
+CUTOFF = "2026-07-30"  # the last day the fixture's transactions cover
+
+
 def _pin(root: Path, name: str, text: str) -> dict[str, object]:
     payload = text.encode("utf-8")
     (root / name).write_bytes(payload)
@@ -47,23 +50,34 @@ def _pin(root: Path, name: str, text: str) -> dict[str, object]:
 
 
 def _spec_with_derived(tmp_path: Path, **over: Any) -> Path:
-    spec = fixture._web_snapshot_spec(tmp_path)  # type: ignore[attr-defined]
+    spec = fixture._web_snapshot_spec(  # type: ignore[attr-defined]
+        tmp_path, valuation_cutoff=CUTOFF
+    )
     first = fixture._without_positions_of_first_account(  # type: ignore[attr-defined]
         spec, liquidation_available=True
     )
     document = json.loads(spec.read_text(encoding="utf-8"))
     root = Path(document["roots"]["source"])
     as_of = document["as_of_date"]
+    suffix = next(
+        row["external_account_id"][-3:]
+        for row in document["crosswalk"]
+        if row["internal_account_id"] == first
+    )
+    export = EXPORT.replace("...691", f"...{suffix}").replace(
+        "2026/11/17", as_of.replace("-", "/")
+    )
+    cutoff_page = BALANCES
     item: dict[str, Any] = {
         "account_id": first,
         "balances": _pin(root, "bal-691.txt", BALANCES),
         "capture_date": as_of,
-        "cutoff": as_of,
+        "cutoff": CUTOFF,
         "earlier_balances": [
-            {"day": as_of, "page": _pin(root, "bal-earlier.txt", BALANCES)}
+            {"day": CUTOFF, "page": _pin(root, "bal-earlier.txt", cutoff_page)}
         ],
-        "export": _pin(root, "pos-691.csv", EXPORT),
-        "history_through": as_of,
+        "export": _pin(root, "pos-691.csv", export),
+        "history_through": CUTOFF,
     }
     item.update(over)
     document["derived_position_rows"] = [item]
@@ -123,3 +137,20 @@ def test_the_spec_key_is_unknown_without_the_current_snapshot_schema(
     spec.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(SchwabGenerationError):
         build_generation(spec)
+
+
+@pytest.mark.parametrize(
+    ("over", "fragment"),
+    [
+        ({"history_through": "2026-07-31"}, "later than the transactions"),
+        ({"cutoff": "2026-07-29"}, "valuation day"),
+        ({"capture_date": "2026-07-29"}, "capture date"),
+    ],
+)
+def test_spec_claims_the_generation_bytes_contradict_refuse(
+    tmp_path: Path, over: dict[str, Any], fragment: str
+) -> None:
+    """KILL: history reach, cutoff and capture day come from the bytes, not the spec."""
+
+    with pytest.raises(SchwabGenerationError, match=fragment):
+        build_generation(_spec_with_derived(tmp_path, **over))

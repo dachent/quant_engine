@@ -62,6 +62,9 @@ def _run(**over: Any) -> list[dict[str, Any]]:
         "history_through": date(2026, 11, 14),
         "earlier_market_value": {"2026-11-14": Decimal("1000.00")},
         "balances_account_value": Decimal("1005.00"),
+        "account_suffix": "691",
+        "valuation_cutoff": date(2026, 11, 6),
+        "history_bound": date(2026, 11, 14),
     }
     args.update(over)
     return derive_positions_at_cutoff(**args)
@@ -112,7 +115,7 @@ def test_a_closed_unmoved_money_market_snapshot_is_carried_to_the_cutoff() -> No
             "quantity differs",
         ),
         ({"history_through": date(2026, 11, 5)}, "reach the cutoff"),
-        ({"export_text": "no header here"}, "header is absent"),
+        ({"export_text": "no header here"}, "names no account"),
     ],
 )
 def test_a_snapshot_that_is_not_the_cutoff_refuses(
@@ -138,6 +141,9 @@ def test_the_real_export_parses_and_closes() -> None:
         history_transactions=[],
         history_through=date(2026, 11, 17),
         earlier_market_value={},
+        account_suffix="691",
+        valuation_cutoff=date(2026, 11, 6),
+        history_bound=date(2026, 11, 17),
     )
     assert [r["symbol"] for r in rows] == ["SWVXX"]
     assert rows[0]["market_value"]["value"] == rows[0]["quantity"]
@@ -153,3 +159,22 @@ def test_balances_page_values_are_parsed() -> None:
     assert parse_balances_values(page) == (Decimal("1005.00"), Decimal("1000.00"))
     with pytest.raises(SchwabDerivedPositionError):
         parse_balances_values("Account Value\n$1.00\n")
+
+
+@pytest.mark.parametrize(
+    ("over", "fragment"),
+    [
+        ({"account_suffix": "722"}, "different account"),
+        ({"capture_date": date(2026, 11, 16)}, "capture date"),
+        ({"valuation_cutoff": date(2026, 11, 5)}, "valuation day"),
+        ({"history_bound": date(2026, 11, 13)}, "later than the transactions"),
+        ({"history_bound": None}, "later than the transactions"),
+    ],
+)
+def test_the_spec_claims_are_checked_against_the_generation_bytes(
+    over: dict[str, Any], fragment: str
+) -> None:
+    """KILL: account, capture day, cutoff and history reach are verified, not trusted."""
+
+    with pytest.raises(SchwabDerivedPositionError, match=fragment):
+        _run(**over)
