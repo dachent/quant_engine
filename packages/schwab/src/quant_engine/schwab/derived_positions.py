@@ -296,15 +296,15 @@ def _day(value: object, name: str) -> date:
 def residual_window_days(row: Mapping[str, Any]) -> list[str]:
     """The days no transaction page and no observation proves for a derived row.
 
-    The history ends at ``history_through``; the first independent observation after it is
-    on the first earlier day.  Between them a reallocation that keeps the account total
-    unchanged (a purchase of a fund with cash, a switch between funds) cannot be seen.
-    Empty when the history reaches the capture day.
+    The history ends at ``history_through``.  Up to the capture a reallocation that keeps
+    the account total unchanged (a purchase of a fund with cash, a switch between funds)
+    cannot be seen: a later page equal in total does not rule it out.  Empty when the
+    history reaches the capture day.
     """
 
     closure = row["closure"]
-    days = sorted(closure["earlier_market_value_days"])
-    return [closure["history_through"], days[0]] if days else []
+    through, capture = closure["history_through"], row["capture_date"]
+    return [through, capture] if through < capture else []
 
 
 def admit_derived_position_rows(

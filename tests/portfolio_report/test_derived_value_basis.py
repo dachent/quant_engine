@@ -452,7 +452,8 @@ def test_a_position_derived_from_a_later_snapshot_keeps_its_own_basis_and_says_s
                 },
                 "mapping_status": "UNMAPPED",
                 "quantity": "5",
-                "residual_reallocation_window_days": ["2026-09-19", "2026-09-22"],
+                "closure": {"earlier_market_value_days": ["2026-09-22"]},
+                "residual_reallocation_window_days": ["2026-09-19", "2026-09-25"],
                 "security_id": "sec-1",
                 "strategy_id": None,
                 "symbol": "FUND",
@@ -464,13 +465,13 @@ def test_a_position_derived_from_a_later_snapshot_keeps_its_own_basis_and_says_s
     assert row["evidence_class"] == kind
     assert "value_basis" not in row
     assert row["capture_date"] == "2026-09-25"
-    assert row["residual_reallocation_window_days"] == ["2026-09-19", "2026-09-22"]
+    assert row["residual_reallocation_window_days"] == ["2026-09-19", "2026-09-25"]
     assert row["basis_note"] == (
         "position inferred, not observed: derived at cutoff from a later snapshot "
         "(captured 2026-09-25); net zero change in the account total over the days since "
         "the cutoff, holdings/cash split inferred from the 2026-09-22 page; "
         "same-total reallocation cannot be excluded between 2026-09-19 and 2026-09-25; "
-        "the 2026-09-22 page fixes only the later holdings, so the per-symbol split is "
+        "a later page equal in total does not rule it out, so the per-symbol split is "
         "not proven for those days"
     )
     assert row["snapshot_status"] == "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"

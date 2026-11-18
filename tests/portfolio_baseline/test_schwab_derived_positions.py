@@ -151,7 +151,7 @@ def test_a_transaction_after_the_cutoff_refuses_the_derived_position() -> None:
 
 def test_the_baseline_row_names_the_residual_reallocation_window() -> None:
     (row,) = _facts(_derived_row())
-    assert row["residual_reallocation_window_days"] == ["2026-11-08", "2026-11-14"]
+    assert row["residual_reallocation_window_days"] == ["2026-11-08", "2026-11-17"]
 
 
 def test_a_missing_cutoff_day_nav_refuses_the_derived_position() -> None:

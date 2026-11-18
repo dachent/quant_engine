@@ -105,7 +105,7 @@ def test_no_rows_admit_nothing() -> None:
 
 
 def test_the_residual_window_is_named() -> None:
-    assert residual_window_days(_row()) == ["2026-11-08", "2026-11-14"]
+    assert residual_window_days(_row()) == ["2026-11-08", "2026-11-17"]
 
 
 def _mutate(path: tuple[str, ...], value: Any) -> dict[str, Any]:

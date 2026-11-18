@@ -8652,15 +8652,18 @@ def _positions(
             # days whose split between holdings the retained pages do not show
             window = item.get("residual_reallocation_window_days") or []
             accepted[-1]["residual_reallocation_window_days"] = list(window)
+            earlier = sorted(
+                (item.get("closure") or {}).get("earlier_market_value_days") or []
+            )
             accepted[-1]["basis_note"] = (
                 "position inferred, not observed: derived at cutoff from a later snapshot "
                 f"(captured {item.get('capture_date')}); net zero change in the account "
                 "total over the days since the cutoff, holdings/cash split inferred from "
-                + (f"the {window[1]} page" if len(window) == 2 else "the capture")
+                + (f"the {earlier[0]} page" if earlier else "the capture")
                 + (
                     f"; same-total reallocation cannot be excluded between {window[0]} "
-                    f"and {item.get('capture_date')}; the {window[1]} page fixes only the "
-                    "later holdings, so the per-symbol split is not proven for those days"
+                    f"and {window[1]}; a later page equal in total does not rule it out, "
+                    "so the per-symbol split is not proven for those days"
                     if len(window) == 2
                     else ""
                 )
