@@ -573,3 +573,42 @@ def test_the_event_completeness_declaration_is_pinned_and_carried(
         world["provenance"],
     )["spec"]
     assert carried["event_completeness_declaration"] == pin
+
+
+def test_position_closes_are_introduced_by_the_flag_not_only_carried(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """The Quantbase share-count pin enters the spec from a governed file (CLI flag
+    --quantbase-position-closes), is carried from a predecessor, and refuses an empty
+    list; absent, the spec has no such key."""
+
+    assert "quantbase_position_closes" not in _build(world)["spec"]
+    closes = tmp_path / "position-closes.json"
+    pins = [{"symbol": "SHV", "path": "shv.csv", "sha256": "b" * 64, "size_bytes": 5}]
+    closes.write_text(json.dumps(pins), encoding="utf-8")
+    spec = tool.build(
+        world["resolved"],
+        world["predecessor"],
+        world["out"],
+        world["provenance"],
+        quantbase_position_closes=closes,
+    )["spec"]
+    assert spec["quantbase_position_closes"] == pins
+    assert "quantbase_fill_closes" not in spec
+    carried = tool.build(
+        world["resolved"],
+        {**world["predecessor"], "quantbase_position_closes": pins},
+        world["out"],
+        world["provenance"],
+    )["spec"]
+    assert carried["quantbase_position_closes"] == pins
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]", encoding="utf-8")
+    with pytest.raises(tool.LedgerSpecError):
+        tool.build(
+            world["resolved"],
+            world["predecessor"],
+            world["out"],
+            world["provenance"],
+            quantbase_position_closes=empty,
+        )
