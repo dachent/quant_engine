@@ -80,3 +80,34 @@ def test_unmapped_account_duplicates_and_unreadable_headers_refuse() -> None:
         scs.build_rows([_stmt(RAW, "a.pdf"), _stmt(RAW, "b.pdf")], MAPPING)
     with pytest.raises(scs.StatementSummaryError, match="period"):
         scs.build_rows([_stmt("Account Number\n2525-5620\n" + BODY)], MAPPING)
+
+
+LEGACY = "\n".join(
+    [
+        "Account Number",
+        "2525-5620",
+        "Statement Period",
+        "December 1-31, 2024",
+        "Cash Transactions Summary This Period Year to Date",
+        "Starting Cash* $ 0.00 $ 0.00",
+        "Deposits and other Cash Credits 0.00 20,700.00",
+        "Investments Sold 0.00 0.00",
+        "Dividends and Interest 1,673.34 2,336.66",
+        "Withdrawals and other Debits 0.00 0.00",
+        "Investments Purchased (1,673.34) (23,036.66)",
+        "Fees and Charges 0.00 0.00",
+        "Total Cash Transaction Detail 0.00 0.00",
+        "Ending Cash* $ 0.00 $ 0.00",
+    ]
+)
+
+
+def test_the_old_pcra_layout_is_read_when_it_closes_and_named_when_it_does_not() -> None:
+    (row,) = scs.build_rows([_stmt(LEGACY)], MAPPING)
+    assert row["tie_status"] == "LEGACY_LAYOUT_CLOSES"
+    assert row["dividends_interest"]["value"] == "1673.34"
+    assert row["purchases"]["value"] == "-1673.34"
+    assert row["deposits"]["value"] == "0.00" and not row["deposits_tied"]
+    broken = LEGACY.replace("Ending Cash* $ 0.00", "Ending Cash* $ 5.00", 1)
+    (gap,) = scs.build_rows([_stmt(broken)], MAPPING)
+    assert gap["tie_status"] == "CASH_SUMMARY_ABSENT" and "deposits" not in gap

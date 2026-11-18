@@ -2,7 +2,7 @@
 
 One row per account-month statement (``statement_cash_summaries`` of the Schwab catalog),
 built from the pinned statement PDFs by ``zero_financing_statements.scan_cash_statement``
-(never by a second reader).  A month that does not tie is still emitted with the reason,
+(never by a second reader), except the pre-2025 PCRA "Cash Transactions Summary" layout, which has its own closing-only reader (`LEGACY_LAYOUT_CLOSES`: begin + movements == end; flow columns not row-tied).  A month that does not tie is still emitted with the reason,
 so a gap is named and never silently dropped; a month with no retained statement has no
 row (the closure names it missing).
 
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import date
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
@@ -74,6 +75,47 @@ def _amount(value: Any) -> dict[str, str]:
     return {"currency": "USD", "status": "AVAILABLE", "value": format(value, "f")}
 
 
+_LEGACY_LABELS = {
+    "Starting Cash*": "beginning_cash",
+    "Deposits and other Cash Credits": "deposits",
+    "Investments Sold": "sales_redemptions",
+    "Dividends and Interest": "dividends_interest",
+    "Withdrawals and other Debits": "withdrawals",
+    "Investments Purchased": "purchases",
+    "Fees and Charges": "expenses",
+    "Ending Cash*": "ending_cash",
+}
+_LEGACY_HEAD = re.compile(r"^Cash Transactions Summary This Period", re.M)
+_MONEY = re.compile(r"\(?-?[\d,]+\.\d{2}\)?")
+
+
+def _legacy_summary(raw_text: str) -> dict[str, Any] | None:
+    """The pre-2025 PCRA layout: a "Cash Transactions Summary" block (This Period / Year to
+    Date).  Returns the This Period amounts when the block reads and closes
+    (beginning + the six movement columns == ending), else None."""
+
+    head = _LEGACY_HEAD.search(raw_text)
+    if head is None:
+        return None
+    values: dict[str, Any] = {}
+    for line in raw_text[head.end() :].splitlines()[1:12]:
+        for label, name in _LEGACY_LABELS.items():
+            if line.startswith(label):
+                tokens = _MONEY.findall(line[len(label) :])
+                if not tokens:
+                    return None
+                token = tokens[0]
+                negative = token.startswith("(") or token.startswith("-")
+                number = Decimal(re.sub(r"[(),-]", "", token))
+                values[name] = -number if negative else number
+    if set(values) != set(_LEGACY_LABELS.values()):
+        return None
+    movement = sum(
+        (values[n] for n in zfs.CASH_SUMMARY_COLUMNS if n != "beginning_cash"), Decimal(0)
+    )
+    return values if values["beginning_cash"] + movement == values["ending_cash"] else None
+
+
 def summary_row(
     *,
     account_id: str,
@@ -96,7 +138,15 @@ def summary_row(
         "withdrawals_tied": False,
     }
     if facts is None:
-        return row  # no readable summary page: the reason names the gap
+        legacy = _legacy_summary(raw_text) if reason == "CASH_SUMMARY_ABSENT" else None
+        if legacy is None:
+            return row  # no readable summary page: the reason names the gap
+        # the old layout prints the columns but no per-row detail this reader ties against:
+        # the amounts close (begin + movements == end); the flow columns are not row-tied here
+        row["tie_status"] = "LEGACY_LAYOUT_CLOSES"
+        for name, value in legacy.items():
+            row[name] = _amount(value)
+        return row
     printed = facts["printed"]
     for name in ("beginning_cash", "ending_cash", *zfs.CASH_SUMMARY_COLUMNS):
         row[name] = _amount(printed[name])
