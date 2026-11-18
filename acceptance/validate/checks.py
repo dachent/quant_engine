@@ -25,8 +25,9 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, timedelta
+from datetime import date, timedelta, timezone
 from decimal import Decimal, InvalidOperation, localcontext
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import math
@@ -8190,6 +8191,19 @@ def _last_eligible_month_end(cutoff: date, lag_days: int) -> date:
     return month_end
 
 
+def _provider_last_modified(source: Mapping[str, Any]) -> date | None:
+    """The date the provider stamped a lens source, or ``None`` if absent or unreadable."""
+
+    publication = source.get("provider_publication")
+    raw = publication.get("last_modified") if isinstance(publication, Mapping) else None
+    if not isinstance(raw, str):
+        return None
+    try:
+        return parsedate_to_datetime(raw).astimezone(timezone.utc).date()
+    except (TypeError, ValueError):
+        return None
+
+
 def provider_lag_bound(ctx: Context, entity: str, day: date) -> str | None:
     """Why a lens may end before the cutoff because its providers publish late.
 
@@ -8239,6 +8253,14 @@ def provider_lag_bound(ctx: Context, entity: str, day: date) -> str | None:
     ).days > 4:
         return None
     if (day.year, day.month) > (eligible.year, eligible.month):
+        # The later month is only current if the provider published it by the cutoff:
+        # the producer copies each provider's Last-Modified onto the lens source row,
+        # and a lens with no stamp (or a stamp after the cutoff) is not accepted.
+        for row in matching:
+            for source in rows(row, "sources"):
+                stamp = _provider_last_modified(source)
+                if stamp is None or stamp > ctx.cutoff:
+                    return None
         return (
             f"lens ends {day}, {(ctx.cutoff - day).days} days before the cutoff, in a "
             f"complete month after the last month its governed sources ({', '.join(sorted(expected))}) "

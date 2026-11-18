@@ -8,7 +8,8 @@ import binascii
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import copy
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 import gzip
 import hashlib
@@ -6571,6 +6572,7 @@ def _group_decomposition_lens_sources(
             "as_of_date": item["as_of_date"],
             "generation_id": item["generation_id"],
             "plan_spec": item.get("plan_spec"),
+            "provider_publication": item.get("provider_publication"),
             "source_key": item["source_key"],
             "source_label": item["source_label"],
             "source_sha256": item["source_sha256"],
@@ -6696,6 +6698,45 @@ def _current_default_lens(lenses: Sequence[Mapping[str, Any]]) -> str:
     return str(present[0]) if present and present[0] else "ECONOMIC_FACTOR"
 
 
+LENS_PROVIDER_RECEIPT_KEYS: Final = {
+    "europe-economic": ("europe_factors", "europe_momentum"),
+    "us-economic": ("us_factors", "us_momentum"),
+    "us-industry": ("us_industries",),
+}
+
+
+def _lens_provider_publication(
+    factor_manifest: Mapping[str, Any] | None, source_key: str
+) -> dict[str, Any] | None:
+    """The provider's own publication stamp for a lens source, or ``None`` if it has none.
+
+    ``last_modified`` is the latest HTTP Last-Modified over the provider files the lens
+    reads; ``None`` there means the provider did not state it for some file, and a check
+    that relies on the later-month rule must then fail closed.
+    """
+
+    keys = LENS_PROVIDER_RECEIPT_KEYS.get(source_key)
+    if keys is None or factor_manifest is None:
+        return None
+    stamps: list[tuple[datetime, str]] = []
+    captured: list[str] = []
+    missing = False
+    for row in _objects(factor_manifest.get("sources"), "public factor sources"):
+        if row.get("source_key") not in keys:
+            continue
+        response = _object(row.get("response"), "public factor response")
+        captured.append(_text(response.get("captured_at_utc"), "provider capture"))
+        raw = response.get("last_modified")
+        if not isinstance(raw, str) or not raw:
+            missing = True
+            continue
+        stamps.append((parsedate_to_datetime(raw).astimezone(timezone.utc), raw))
+    return {
+        "captured_at_utc": max(captured) if captured else None,
+        "last_modified": None if missing or not stamps else max(stamps)[1],
+    }
+
+
 def _decomposition_lenses_for_mode(
     root: Path,
     plan_bundle: Path,
@@ -6727,7 +6768,12 @@ def _decomposition_lenses_for_mode(
         manifest.get("builder_version"),
         manifest.get("schema_version"),
     ) in {("0.17.0", 2), ("0.18.0", 2)}
+    factor_manifest: dict[str, Any] | None = None
     if current_plan:
+        factor_manifest, _fm_content, _fm_sha = _json_snapshot(
+            plan_bundle / "inputs" / "governance" / "public-factor-source-manifest.json",
+            "public factor source manifest",
+        )
         if manifest.get("bundle_id") != plan_bundle.name:
             raise ControlPanelValidationError(
                 "current decomposition plan identity differs"
@@ -6954,6 +7000,9 @@ def _decomposition_lenses_for_mode(
             )
             analysis["analysis_lens"] = expected_lens
             analysis["plan_spec"] = plan_spec
+            analysis["provider_publication"] = _lens_provider_publication(
+                factor_manifest, source_key
+            )
             analysis["source_key"] = source_key
             analysis["source_label"] = source_label
             analysis["surface"] = surface

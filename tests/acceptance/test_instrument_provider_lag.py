@@ -30,7 +30,14 @@ PLAN = {
 }
 
 
-def _lens_end(as_of: str, source_keys: list[str]):
+PUBLISHED = {"last_modified": "Tue, 08 Sep 2026 10:00:00 GMT"}
+
+
+def _lens_end(
+    as_of: str,
+    source_keys: list[str],
+    publication: dict[str, str] | None = None,
+):
     def mutate(report: dict[str, Any]) -> None:
         views = [
             *report["decomposition_lenses"]["modes"].values(),
@@ -39,13 +46,24 @@ def _lens_end(as_of: str, source_keys: list[str]):
         for rows in views:
             for lens in rows if isinstance(rows[0], dict) else rows[0]:
                 lens["as_of_date"] = as_of
-                lens["sources"] = [{"source_key": key} for key in source_keys]
+                lens["sources"] = [
+                    {"source_key": key}
+                    if publication is None
+                    else {"source_key": key, "provider_publication": publication}
+                    for key in source_keys
+                ]
 
     return mutate
 
 
-def _findings(tmp_path: Path, as_of: str, keys: list[str], plan: bool = True):
-    gen_dir = build(tmp_path, Spec(report=[_lens_end(as_of, keys)]))
+def _findings(
+    tmp_path: Path,
+    as_of: str,
+    keys: list[str],
+    plan: bool = True,
+    publication: dict[str, str] | None = None,
+):
+    gen_dir = build(tmp_path, Spec(report=[_lens_end(as_of, keys, publication)]))
     root = _policy_fixture(gen_dir.parent / "test-authority")
     if plan:
         target = (
@@ -96,8 +114,40 @@ def test_v10_a_lens_ending_in_a_later_complete_published_month_is_current(
 ) -> None:
     """Latest published French month (0.4.0 builder): ends after the last obliged month."""
 
-    findings = _findings(tmp_path, "2026-08-31", ["us-economic", "europe-economic"])
+    findings = _findings(
+        tmp_path,
+        "2026-08-31",
+        ["us-economic", "europe-economic"],
+        publication=PUBLISHED,
+    )
     assert findings == []
+
+
+def test_v10_a_later_month_published_after_the_cutoff_still_blocks(
+    tmp_path: Path,
+) -> None:
+    # #1010: the later-month rule needs proof the provider published by the cutoff.
+    late = {"last_modified": "Tue, 27 Oct 2026 15:18:47 GMT"}
+    findings = _findings(
+        tmp_path,
+        "2026-08-31",
+        ["us-economic", "europe-economic"],
+        publication=late,
+    )
+    assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}
+
+
+def test_v10_a_later_month_without_a_provider_stamp_fails_closed(
+    tmp_path: Path,
+) -> None:
+    for publication in (None, {"last_modified": None}, {"last_modified": "garbage"}):
+        findings = _findings(
+            tmp_path / str(publication),
+            "2026-08-31",
+            ["us-economic", "europe-economic"],
+            publication=publication,
+        )
+        assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}
 
 
 def test_v10_a_lens_ending_mid_month_after_the_eligible_month_still_blocks(
