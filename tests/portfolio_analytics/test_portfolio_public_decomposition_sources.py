@@ -326,7 +326,7 @@ def test_build_uses_exact_dates_decimal_returns_and_explicit_missing(
     assert industry_rows[1][-1] == ""
 
     output_manifest = {item["path"]: item for item in manifest["outputs"]}
-    assert manifest["builder_version"] == "0.3.0"
+    assert manifest["builder_version"] == "0.4.0"
     receipt_hashes = {
         key: hashlib.sha256(path.read_bytes()).hexdigest()
         for key, path in manifests.items()
@@ -603,3 +603,45 @@ def test_write_is_immutable(tmp_path: Path) -> None:
     assert (destination / "source-manifest.json").is_file()
     with pytest.raises(sources.PublicSourceError, match="already exists"):
         _write_bundle(catalog, paths, manifests, root)
+
+
+def test_the_latest_published_complete_month_is_admitted_beyond_the_required_one(
+    tmp_path: Path,
+) -> None:
+    """Factor-model audit D1: provider data through a full July is admitted on 2026-08-17.
+
+    The 45-day rule only fixes the minimum (June) and is recorded as the publication
+    lag; before this the lens stopped at June although July was published.
+    """
+
+    catalog, paths, manifests = _inputs(tmp_path)
+    days = ["20260630", "20260731"]
+    _set_source_dates(
+        paths,
+        manifests,
+        {
+            "us_factors": days,
+            "us_momentum": days,
+            "europe_factors": days,
+            "europe_momentum": days,
+            "us_industries": ["20260731"],
+        },
+    )
+    _set_capture_time(manifests, "2026-08-17T12:00:00Z")
+
+    outputs, manifest = sources.build_bundle(
+        catalog,
+        paths,
+        manifests,
+        "2026-08-17T11:55:00Z",
+        "2026-08-17T12:05:00Z",
+        "2026-08-17",
+    )
+
+    for output in manifest["outputs"]:
+        assert output["freshness"]["eligible_month"] == "2026-07"
+        assert output["freshness"]["accepted_observation_end"] == "2026-07-31"
+        # the 45-day deadline is recorded, not enforced, beyond the required month
+        assert output["freshness"]["publication_deadline"] == "2026-09-14"
+    for data in outputs.values():
+        assert _csv_rows(data)[-1][0] == "2026-07-31"

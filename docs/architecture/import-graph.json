@@ -74,6 +74,16 @@
   ],
   "tools_edges": [
     [
+      "base_bundle_builder",
+      "base_proxy_factors",
+      1
+    ],
+    [
+      "base_bundle_builder",
+      "portfolio_target_series",
+      1
+    ],
+    [
       "build_quantbase_fund_facts",
       "nested_strategy_tag_map",
       1
@@ -126,6 +136,11 @@
     [
       "capture_refresh",
       "capture_pipeline",
+      1
+    ],
+    [
+      "check_plausibility",
+      "validate_generation",
       1
     ],
     [
@@ -361,6 +376,11 @@
     [
       "portfolio_current_decomposition_plan",
       "strategy_basis_disclosure",
+      1
+    ],
+    [
+      "portfolio_current_dependence",
+      "portfolio_adverse_loss",
       1
     ],
     [
@@ -715,6 +735,11 @@
     ],
     [
       "portfolio_target_series",
+      "portfolio_attribution",
+      1
+    ],
+    [
+      "portfolio_target_series",
       "strategy_basis",
       1
     ],
@@ -1006,6 +1031,11 @@
     [
       "strategy_basis_disclosure",
       "strategy_basis",
+      1
+    ],
+    [
+      "style_capture_assemble",
+      "base_proxy_factors",
       1
     ],
     [

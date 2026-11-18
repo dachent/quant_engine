@@ -1142,7 +1142,41 @@ def _read_factors(
             rows[day] = FactorRow(day, risk_free, values)
     if not rows:
         raise DecompositionError("factor source contains no observations")
+    _check_risk_free(rows)
     return rows, expected
+
+
+# A daily risk-free return above 0.5% (over 100% a year) or below -0.05% is not a
+# financing rate.  The proxy file's RF is a cash-ETF price return: a distribution
+# day shows up as a drop of about -0.3% (2026-11-02 in the release payload), which
+# then enters every excess return of the fit.  Refuse rather than fit on it.
+RISK_FREE_DAILY_MAX = 0.005
+RISK_FREE_DAILY_MIN = -0.0005
+
+
+# Only the recent window is checked.  The 2007-2010 BIL price returns of the retained
+# style/base files carry tick noise and crisis-day moves beyond the bound (80 values in
+# the style file); those rows were accepted in the released history and are not what
+# this guard is for: an unposted distribution at the end of a capture.
+RISK_FREE_CHECK_WINDOW_DAYS = 1095
+
+
+def _check_risk_free(rows: Mapping[date, FactorRow]) -> None:
+    last_day = max(rows) if rows else None
+    bad = sorted(
+        (row.day, row.risk_free)
+        for row in rows.values()
+        if last_day is not None
+        and (last_day - row.day).days <= RISK_FREE_CHECK_WINDOW_DAYS
+        and not RISK_FREE_DAILY_MIN <= row.risk_free <= RISK_FREE_DAILY_MAX
+    )
+    if bad:
+        raise DecompositionError(
+            f"factor risk-free column has {len(bad)} implausible daily value(s), "
+            f"first {bad[0][0].isoformat()}: outside "
+            f"[{RISK_FREE_DAILY_MIN}, {RISK_FREE_DAILY_MAX}] (a price-return proxy "
+            "that includes a distribution drop is not a risk-free rate)"
+        )
 
 
 def _number(value: float | np.floating[Any] | None) -> str | None:

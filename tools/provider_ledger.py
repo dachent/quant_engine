@@ -10325,6 +10325,11 @@ def _provider_coverage(
         }
     )
     authoritative["out_of_boundary"] = out_of_boundary
+    structural_boundaries = limitations("structural_boundaries")
+    if (
+        structural_boundaries
+    ):  # absent otherwise: other providers' ledger ids do not move
+        authoritative["structural_boundaries"] = structural_boundaries
     return authoritative
 
 

@@ -19,6 +19,8 @@ from the point's own fields; it never trusts a stated ``cannot_create_new_high``
 
 from __future__ import annotations
 
+import hashlib
+import json
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from fractions import Fraction
 from typing import Any, Final, Mapping, Sequence
@@ -213,6 +215,135 @@ def proof_covers_spans(
         for spans in spans_by_strategy.values()
         for span in spans
     )
+
+
+OWNER_ACCEPTED: Final = "OWNER_ACCEPTED"
+PENDING_OWNER_ACCEPTANCE: Final = "PENDING_OWNER_ACCEPTANCE"
+ACCEPTANCE_SCHEMA: Final = "portfolio-hwm-owner-acceptance/1"
+
+
+#: sha256 of the owner's acceptance record.  The record is pinned here so a hand edit
+#: of the file cannot flip a status: changing it needs a reviewed change to this line.
+OWNER_ACCEPTANCE_RECORD_SHA256: Final = (
+    "978df59ae7e6933e60224442f3d6d912fb60a3eff756107d4f14244306d82e69"
+)
+
+
+def _four_places(value: Any) -> str | None:
+    try:
+        return format(Decimal(str(value)).quantize(Decimal("0.0001")), "f")
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def hwm_financial_acceptance(
+    document: Mapping[str, Any] | None, proof: Mapping[str, Any]
+) -> str:
+    """The one acceptance state of a governed HWM proof, from the owner's record.
+
+    ``OWNER_ACCEPTED`` only when the record names this policy, carries the decision,
+    and states exactly what this proof is: the same policy sha256, ``complete_through``
+    (which is also the last index day), point count, index, high-water mark and
+    maximum drawdown (4 decimals), and every recorded missing daily date is a day on
+    the index path (the path is daily; a missing source day is filled by its span
+    return).  A proof that differs in any of them is not covered and reads pending,
+    so a later release that changes the index is never accepted silently.  The state
+    is computed here once; every surface prints this value.
+    """
+
+    if not (
+        isinstance(document, Mapping)
+        and document.get("schema") == ACCEPTANCE_SCHEMA
+        and document.get("policy_id") == proof.get("policy_id")
+        and document.get("decision") == OWNER_ACCEPTED
+    ):
+        return PENDING_OWNER_ACCEPTANCE
+    accepted = document.get("accepted")
+    path = proof.get("index_path")
+    if not isinstance(accepted, Mapping) or not isinstance(path, list) or not path:
+        return PENDING_OWNER_ACCEPTANCE
+    recorded = accepted.get("missing_daily_points")
+    if not isinstance(recorded, list) or not recorded:
+        return PENDING_OWNER_ACCEPTANCE
+    days = [str(p.get("as_of")) for p in path if isinstance(p, Mapping)]
+    if (
+        accepted.get("policy_sha256") == proof.get("policy_sha256")
+        and accepted.get("complete_through") == proof.get("complete_through")
+        and days
+        and days[-1] == proof.get("complete_through")
+        and accepted.get("index_points") == len(path)
+        and accepted.get("current_index_4dp")
+        == _four_places(proof.get("current_index"))
+        and accepted.get("current_hwm_4dp") == _four_places(proof.get("current_hwm"))
+        and accepted.get("maximum_drawdown_4dp")
+        == _four_places(proof.get("maximum_drawdown"))
+        and all(
+            isinstance(p, Mapping) and str(p.get("date")) in set(days) for p in recorded
+        )
+    ):
+        return OWNER_ACCEPTED
+    return PENDING_OWNER_ACCEPTANCE
+
+
+def receipt_missing_points(
+    receipts: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, str]]:
+    """The (strategy, date) missing source days the epoch HPR receipts declare."""
+
+    points: list[dict[str, str]] = []
+    for outer in receipts or []:
+        receipt = outer.get("receipt") if isinstance(outer, Mapping) else None
+        spans = (
+            receipt.get("span_return_receipts")
+            if isinstance(receipt, Mapping)
+            else None
+        )
+        for span in spans if isinstance(spans, list) else []:
+            if isinstance(span, Mapping):
+                points.append(
+                    {
+                        "strategy_id": str(outer.get("strategy_id")),
+                        "date": str(span.get("missing_source_date")),
+                    }
+                )
+    return points
+
+
+def apply_hwm_owner_acceptance(
+    proof: Mapping[str, Any],
+    record_bytes: bytes,
+    missing_daily_points: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """The proof with its acceptance state, and the record's digest when accepted.
+
+    Given the span-filled days the epoch receipts declare, the set must equal the
+    record's missing days exactly: a fourth filled day is a change the owner has not
+    accepted.  Called without them (a re-projection that cannot see the receipts) the
+    content pins alone decide, and a consumer that was published with the receipts
+    differs from it only when a gap was added: that fails closed upstream.
+    """
+
+    digest = hashlib.sha256(record_bytes).hexdigest()
+    document = json.loads(record_bytes)
+    state = (
+        hwm_financial_acceptance(document, proof)
+        if digest == OWNER_ACCEPTANCE_RECORD_SHA256
+        else PENDING_OWNER_ACCEPTANCE
+    )
+    if state == OWNER_ACCEPTED and missing_daily_points is not None:
+        recorded = sorted(
+            (str(p["strategy_id"]), str(p["date"]))
+            for p in document["accepted"]["missing_daily_points"]
+        )
+        filled = sorted(
+            (str(p["strategy_id"]), str(p["date"])) for p in missing_daily_points
+        )
+        if recorded != filled:
+            state = PENDING_OWNER_ACCEPTANCE
+    out = {**proof, "financial_acceptance": state}
+    if state == OWNER_ACCEPTED:
+        out["owner_acceptance_sha256"] = digest
+    return out
 
 
 def numerical_from_governed_proof(

@@ -78,6 +78,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from quant_engine.core import canonical_json_bytes, strict_json_loads
+from quant_engine.portfolio_ledger import ObservedAmount
 from quant_engine.schwab import (
     CurrentSnapshot,
     SchwabGenerationError,
@@ -826,6 +827,23 @@ def ingest(
         raise IngestError("snapshot rows differ from the verified driver run")
     zero_quantity_rows = omitted
     snapshot = replace(read, sweep_vehicle_count=len(sweeps))
+    liquidation = _liquidation_values(
+        run_dir, cutoff, raw_holdings, crosswalk, reader_closes, sorted(accounts)
+    )
+    snapshot = replace(
+        snapshot,
+        accounts=tuple(
+            replace(
+                account,
+                liquidation_value=ObservedAmount.available(
+                    liquidation[account.account_id]["value"], "USD"
+                ),
+            )
+            if liquidation[account.account_id]["closure"] == "CLOSED"
+            else account
+            for account in snapshot.accounts
+        ),
+    )
     if any(_market_value_status(row) != "AVAILABLE" for row in snapshot.positions):
         raise IngestError("a held position has no market value after valuation")
     expected = _positions_by_identity(held)
@@ -1001,6 +1019,14 @@ def ingest(
             "provider_quoted_differs_count": quoted_differs,
         },
         "nav": nav_summary,
+        "liquidation_value": {
+            account: {
+                "closure": item["closure"],
+                "official": format(item["value"], "f"),
+                **({"native": format(item["native"], "f")} if "native" in item else {}),
+            }
+            for account, item in sorted(liquidation.items())
+        },
         "provider": "SCHWAB",
         "schema_name": "schwab-capture-ingest-binding",
         "schema_version": SCHEMA_VERSION,
@@ -1120,6 +1146,64 @@ def _market_value_status(row: Mapping[str, object]) -> object:
 # --------------------------------------------------------------------------- #
 # NAV and terminal transaction package
 # --------------------------------------------------------------------------- #
+
+
+def _liquidation_values(
+    run_dir: Path,
+    cutoff: driver.Cutoff,
+    raw_holdings: object,
+    crosswalk: Mapping[str, str],
+    closes: Mapping[str, Decimal],
+    accounts: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    """Each account's liquidation value: its holdings at the official closes plus its cash.
+
+    The value is the figure ``schwab_nav_derive.official_value`` builds the NAV from, so it is
+    published (``closure == "CLOSED"``) only when the provider's own native balance of the cutoff
+    day agrees with it within the derivation's tolerance (a repeat of the day before that
+    disagrees is a possible stale carry and proves nothing).  Any other account keeps ``UNAVAILABLE`` and names why; the value is never a
+    provider-quoted total (those are last-trade prices, not the official close).
+    """
+
+    held = derive_tool.read_holdings(raw_holdings, crosswalk)
+    out: dict[str, dict[str, Any]] = {}
+    for internal in accounts:
+        quantities, cash = held[internal]
+        priced = {s: q for s, q in quantities.items() if q != 0}
+        value = derive_tool.official_value(
+            priced,
+            cash,
+            {s: {cutoff.as_of_date: closes[s]} for s in priced},
+            cutoff.as_of_date,
+            internal,
+        )
+        try:
+            history = driver.parse_balance_history(
+                strict_json_loads(
+                    (run_dir / f"raw/balances.historical/{internal}.json").read_bytes(),
+                    label="raw balances",
+                )
+            )
+        except driver.DriverError as exc:
+            raise IngestError(str(exc)) from exc
+        kept = sorted((d, v) for d, v in history.items() if d <= cutoff.as_of_date)
+        item: dict[str, Any] = {"value": value}
+        if not kept or kept[-1][0] != cutoff.as_of_date:
+            item["closure"] = "NO_NATIVE_CUTOFF_ROW"
+        else:
+            item["native"] = kept[-1][1]
+            agrees = abs(value - kept[-1][1]) <= derive_tool.DEFAULT_TOLERANCE
+            if agrees:
+                # the value is built from the capture, independently of the native series:
+                # agreement proves it even where the native row repeats the day before
+                item["closure"] = "CLOSED"
+            elif len(kept) > 1 and kept[-1][1] == kept[-2][1]:
+                # a disagreeing repeat may be a stale carry: not a measurement of the day
+                item["closure"] = "NATIVE_CUTOFF_ROW_REPEATS_PRIOR_DAY"
+            else:
+                item["closure"] = "NOT_CLOSED"
+        out[internal] = item
+    return out
 
 
 def _write_nav(

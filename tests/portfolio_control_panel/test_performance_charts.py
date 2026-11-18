@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from test_performance_chart_audit import _run as _run_steps
 from test_shell_qc1_labels import _run
 
 DATES = [
@@ -228,13 +229,16 @@ def test_returns_chart_reads_the_union_grid_and_names_the_anchor(
     assert "SPXL unavailable: not admitted" in legend
     assert "not in this snapshot" not in legend
     note = _plain(dom, "#perf-returns-note")
-    assert "own first week" in note  # Max view is the default zoom
+    assert (
+        "Common window" in note
+    )  # Max view is the default zoom, rebased at the group anchor
     assert "Group anchor Dec 15, 2025" in note and "set by Beta" in note
     assert "draws nothing before its own first week" in note
 
 
 def test_each_line_starts_at_its_own_first_week(tmp_path: Path) -> None:
-    dom = _run(tmp_path, _payload(), "renderPerformance")
+    # The own-start basis (an explicit choice on Max) keeps the per-line first week; the default Max is the common window.
+    dom = _run_steps(tmp_path, _payload(), ['perfBasis = "own"'])
 
     first_x: dict[str, float] = {}
     for stroke, _dash, xs in _polylines(dom["#perf-returns-chart"]["innerHTML"]):

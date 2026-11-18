@@ -77,7 +77,10 @@ from quant_engine.portfolio_ledger import (
     validate_as_held_hwm_receipt_generation_binding,
 )
 from quant_engine.portfolio_ledger import (
+    OWNER_ACCEPTED,
     assess_gap_bounds_document,
+    apply_hwm_owner_acceptance,
+    PENDING_OWNER_ACCEPTANCE,
     numerical_from_governed_proof,
     proof_covers_spans,
 )
@@ -234,6 +237,11 @@ ACCOUNT_MANIFEST_INDEPENDENT_VERIFICATION_SCHEMA = (
 HWM_POLICY = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
 )
+_HWM_OWNER_ACCEPTANCE = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-hwm-owner-acceptance-v1.json"
+)
 _HWM_GAP_BOUNDS = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -278,6 +286,11 @@ STRATEGY_UNDERWRITING_POLICY = (
     Path(__file__).resolve().parents[1]
     / "contracts"
     / "portfolio-strategy-underwriting-v1.json"
+)
+STRATEGY_RETURN_SOURCES_CONTRACT = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "strategy-return-sources-v1.json"
 )
 DEFAULT_TEMPLATE_ROOT = (
     Path(__file__).resolve().parents[1] / "apps" / "portfolio-control-panel"
@@ -4113,6 +4126,9 @@ def _suppress_unmatched_strategy_performance(
             "corroboration",
             "execution_cost",
             "fee_rates",
+            "derived_annual_cost_usd",
+            "cost_classification",
+            "cost_derivation",
             "cost_rate_disclosure",
             "systematic_weight",
         ):
@@ -4438,9 +4454,10 @@ def _policy_constant_sensitivity(
 ) -> dict[str, Any] | None:
     """Beside the owner-approved dependence weights, what the restated weights would give.
 
-    The PORT-DEPENDENCE-1 allocation weights and conservative loss fractions are static
-    owner inputs and are never restated.  When a strategy is on its sleeve basis the
-    payload says so and shows, from data, the central-case and conservative-bound losses
+    The PORT-DEPENDENCE-1 allocation weights are static owner inputs and are never
+    restated; the adverse loss fractions are computed by the audit rule from the governed
+    series at each cutoff.  When a strategy is on its sleeve basis the
+    payload says so and shows, from data, the central-case and adverse-loss-bound losses
     with the weights replaced by the restated current-capital weights of the dependence
     strategies, normalized within that perimeter exactly as the policy weights are.  The
     adverse loss fractions and the dependence matrix are the payload's own (measured on
@@ -4538,7 +4555,7 @@ def _policy_constant_sensitivity(
         )
     return {
         "classification": "OWNER_APPROVED_POLICY_CONSTANT_NOT_RESTATED",
-        "constants": ["allocation_weight", "conservative_loss_fraction"],
+        "constants": ["allocation_weight"],
         "policy_id": DEPENDENCE_POLICY_ID,
         "restated_strategies": restated,
         "policy": {
@@ -4563,9 +4580,11 @@ def _policy_constant_sensitivity(
             ),
         },
         "statement": (
-            "The dependence allocation weights and conservative loss fractions are "
-            "owner-approved policy constants (PORT-DEPENDENCE-1), not restated. "
-            "Shown beside them: the same central-case and conservative-bound losses "
+            "The dependence allocation weights are "
+            "owner-approved policy constants (PORT-DEPENDENCE-1), not restated; the "
+            "adverse loss fractions are computed by the audit rule (1.25x prior / 1.5x live max drawdown, +5pp where live history is missing or platform-only; all strategies lose simultaneously; not a statistical confidence bound) "
+            "from the governed series. "
+            "Shown beside them: the same central-case and adverse-loss-bound losses "
             "with the weights replaced by the restated current-capital weights of "
             "the dependence strategies, normalized within the perimeter. The adverse "
             "loss fractions and correlations are measured on the restated paths."
@@ -5293,10 +5312,10 @@ def _panel_governed_hwm_proof(
         raise ControlPanelValidationError(
             f"governed HWM result is invalid: {exc}"
         ) from exc
-    return {
+    proof = {
         "schema_version": 1,
         "status": accepted["status"],
-        "financial_acceptance": "PENDING_OWNER_ACCEPTANCE",
+        "financial_acceptance": PENDING_OWNER_ACCEPTANCE,
         "assurance_profile": accepted["assurance_profile"],
         "policy_id": accepted["policy_id"],
         "policy_sha256": accepted["policy_sha256"],
@@ -5327,6 +5346,7 @@ def _panel_governed_hwm_proof(
             for row in accepted["index_path"]
         ],
     }
+    return apply_hwm_owner_acceptance(proof, _HWM_OWNER_ACCEPTANCE.read_bytes())
 
 
 def _reconcile_hwm_coverage(
@@ -5577,6 +5597,10 @@ def _available_prefixed(status: object) -> str:
     return text if text.startswith("AVAILABLE_") else "AVAILABLE_" + text
 
 
+# a factor window ending more than this many days before the live series end is stale
+STALE_FACTOR_WINDOW_DAYS = 10
+
+
 def _fit_segments(
     row: Mapping[str, Any], start: Any, end: Any, observations: int
 ) -> list[series_label.SeriesLabel]:
@@ -5610,6 +5634,87 @@ def _fit_segments(
         ]
     except (series_label.SeriesLabelError, ValueError):
         return []
+
+
+_GATE_DYNAMIC_RESULT_KEYS: Final = (
+    "exposure_path",
+    "holdout_forecasts",
+    "largest_exposure_changes",
+)
+
+
+def _gate_forensic_dynamic(diagnostics: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The result-bearing part of the dynamic diagnostics of a gate-rejected fit."""
+
+    dynamic = _optional_mapping(diagnostics.get("dynamic"))
+    if dynamic is None:
+        return None
+    return {key: dynamic[key] for key in _GATE_DYNAMIC_RESULT_KEYS if key in dynamic}
+
+
+def _gate_public_diagnostics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
+    """Diagnostics of a gate-rejected fit without any per-date beta or forecast exposure."""
+
+    public = dict(diagnostics)
+    dynamic = _optional_mapping(public.get("dynamic"))
+    if dynamic is not None:
+        public["dynamic"] = {
+            key: value
+            for key, value in dynamic.items()
+            if key not in _GATE_DYNAMIC_RESULT_KEYS
+        }
+    return public
+
+
+def _gate_withheld_alpha() -> dict[str, Any]:
+    return {
+        "annualized_standard_error": None,
+        "confidence_status": "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE",
+        "gross_annualized": None,
+        "gross_status": "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE",
+        "net_annualized": None,
+        "net_status": "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE",
+        "periodic_intercept": None,
+    }
+
+
+# Factor-model audit D7/D8: a loading beyond this size, or a negative training R2,
+# is shown with a flag so a reader checks the scale and the fit before using it.
+SUSPECT_BETA_ABS: Final = Decimal(3)
+
+
+def _fit_quality_flags(row: Mapping[str, Any]) -> list[str]:
+    flags: list[str] = []
+    detail = _optional_mapping(row.get("diagnostic_detail")) or {}
+    for item in list(row.get("exposures") or []) + list(detail.get("exposures") or []):
+        beta = _alpha_decimal(item.get("beta")) if isinstance(item, Mapping) else None
+        if beta is not None and abs(beta) > SUSPECT_BETA_ABS:
+            flags.append("LARGE_EXPOSURE_CHECK_SCALE")
+            break
+    diagnostics = _optional_mapping(row.get("diagnostics")) or {}
+    train = _optional_mapping(diagnostics.get("train")) or {}
+    train_r2 = _alpha_decimal(train.get("r_squared"))
+    if train_r2 is not None and train_r2 < 0:
+        flags.append("NEGATIVE_TRAIN_R_SQUARED")
+    return flags
+
+
+def _train_window(row: Mapping[str, Any], start: Any, end: Any) -> tuple[Any, Any]:
+    """First to last TRAIN anchor of the fit; the whole window when no buckets ship."""
+
+    association = _optional_mapping(row.get("interval_association")) or {}
+    buckets = association.get("buckets")
+    if not isinstance(buckets, list):
+        return start, end
+    candidates = [
+        item.get("factor_anchor")
+        for item in buckets
+        if isinstance(item, Mapping) and item.get("partition") == "TRAIN"
+    ]
+    anchors: list[str] = [item for item in candidates if isinstance(item, str)]
+    if not anchors:
+        return start, end
+    return min(anchors), max(anchors)
 
 
 def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -5698,16 +5803,49 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         or (isinstance(layers, list) and "BACKTEST" in layers)
     )
     composition_known = isinstance(backtest, int) and not isinstance(backtest, bool)
-    if net is None and gross is None:
+    # the alpha is the TRAIN intercept: its window is the training buckets', not the
+    # whole sample's (factor-model audit, annualization matrix D2)
+    train_start, train_end = _train_window(row, start, end)
+    train_days = (
+        (date.fromisoformat(train_end) - date.fromisoformat(train_start)).days
+        if isinstance(train_start, str) and isinstance(train_end, str)
+        else None
+    )
+    fit_days = train_days if train_days is not None else days
+    # the series this fit is shown beside ends at the accepted history end; a lens
+    # that stops earlier (French files) lags it by the difference
+    reference_ends = [
+        value
+        for value in (
+            coverage.get("canonical_live_observed_end"),
+            composition.get("accepted_history_complete_through"),
+        )
+        if isinstance(value, str)
+    ]
+    window_lag_days = (
+        (date.fromisoformat(max(reference_ends)) - date.fromisoformat(end)).days
+        if reference_ends and isinstance(end, str)
+        else None
+    )
+    if row.get("status") == "DIAGNOSTIC_ONLY":
+        # a fit the sealed gate rejected is forensic only; its alpha is withheld
+        headline_status = "NOT_A_HEADLINE_MODEL_GATE_FAILED"
+    elif net is None and gross is None:
         headline_status = "UNAVAILABLE_NO_ALPHA"
+    elif row.get("status") not in (None, "AVAILABLE"):
+        # a fit the sealed holdout gate rejected is forensic only, whatever its SE
+        headline_status = "NOT_A_HEADLINE_MODEL_GATE_FAILED"
     elif includes_backtest:
         headline_status = "NOT_A_HEADLINE_INCLUDES_BACKTEST"
+    elif window_lag_days is not None and window_lag_days > STALE_FACTOR_WINDOW_DAYS:
+        # the fit's window ends well before the accepted live series it is shown beside
+        headline_status = "NOT_A_HEADLINE_STALE_FACTOR_WINDOW"
     elif not composition_known:
         headline_status = "NOT_A_HEADLINE_COMPOSITION_UNKNOWN"
     elif t_stat is None:
         headline_status = "NOT_A_HEADLINE_NO_STANDARD_ERROR"
     elif not series_label.headline_allowed(
-        _fit_segments(row, start, end, used if isinstance(used, int) else 1)
+        _fit_segments(row, train_start, train_end, used if isinstance(used, int) else 1)
     ):
         # sprint-p123's layer rule: only MODEL_LIVE / ACCOUNT_LIVE segments, over
         # at least one year
@@ -5718,6 +5856,18 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "status": "AVAILABLE" if available else "UNAVAILABLE",
         "inference": inference,
         "headline_status": headline_status,
+        "window_lag_days": window_lag_days,
+        "research_lens_label": (
+            f"research lens: factor data through {end}, not a cutoff-current headline"
+            if window_lag_days is not None
+            and window_lag_days > STALE_FACTOR_WINDOW_DAYS
+            and isinstance(end, str)
+            else None
+        ),
+        "train_window_start": train_start,
+        "train_window_end": train_end,
+        "train_window_days": train_days,
+        "quality_flags": _fit_quality_flags(row),
         # one headline alpha per strategy: the fit on the accepted live return series
         # with a standard error and t-statistic; every other fit is secondary
         "lens_role": "HEADLINE"
@@ -5748,9 +5898,9 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "annualisation": ALPHA_ANNUALISATION,
         "annualisation_basis": (
             None
-            if days is None
+            if fit_days is None
             else "ANNUALISED_FROM_DAYS"
-            if days < 365
+            if fit_days < 365
             else "ANNUALISED"
         ),
         "alternatives": [],
@@ -5964,25 +6114,44 @@ def _factor_analysis(
             )
             rows.append(
                 {
-                    "alpha": diagnostic_alpha,
-                    "contribution_summary": (
-                        _factor_contribution_summary(model)
-                        if model.get("contributions")
-                        else None
-                    ),
+                    # a fit the sealed gate rejected publishes status and reason, no
+                    # result: its numbers sit under a labelled diagnostic detail only
+                    "alpha": _gate_withheld_alpha(),
+                    "diagnostic_detail": {
+                        "alpha": diagnostic_alpha,
+                        "exposures": diagnostic_exposures,
+                        "contribution_summary": (
+                            _factor_contribution_summary(model)
+                            if model.get("contributions")
+                            else None
+                        ),
+                        "dynamic": _gate_forensic_dynamic(diagnostics),
+                        "orthogonal_attribution": orthogonal_surface_fields.get(
+                            "orthogonal_attribution"
+                        ),
+                        "warning": "COMPUTED_NOT_ACCEPTED_FOR_PM_ALPHA_OR_EXPOSURE_CONCLUSIONS",
+                    },
+                    "contribution_summary": None,
                     "cost_coverage": _text(
                         model.get("cost_coverage"), "model.cost_coverage"
                     ),
                     "coverage": _object(model.get("coverage"), "model.coverage"),
-                    "diagnostics": diagnostics,
+                    "diagnostics": _gate_public_diagnostics(diagnostics),
                     "estimator": estimator,
                     "evidence_layer": _text(
                         model.get("evidence_layer"), "model.evidence_layer"
                     ),
-                    "exposures": diagnostic_exposures,
+                    "exposures": [],
                     "model_id": model_id,
                     "model_quality": model_quality,
-                    **orthogonal_surface_fields,
+                    **{
+                        key: (
+                            {"status": "WITHHELD_MODEL_QUALITY_GATE"}
+                            if key == "orthogonal_attribution"
+                            else value
+                        )
+                        for key, value in orthogonal_surface_fields.items()
+                    },
                     "selection_status": _text(
                         selection.get("status"), "selection.status"
                     ),
@@ -6533,6 +6702,19 @@ def _attach_alpha_alternatives(grouped: Sequence[Mapping[str, Any]]) -> None:
                     )
 
 
+# Factor-model audit D1: the economic-factor lens reads monthly-published French files
+# and ends before the cutoff, so a cutoff-current lens leads the panel.
+DEFAULT_LENS_ORDER: Final = ("ETF_STYLE", "RETURN_SECTOR", "ECONOMIC_FACTOR")
+
+
+def _current_default_lens(lenses: Sequence[Mapping[str, Any]]) -> str:
+    present = [item.get("lens_id") for item in lenses]
+    for lens_id in DEFAULT_LENS_ORDER:
+        if lens_id in present:
+            return lens_id
+    return str(present[0]) if present and present[0] else "ECONOMIC_FACTOR"
+
+
 def _decomposition_lenses_for_mode(
     root: Path,
     plan_bundle: Path,
@@ -6840,7 +7022,7 @@ def _decomposition_lenses_for_mode(
     _attach_alpha_alternatives(grouped)
     return (
         {
-            "default_lens": "ECONOMIC_FACTOR",
+            "default_lens": _current_default_lens(grouped),
             "lenses": grouped,
             "plan_bundle_id": plan_bundle.name,
             "plan_manifest_sha256": manifest_sha256,
@@ -9590,6 +9772,80 @@ def _regime_underwriting(
     }
 
 
+def _text_list(value: object, field_name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ControlPanelValidationError(f"{field_name} must be a list")
+    return [_text(item, field_name) for item in value]
+
+
+def _strategy_concepts(
+    underwriting_rows: Sequence[Mapping[str, Any]],
+    contract_snapshot: bytes | None = None,
+) -> dict[str, Any]:
+    """One concept record per current strategy, read from the governed return-sources contract.
+
+    The record carries the contract's own words (mechanism, persistence, alternative
+    explanation, falsification tests, confidence); nothing is composed here.  A strategy the
+    contract does not describe gets `concept: null`, never an invented archetype.  Design
+    evidence, weight and accounts stay on the strategy and underwriting rows the renderer
+    already holds.
+    """
+
+    if contract_snapshot is None:
+        contract, _content, contract_hash = _json_snapshot(
+            STRATEGY_RETURN_SOURCES_CONTRACT, "strategy return sources"
+        )
+    else:
+        contract = _json_from_bytes(contract_snapshot, "strategy return sources")
+        contract_hash = hashlib.sha256(contract_snapshot).hexdigest()
+    entries = {
+        str(item.get("strategy_id")): item
+        for item in _objects(contract.get("strategies"), "strategy return sources")
+    }
+    rows: list[dict[str, Any]] = []
+    for underwriting in underwriting_rows:
+        strategy_id = _text(underwriting.get("strategy_id"), "concept strategy_id")
+        entry = entries.get(strategy_id)
+        concept: dict[str, Any] | None = None
+        if entry is not None:
+            concept = {
+                "mechanism": _text(entry.get("mechanism"), f"{strategy_id} mechanism"),
+                "persistence": _text(
+                    entry.get("persistence"), f"{strategy_id} persistence"
+                ),
+                "alternative_explanation": _text(
+                    entry.get("alternative_explanation"),
+                    f"{strategy_id} alternative explanation",
+                ),
+                "falsification": _text_list(
+                    entry.get("falsification"), f"{strategy_id} falsification"
+                ),
+                "confidence": _text(
+                    entry.get("confidence"), f"{strategy_id} confidence"
+                ),
+                "source_status": (
+                    "NO_IDENTIFIED_SOURCE"
+                    if entry.get("no_identified_source") is True
+                    else "IDENTIFIED_SOURCE"
+                ),
+            }
+        rows.append(
+            {
+                "strategy_id": strategy_id,
+                "strategy_name": _text(
+                    underwriting.get("strategy_name"), f"{strategy_id} name"
+                ),
+                "concept": concept,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "source_artifact": "contracts/strategy-return-sources-v1.json",
+        "source_sha256": contract_hash,
+        "rows": rows,
+    }
+
+
 def _strategy_underwriting(
     strategies: Sequence[Mapping[str, Any]],
     decomposition_lenses: Mapping[str, Any],
@@ -10245,6 +10501,10 @@ def _lens_is_source_qualified(rows: Sequence[Mapping[str, Any]]) -> bool:
 
 
 HWM_CANDIDATE_LABEL: Final = "Governed PORT-HWM-4 candidate, pending owner acceptance"
+HWM_ACCEPTED_LABEL_PREFIX: Final = (
+    "Governed PORT-HWM-4 high-water mark, owner accepted; "
+    "missing daily points filled by span returns: "
+)
 
 
 HWM_CANDIDATE_PERIMETER: Final = "SYSTEMATIC_EX_RESERVE"
@@ -10302,25 +10562,46 @@ def _hwm_candidate(
 ) -> dict[str, Any] | None:
     """The governed number as a labelled candidate beside the numeric status.
 
-    The numeric status stays what the report says: the E2 register (two Robuxio
-    two-day spans can hide a peak) keeps it unaccepted, and the governed PORT-HWM-4
-    receipt is pending owner acceptance.  The panel shows that number under its own
-    label instead of hiding it, so no "no number is calculated" text sits beside it.
-    ``kpi`` carries what the Risk-tab KPI prints, so the renderer composes no text of
-    its own; acceptance is not changed by it.
+    The numeric status stays what the report says (the E2 register when a missing
+    daily point can hide a peak).  The acceptance state is the proof's own
+    ``financial_acceptance``, set once from the owner's hashed record: pending, or
+    owner accepted for exactly the index and missing points the record states (a
+    mismatch with the epoch receipts raises).  The panel shows the number under its
+    own label instead of hiding it.  ``kpi`` carries what the Risk-tab KPI prints, so
+    the renderer composes no text of its own.
     """
 
     if proof is None or proof.get("status") != "AVAILABLE":
         return None
-    if proof.get("financial_acceptance") != "PENDING_OWNER_ACCEPTANCE":
+    acceptance = proof.get("financial_acceptance")
+    if acceptance not in ("PENDING_OWNER_ACCEPTANCE", OWNER_ACCEPTED):
         raise ControlPanelValidationError(
             "governed HWM proof carries an unexpected financial acceptance state"
         )
+    accepted = acceptance == OWNER_ACCEPTED
+    missing = _hwm_missing_daily_points(epoch_hpr_receipts)
+    if accepted:
+        recorded = json.loads(_HWM_OWNER_ACCEPTANCE.read_bytes())["accepted"][
+            "missing_daily_points"
+        ]
+        if sorted((str(p["strategy_id"]), str(p["date"])) for p in recorded) != sorted(
+            (str(p["strategy_id"]), str(p["date"])) for p in missing
+        ):
+            raise ControlPanelValidationError(
+                "accepted HWM missing daily points differ from the epoch receipts"
+            )
+    label = (
+        f"{HWM_ACCEPTED_LABEL_PREFIX}{len(missing)}"
+        if accepted
+        else HWM_CANDIDATE_LABEL
+    )
     unaccepted = hwm_summary.get("hwm_numerical_status", "UNAVAILABLE") == "UNAVAILABLE"
     path = proof.get("index_path")
     index_path = path if isinstance(path, list) else []
     return {
-        "status": "CANDIDATE_PENDING_OWNER_ACCEPTANCE",
+        "status": "OWNER_ACCEPTED"
+        if accepted
+        else "CANDIDATE_PENDING_OWNER_ACCEPTANCE",
         "policy_id": proof["policy_id"],
         "current_drawdown": proof["current_drawdown"],
         "maximum_drawdown": proof["maximum_drawdown"],
@@ -10330,18 +10611,20 @@ def _hwm_candidate(
         "evaluated_on": proof["evaluated_on"],
         "financial_acceptance": proof["financial_acceptance"],
         "not_accepted_reason": (
-            hwm_summary.get("hwm_numerical_reason") if unaccepted else None
+            hwm_summary.get("hwm_numerical_reason")
+            if unaccepted and not accepted
+            else None
         ),
-        "not_accepted_register": "E2",
+        "not_accepted_register": None if accepted else "E2",
         "receipt_sha256": proof["receipt_sha256"],
-        "label": HWM_CANDIDATE_LABEL,
+        "label": label,
         "kpi": {
             "value": _hwm_kpi_text(proof["current_index"], "HWM current index"),
             "hwm": _hwm_kpi_text(proof["current_hwm"], "HWM current high-water mark"),
             "drawdown": _hwm_kpi_text(
                 proof["current_drawdown"], "HWM current drawdown"
             ),
-            "label": HWM_CANDIDATE_LABEL,
+            "label": label,
             "perimeter": HWM_CANDIDATE_PERIMETER,
             "return_basis": proof["return_basis"],
             "index_points": len(index_path),
@@ -10636,6 +10919,7 @@ def _panel_data(
     portable_hwm_performance_policy_snapshot: bytes | None = None,
     economic_driver_snapshot: bytes | None = None,
     underwriting_policy_snapshot: bytes | None = None,
+    strategy_return_sources_snapshot: bytes | None = None,
     correlation_strategy_names: Mapping[str, str] | None = None,
     epoch_hpr_receipts: Sequence[Mapping[str, Any]] | None = None,
     hwm_basis: tuple[Mapping[str, Any], Mapping[str, date], frozenset[str]]
@@ -11905,7 +12189,7 @@ def _panel_data(
                 "performance, HWM, or readiness conclusion is accepted."
                 if not performance_lineage_available
                 else (
-                    "Readiness is governed by the correlation-one conservative bound; "
+                    "Readiness is governed by the correlation-one adverse-loss bound (1.25x prior / 1.5x live max drawdown, +5pp where live history is missing or platform-only; all strategies lose simultaneously; not a statistical confidence bound); "
                     "the measured-dependence central case is descriptive and does not govern readiness. "
                     "Canonical report admitted NAV now covers "
                     + (", ".join(admitted_nav_names) or "no included-perimeter sleeves")
@@ -12061,6 +12345,9 @@ def _panel_data(
         "replication_analysis": accepted_replication,
         "strategies": strategies,
         "strategy_underwriting": strategy_underwriting,
+        "strategy_concepts": _strategy_concepts(
+            strategy_underwriting["rows"], strategy_return_sources_snapshot
+        ),
         "hwm_summary": hwm_summary,
         "hybrid_mode_gate": hybrid_mode_gate,
         "leverage_disclosures": list(report["leverage_disclosures"]),
@@ -13406,6 +13693,7 @@ def _rendered_files(
         (_PORTABLE_HWM_PERFORMANCE_POLICY, "portable HWM performance policy"),
         (ECONOMIC_DRIVER_CLUSTERS, "economic driver cluster contract"),
         (STRATEGY_UNDERWRITING_POLICY, "underwriting policy"),
+        (STRATEGY_RETURN_SOURCES_CONTRACT, "strategy return sources"),
         (PANEL_DATA_SCHEMA, "control-panel data schema"),
         (ACCOUNT_MANIFEST_SCHEMA, "account-strategy manifest schema"),
     ):
@@ -13452,6 +13740,9 @@ def _rendered_files(
         underwriting_policy_snapshot=authority_snapshots[STRATEGY_UNDERWRITING_POLICY][
             0
         ],
+        strategy_return_sources_snapshot=authority_snapshots[
+            STRATEGY_RETURN_SOURCES_CONTRACT
+        ][0],
         correlation_strategy_names=plan_strategy_names or baseline_strategy_names,
         epoch_hpr_receipts=(
             verified_strategy_history["epoch_hpr_receipts"]
@@ -13621,6 +13912,10 @@ def _rendered_files(
         "underwriting_policy": (
             STRATEGY_UNDERWRITING_POLICY,
             authority_snapshots[STRATEGY_UNDERWRITING_POLICY][1],
+        ),
+        "strategy_return_sources": (
+            STRATEGY_RETURN_SOURCES_CONTRACT,
+            authority_snapshots[STRATEGY_RETURN_SOURCES_CONTRACT][1],
         ),
         "panel_data_schema": (
             PANEL_DATA_SCHEMA,
@@ -16271,6 +16566,13 @@ def publish_panel(
             artifact_id="input/portfolio-strategy-underwriting-policy.json",
             as_of_date=publication_as_of,
             schema_name="portfolio-strategy-underwriting-policy",
+            schema_version="1",
+        ),
+        snapshot_artifact(
+            "strategy_return_sources",
+            artifact_id="input/portfolio-strategy-return-sources.json",
+            as_of_date=publication_as_of,
+            schema_name="portfolio-strategy-return-sources",
             schema_version="1",
         ),
     ]

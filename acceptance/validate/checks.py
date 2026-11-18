@@ -43,6 +43,7 @@ from . import (
     sleeve_basis,
     trading_week,
 )
+from . import plausibility as plausibility  # re-exported: tools/check_plausibility.py
 from .generation import (
     APP,
     PAYLOAD_FILES,
@@ -228,6 +229,11 @@ class Context:
     # The provider-ledger admit-or-declare receipt (``--admission-receipt``): the governed
     # per-item EXCLUDE dispositions. ``None`` is no receipt, which exempts nothing.
     provider_receipt: Mapping[str, Any] | None = None
+    # #912: the owner-eyes plausibility rules (``plausibility.owner_eyes``): "OFF" (a library
+    # caller with a synthetic panel), "WARN" (findings are WARNING: listed, exit status
+    # unaffected; the default of ``tools/validate_generation.py`` until the rules are
+    # calibrated on a release payload) or "BLOCK" (findings block).
+    owner_eyes: str = "OFF"
     # #624: the ``strategy-basis-declaration/1`` the generation was built with ({strategy id:
     # basis}) and the sleeve facts its sleeve epochs stand on.  ``None`` is no declaration:
     # every strategy is on its parent-account basis and nothing below changes.
@@ -1778,6 +1784,8 @@ def check_required_sections(ctx: Context) -> Iterator[Finding]:
         "manifest": ctx.gen.manifest,
     }
     for label, file, keys in _REQUIRED_SECTIONS:
+        if label == "manifest" and ctx.gen.candidate_only:
+            continue
         for key in keys:
             if key not in documents[label]:
                 yield _finding(
@@ -1794,6 +1802,8 @@ def check_required_sections(ctx: Context) -> Iterator[Finding]:
 
 
 def check_generation_id(ctx: Context) -> Iterator[Finding]:
+    if ctx.gen.candidate_only:
+        return  # no manifest yet: the findings-panel stage checks the published one
     manifest_id = ctx.gen.manifest.get("generation_id")
     if manifest_id != ctx.gen.generation_id:
         yield _finding(
@@ -1898,9 +1908,15 @@ def check_nested_generation_ids(ctx: Context) -> Iterator[Finding]:
 
     for file, document in (
         (CANDIDATE, ctx.gen.candidate),
-        (
-            GENERATION_MANIFEST,
-            {k: v for k, v in ctx.gen.manifest.items() if k != "artifacts"},
+        *(
+            ()
+            if ctx.gen.candidate_only
+            else (
+                (
+                    GENERATION_MANIFEST,
+                    {k: v for k, v in ctx.gen.manifest.items() if k != "artifacts"},
+                ),
+            )
         ),
         (PANEL, node(ctx.panel, "meta")),
         (PANEL, node(ctx.panel, "account_manifest")),
@@ -3033,6 +3049,28 @@ def _itemized_candidates(
         + reserve_value,
     }
     at_cutoff.update(account_lane)
+    # The current capital identity is systematic + the CURRENT reserve (the reserve
+    # classification row, statement-dated under Decision B) + the retained excluded
+    # balance; the allocation_history reserve is a dated snapshot, not the current one.
+    current_reserve = next(
+        (
+            to_decimal(item.get("latest_value_usd"))
+            for item in rows(ctx.report, "account_summary")
+            if item.get("account_id") == "reserve-classification"
+        ),
+        None,
+    )
+    if current_reserve is not None:
+        retained = summary_value(ctx, "Retained excluded systematic balance")
+        retained_value = (
+            retained[1] if retained and retained[1] is not None else Decimal(0)
+        )
+        at_cutoff["sum(current account values at cutoff) + current reserve"] = (
+            cutoff_systematic + current_reserve
+        )
+        at_cutoff[
+            "sum(current account values at cutoff) + current reserve + retained excluded"
+        ] = cutoff_systematic + current_reserve + retained_value
     strategy = row.get("strategy_id")
     if isinstance(strategy, str):
         for item in rows(ctx.report, "allocation_history"):
@@ -8189,10 +8227,25 @@ def provider_lag_bound(ctx: Context, entity: str, day: date) -> str | None:
             return None
     lag = max(lag for lag in expected.values() if lag is not None)
     eligible = _last_eligible_month_end(ctx.cutoff, lag)
-    if (day.year, day.month) != (eligible.year, eligible.month) or (
-        eligible - day
+    day_month_end = (day.replace(day=28) + timedelta(days=4)).replace(
+        day=1
+    ) - timedelta(days=1)
+    # The lag policy fixes the LAST month a run is obliged to carry.  A lens that ends in
+    # a later month (the provider published it before the cutoff: French files ending
+    # 2026-09-30 were published 2026-10-27, cutoff 2026-11-06) is current for those
+    # sources too, as long as it is a complete month and its end is stated.
+    if (day.year, day.month) < (eligible.year, eligible.month) or (
+        day_month_end - day
     ).days > 4:
         return None
+    if (day.year, day.month) > (eligible.year, eligible.month):
+        return (
+            f"lens ends {day}, {(ctx.cutoff - day).days} days before the cutoff, in a "
+            f"complete month after the last month its governed sources ({', '.join(sorted(expected))}) "
+            f"were obliged to publish by the cutoff ({eligible:%Y-%m}, {lag} day publication lag): "
+            "published data is current for those sources (governed decomposition plan "
+            "freshness policy)"
+        )
     return (
         f"lens ends {day} because its governed sources ({', '.join(sorted(expected))}) "
         f"publish monthly with a {lag} day publication lag: the last eligible month at "
@@ -8537,6 +8590,22 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
             )
         return
 
+    if getattr(ctx.gen, "candidate_only", False) and not artifacts:
+        # A panel CANDIDATE has no manifest yet (G2, before publication), so no artifact can be
+        # bound. The manifest-bound identity (one artifact, its hash) is judged on the published
+        # generation at the findings-panel stage, where this requirement is unchanged. Here the
+        # source is the panel's own declaration, so every panel-only check below still runs:
+        # the declared source cutoff against the last completed week, the current-week record
+        # and its visibility, and that the panel declares a well-formed source hash.
+        artifacts = [
+            {
+                "artifact_id": source_artifact_id,
+                "as_of_date": weekly.get("as_of_date"),
+                "sha256": weekly.get("source_sha256"),
+                "schema": {"name": "portfolio-weekly-returns", "version": "2"},
+                "size_bytes": 1,
+            }
+        ]
     if len(artifacts) != 1:
         yield _finding(
             "dates.weekly_current_week",
@@ -10206,6 +10275,56 @@ def _payload_budget_findings(ctx: Context) -> Iterator[Finding]:
             ("F5",),
             f"{text}: {measured} B > {limit} B (payload_budget.json, relative to the previous release, #893); "
             "raising a budget is an explicit edit in the change that grows the block",
+        )
+
+
+def check_plausibility_owner_eyes(ctx: Context) -> Iterator[Finding]:
+    """#912 (review Q1): the owner-eyes plausibility rules on the REAL panel payload.
+
+    Ranges, calendar truth, equalities between surfaces, dates against the cutoff and claims
+    that must be able to fail; each rule names the owner finds it catches (acceptance/
+    validate/plausibility.py, ``tools/check_plausibility.py --list``).  In WARN mode (default) a hit is a WARNING; in BLOCK mode it blocks."""
+
+    mode = str(ctx.owner_eyes).upper()
+    if mode not in plausibility.MODES:
+        raise ValueError(
+            f"owner_eyes mode {ctx.owner_eyes!r} is not one of {plausibility.MODES}"
+        )
+    if mode == "OFF":
+        return
+    klass = {r.rule_id: r.klass for r in plausibility.RULES}
+    try:
+        hits = plausibility.evaluate(ctx.panel, ctx.cutoff)
+    except Exception as exc:  # noqa: BLE001 - a wrong rule must not red a WARN run
+        if mode == "BLOCK":
+            raise
+        yield _finding(
+            "plausibility.owner_eyes",
+            WARNING,
+            "(rules)",
+            type(exc).__name__,
+            "the rules run",
+            PANEL,
+            "$",
+            (),
+            f"the owner-eyes rules crashed and were skipped: {exc}",
+        )
+        return
+    for hit in hits:
+        yield _finding(
+            "plausibility.owner_eyes",
+            WARNING
+            if mode == "WARN"
+            else NOT_READY
+            if klass.get(hit.rule) == "NOT_READY"
+            else BLOCKER_REGRESSION,
+            hit.rule,
+            jsonable(hit.observed),
+            hit.expected,
+            PANEL,
+            hit.path,
+            tuple(f"OE{n}" for n in hit.finds),
+            hit.message,
         )
 
 
@@ -12796,6 +12915,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("lint.invested_capital_vs_contributions", check_lint_invested_capital),
     ("lint.internal_tokens_displayed", check_lint_display_tokens),
     ("lint.payload_size", check_lint_payload_size),
+    ("plausibility.owner_eyes", check_plausibility_owner_eyes),
     ("correction.unresolved", check_corrections),
     ("expected", check_expected),
 )

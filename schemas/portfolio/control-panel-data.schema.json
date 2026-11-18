@@ -302,7 +302,7 @@
                 "current_hwm": { "$ref": "#/$defs/decimal" },
                 "current_index": { "$ref": "#/$defs/decimal" },
                 "evaluated_on": { "type": "string", "format": "date" },
-                "financial_acceptance": { "const": "PENDING_OWNER_ACCEPTANCE" },
+                "financial_acceptance": { "enum": ["PENDING_OWNER_ACCEPTANCE", "OWNER_ACCEPTED"] },
                 "kpi": {
                   "type": "object",
                   "additionalProperties": false,
@@ -311,7 +311,7 @@
                     "value": { "$ref": "#/$defs/decimal" },
                     "hwm": { "$ref": "#/$defs/decimal" },
                     "drawdown": { "$ref": "#/$defs/decimal" },
-                    "label": { "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" },
+                    "label": { "anyOf": [{ "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" }, { "type": "string", "pattern": "^Governed PORT-HWM-4 high-water mark, owner accepted; missing daily points filled by span returns: [0-9]+$" }] },
                     "perimeter": { "type": "string", "minLength": 1 },
                     "return_basis": { "type": "string", "minLength": 1 },
                     "index_points": { "type": "integer", "minimum": 0 },
@@ -344,13 +344,13 @@
                     }
                   }
                 },
-                "label": { "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" },
+                "label": { "anyOf": [{ "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" }, { "type": "string", "pattern": "^Governed PORT-HWM-4 high-water mark, owner accepted; missing daily points filled by span returns: [0-9]+$" }] },
                 "maximum_drawdown": { "$ref": "#/$defs/decimal" },
                 "not_accepted_reason": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
-                "not_accepted_register": { "const": "E2" },
+                "not_accepted_register": { "enum": ["E2", null] },
                 "policy_id": { "const": "PORT-HWM-4" },
                 "receipt_sha256": { "$ref": "#/$defs/hash" },
-                "status": { "const": "CANDIDATE_PENDING_OWNER_ACCEPTANCE" }
+                "status": { "enum": ["CANDIDATE_PENDING_OWNER_ACCEPTANCE", "OWNER_ACCEPTED"] }
               }
             }
           ]
@@ -674,7 +674,7 @@
           "required": ["classification", "constants", "policy_id", "restated_strategies", "policy", "sensitivity", "statement"],
           "properties": {
             "classification": { "const": "OWNER_APPROVED_POLICY_CONSTANT_NOT_RESTATED" },
-            "constants": { "type": "array", "items": { "enum": ["allocation_weight", "conservative_loss_fraction"] }, "minItems": 2, "maxItems": 2 },
+            "constants": { "type": "array", "items": { "enum": ["allocation_weight"] }, "minItems": 1, "maxItems": 1 },
             "policy_id": { "const": "PORT-DEPENDENCE-1" },
             "restated_strategies": { "type": "array", "minItems": 1, "items": { "type": "string" } },
             "policy": {
@@ -813,6 +813,7 @@
     "hwm_governed_proof": { "$ref": "#/$defs/governed_hwm_proof" },
     "performance_tab": { "$ref": "#/$defs/performance_tab" },
     "model_vs_actual": { "$ref": "#/$defs/model_vs_actual" },
+    "strategy_concepts": { "$ref": "#/$defs/strategy_concepts" },
     "vendor_gap_fills": { "$ref": "#/$defs/vendor_gap_fills" },
     "orthogonal_risk_attribution": { "$ref": "#/$defs/orthogonal_risk_attribution" },
     "limitations": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
@@ -2501,6 +2502,23 @@
             "$ref": "#/$defs/custody_handoff_reserve_member"
           }
         },
+        "part_dates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["as_of_date", "part"],
+            "properties": {
+              "as_of_date": {
+                "$ref": "#/$defs/custody_handoff_nullable_date"
+              },
+              "part": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
         "reason": {
           "type": [
             "string",
@@ -3747,6 +3765,53 @@
         }
       }
     },
+    "strategy_concepts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_artifact", "source_sha256", "rows"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "source_artifact": { "type": "string", "minLength": 1 },
+        "source_sha256": { "$ref": "#/$defs/hash" },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["strategy_id", "strategy_name", "concept"],
+            "properties": {
+              "strategy_id": { "type": "string", "minLength": 1 },
+              "strategy_name": { "type": "string", "minLength": 1 },
+              "concept": {
+                "oneOf": [
+                  { "type": "null" },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "mechanism",
+                      "persistence",
+                      "alternative_explanation",
+                      "falsification",
+                      "confidence",
+                      "source_status"
+                    ],
+                    "properties": {
+                      "mechanism": { "type": "string", "minLength": 1 },
+                      "persistence": { "type": "string", "minLength": 1 },
+                      "alternative_explanation": { "type": "string", "minLength": 1 },
+                      "falsification": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                      "confidence": { "type": "string", "minLength": 1 },
+                      "source_status": { "enum": ["NO_IDENTIFIED_SOURCE", "IDENTIFIED_SOURCE"] }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
     "model_vs_actual": {
       "type": "object",
       "additionalProperties": false,
@@ -3823,7 +3888,7 @@
               "access": { "type": "string" },
               "estimated_size": { "type": "string" },
               "replaces": { "type": "array", "items": { "type": "string" } },
-              "status": { "enum": ["REQUESTED_NOT_DOWNLOADED", "NOT_A_DOWNLOAD_OWNER_RULING"] }
+              "status": { "enum": ["REQUESTED_NOT_DOWNLOADED", "NOT_A_DOWNLOAD_OWNER_RULING", "CLOSED_BY_CAPTURE_B_STATE_EVIDENCED_BY_ABSENCE_OF_TRADES"] }
             }
           }
         },
@@ -4618,7 +4683,8 @@
       "properties": {
         "schema_version": { "const": 1 },
         "status": { "const": "AVAILABLE" },
-        "financial_acceptance": { "const": "PENDING_OWNER_ACCEPTANCE" },
+        "financial_acceptance": { "enum": ["PENDING_OWNER_ACCEPTANCE", "OWNER_ACCEPTED"] },
+        "owner_acceptance_sha256": { "$ref": "#/$defs/hash" },
         "assurance_profile": { "type": "string", "minLength": 1 },
         "policy_id": { "const": "PORT-HWM-4" },
         "policy_sha256": { "$ref": "#/$defs/hash" },
