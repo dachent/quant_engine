@@ -153,3 +153,45 @@ def test_balances_page_values_are_parsed() -> None:
     assert parse_balances_values(page) == (Decimal("1005.00"), Decimal("1000.00"))
     with pytest.raises(SchwabDerivedPositionError):
         parse_balances_values("Account Value\n$1.00\n")
+
+
+def test_balances_labels_are_read_by_line_layout_not_first_substring() -> None:
+    """Pins the first-occurrence rule on the live page layout: a label line is a line that IS the
+    label, its amount is the first '$' line within the next three lines; a label that appears earlier
+    without such an amount (a table header) is passed over, one with an amount wins."""
+
+    from quant_engine.schwab.derived_positions import (
+        SchwabDerivedPositionError,
+        parse_balances_values,
+    )
+
+    header_first = "\n".join(
+        [
+            "Positions table",
+            "Market Value",  # a column header: no '$' amount within three lines
+            "Symbol",
+            "Qty",
+            "Price",
+            "Account Value",
+            "$3.81",
+            " ",
+            "Day Change",
+            "$0.00",
+            "Cash & Cash Investments",
+            "$3.81",
+            "Market Value",
+            "$0.00",
+        ]
+    )
+    assert parse_balances_values(header_first) == (Decimal("3.81"), Decimal("0.00"))
+    # the first label line that has an amount wins (the rule: first occurrence with an amount)
+    twice = "Account Value\n$10.00\nMarket Value\n$1.00\nAccount Value\n$99.00\nMarket Value\n$98.00\n"
+    assert parse_balances_values(twice) == (Decimal("10.00"), Decimal("1.00"))
+    # an amount further than three lines away is not read
+    far = "Account Value\nx\ny\nz\n$5.00\nMarket Value\n$1.00\n"
+    with pytest.raises(SchwabDerivedPositionError):
+        parse_balances_values(far)
+    # a label embedded in a longer line is not a label line
+    embedded = "Total Account Value History\n$5.00\nMarket Value\n$1.00\n"
+    with pytest.raises(SchwabDerivedPositionError):
+        parse_balances_values(embedded)
