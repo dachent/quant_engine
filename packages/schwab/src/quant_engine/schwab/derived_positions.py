@@ -336,6 +336,9 @@ def admit_derived_position_rows(
     * the source artifact is a positions export; every earlier day has a balances page in
       the catalog whose id carries that day, inside ``(history_through, capture]``.
 
+    The claim is a net zero change in the account total over ``(cutoff, capture]``;
+    offsetting flows that cancel are not excluded by it.  The cutoff-day NAV fixes the
+    total, not its split: the holdings/cash split rests on the export and the earlier page.
     What stays unproven is a reallocation inside the account between ``history_through``
     and the first earlier day that keeps its total: ``residual_window_days`` names it.
     Returns the admitted rows by record id (empty when ``rows`` is empty).
@@ -482,6 +485,17 @@ def admit_derived_position_rows(
                         "the account has transactions after the cutoff: "
                         "the snapshot is not the cutoff"
                     )
+        for observation in nav_observations:
+            stated = observation.get("as_of_date")
+            if (
+                observation.get("account_id") == account_id
+                and isinstance(stated, str)
+                and stated != stated.strip()
+                and stated.strip() == valuation_cutoff.isoformat()
+            ):
+                raise SchwabDerivedPositionError(
+                    "a NAV observation date is not canonical"
+                )
         navs = [
             observation
             for observation in nav_observations

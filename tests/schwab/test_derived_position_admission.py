@@ -210,6 +210,24 @@ def test_a_transaction_of_another_account_does_not_refuse() -> None:
     )
 
 
+def test_nav_observations_are_a_required_argument() -> None:
+    with pytest.raises(TypeError, match="nav_observations"):
+        admit_derived_position_rows(
+            [_row()],
+            accepted_accounts={ACCOUNT},
+            transactions=[],
+            valuation_cutoff=CUTOFF,
+            snapshot_day=SNAPSHOT,
+            artifact_schemas=SCHEMAS,
+            transaction_history=HISTORY,
+        )  # type: ignore[call-arg]
+
+
+def test_a_cutoff_nav_with_a_padded_date_refuses() -> None:
+    with pytest.raises(SchwabDerivedPositionError, match="not canonical"):
+        _admit([_row()], nav_observations=[_nav(), _nav(as_of_date="2026-11-06 ")])
+
+
 @pytest.mark.parametrize(
     "navs, message",
     [

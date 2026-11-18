@@ -8654,7 +8654,9 @@ def _positions(
             accepted[-1]["residual_reallocation_window_days"] = list(window)
             accepted[-1]["basis_note"] = (
                 "position inferred, not observed: derived at cutoff from a later snapshot "
-                f"(captured {item.get('capture_date')})"
+                f"(captured {item.get('capture_date')}); net zero change in the account "
+                "total over the days since the cutoff, holdings/cash split inferred from "
+                + (f"the {window[1]} page" if len(window) == 2 else "the capture")
                 + (
                     f"; per-symbol split not proven from {window[0]} to {window[1]}"
                     if len(window) == 2
