@@ -213,6 +213,21 @@
         "release": "F1",
         "note": "reserve follow-ons"
       }
+    },
+    {
+      "id": "KI-14",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "The Quantbase admitted-item-set pin as matching the receipt: the contract pin is the historical f72255e5 (computed with fill closes) while the B ledger receipt records the observed 0df05b6a (no fill closes). It is not enforced under a run observation.",
+      "effect": "None on numbers or refusals. The pin and the receipt record different values; provider_ledger compares only without a run observation, provider_admission binds historical values to the contract pin and observed values to the receipt's own recompute.",
+      "affected_paths": [
+        "Quantbase admitted_item_set_sha256 pin"
+      ],
+      "fix": {
+        "ticket": null,
+        "release": "F1",
+        "note": "the F1 carrier re-pins from the F1 ledger build"
+      }
     }
   ]
 }
