@@ -213,3 +213,32 @@ def test_a_capture_without_a_holdings_file_has_no_positions_not_an_error(
         financial_cutoff=date(2026, 11, 6),
     )
     assert rows == []
+
+
+def test_the_closure_exposes_the_proofs_not_only_the_tolerance(tmp_path: Path) -> None:
+    (row,) = _rows(tmp_path, date(2026, 11, 6))
+    closure = row["closure"]
+    assert closure["snapshot_total_usd"] == closure["snapshot_nav_usd"] == "48061.98"
+    assert closure["snapshot_difference_usd"] == "0.00"
+    assert closure["last_rebalance_date"] == "2026-11-05"
+    assert closure["last_order_date"] == "2026-11-05"
+    assert closure["activity_after_cutoff_count"] == 0
+    assert closure["usd_cash"] == "20.00"
+    assert row["mark_price"] == "110.14" and row["snapshot_price"] == "110.14"
+    assert isinstance(row["quantity"], str)
+
+
+def test_a_snapshot_that_does_not_sum_to_its_nav_refuses_even_inside_a_loose_total(
+    tmp_path: Path,
+) -> None:
+    """KILL: the snapshot sum is the proof; 1 % off the NAV refuses at 0.5 %."""
+
+    edit = FILES["csv/dashboard_Volatis_Strategy_holdings.csv"].replace(
+        "48041.98", "48541.98"
+    )
+    with pytest.raises(ledger.ProviderLedgerError, match="do not close"):
+        _rows(
+            tmp_path,
+            date(2026, 11, 6),
+            **{"csv/dashboard_Volatis_Strategy_holdings.csv": edit},
+        )

@@ -1916,12 +1916,16 @@ def _quantbase_positions(
             "quantbase Volatis pricehistory",
         )
     }
+    last_rebalance: date | None = None
+    last_order: date | None = None
     for row in rebalances:
         day = _day(row["date"], "quantbase rebalance date")
         if cutoff_day < day <= snapshot_day:
             raise ProviderLedgerError(
                 "quantbase holdings snapshot postdates a rebalance after the cutoff"
             )
+        if day <= cutoff_day and (last_rebalance is None or day > last_rebalance):
+            last_rebalance = day
     for row in activity:
         filled_at = str(row.get("filled_at") or "").strip()
         if row.get("activity_type") == "order" and filled_at:
@@ -1934,6 +1938,10 @@ def _quantbase_positions(
                 raise ProviderLedgerError(
                     "quantbase holdings snapshot postdates an order after the cutoff"
                 )
+            if filled_day <= cutoff_day and (
+                last_order is None or filled_day > last_order
+            ):
+                last_order = filled_day
     cash = Decimal(0)
     risky: list[tuple[str, Decimal, Decimal, str]] = []
     for row in holdings:
@@ -1973,12 +1981,25 @@ def _quantbase_positions(
         account_id, cutoff_day, accounts, strategies, assignments
     )
     artifact_id = f"source/{_QUANTBASE_HOLDINGS}"
+    # The proofs are the snapshot lines summing to the snapshot NAV and nothing
+    # trading between the cutoff and the snapshot; the value at an earlier cutoff is
+    # derived from that NAV, so its difference from the NAV proves nothing by itself.
     closure = {
         "cash_usd": format(cash, "f"),
+        "usd_cash": format(cash, "f"),
         "nav_usd": format(cutoff_nav if derived else snapshot_nav, "f"),
         "nav_date": cutoff_day.isoformat(),
         "snapshot_nav_usd": format(snapshot_nav, "f"),
         "snapshot_total_usd": format(snapshot_total, "f"),
+        "snapshot_difference_usd": format(snapshot_total - snapshot_nav, "f"),
+        "snapshot_relative_difference": format(
+            abs(snapshot_total - snapshot_nav) / snapshot_nav, "f"
+        ),
+        "last_rebalance_date": (
+            last_rebalance.isoformat() if last_rebalance is not None else None
+        ),
+        "last_order_date": last_order.isoformat() if last_order is not None else None,
+        "activity_after_cutoff_count": 0,
         "relative_tolerance": str(_QUANTBASE_POSITIONS_TOLERANCE),
     }
     rows: list[dict[str, Any]] = []
@@ -1995,6 +2016,7 @@ def _quantbase_positions(
                 "evidence_layer": "ACCOUNT_LIVE",
                 "generation_id": generation_id,
                 "mapping_status": mapping_status,
+                "mark_price": price,
                 "market_value": {
                     "currency": "USD",
                     "status": "AVAILABLE",
