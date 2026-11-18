@@ -1223,14 +1223,15 @@ def evaluate_capture(
 
 _SUMMARY_ROW_AMOUNT = re.compile(r"\(?-?\$[\d,]+\.\d\d(?!\d)\)?")
 _LADDER_CATEGORY = re.compile(
-    r"^(?:(\d{2})/(\d{2})[ \t]+)?(Purchase|Sale|Dividend|Interest|Withdrawal|Deposit|"
-    r"Expense|Other)\b(?![(/])"
+    r"^(?:(\d{2})/(\d{2})[ \t]+)?(Purchase|Sale|Redemption|Dividend|Interest|Withdrawal|"
+    r"Deposit|Expense|Other)\b(?![(/])"
 )
 _LADDER_COLUMN = {
     "Deposit": 1,
     "Withdrawal": 2,
     "Purchase": 3,
     "Sale": 4,
+    "Redemption": 4,
     "Dividend": 5,
     "Interest": 5,
     "Expense": 6,
@@ -1276,6 +1277,148 @@ def parse_cash_ladder(
     return ladder, begin, reason
 
 
+_QTY_PRICE = re.compile(r"(?<![\d.,])\(?-?[\d,]+\.\d{4}\)?(?![\d.,%])")
+
+
+def _row_amount(category: str, text: str) -> Decimal:
+    """The Amount column of one transaction row.
+
+    A row prints ``[quantity price] [charges] amount [realized gain]``.  Older statements
+    suffix the realized gain with (ST)/(LT) and the last money token is the amount; newer
+    ones print it bare, so for a Sale the amount is the money token nearest to
+    quantity x price (charges and rounding are cents) and a row that has none is refused.
+    The printed category total still has to tie to the cent, so a wrong pick cannot pass."""
+
+    amounts = _ROW_AMOUNT.findall(text)
+    if not amounts:
+        raise ZeroFinancingError("TRANSACTION_AMOUNT_ABSENT")
+    if category not in ("Sale", "Redemption"):
+        return _parse_money(amounts[-1])
+    quantity_price = _QTY_PRICE.findall(text)
+    if len(quantity_price) < 2:
+        if len(amounts) == 1:
+            return _parse_money(amounts[0])
+        raise ZeroFinancingError("TRANSACTION_AMOUNT_UNREADABLE")
+    proceeds = abs(
+        Decimal(re.sub(r"[(),-]", "", quantity_price[0]))
+        * Decimal(re.sub(r"[(),-]", "", quantity_price[1]))
+    )
+    best = min((_parse_money(x) for x in amounts), key=lambda v: abs(abs(v) - proceeds))
+    if abs(abs(best) - proceeds) > Decimal("0.10") + proceeds / 10000:
+        raise ZeroFinancingError("TRANSACTION_AMOUNT_UNREADABLE")
+    return best
+
+
+def scan_cash_statement(
+    raw_text: str, start: date, end: date
+) -> tuple[dict[str, Any] | None, str]:
+    """(facts, reason) of one statement's printed cash summary and transaction rows.
+
+    ``facts`` is None when the summary cannot be read or does not add up.  Otherwise it
+    holds ``printed`` (beginning/ending cash and the six summary columns), ``summary``
+    (the eight amounts) and, when every row was readable, ``rows_ok`` True with
+    ``column_totals`` (rows' totals per summary column, index 1..6), ``by_day`` and
+    ``tied`` (per summary column 1..6, printed == sum of its rows); ``rows_ok`` False
+    carries the reason a row or the list could not be read.  Nothing is dropped silently."""
+
+    lines = raw_text.replace("\r\n", "\n").split("\n")
+    try:
+        head = next(
+            n
+            for n, x in enumerate(lines)
+            if x.strip().startswith("Transactions - Summary")
+        )
+    except StopIteration:
+        return None, "CASH_SUMMARY_ABSENT"
+    summary: list[Decimal] | None = None
+    for line in lines[head + 1 : head + 16]:
+        found = _SUMMARY_ROW_AMOUNT.findall(line)
+        if len(found) == 8:
+            summary = [_parse_money(x) for x in found]
+            break
+    if summary is None:
+        return None, "CASH_SUMMARY_ROW_NOT_FOUND"
+    begin, end_cash = summary[0], summary[7]
+    if begin + sum(summary[1:7], Decimal(0)) != end_cash:
+        return None, "CASH_SUMMARY_DOES_NOT_ADD_UP"
+    facts: dict[str, Any] = {
+        "printed": {
+            "beginning_cash": begin,
+            "ending_cash": end_cash,
+            **dict(zip(CASH_SUMMARY_COLUMNS, summary[1:7], strict=True)),
+        },
+        "summary": summary,
+        "rows_ok": False,
+    }
+
+    def refuse(reason: str) -> tuple[dict[str, Any] | None, str]:
+        return facts, reason
+
+    first = next(
+        (n for n, x in enumerate(lines) if x.strip().startswith("Transaction Details")),
+        None,
+    )
+    last = next(
+        (n for n, x in enumerate(lines) if x.strip().startswith("Total Transactions")),
+        None,
+    )
+    records: list[list[str]] = []
+    dates: list[date | None] = []
+    categories: list[str] = []
+    if first is not None:
+        if last is None or last < first:
+            return refuse("TRANSACTION_LIST_NOT_CLOSED")
+        current: date | None = None
+        for line in lines[first + 1 : last]:
+            if re.fullmatch(r"\d{2}/\d{2}", line.strip()):
+                return refuse("BARE_DATE_LINE")
+            match = _LADDER_CATEGORY.match(line.strip())
+            if match is None and re.match(r"\d{2}/\d{2}[ \t]+\S", line.strip()):
+                return refuse("UNKNOWN_TRANSACTION_CATEGORY")
+            if match:
+                if match.group(1):
+                    try:
+                        current = date(
+                            end.year, int(match.group(1)), int(match.group(2))
+                        )
+                    except ValueError:
+                        return refuse("TRANSACTION_DATE_INVALID")
+                    if not start <= current <= end:
+                        return refuse("TRANSACTION_DATE_OUTSIDE_PERIOD")
+                records.append([line])
+                dates.append(current)
+                categories.append(match.group(3))
+            elif records:
+                records[-1].append(line)
+    column_totals = [Decimal(0)] * 7
+    by_day: dict[date, Decimal] = {}
+    for record, when, category in zip(records, dates, categories, strict=True):
+        if category == "Other":
+            continue  # activity that does not move cash (transfers of securities, ...)
+        if when is None:
+            return refuse("TRANSACTION_WITHOUT_DATE")
+        text = _REALIZED.sub(" ", " ".join(record))
+        text = re.sub(r"\$[\d,]+\.\d\d", " ", text)
+        try:
+            amount = _row_amount(category, text)
+        except ZeroFinancingError as exc:
+            reason = str(exc)
+            return refuse(
+                reason
+                if reason.startswith("TRANSACTION_")
+                else "TRANSACTION_AMOUNT_UNREADABLE"
+            )
+        column_totals[_LADDER_COLUMN[category]] += amount
+        by_day[when] = by_day.get(when, Decimal(0)) + amount
+    facts.update(
+        rows_ok=True,
+        column_totals=column_totals,
+        by_day=by_day,
+        tied=[column_totals[i] == summary[i] for i in range(1, 7)],
+    )
+    return facts, "CASH_STATEMENT_READ"
+
+
 def parse_cash_ladder_totals(
     raw_text: str, start: date, end: date
 ) -> tuple[dict[date, Decimal] | None, Decimal | None, str, dict[str, Decimal] | None]:
@@ -1295,92 +1438,20 @@ def parse_cash_ladder_totals(
     amount, and the ladder ends on the printed ending cash.  Anything else is None with the
     reason (the days stay unobserved), never a guess."""
 
-    lines = raw_text.replace("\r\n", "\n").split("\n")
-    try:
-        head = next(
-            n
-            for n, x in enumerate(lines)
-            if x.strip().startswith("Transactions - Summary")
-        )
-    except StopIteration:
-        return None, None, "CASH_SUMMARY_ABSENT", None
-    summary: list[Decimal] | None = None
-    for line in lines[head + 1 : head + 16]:
-        found = _SUMMARY_ROW_AMOUNT.findall(line)
-        if len(found) == 8:
-            summary = [_parse_money(x) for x in found]
-            break
-    if summary is None:
-        return None, None, "CASH_SUMMARY_ROW_NOT_FOUND", None
-    begin, end_cash = summary[0], summary[7]
-    if begin + sum(summary[1:7], Decimal(0)) != end_cash:
-        return None, None, "CASH_SUMMARY_DOES_NOT_ADD_UP", None
-    printed = {
-        "beginning_cash": begin,
-        "ending_cash": end_cash,
-        **dict(zip(CASH_SUMMARY_COLUMNS, summary[1:7], strict=True)),
-    }
-    first = next(
-        (n for n, x in enumerate(lines) if x.strip().startswith("Transaction Details")),
-        None,
-    )
-    last = next(
-        (n for n, x in enumerate(lines) if x.strip().startswith("Total Transactions")),
-        None,
-    )
-    records: list[list[str]] = []
-    dates: list[date | None] = []
-    categories: list[str] = []
-    if first is not None:
-        if last is None or last < first:
-            return None, None, "TRANSACTION_LIST_NOT_CLOSED", printed
-        current: date | None = None
-        for line in lines[first + 1 : last]:
-            if re.fullmatch(r"\d{2}/\d{2}", line.strip()):
-                return None, None, "BARE_DATE_LINE", printed
-            match = _LADDER_CATEGORY.match(line.strip())
-            if match is None and re.match(r"\d{2}/\d{2}[ \t]+\S", line.strip()):
-                return None, None, "UNKNOWN_TRANSACTION_CATEGORY", printed
-            if match:
-                if match.group(1):
-                    try:
-                        current = date(
-                            end.year, int(match.group(1)), int(match.group(2))
-                        )
-                    except ValueError:
-                        return None, None, "TRANSACTION_DATE_INVALID", printed
-                    if not start <= current <= end:
-                        return None, None, "TRANSACTION_DATE_OUTSIDE_PERIOD", printed
-                records.append([line])
-                dates.append(current)
-                categories.append(match.group(3))
-            elif records:
-                records[-1].append(line)
-    column_totals = [Decimal(0)] * 7
-    by_day: dict[date, Decimal] = {}
-    for record, when, category in zip(records, dates, categories, strict=True):
-        if category == "Other":
-            continue  # activity that does not move cash (transfers of securities, ...)
-        if when is None:
-            return None, None, "TRANSACTION_WITHOUT_DATE", printed
-        text = _REALIZED.sub(" ", " ".join(record))
-        text = re.sub(r"\$[\d,]+\.\d\d", " ", text)
-        amounts = _ROW_AMOUNT.findall(text)
-        if not amounts:
-            return None, None, "TRANSACTION_AMOUNT_ABSENT", printed
-        try:
-            amount = _parse_money(amounts[-1])
-        except ZeroFinancingError:
-            return None, None, "TRANSACTION_AMOUNT_UNREADABLE", printed
-        column_totals[_LADDER_COLUMN[category]] += amount
-        by_day[when] = by_day.get(when, Decimal(0)) + amount
-    if column_totals[1:] != list(summary[1:7]):
+    facts, reason = scan_cash_statement(raw_text, start, end)
+    if facts is None:
+        return None, None, reason, None
+    printed = facts["printed"]
+    if not facts["rows_ok"]:
+        return None, None, reason, printed
+    if not all(facts["tied"]):
         return None, None, "CASH_CATEGORY_TOTALS_DIFFER", printed
+    begin, end_cash = facts["summary"][0], facts["summary"][7]
     ladder: dict[date, Decimal] = {}
     cash = begin
     day = start
     while day <= end:
-        cash += by_day.get(day, Decimal(0))
+        cash += facts["by_day"].get(day, Decimal(0))
         ladder[day] = cash
         day += timedelta(days=1)
     if ladder[end] != end_cash:
