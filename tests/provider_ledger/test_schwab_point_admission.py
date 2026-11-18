@@ -512,11 +512,11 @@ def test_the_ledger_refuses_a_derived_position_row_without_a_valuation_cutoff(
 
 
 DERIVED_CLOSURE = {
-    "cash_usd": "1.00",
+    "cash_usd": "0.00",
     "earlier_market_value_days": ["2026-09-18"],
     "history_through": "2026-09-17",
     "holdings_usd": "100",
-    "positions_total_usd": "101.00",
+    "positions_total_usd": "100.00",
 }
 
 

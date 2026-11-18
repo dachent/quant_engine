@@ -894,7 +894,7 @@ def _staged_observation(
                 )
                 if schwab_derived is not None:
                     # the empty account holds a $1.00 fund derived at the cutoff
-                    derived_account = "synthetic-schwab-empty"
+                    derived_account = account
                     derived_security = (
                         "security-schwab-" + hashlib.sha256(b"SWVXX").hexdigest()[:24]
                     )
@@ -910,11 +910,11 @@ def _staged_observation(
                         "as_of_date": schwab_valuation_cutoff,
                         "capture_date": schwab_point_capture[:10],
                         "closure": {
-                            "cash_usd": "1.00",
+                            "cash_usd": "0.00",
                             "earlier_market_value_days": [schwab_point_capture[:10]],
                             "history_through": schwab_valuation_cutoff,
                             "holdings_usd": "100",
-                            "positions_total_usd": "101.00",
+                            "positions_total_usd": "100.00",
                         },
                         "evidence_class": "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT",
                         "mapping_status": "UNMAPPED",
@@ -939,10 +939,21 @@ def _staged_observation(
                         "transaction_history": {
                             "accounts": {
                                 derived_account: {
-                                    "effective_start": "2020-01-01",
                                     "effective_end": schwab_valuation_cutoff,
+                                    "effective_start": "2020-01-01",
+                                    "source_manifest_sha256": "c" * 64,
+                                    "terminal_observed_at": (
+                                        schwab_valuation_cutoff + "T12:00:00-04:00"
+                                    ),
+                                    "transaction_count": 0,
                                 }
-                            }
+                            },
+                            "complete_through": schwab_valuation_cutoff,
+                            "requested_interval": "ALL_AVAILABLE_HISTORY",
+                            "source_manifest_sha256": "c" * 64,
+                            "terminal_observed_at": (
+                                schwab_valuation_cutoff + "T12:00:00-04:00"
+                            ),
                         },
                     }
                     catalog["positions"] = [*catalog["positions"], derived_row]
