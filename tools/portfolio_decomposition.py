@@ -2020,6 +2020,32 @@ def _r_squared(
     return 1.0 - float(np.sum((actual - predicted) ** 2)) / denominator
 
 
+# #904 / factor-model audit (annualization matrix D3): the periods a year of a fit come
+# from the dates it was fitted on.  The declared count is kept while the dates carry it
+# within 2% (exchange-calendar 252 with holidays); a calendar-daily series (weekends
+# present) is 365; under four weeks of dates the declaration stands.  Any other series is
+# annualised with its own observed count, never with a declaration its dates contradict.
+PERIODS_TOLERANCE = 0.02
+PERIODS_MINIMUM_SPAN_DAYS = 28
+PERIODS_CALENDAR_WEEKEND_SHARE = 0.2
+
+
+def _effective_periods_per_year(declared: int, days: Sequence[date]) -> int:
+    ordered = sorted(set(days))
+    if declared < 252 or len(ordered) < 3:
+        return declared
+    span = (ordered[-1] - ordered[0]).days
+    if span < PERIODS_MINIMUM_SPAN_DAYS:
+        return declared
+    weekend = sum(1 for day in ordered if day.weekday() >= 5)
+    if weekend >= PERIODS_CALENDAR_WEEKEND_SHARE * len(ordered):
+        return 365
+    observed = round((len(ordered) - 1) * 365 / span)
+    if abs(observed - declared) <= declared * PERIODS_TOLERANCE:
+        return declared
+    return min(max(observed, 1), 366)
+
+
 def _identity_number(value: float) -> str:
     """Preserve a consumed float exactly when it participates in an identity."""
 
@@ -2910,7 +2936,10 @@ def _dynamic_model_result(
     net_alpha = None
     gross_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     net_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
-    annualized_observed = train_fit.intercept * model.periods_per_year
+    periods = _effective_periods_per_year(
+        model.periods_per_year, [item[1].day for item in train]
+    )
+    annualized_observed = train_fit.intercept * periods
     live_basis = next(
         (row.return_basis for row in target_rows if row.evidence_layer != "BACKTEST"),
         None,
@@ -2942,13 +2971,13 @@ def _dynamic_model_result(
         gross_alpha = annualized_observed
         gross_status = "AVAILABLE_OBSERVED_BASIS"
         if periodic_cost is not None:
-            net_alpha = (train_fit.intercept - periodic_cost) * model.periods_per_year
+            net_alpha = (train_fit.intercept - periodic_cost) * periods
             net_status = "AVAILABLE_COMPLETE_COST_CONVERSION"
     else:
         net_alpha = annualized_observed
         net_status = "AVAILABLE_OBSERVED_BASIS"
         if periodic_cost is not None:
-            gross_alpha = (train_fit.intercept + periodic_cost) * model.periods_per_year
+            gross_alpha = (train_fit.intercept + periodic_cost) * periods
             gross_status = "AVAILABLE_COMPLETE_COST_CONVERSION"
 
     largest_changes = [
@@ -2998,7 +3027,7 @@ def _dynamic_model_result(
                     test_predicted,
                     baseline=float(np.mean(train_target)),
                     factor_count=len(model.factor_ids),
-                    periods_per_year=model.periods_per_year,
+                    periods_per_year=periods,
                 ),
                 "predicted_r_squared": _number(holdout_r_squared),
                 "prediction_mode": "CAUSAL_WALK_FORWARD_PRIOR_STATE",
@@ -3027,7 +3056,7 @@ def _dynamic_model_result(
                 train_fit.fitted,
                 baseline=float(np.mean(train_target)),
                 factor_count=len(model.factor_ids),
-                periods_per_year=model.periods_per_year,
+                periods_per_year=periods,
             ),
         },
         "estimator": model.estimator,
@@ -3468,7 +3497,10 @@ def _factor_anchor_observations(
             observed.isoformat() for observed in incomplete_anchors
         ],
         "pending_factor_anchor_labels": unassignable_tail_labels,
-        "periods_per_year": model.periods_per_year,
+        "periods_per_year": _effective_periods_per_year(
+            model.periods_per_year,
+            [row[1].day for row in observations if row[0].day <= model.train_end],
+        ),
         "policy_id": (
             FACTOR_ANCHOR_POLICY
             if policy.target_calendar != "LEGACY_EXACT_LABEL"
@@ -3969,7 +4001,10 @@ def _model_result(
     net_alpha = None
     gross_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     net_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
-    annualized_observed = fit.intercept * model.periods_per_year
+    periods = _effective_periods_per_year(
+        model.periods_per_year, [item[1].day for item in train]
+    )
+    annualized_observed = fit.intercept * periods
     live_basis = next(
         (row.return_basis for row in target_rows if row.evidence_layer != "BACKTEST"),
         None,
@@ -4001,18 +4036,18 @@ def _model_result(
         gross_alpha = annualized_observed
         gross_status = "AVAILABLE_OBSERVED_BASIS"
         if periodic_cost is not None:
-            net_alpha = (fit.intercept - periodic_cost) * model.periods_per_year
+            net_alpha = (fit.intercept - periodic_cost) * periods
             net_status = "AVAILABLE_COMPLETE_COST_CONVERSION"
     else:
         net_alpha = annualized_observed
         net_status = "AVAILABLE_OBSERVED_BASIS"
         if periodic_cost is not None:
-            gross_alpha = (fit.intercept + periodic_cost) * model.periods_per_year
+            gross_alpha = (fit.intercept + periodic_cost) * periods
             gross_status = "AVAILABLE_COMPLETE_COST_CONVERSION"
 
     alpha_standard_error = _annualize_coefficient_standard_error(
         None if standard_errors is None else float(standard_errors[0]),
-        model.periods_per_year,
+        periods,
     )
     result = {
         "alpha": {
@@ -4035,7 +4070,7 @@ def _model_result(
                     test_predicted,
                     baseline=float(np.mean(train_target)),
                     factor_count=len(model.factor_ids),
-                    periods_per_year=model.periods_per_year,
+                    periods_per_year=periods,
                 ),
                 "predicted_r_squared": _number(holdout_r2),
             },
@@ -4052,7 +4087,7 @@ def _model_result(
                 train_predicted,
                 baseline=float(np.mean(train_target)),
                 factor_count=len(model.factor_ids),
-                periods_per_year=model.periods_per_year,
+                periods_per_year=periods,
             ),
         },
         "estimator": model.estimator,
