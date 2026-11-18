@@ -420,4 +420,5 @@ def test_the_real_run_closes_independently_and_types_its_gaps(tmp_path: Path) ->
     assert {p["closure_status"] for p in positions} <= {
         "CLOSED_AGAINST_PUBLISHED_NAV",
         "NAV_DAILY_ABSENT",
+        "NATIVE_VALUE_ABSENT",
     }
