@@ -8590,7 +8590,7 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
             )
         return
 
-    if ctx.gen.candidate_only and not artifacts:
+    if getattr(ctx.gen, "candidate_only", False) and not artifacts:
         # A panel CANDIDATE has no manifest yet (G2, before publication), so no artifact can be
         # bound. The manifest-bound identity (one artifact, its hash) is judged on the published
         # generation at the findings-panel stage, where this requirement is unchanged. Here the
