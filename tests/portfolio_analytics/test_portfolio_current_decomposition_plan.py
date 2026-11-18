@@ -3308,3 +3308,38 @@ def test_a_stale_template_interval_policy_cannot_reach_the_bundle(
         emitted["target_source"]["interval_policy"]["evaluation_information_set"]
         == "RETROSPECTIVE_SELECTED_SNAPSHOT"
     )
+
+
+@pytest.mark.parametrize(
+    ("version", "accepted"),
+    (("0.4.0", True), ("0.5.0", False), ("uncontrolled", False)),
+)
+def test_public_manifest_builder_version_policy(
+    tmp_path: Path, version: str, accepted: bool
+) -> None:
+    """The 0.4.0 builder (latest published French month) is accepted beside 0.3.0."""
+
+    market_paths, manifest_path, catalog_sha256, evaluation_date = (
+        _canonical_public_manifest_with_renamed_inputs(tmp_path)
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["builder_version"] = version
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def verify() -> None:
+        planner._verify_public_factor_manifest(
+            manifest_path, market_paths, catalog_sha256, evaluation_date, "DEVELOPMENT"
+        )
+
+    if accepted:
+        verify()
+    else:
+        with pytest.raises(planner.CurrentPlanError, match="contract is unsupported"):
+            verify()
+
+
+def test_the_accepted_public_factor_builder_versions_are_the_two_contracts() -> None:
+    """0.3.0 (08-31, carried A5 bundles) stays valid; 0.4.0 is the current builder."""
+
+    assert planner.ACCEPTED_PUBLIC_FACTOR_BUILDER_VERSIONS == {"0.3.0", "0.4.0"}
+    assert planner.PUBLIC_FACTOR_BUILDER_VERSION == "0.4.0"

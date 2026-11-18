@@ -650,3 +650,32 @@ def test_windows_withheld_for_ending_after_the_cutoff_are_not_called_stale() -> 
     raw, sha = _raw(audit)
     block = mva.build_model_vs_actual(_panel(), raw, sha)
     assert block["strategies"][0]["windows"] == []
+
+
+CLOSED_BY_CAPTURE = "CLOSED_BY_CAPTURE_B_STATE_EVIDENCED_BY_ABSENCE_OF_TRADES"
+
+
+def test_a_pull_closed_by_a_capture_validates_against_the_real_schema() -> None:
+    # A pull that a later capture answered is neither "requested, not downloaded" nor an owner
+    # ruling; labelling it with either would state something false.
+    block, _raw_bytes, _sha = _build()
+    closed = copy.deepcopy(block)
+    closed["pulls"][0]["status"] = CLOSED_BY_CAPTURE
+    assert _errors(closed) == []
+    unknown = copy.deepcopy(block)
+    unknown["pulls"][0]["status"] = "CLOSED_BY_SOMETHING_ELSE"
+    assert _errors(unknown) != []
+
+
+def test_the_panel_names_and_tones_the_closed_by_capture_pull_status() -> None:
+    app = (ROOT / "apps" / "portfolio-control-panel" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        f"{CLOSED_BY_CAPTURE}:"
+        in app.split("const STATUS_LABELS", 1)[1].split("};", 1)[0]
+    )
+    assert (
+        f"{CLOSED_BY_CAPTURE}:"
+        in app.split("const STATUS_TONES", 1)[1].split("});", 1)[0]
+    )

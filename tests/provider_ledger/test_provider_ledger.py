@@ -447,20 +447,20 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
         "p123-eu-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+                "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+                "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
             ),
             (
                 "provider-ledger-catalog",
-                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-                "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb",
+                "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+                "972eb0934fff097414f7698295255cf7e981d417387c0b9342756a71508e5adf",
             ),
         },
         "volatis-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+                "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+                "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
             ),
         },
         # These four gained ACCOUNT_LIVE corrections when the three
@@ -472,36 +472,36 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
         "grizzlybears-vtma-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+                "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+                "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
             ),
         },
         "p123-ai-factor-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+                "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+                "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
             ),
         },
         "p123-ai-model-live": {
             (
                 "provider-ledger-generation-manifest",
-                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+                "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+                "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
             ),
         },
         "qsi-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+                "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+                "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
             ),
         },
         "tt-portfolio-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+                "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+                "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
             ),
         },
         "echotrade-event-only-account-live-rejected": {
@@ -534,9 +534,9 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
             "2026-09-03",
         ),
         "matrixport": (
-            "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-            "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
-            "2026-09-03",
+            "de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63",
+            "8763eda116221636e5da3d87c0d3749719024091eae1fb1295956fb8278141e7",
+            "2026-11-07",
         ),
         "portfolio123": (
             "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
@@ -544,14 +544,14 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
             "2026-09-02",
         ),
         "quantbase": (
-            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-            "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c",
-            "2026-09-02",
+            "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
+            "165f56f51fbf3a24ae74c16624ae4e979bfb810a87aa8c3cdd72333c8ca8b8b1",
+            "2026-11-09",
         ),
         "schwab": (
-            "edbd2575350ce55c870f122bfa04c32a4bd42ed443fbd7fe7a55177322307174",
-            "97f0645cdda37c7d3d86707ae3eb92616deaeb53f41a3961724190d2054590e4",
-            "2026-09-04",
+            "8883029dfe97a4ef208b6d6177ffbe76eb9f3dc6c996d41544d8384faa261e5b",
+            "cf8d09f7c2caa1ec74607c8253a89edd9624b42b67768eb40bd53b97dbb2535b",
+            "2026-11-08",
         ),
     }
 
@@ -592,7 +592,7 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
     }
     assert expected_history_generations == {
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
-        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+        "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
     }
     accepted_history_generations = {
         receipt["generation_id"]
