@@ -134,7 +134,10 @@ else:
     verify_performance_tab = _performance_tab_module.verify_performance_tab
 
 if TYPE_CHECKING:
-    from portfolio_model_vs_actual import build_model_vs_actual
+    from portfolio_model_vs_actual import (
+        build_model_vs_actual,
+        model_account_gap_references as model_account_gap_references_for,
+    )
 else:
     try:
         _model_vs_actual_module = import_module("tools.portfolio_model_vs_actual")
@@ -143,6 +146,9 @@ else:
             raise
         _model_vs_actual_module = import_module("portfolio_model_vs_actual")
     build_model_vs_actual = _model_vs_actual_module.build_model_vs_actual
+    model_account_gap_references_for = (
+        _model_vs_actual_module.model_account_gap_references
+    )
 
 if TYPE_CHECKING:
     from portfolio_vendor_nav_gap_fill import build_vendor_gap_fills
@@ -9227,6 +9233,16 @@ PROXY_RECONCILIATION_STATUSES = frozenset(
 RECONSTRUCTED_PROXY_COMPARISON_STATUS = (
     "RECONSTRUCTED_PROXY_DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV"
 )
+# The model-versus-actual replica of the same strategy and window: the underwriting row
+# publishes this figure; the signal-state proxy above rides along only as a cross-check.
+REPLICA_REFERENCE_COMPARISON_STATUS = "AUDIT_REPLICA_REFERENCE_NOT_PROVIDER_PUBLISHED"
+# Strategies whose underwriting gap is taken from the model-versus-actual replica.  A
+# strategy joins deliberately: the audit comparator saying "not provider-published" is
+# not enough to swap a published reference.
+REPLICA_REFERENCE_STRATEGY_IDS = ("grizzlybears-vtma",)
+RECONSTRUCTED_REFERENCE_COMPARISON_STATUSES = frozenset(
+    {RECONSTRUCTED_PROXY_COMPARISON_STATUS, REPLICA_REFERENCE_COMPARISON_STATUS}
+)
 
 
 def _reconstructed_proxy_reference(
@@ -9346,8 +9362,65 @@ def _reconstructed_proxy_gap_underwriting(
     }
 
 
+def _replica_reference_gap_underwriting(
+    gap: Mapping[str, Any], reference: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The gap against the model-versus-actual replica, the signal-state proxy as cross-check.
+
+    The replica is the model figure the model-versus-actual block publishes for the
+    strategy's primary window; publishing a second, cruder model return for the same
+    strategy in the underwriting row made the two sections disagree.  The proxy's own
+    figures stay in ``proxy_cross_check`` and never decide the advisory.
+    """
+
+    total_gap = _finite_float(reference.get("gap"), "replica gap")
+    uncertainty = reference.get("uncertainty_pp")
+    range_text = (
+        f" per the audit's own note the replica carries a proxy range of about +/-{uncertainty:g} pp"
+        if isinstance(uncertainty, (int, float)) and not isinstance(uncertainty, bool)
+        else ""
+    )
+    result = dict(gap)
+    result.update(
+        {
+            "comparison_status": REPLICA_REFERENCE_COMPARISON_STATUS,
+            "observed_start": reference.get("start"),
+            "observed_end": reference.get("end"),
+            "observations": None,
+            "reference_cumulative_return": _number_text(
+                _finite_float(reference.get("model_return"), "replica model return")
+            ),
+            "account_cumulative_return": _number_text(
+                _finite_float(reference.get("account_return"), "replica account return")
+            ),
+            "total_gap": _number_text(total_gap),
+            "unresolved_residual": _number_text(total_gap),
+            "reference_basis": reference.get("comparator_description"),
+            "reference_window_id": reference.get("window_id"),
+            "reference_uncertainty_pp": uncertainty,
+            "reference_note": (
+                "Reference is the model-versus-actual replica for the same window, "
+                "not a provider series;" + range_text + "."
+            ),
+            "path_statistics_basis": "SIGNAL_STATE_CLOSE_PROXY_CROSS_CHECK",
+            "proxy_cross_check": {
+                "comparison_status": gap.get("comparison_status"),
+                "observed_start": gap.get("observed_start"),
+                "observed_end": gap.get("observed_end"),
+                "observations": gap.get("observations"),
+                "reference_cumulative_return": gap.get("reference_cumulative_return"),
+                "account_cumulative_return": gap.get("account_cumulative_return"),
+                "total_gap": gap.get("total_gap"),
+            },
+        }
+    )
+    return result
+
+
 def _model_account_gap_underwriting(
-    strategy: Mapping[str, Any], gap_policy: Mapping[str, Any]
+    strategy: Mapping[str, Any],
+    gap_policy: Mapping[str, Any],
+    reference: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     strategy_name = _text(strategy.get("strategy_name"), "gap strategy_name")
     implementation = strategy.get("implementation_reconciliation")
@@ -9389,9 +9462,12 @@ def _model_account_gap_underwriting(
     available = comparison_status.startswith("DESCRIPTIVE_EXACT_DATE")
     proxy = None if available else _reconstructed_proxy_reference(implementation)
     if proxy is not None:
-        return _reconstructed_proxy_gap_underwriting(
+        proxy_gap = _reconstructed_proxy_gap_underwriting(
             strategy, gap_policy, proxy, strategy_name
         )
+        if reference is not None and reference.get("provider_published") is False:
+            return _replica_reference_gap_underwriting(proxy_gap, reference)
+        return proxy_gap
     total_gap = (
         _optional_float(
             strategy.get("provider_cumulative_gap"),
@@ -9838,6 +9914,7 @@ def _strategy_underwriting(
     performance_lineage_available: bool = True,
     implementation_contracts: Mapping[str, Mapping[str, Any] | None] | None = None,
     account_lanes: Mapping[str, Mapping[str, Any]] | None = None,
+    model_account_gap_references: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Compose an advisory evidence ledger without creating new fact authority."""
 
@@ -9987,7 +10064,11 @@ def _strategy_underwriting(
                     }
                 )
 
-        gap = _model_account_gap_underwriting(strategy, gap_policy)
+        gap = _model_account_gap_underwriting(
+            strategy,
+            gap_policy,
+            (model_account_gap_references or {}).get(str(strategy.get("strategy_id"))),
+        )
         regimes = _regime_underwriting(
             strategy,
             weekly_rows,
@@ -10081,7 +10162,10 @@ def _strategy_underwriting(
             recommendation_reasons.extend(
                 ["MODEL_ACCOUNT_GAP_AT_OR_BELOW_MINUS_FIVE_PERCENT", gap["signature"]]
             )
-            if gap.get("comparison_status") == RECONSTRUCTED_PROXY_COMPARISON_STATUS:
+            if (
+                gap.get("comparison_status")
+                in RECONSTRUCTED_REFERENCE_COMPARISON_STATUSES
+            ):
                 # the reference is the reconstructed replica, not a provider series: say so in the advice
                 recommendation_reasons.append("REFERENCE_IS_RECONSTRUCTED_PROXY")
         elif portfolio_fit_status == "CLUSTER_BUDGET_BREACH":
@@ -10906,6 +10990,8 @@ def _panel_data(
     hwm_basis: tuple[Mapping[str, Any], Mapping[str, date], frozenset[str]]
     | None = None,
     strategy_basis_declaration: bytes | None = None,
+    model_vs_actual_gap_input: tuple[bytes, str] | None = None,
+    capital_for_as_of: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -11743,6 +11829,24 @@ def _panel_data(
         raise ControlPanelValidationError(
             "panel capital identity differs: " + "; ".join(capital_problems)
         )
+    # The block cuts its windows at the invested-capital completeness date, else the
+    # weekly-returns as-of: the reference lookup uses exactly those two values.
+    model_account_gap_references: Mapping[str, Mapping[str, Any]] = {}
+    if model_vs_actual_gap_input is not None:
+        try:
+            model_account_gap_references = model_account_gap_references_for(
+                {
+                    "invested_capital": capital_for_as_of,
+                    "weekly_returns": accepted_weekly_returns,
+                },
+                model_vs_actual_gap_input[0],
+                model_vs_actual_gap_input[1],
+                REPLICA_REFERENCE_STRATEGY_IDS,
+            )
+        except ValueError as exc:
+            raise ControlPanelValidationError(
+                f"model_vs_actual input is not usable: {exc}"
+            ) from exc
     strategy_underwriting, underwriting_policy_hash = _strategy_underwriting(
         strategies,
         accepted_decomposition_lenses,
@@ -11756,6 +11860,7 @@ def _panel_data(
             for _kind, key in _IMPLEMENTATION_REFERENCE_KEYS
         },
         account_lanes=restated_account_lanes,
+        model_account_gap_references=model_account_gap_references,
     )
     admitted_nav_names = sorted(
         _text(row.get("strategy_name"), "provider NAV strategy_name")
@@ -13624,6 +13729,20 @@ def _rendered_files(
         authority_snapshots[authority_path] = _read_snapshot(
             authority_path, authority_label
         )
+    # The underwriting gap of a strategy with no provider comparison uses the model figure
+    # of its model-versus-actual primary window (see _panel_data), so the two sections
+    # cannot disagree; the audit bytes are read here, once, with the same refusal.
+    model_vs_actual_gap_input: tuple[bytes, str] | None = None
+    if model_vs_actual_input is not None:
+        try:
+            model_vs_actual_gap_input = (
+                model_vs_actual_input[0].read_bytes(),
+                model_vs_actual_input[1],
+            )
+        except OSError as exc:
+            raise ControlPanelValidationError(
+                f"model_vs_actual input is not usable: {exc}"
+            ) from exc
     data = _panel_data(
         report,
         report_identity_values,
@@ -13676,6 +13795,8 @@ def _rendered_files(
         strategy_basis_declaration=_report_strategy_basis_declaration(
             report, report_path
         ),
+        model_vs_actual_gap_input=model_vs_actual_gap_input,
+        capital_for_as_of=invested_capital,
     )
     if invested_capital is not None:
         data["invested_capital"] = invested_capital
