@@ -3071,6 +3071,13 @@ def _itemized_candidates(
         at_cutoff[
             "sum(current account values at cutoff) + current reserve + retained excluded"
         ] = cutoff_systematic + current_reserve + retained_value
+        # The baseline's own identity record is stamped on the account basis (#624); the
+        # same identity on that lane carries the current reserve and retained balance.
+        for lane_name, lane_value in account_lane.items():
+            at_cutoff[f"{lane_name} + current reserve"] = lane_value + current_reserve
+            at_cutoff[f"{lane_name} + current reserve + retained excluded"] = (
+                lane_value + current_reserve + retained_value
+            )
     strategy = row.get("strategy_id")
     if isinstance(strategy, str):
         for item in rows(ctx.report, "allocation_history"):
