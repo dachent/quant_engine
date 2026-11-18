@@ -185,3 +185,36 @@ def test_t_status_is_one_value_with_a_single_available_prefix() -> None:
     context = panel._alpha_context(_row())
     assert context["t_status"] == "AVAILABLE_HAC_DESCRIPTIVE_POST_SELECTION"
     assert "AVAILABLE_AVAILABLE" not in context["t_status"]
+
+
+def test_financial_outcomes_rebuilds_the_alternatives_the_panel_attaches() -> None:
+    # World BG production-spec: the comparator expected [] where the panel attached one
+    # alternative (an UNAVAILABLE dynamic cell whose series has an alpha in another lens).
+    outcomes = _load(
+        "portfolio_financial_outcomes_for_alpha_context",
+        "tools/portfolio_financial_outcomes.py",
+    )
+
+    def row(source: str, status: str, **extra: Any) -> dict[str, Any]:
+        base = _row(status=status, source_key=source, series_id="AI", **extra)
+        base["alpha_context"] = panel._alpha_context(base)
+        return base
+
+    unavailable = row("us-economic", "UNAVAILABLE", alpha=None, unavailable_reasons=["X"])
+    style = row("multi-asset-style", "AVAILABLE")
+    grouped = [
+        {
+            "lens_id": "ECONOMIC_FACTOR",
+            "lens_label": "Economic factors",
+            "surfaces": {"DYNAMIC_FLS": {"series": [unavailable]}},
+        },
+        {
+            "lens_id": "ETF_STYLE",
+            "lens_label": "ETF style",
+            "surfaces": {"DYNAMIC_FLS": {"series": [style]}},
+        },
+    ]
+    panel._attach_alpha_alternatives(grouped)
+    rebuilt = outcomes._displayed_alpha_alternatives(grouped, "AI", "DYNAMIC_FLS")
+    assert len(rebuilt) == 1
+    assert unavailable["alpha_context"]["alternatives"] == rebuilt
