@@ -281,3 +281,42 @@ def test_overlapping_model_and_account_live_rows_are_one_live_path() -> None:
     rows[-1] = {**rows[-1], "return": "-0.05"}
     _backtest, live = rule._series_returns(rows, series)
     assert rule.max_drawdown(live) > Decimal("0.05")
+
+
+def _gap_rows(account_days: list[int]) -> list[dict[str, str]]:
+    rows = []
+    for day in range(1, 11):
+        rows.append(
+            {
+                "series_id": "p123-ai-factor",
+                "date": f"2026-01-{day:02d}",
+                "return": "0.001",
+                "evidence_layer": "MODEL_LIVE",
+            }
+        )
+        if day in account_days:
+            rows.append(
+                {
+                    "series_id": "p123-ai-factor",
+                    "date": f"2026-01-{day:02d}",
+                    "return": "0.002",
+                    "evidence_layer": "ACCOUNT_LIVE",
+                }
+            )
+    return rows
+
+
+def test_model_live_fills_only_the_dates_before_the_accounts_first_live_date() -> None:
+    _backtest, live = rule._series_returns(
+        _gap_rows([5, 6, 7, 8, 9, 10]), "p123-ai-factor"
+    )
+    assert len(live) == 10  # four model dates, then six account dates
+
+
+def test_an_account_gap_after_funding_is_refused_not_filled_with_the_model_record() -> (
+    None
+):
+    """Review follow-on: day 8 has no account return; the model row must not stand in."""
+
+    with pytest.raises(rule.AdverseLossError, match="account gap is not filled"):
+        rule._series_returns(_gap_rows([5, 6, 7, 9, 10]), "p123-ai-factor")

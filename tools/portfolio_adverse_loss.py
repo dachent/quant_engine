@@ -135,6 +135,30 @@ def _series_returns(
             layer == ACCOUNT_LAYER and held["evidence_layer"] != ACCOUNT_LAYER
         ):
             chosen[key] = row
+    # The provider's model record may stand in for the account only BEFORE the account's
+    # first live date.  A date after it that has a model row but no account row is a gap
+    # in the owner's own history: filling it with the provider's record would be a number
+    # the owner never earned, so the rule refuses instead of choosing one.
+    account_days = [
+        key[0]
+        for key, row in chosen.items()
+        if row["evidence_layer"] == ACCOUNT_LAYER and not key[1]
+    ]
+    if account_days:
+        first_account = min(account_days)
+        filled = sorted(
+            key[0]
+            for key, row in chosen.items()
+            if not key[1]
+            and row["evidence_layer"] != ACCOUNT_LAYER
+            and key[0] > first_account
+        )
+        if filled:
+            raise AdverseLossError(
+                f"{series_id}: {len(filled)} date(s) after the account's first live date "
+                f"{first_account} (first {filled[0]}) have a model-live return but no "
+                "account return: an account gap is not filled with the provider's record"
+            )
     live = [Decimal(chosen[key]["return"]) for key in sorted(chosen)]
     return backtest, live
 
