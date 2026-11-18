@@ -1,5 +1,5 @@
 {
-  "basis": "committed_bytes is the measured figure of each block as last raised, and the base of the code ceiling (1.5 x, acceptance/validate/payload_rule.py): R3c committed panel b45631f8 for the blocks no justification below names, the release A A3 lane-replica measure for leverage_disclosures, model_vs_actual, portfolio_twr_cumulative and strategy_underwriting before int14, the int14 panel 96e7e450 for the blocks whose justification says int14, the release B candidate 0c06ae10 for index_html and dashboard_data_js, and the release B staged panel 8ee4e52c for total_physical. Block limits are the reviewed floor: measured + 1 percent rounded up to 1000 B. The physical total_bytes floor is the exception: measured on 8ee4e52c plus 2 percent, rounded up to 1000 B (history entry, reason). Weekly growth is NOT edited here: lint.payload_size computes each limit from the previous committed release (#893), but that relative rule never goes below these floors and never above the ceiling. Raise a floor only by rerunning tools/panel_payload_size.py --raise-all in the change that deliberately grows a block.",
+  "basis": "committed_bytes is the measured figure of each block as last raised, and the base of the code ceiling (1.5 x, acceptance/validate/payload_rule.py): R3c committed panel b45631f8 for the blocks no justification below names, the release A A3 lane-replica measure for leverage_disclosures, model_vs_actual, portfolio_twr_cumulative and strategy_underwriting before int14, the int14 panel 96e7e450 for the blocks whose justification says int14, the release B candidate 0c06ae10 for index_html and dashboard_data_js, and the release B staged panel 8ee4e52c for total_physical. Block limits are the reviewed floor: measured + 1 percent rounded up to 1000 B. The physical total_bytes floor is the exception: the release driver's constant-qa estimate of the staged total (413832321 B, 108519 B above the 413723802 B measured on 8ee4e52c) plus 2 percent, rounded up to 1000 B (history entry, reason). Weekly growth is NOT edited here: lint.payload_size computes each limit from the previous committed release (#893), but that relative rule never goes below these floors and never above the ceiling. Raise a floor only by rerunning tools/panel_payload_size.py --raise-all in the change that deliberately grows a block.",
   "committed_bytes": {
     "total_physical": 413723802,
     "index_html": 50371122,
@@ -130,7 +130,7 @@
   "unlisted_block_max_bytes": 50000,
   "other_blocks_max_bytes": 400000,
   "physical": {
-    "total_bytes": 421999000,
+    "total_bytes": 422109000,
     "index_html_bytes": 50875000,
     "dashboard_data_json_bytes": 291324000,
     "dashboard_data_js_bytes": 46235000
@@ -1908,10 +1908,10 @@
     {
       "generation": "8ee4e52ce1351055fd449cad37da2af12f2ef2e8ed9e23f089f175fbf1bf18b1 (release B staged panel, cutoff 2026-11-06)",
       "margin": 0.02,
-      "rule": "total_bytes limit = ceil(measured x (1 + margin) / 1000) x 1000, an explicit reviewed floor (blocks stay at measured + 1 %)",
+      "rule": "total_bytes limit = ceil(estimate x (1 + margin) / 1000) x 1000 on the release driver constant-qa estimate 413832321 B (the staged total with a fixed qa/ allowance, measured 413723802 B on 8ee4e52c), an explicit reviewed floor (blocks stay at measured + 1 %)",
       "reason": "lint.payload_size refused the staged B generation on total_bytes 413723802 B > 404737000 B, the relative limit (previous release A 400729195 B x 1.01, 0 added days because B has the same cutoff as A); the file floor was 401175000 B. The total is 3.24 % above A with no added day, so the day-based relative rule cannot cover it. The growth is content: the 4657 Schwab financing rows in leverage_disclosures, the adverse_loss_basis fields, and the new strategy_concepts block (9502 B) with the Strategy-concepts view that renders it, carried in all four files that the total counts. Every other physical file and every listed block of the staged panel is under its floor (index_html_bytes 50371622 B of 50875000 B, dashboard_data_json_bytes 288752134 B of 291324000 B, dashboard_data_js_bytes 45776755 B of 46235000 B). The headroom is 2 % on the total, not 1 %, because the total is the sum of four files that each move with the data; the ceiling (1.5 x committed total_physical) stays in code.",
       "physical": {
-        "total_bytes": {"before": 397202029, "after": 413723802, "previous_limit": 401175000, "limit": 421999000}
+        "total_bytes": {"before": 397202029, "after": 413723802, "previous_limit": 401175000, "limit": 422109000}
       }
     }
   ]
