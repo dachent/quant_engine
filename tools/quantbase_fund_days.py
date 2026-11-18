@@ -12,7 +12,7 @@ residual must equal the dashboard), and only then restates a fill day to its pos
 holdings x close.  A fill day whose closes are missing, or whose pre-fill rebuild does
 not close, is never silently restated: it keeps the dashboard value and says why.
 A fill moves holdings, not value: the restated value of a fill day must lie within
-``MAX_RESTATEMENT_CHANGE`` of the dashboard value, else the restatement is refused and the
+``MAX_RESTATEMENT_CHANGE`` (3 %) of the dashboard value, else the restatement is refused and the
 dashboard value kept (a close series in other units than the legs, for example split-adjusted
 closes against as-traded quantities, values the post-fill holdings at a fraction of the fund:
 TQQQ 2025-08-06, 245.08 shares x 44.42 adjusted instead of 88.84 as traded).
@@ -34,8 +34,10 @@ from typing import Final
 CASH: Final = "$USD"
 ABS_TOLERANCE: Final = Decimal("25")
 REL_TOLERANCE: Final = Decimal("0.0005")
-# the largest change of a fill day's value a restatement may make (fill-to-close market move)
-MAX_RESTATEMENT_CHANGE: Final = Decimal("0.05")
+# the largest change of a fill day's value a restatement may make (fill-to-close market move):
+# 3 %, from the real 75 restated days (largest 2.41 %, 2026-04-21, then 1.92 %, 1.37 %; median 0.23 %)
+# with headroom; a larger move keeps the dashboard value (conservative)
+MAX_RESTATEMENT_CHANGE: Final = Decimal("0.03")
 
 RESTATED: Final = "RESTATED_POST_FILL"
 DASHBOARD: Final = "DASHBOARD_NO_FILL"

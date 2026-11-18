@@ -42,14 +42,14 @@ def _world(
     root = tmp_path / "source-runs" / RUN / "artifacts"
     (root / "csv").mkdir(parents=True)
     price = root / ledger._QUANTBASE_PRICEHISTORY
-    # 01-05 holds SHV (10 x 100 = 1000); the 01-06 fill swaps it for TQQQ (22 x 44 = 968).
+    # 01-05 holds SHV (10 x 100 = 1000); the 01-06 fill swaps it for TQQQ (22 x 44.5 = 979).
     price.write_text(
         price_text
         if price_text is not None
         else "time,value,cost_basis,profit_loss\n"
         "01/05/2026,1000.00,1000.00,0\n"
         "01/06/2026,1000.00,1000.00,0\n"
-        "01/07/2026,968.00,1000.00,0\n",
+        "01/07/2026,979.00,1000.00,0\n",
         encoding="utf-8-sig",
     )
     activity = root / "csv" / "account_activity.csv"
@@ -121,7 +121,7 @@ def _observations(
 
 CLOSES = {
     "SHV": {date(2026, 1, d): Decimal("100") for d in (5, 6, 7)},
-    "TQQQ": {date(2026, 1, d): Decimal("44") for d in (5, 6, 7)},
+    "TQQQ": {date(2026, 1, d): Decimal("44.5") for d in (5, 6, 7)},
 }
 
 
@@ -138,7 +138,7 @@ def test_a_fill_day_is_restated_to_its_post_fill_value_with_governed_closes(
     ended that day in TQQQ, which is what 01-07 shows."""
 
     rows = _observations(tmp_path, CLOSES)
-    assert rows["2026-01-06"]["nav"]["value"] == "968.00"
+    assert rows["2026-01-06"]["nav"]["value"] == "979.00"
     assert rows["2026-01-06"]["fill_restatement"] == {
         "dashboard_value": "1000.00",
         "status": "RESTATED_POST_FILL",
@@ -169,7 +169,7 @@ def test_the_spec_pins_the_closes_and_refuses_a_hash_mismatch(tmp_path: Path) ->
 def test_closes_in_other_units_than_the_legs_are_refused_loudly(tmp_path: Path) -> None:
     """B blocker: a split-adjusted close (here half the as-traded 44) values the post-fill
     holdings at about half the fund and fails the rebuild on the days the fund holds the symbol:
-    the pin is refused (the per-day 5 % gate on its own keeps the dashboard value)."""
+    the pin is refused (the per-day 3 % gate on its own keeps the dashboard value)."""
 
     halved = {
         "SHV": CLOSES["SHV"],

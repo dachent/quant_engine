@@ -8,7 +8,7 @@ import quantbase_fund_days as q
 D0, D1, D2, D3 = date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)
 CLOSES = {
     "SHV": {D1: Decimal("100"), D2: Decimal("100"), D3: Decimal("100")},
-    "TQQQ": {D1: Decimal("50"), D2: Decimal("44"), D3: Decimal("44")},
+    "TQQQ": {D1: Decimal("50"), D2: Decimal("44.5"), D3: Decimal("44.5")},
 }
 # D1 opens in SHV; D2 sells it all for TQQQ at 45 (fills a few minutes before the close at 44).
 LEGS = [
@@ -27,17 +27,17 @@ def test_a_fill_day_is_restated_to_post_fill_holdings_and_matches_the_next_day()
     dashboard = {
         D1: Decimal("1000"),
         D2: Decimal("1000"),
-        D3: Decimal("968"),
+        D3: Decimal("979"),
     }
     out = q.corrected_values(dashboard, LEGS, CLOSES)
     assert out[D2].status == q.RESTATED
-    assert out[D2].value == Decimal("968")
+    assert out[D2].value == Decimal("979")
     assert out[D3].value == dashboard[D3]
     assert out[D2].value == out[D3].value  # no phantom return on the fill day
 
 
 def test_a_rebuild_that_does_not_close_is_never_restated() -> None:
-    dashboard = {D1: Decimal("1000"), D2: Decimal("1300"), D3: Decimal("968")}
+    dashboard = {D1: Decimal("1000"), D2: Decimal("1300"), D3: Decimal("979")}
     out = q.corrected_values(dashboard, LEGS, CLOSES)
     assert out[D2].status == q.UNRESTATED_NO_CLOSURE
     assert out[D2].value == Decimal("1300")
@@ -108,17 +108,17 @@ def test_the_same_day_with_as_traded_closes_restates_within_the_tolerance() -> N
     )
     assert out[E2].status == q.RESTATED
     assert abs(out[E2].value - REAL_DASHBOARD[E2]) / REAL_DASHBOARD[E2] < Decimal(
-        "0.05"
+        "0.03"
     )
 
 
 def test_a_restatement_just_inside_and_just_outside_the_five_percent_gate() -> None:
-    # post-fill value = 17.2061 + 245.0800 x close: inside at 4.9% above, outside at 5.1%
+    # post-fill value = 17.2061 + 245.0800 x close: inside at 2.9% above, outside at 3.1%
     base = REAL_DASHBOARD[E2]
-    inside = (base * Decimal("1.049") - Decimal("17.2060885064")) / Decimal(
+    inside = (base * Decimal("1.029") - Decimal("17.2060885064")) / Decimal(
         "245.0799626930"
     )
-    outside = (base * Decimal("1.051") - Decimal("17.2060885064")) / Decimal(
+    outside = (base * Decimal("1.031") - Decimal("17.2060885064")) / Decimal(
         "245.0799626930"
     )
     for close, status in ((inside, q.RESTATED), (outside, q.UNRESTATED_IMPLAUSIBLE)):
@@ -134,7 +134,7 @@ def test_a_fill_to_close_move_beyond_the_gate_is_refused_even_when_the_rebuild_c
     None
 ):
     # the same fill day with TQQQ closing at 40 (-11 % from the 45 fill): a 12 % restatement exceeds
-    # the five percent gate, so the dashboard value is kept (conservative, never a halved level)
+    # the three percent gate, so the dashboard value is kept (conservative, never a halved level)
     closes = {"SHV": CLOSES["SHV"], "TQQQ": {D1: Decimal("50"), D2: Decimal("40")}}
     out = q.corrected_values({D1: Decimal("1000"), D2: Decimal("1000")}, LEGS, closes)
     assert out[D2].status == q.UNRESTATED_IMPLAUSIBLE
@@ -143,7 +143,7 @@ def test_a_fill_to_close_move_beyond_the_gate_is_refused_even_when_the_rebuild_c
 
 def test_a_fill_day_whose_next_day_does_not_reproduce_is_refused() -> None:
     # value that entered outside the order legs (a deposit the night of the fill): the restated
-    # day is inside 5 % but the next dashboard day is 5,000 above the rebuilt holdings
+    # day is inside 3 % but the next dashboard day is 5,000 above the rebuilt holdings
     dashboard = dict(REAL_DASHBOARD)
     dashboard[E3] = REAL_DASHBOARD[E3] + Decimal("5000")
     out = q.corrected_values(
