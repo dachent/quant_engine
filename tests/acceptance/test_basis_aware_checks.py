@@ -260,6 +260,56 @@ def test_the_account_lane_total_is_not_a_free_pass_without_the_declaration(
     assert [f.check_id for f in findings] == ["capital.reconciliation_recompute"]
 
 
+def _current_reserve_report(total: str, reserve_status: str) -> dict[str, Any]:
+    report = _reconciliation(total)
+    report["reconciliation_checks"][0]["details_json"] = json.dumps(
+        {"total_liquid_usd": total}
+    )
+    report["allocation_history"] = [
+        {"scope": "RESERVE", "current_value_usd": "100", "as_of_date": "2026-01-16"}
+    ]
+    report["account_summary"] = [
+        {
+            "account_id": "reserve-classification",
+            "latest_value_usd": "150",
+            "as_of_date": "2026-01-30",
+            "status": reserve_status,
+        }
+    ]
+    report["portfolio_summary"] = [
+        {"metric": "Retained excluded systematic balance", "value": "7"}
+    ]
+    return report
+
+
+def test_a_stamped_total_is_reproduced_from_the_current_statement_dated_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cut = {"synthetic-beta": (D(1000), [])}
+    monkeypatch.setattr(checks, "cutoff_capital_by_strategy", lambda _ctx: cut)
+    for total, expected in (("1157", 0), ("1150", 0), ("1120", 1)):
+        context = _context(
+            report=_current_reserve_report(
+                total, "STATEMENT_DATED_MANDATE_CLASSIFICATION"
+            )
+        )
+        assert len(list(checks.check_reconciliation_recompute(context))) == expected
+
+
+def test_a_statement_dated_reserve_row_does_not_claim_the_cutoff() -> None:
+    for status, flagged in (
+        ("STATEMENT_DATED_MANDATE_CLASSIFICATION", False),
+        ("AVAILABLE_MANDATE_CLASSIFICATION", True),
+    ):
+        context = _context(report=_current_reserve_report("1157", status))
+        found = [
+            f
+            for f in checks.check_capital_as_of(context)
+            if f.entity == "reserve-classification"
+        ]
+        assert bool(found) is flagged
+
+
 def test_the_lane_term_is_the_liability_line() -> None:
     figures = _figures()
     assert figures.value - figures.parent_equity == -figures.liability_line == 1400
