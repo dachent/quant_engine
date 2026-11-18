@@ -177,6 +177,7 @@ jobs:
           tools/portfolio_decision.py
           tools/context_pack.py
           tools/recommendation_log.py
+          tools/owner_page.py
           tools/release_preflight.py
           tools/release_preflight_g1a.py
           tools/release_preflight_g1b.py
