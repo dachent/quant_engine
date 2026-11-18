@@ -2546,37 +2546,62 @@ def _derive_rate_dollar_costs(
     return carried
 
 
+_FINANCIAL_MVP_CONTRACT_PATH: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-financial-mvp-source-v1.json"
+)
+_OWNER_RULING_AUTHORITY = re.compile(r"^OWNER_(\d+)_COMMENT_(\d+)_DEPRECATED$")
+
+
 def _classify_excluded_history_only_costs(
     costs: Sequence[Mapping[str, Any]], as_of: date
 ) -> list[dict[str, Any]]:
-    """A cost row with no price whose strategy the governed policy excludes as a
-    deprecated or history-only record, effective by the cutoff, is a structural
-    exclusion from live costs (with the policy's own reason), not a gap."""
+    """A cost row with no price whose strategy the financial-MVP contract declares
+    DEPRECATED_HISTORY_ONLY and EXCLUDED from the product, with an owner-ruling
+    authority and a product interval that ended by the cutoff, is a structural
+    exclusion from live costs.  The classification carries the ruling reference the
+    contract names (an owner comment on a repository issue); no free text decides it."""
 
-    policy = _load_json(_HWM_POLICY_PATH, "hwm policy contract")
-    exclusions = {
+    contract = _load_json(_FINANCIAL_MVP_CONTRACT_PATH, "financial MVP contract")
+    declared = {
         str(row["strategy_id"]): row
-        for row in policy.get("material_perimeter", {}).get("exclusions", [])
+        for row in contract.get("strategies", [])
         if isinstance(row, dict) and "strategy_id" in row
     }
     carried: list[dict[str, Any]] = []
     for row in costs:
         item = dict(row)
-        excluded = exclusions.get(str(item["strategy_id"]))
-        reason = str(excluded.get("reason", "")) if excluded else ""
+        entry = declared.get(str(item["strategy_id"]))
+        interval = entry.get("effective_product_interval") if entry else None
+        membership = entry.get("funded_membership") if entry else None
+        ruling = (
+            _OWNER_RULING_AUTHORITY.match(str(membership.get("authority")))
+            if isinstance(membership, dict)
+            else None
+        )
         if (
-            excluded is not None
+            entry is not None
+            and ruling is not None
+            and isinstance(interval, dict)
+            and entry.get("lifecycle_status") == "DEPRECATED_HISTORY_ONLY"
+            and entry.get("product_requirement") == "EXCLUDED"
+            and interval.get("effective_end")
+            and _date(interval["effective_end"], "product interval end") <= as_of
             and item["annual_external_cost_usd"] is None
             and item.get("derived_annual_cost_usd") is None
             and not str(item.get("cost_status", "")).startswith("known")
-            and _date(excluded["effective_date"], "exclusion.effective_date") <= as_of
-            and ("deprecated" in reason.lower() or "history-only" in reason.lower())
         ):
             item["cost_classification"] = {
                 "classification": COST_CLASS_EXCLUDED_HISTORY_ONLY,
-                "effective_date": excluded["effective_date"],
-                "reason": reason,
-                "source": "contracts/portfolio-hwm-policy-v3.json",
+                "product_interval_end": interval["effective_end"],
+                "reason": str(entry.get("readiness_reason", "")),
+                "ruling_reference": str(membership["authority"]),
+                "ruling_url": (
+                    "https://github.com/dachent/quant_engine/issues/"
+                    f"{ruling.group(1)}#issuecomment-{ruling.group(2)}"
+                ),
+                "source": "contracts/portfolio-financial-mvp-source-v1.json",
             }
         carried.append(item)
     return carried
@@ -5105,6 +5130,7 @@ def _costs_claim(costs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             isinstance(classification, Mapping)
             and classification.get("classification") == COST_CLASS_EXCLUDED_HISTORY_ONLY
             and classification.get("reason")
+            and classification.get("ruling_reference")
         ):
             return True
         if str(row.get("cost_status", "")).startswith("known"):
