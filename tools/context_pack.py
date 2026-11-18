@@ -129,6 +129,28 @@ KNOWN_ISSUES_PATH = ROOT / "contracts" / "portfolio-known-issues-v1.json"
 _ISSUE_ID = re.compile(r"KI-\d{2,}")
 
 
+STRESS_BOUND_FALLBACK = "The stress loss is a bound under the stated rule, not a forecast and not a statistical confidence bound."
+
+
+def stress_bound_line(data: Mapping[str, Any]) -> str:
+    """The stress-bound rule text, read from the payload's adverse_loss_basis.rule_statement when it carries one."""
+
+    stack: list[tuple[Any, int]] = [(data, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, Mapping):
+            basis = node.get("adverse_loss_basis")
+            if isinstance(basis, Mapping) and isinstance(
+                basis.get("rule_statement"), str
+            ):
+                return f"{STRESS_BOUND_FALLBACK} Rule as published: {_clean(basis['rule_statement'])}."
+            if depth < 6:
+                stack.extend((v, depth + 1) for v in node.values())
+        elif isinstance(node, list) and depth < 6:
+            stack.extend((v, depth + 1) for v in node[:50])
+    return STRESS_BOUND_FALLBACK
+
+
 def known_issue_lines(contract: Mapping[str, Any]) -> list[str]:
     """One DO NOT RELY line per OPEN known issue of the governed list; a malformed list refuses the pack."""
 
@@ -829,7 +851,7 @@ def build_pack(
     add(
         "do_not_rely",
         "DO NOT RELY ON",
-        "\n".join(f"- {d}" for d in DO_NOT_RELY)
+        "\n".join(f"- {d}" for d in [*DO_NOT_RELY, stress_bound_line(data)])
         + (
             "\nKnown issues of this release (governed list, contracts/portfolio-known-issues-v1.json):\n"
             + "\n".join(f"- {line}" for line in issue_lines)

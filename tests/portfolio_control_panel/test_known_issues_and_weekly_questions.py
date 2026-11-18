@@ -186,3 +186,22 @@ def test_q5_what_not_to_trust_names_the_known_issues_and_the_data_holes() -> Non
         i["id"] in not_trust for i in _issues()["issues"] if i["status"] == "OPEN"
     )
     assert all(h["id"] in holes for h in pack["holes"])
+
+
+def test_the_stress_bound_is_not_a_forecast_and_uses_the_published_rule_when_present() -> (
+    None
+):
+    plain = _section(_pack(_issues()), "do_not_rely")
+    assert "bound under the stated rule, not a forecast" in plain
+    data = json.loads(FIXTURE.read_bytes())
+    data["correlation"] = {
+        "rows": [{"adverse_loss_basis": {"rule_statement": "1.25x prior rule text"}}]
+    }
+    policy_bytes = POLICY_PATH.read_bytes()
+    sha = hashlib.sha256(policy_bytes).hexdigest()
+    decision = pd.build_decision(data, json.loads(policy_bytes), sha)
+    sources = json.loads(SOURCES_PATH.read_bytes())["strategies"]
+    pack = cp.build_pack(
+        data, decision, json.loads(policy_bytes), sha, sources, None, None, _issues()
+    )
+    assert "Rule as published: 1.25x prior rule text" in _section(pack, "do_not_rely")

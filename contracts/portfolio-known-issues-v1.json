@@ -27,9 +27,9 @@
       "id": "KI-02",
       "status": "OPEN",
       "verification": "CONTROL",
-      "do_not_rely": "Annualised figures on the 14 panel rows (and 62 analytics rows) that scale by 252 periods a year where 242 or 260 apply.",
-      "effect": "Annualised figures on those rows are slightly mis-scaled.",
-      "affected_paths": [],
+      "do_not_rely": "Alpha net, its annualised standard error and annualised tracking error on the 22 factor-fit rows whose train dates carry a count other than 252 a year: EU economic lenses (260 or 261) understate alpha by about 3.2 or 3.6 percent, EU rows at 245 overstate it by 2.8 percent, Robuxio style lenses at 246 by 2.4 percent. None is a headline figure; they appear only in lens detail.",
+      "effect": "22 of 630 rows with train anchors scale by 252 instead of their own count; 12 are AVAILABLE and 10 are DIAGNOSTIC_ONLY (alpha withheld). Per-row list: records/sprint/F1-PPY-ROWS.txt.",
+      "affected_paths": ["factor_analysis lens detail rows"],
       "fix": {"ticket": "#904", "release": "F1", "note": "annualization fix"}
     },
     {
