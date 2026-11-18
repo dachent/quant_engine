@@ -51,3 +51,13 @@ def test_a_withdrawn_row_clears_the_benchmark_cash_fields_with_the_rest() -> Non
     source = inspect.getsource(panel)
     assert '"benchmark_cash_drag_status",' in source
     assert '"benchmark_cash_drag_reason",' in source
+
+
+def test_the_panel_renders_the_benchmark_cash_status_in_the_benchmark_cell() -> None:
+    from pathlib import Path
+
+    app = (
+        Path(__file__).resolve().parents[2] / "apps/portfolio-control-panel/app.js"
+    ).read_text(encoding="utf-8")
+    assert "cash drag ${statusText(row.benchmark_cash_drag_status)}" in app
+    assert "row.benchmark_cash_drag_reason" in app
