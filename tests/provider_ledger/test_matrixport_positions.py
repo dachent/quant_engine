@@ -41,6 +41,7 @@ HEADER = (
     "nav,nav_available,product_id,reconciliation_class,share,source_endpoint,utc_date,"
     "utc_midnight_chicago,utc_midnight_ms,utc_midnight_utc,valuation_source,"
     "value_usd_api_rate,value_usd_api_reported,value_usd_api_reported_current_snapshot,"
+    "value_usd_observed,value_usd_parity_assumed,"
     "value_usd_strict_component"
 )
 NAV_HEADER = (
@@ -317,6 +318,39 @@ def test_a_nav_day_without_position_rows_is_refused_with_the_dates(
             {},
             fx_rates=_fx({"2026-11-06": "1", "2026-11-07": "1"}),
         )
+
+
+def test_days_cut_out_of_the_middle_are_refused_with_the_dates(tmp_path: Path) -> None:
+    days = ["2026-11-04", "2026-11-05", "2026-11-06"]
+    rows = [_row(day, "10") for day in (days[0], days[2])]
+    nav_rows = [_nav_row(day, "10") for day in days]
+    fx = _fx({day: "1" for day in days})
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="MATRIXPORT_POSITIONS_GAP.*2026-11-05"
+    ):
+        _positions(tmp_path, rows, fx, nav_rows=nav_rows)
+
+
+def test_an_active_day_without_a_native_value_is_typed_unavailable(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        _row("2026-11-05", "10"),
+        _row("2026-11-06", "10", native=""),
+        _row("2026-11-07", "10"),
+    ]
+    fx = _fx({"2026-11-05": "1", "2026-11-06": "1", "2026-11-07": "1"})
+    positions = _positions(tmp_path, rows, fx)
+    by_day = {p["as_of_date"]: p for p in positions}
+    gap = by_day["2026-11-06"]
+    assert gap["closure_status"] == "NATIVE_VALUE_ABSENT"
+    assert gap["market_value"] == {
+        "currency": "USD",
+        "status": "UNAVAILABLE",
+        "value": None,
+    }
+    assert gap["quantity"] == "100"
+    assert by_day["2026-11-05"]["closure_status"] == "CLOSED_AGAINST_PUBLISHED_NAV"
 
 
 def test_a_duplicate_product_day_is_refused(tmp_path: Path) -> None:

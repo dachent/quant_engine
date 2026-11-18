@@ -1479,6 +1479,9 @@ def _matrixport_positions(
     totals: dict[date, Decimal] = defaultdict(Decimal)
     independent: dict[date, Decimal] = defaultdict(Decimal)
     unclosed: set[date] = set()
+    native_absent: set[date] = set()
+    held_days: set[tuple[str, date]] = set()
+    active_days: set[date] = set()
     seen: set[tuple[date, str]] = set()
     with localcontext() as context:
         context.prec = 80
@@ -1486,6 +1489,9 @@ def _matrixport_positions(
             day = _day(row.get("utc_date"), "matrixport daily holdings utc_date")
             if financial_cutoff is not None and day > financial_cutoff:
                 continue
+            held_days.add(
+                (_text(row.get("product_id"), "matrixport holding product_id"), day)
+            )
             share = _observed_decimal(
                 row.get("share"), "matrixport daily holdings share"
             )
@@ -1498,11 +1504,47 @@ def _matrixport_positions(
             native = _observed_decimal(
                 row.get("native_value"), "matrixport native holding value"
             )
-            if native is None or day > fx_end:
-                # No native value to convert, or no admitted USD conversion: no position
-                # row (the NAV builder dispositions the same rows).
+            if day > fx_end:
+                # No admitted USD conversion: outside the position window.
                 continue
             product_id = _text(row.get("product_id"), "matrixport holding product_id")
+            active_days.add(day)
+            if native is None:
+                # Active share but no native value: the NAV builder has no day here either.
+                # The position is typed UNAVAILABLE (never dropped, never valued).
+                native_absent.add(day)
+                strategy_id, mapping_status = _mapped_strategy_for_account(
+                    account_id, day, accounts, strategies, assignments
+                )
+                source_id = f"{day.isoformat()}:{product_id}"
+                positions.append(
+                    {
+                        "account_id": account_id,
+                        "as_of_date": day.isoformat(),
+                        "closure_status": "NATIVE_VALUE_ABSENT",
+                        "evidence_layer": "ACCOUNT_LIVE",
+                        "generation_id": generation_id,
+                        "mapping_status": mapping_status,
+                        "market_value": {
+                            "currency": "USD",
+                            "status": "UNAVAILABLE",
+                            "value": None,
+                        },
+                        "provider_id": "matrixport",
+                        "quantity": format(share.normalize(), "f"),
+                        "record_id": f"matrixport:position:{source_id}",
+                        "security_id": "security-matrixport-"
+                        + hashlib.sha256(product_id.encode("utf-8")).hexdigest()[:24],
+                        "source_artifact_id": artifact_id,
+                        "source_record_id": source_id,
+                        "strategy_id": strategy_id,
+                        "symbol": _text(
+                            row.get("currency"), "matrixport holding currency"
+                        ),
+                        "value_basis": "NAV_SHARE_PRODUCT",
+                    }
+                )
+                continue
             if (day, product_id) in seen:
                 raise ProviderLedgerError(
                     "MATRIXPORT_POSITIONS_DUPLICATE: more than one holding row exists "
@@ -1588,9 +1630,40 @@ def _matrixport_positions(
                 "MATRIXPORT_POSITIONS_NAV_CLOSURE: an account NAV is unavailable"
             )
         nav_days[date.fromisoformat(str(observation["as_of_date"]))] = nav_value
+    # Gap detection against the independent published-NAV calendar: every published day
+    # between the first and last held day (bounded by the declared boundary, the cutoff and the
+    # admitted FX end) must have a holdings row; a missing run of days is refused, not passed.
+    if active_days:
+        window_end = min(
+            max(active_days),
+            _day(
+                catalog.get("observed_boundary_date"),
+                "matrixport observed_boundary_date",
+            ),
+        )
+        missing = sorted(
+            {
+                day
+                for (_product, day) in published_nav
+                if min(active_days) <= day <= window_end
+            }
+            - {day for (_product, day) in held_days}
+        )
+        if missing:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_GAP: published unit NAV days with no holdings "
+                "row inside the held window: "
+                + ", ".join(d.isoformat() for d in missing)
+            )
     for label, days in (
-        ("a NAV day has no position rows", sorted(set(nav_days) - set(totals))),
-        ("a position day has no NAV observation", sorted(set(totals) - set(nav_days))),
+        (
+            "a NAV day has no position rows",
+            sorted(set(nav_days) - set(totals) - native_absent),
+        ),
+        (
+            "a position day has no NAV observation",
+            sorted(set(totals) - set(nav_days)),
+        ),
     ):
         if days:
             raise ProviderLedgerError(
