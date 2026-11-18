@@ -223,3 +223,22 @@ def test_the_ledger_refuses_a_close_pin_that_fails_the_rebuild_on_non_fill_days(
                 ledger._quantbase_nav_observations(**kwargs)
         else:
             assert ledger._quantbase_nav_observations(**kwargs)
+
+
+def test_a_fill_at_or_after_23_utc_is_refused_as_calendar_ambiguous(
+    tmp_path: Path,
+) -> None:
+    activity = (
+        "activity_type,filled_at,fund,fund_title,quantity,symbol\n"
+        "order,2026-01-02T20:54:00.000000Z,107,Volatis Strategy,10,SHV\n"
+        "order,2026-01-06T23:30:00.000000Z,107,Volatis Strategy,-10,SHV\n"
+    )
+    manifest, catalog = _world(tmp_path, None, activity)
+    with pytest.raises(ledger.ProviderLedgerError, match="calendar day is ambiguous"):
+        ledger._quantbase_restated_days(
+            manifest,
+            tmp_path,
+            RUN,
+            [{"time": "01/05/2026", "value": "1000.00"}],
+            CLOSES,
+        )

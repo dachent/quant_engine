@@ -1679,6 +1679,10 @@ def _matrixport_capital_anchors(
     return anchors
 
 
+# real fills run 13:00-22:59 UTC (the fund trades a few minutes before the US close)
+_QUANTBASE_LATEST_FILL_UTC_HOUR: Final = 23
+
+
 def _quantbase_restated_days(
     manifest: GenerationManifest,
     root: Path,
@@ -1714,6 +1718,14 @@ def _quantbase_restated_days(
         if quantity is None:
             continue
         stamp = _utc_timestamp(filled_at, "quantbase order filled_at")
+        if int(stamp[11:13]) >= _QUANTBASE_LATEST_FILL_UTC_HOUR:
+            # the fill day is the UTC calendar day while the dashboard is dated by the US calendar
+            # day: a fill this late could belong to the next dashboard day
+            raise ProviderLedgerError(
+                f"quantbase order filled_at {filled_at} is at or after "
+                f"{_QUANTBASE_LATEST_FILL_UTC_HOUR}:00 UTC: its calendar day is ambiguous against "
+                "the dashboard day"
+            )
         legs.append(
             (date.fromisoformat(stamp[:10]), str(row.get("symbol") or ""), quantity)
         )
