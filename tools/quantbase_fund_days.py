@@ -119,24 +119,30 @@ def corrected_values(
             result[day] = FundDay(nav, UNRESTATED_IMPLAUSIBLE, residual)
             continue
         result[day] = FundDay(restated, RESTATED, residual)
-    ordered = sorted(result)
-    for position, day in enumerate(ordered):
-        if result[day].status != RESTATED:
+    # every day the holdings could have been evaluated or changed: the dashboard days and every
+    # fill day (a fill day without a dashboard row is a candidate too: the ledger drops rows whose
+    # value is missing or zero)
+    candidates = sorted(set(result) | set(by_day))
+    for position, day in enumerate(candidates):
+        if day not in result or result[day].status != RESTATED:
             continue
-        # The proving day is the next day the fund's holdings were evaluated or changed: a day with
-        # a valued pre-fill rebuild, or a day with fills.  A day without closes that trades is never
-        # skipped (it would let a later day "prove" holdings the missing day had already sold);
-        # weekend and holiday days (no fills, no close) carry no information and are passed over.
+        # The proving day is the next day the holdings were evaluated or changed: a day with a
+        # valued pre-fill rebuild, or a day with fills.  A trading day without closes (or without a
+        # dashboard row) is never skipped (it would let a later day "prove" holdings it had already
+        # sold); weekend and holiday days (no fills, no close) carry no information and are passed
+        # over.
         proving = next(
             (
                 later
-                for later in ordered[position + 1 :]
-                if result[later].residual is not None or later in by_day
+                for later in candidates[position + 1 :]
+                if later in by_day
+                or (later in result and result[later].residual is not None)
             ),
             None,
         )
         proved = (
             proving is not None
+            and proving in result
             and result[proving].residual is not None
             and result[proving].status != UNRESTATED_NO_CLOSURE
         )

@@ -1727,6 +1727,13 @@ def _quantbase_restated_days(
     corrected = quantbase_fund_days.corrected_values(dashboard, legs, fill_closes)
     if not quantbase_fund_days.closes_reproduce_the_dashboard(corrected, legs):
         valued, failed = quantbase_fund_days.non_fill_closure_failures(corrected, legs)
+        if valued < quantbase_fund_days.MIN_NON_FILL_DAYS:
+            raise ProviderLedgerError(
+                "quantbase_fill_closes cannot be trusted: only "
+                f"{valued} non-fill days are valued (at least "
+                f"{quantbase_fund_days.MIN_NON_FILL_DAYS} are needed to show that the closes "
+                "reproduce the dashboard)"
+            )
         raise ProviderLedgerError(
             "quantbase_fill_closes do not reproduce the dashboard on non-fill days "
             f"({failed} of {valued} valued days fail the holdings x close rebuild): the "

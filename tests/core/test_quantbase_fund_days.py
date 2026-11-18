@@ -235,3 +235,31 @@ def test_too_few_valued_non_fill_days_do_not_show_that_the_closes_reproduce() ->
     assert not q.closes_reproduce_the_dashboard(
         good, legs
     )  # also unproven: too short to judge
+
+
+def test_a_fill_day_without_a_dashboard_row_is_a_proving_day_that_cannot_prove() -> (
+    None
+):
+    """Opus P1 variant: E3 sells the TQQQ for SHV, its closes are present but the dashboard has no
+    row for E3 (the ledger drops rows with a missing or zero value): the fill day itself is the
+    proving day, there is no dashboard value on it, so E2 stays unproven and unrestated."""
+
+    e4 = date(2025, 8, 8)
+    legs = [
+        *REAL_LEGS,
+        (E3, "TQQQ", Decimal("-245.0799626930")),
+        (E3, "SHV", Decimal("199.0")),
+    ]
+    low = _real_closes(("83.0", "86.2", "87.1"))
+    closes = {
+        "SHV": {**low["SHV"], e4: Decimal("110.18")},
+        "TQQQ": low["TQQQ"],
+    }
+    dashboard = {
+        E1: REAL_DASHBOARD[E1],
+        E2: REAL_DASHBOARD[E2],
+        e4: Decimal("17.2060885064") + Decimal("199.0") * Decimal("110.18"),
+    }
+    out = q.corrected_values(dashboard, legs, closes)
+    assert out[E2].status == q.UNRESTATED_NEXT_DAY_UNPROVEN
+    assert out[E2].value == REAL_DASHBOARD[E2]
