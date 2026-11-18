@@ -187,6 +187,29 @@ def test_a_missing_cutoff_nav_refuses(tmp_path: Path) -> None:
         _rows(tmp_path, date(2026, 11, 7))
 
 
-def test_the_fact_is_registered_for_quantbase() -> None:
-    assert "positions" in ledger._ACCOUNT_FACTS["quantbase"]
-    assert ("quantbase", "positions") in ledger._CSV_FACT_BUILDERS
+def test_the_builder_is_not_yet_registered_as_a_declared_fact() -> None:
+    """Registering the fact needs the financial contract's target facts to name it
+    (carrier-7 pin): the ledger integration owner does both in one change."""
+
+    assert "positions" not in ledger._ACCOUNT_FACTS["quantbase"]
+    assert callable(ledger._csv_quantbase_positions)
+
+
+def test_a_capture_without_a_holdings_file_has_no_positions_not_an_error(
+    tmp_path: Path,
+) -> None:
+    """Earlier Quantbase captures carry no holdings csv: the fact is simply absent."""
+
+    files = {k: v for k, v in FILES.items() if "holdings" not in k}
+    manifest = _manifest(tmp_path, files)
+    rows = ledger._quantbase_positions(
+        "gen-1",
+        manifest,
+        {"catalog_schema_version": 1, "legacy_lineage": {"run_id": RUN}},
+        tmp_path,
+        {ACCOUNT},
+        {"volatis-strategy"},
+        {},
+        financial_cutoff=date(2026, 11, 6),
+    )
+    assert rows == []

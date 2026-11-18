@@ -142,13 +142,7 @@ for _descriptor in (
         provider_id="quantbase",
         catalog_filename="quantbase-generation.json",
         catalog_schema_versions=frozenset({1}),
-        account_facts=(
-            "capital_anchors",
-            "flows",
-            "nav_observations",
-            "positions",
-            "transactions",
-        ),
+        account_facts=("capital_anchors", "flows", "nav_observations", "transactions"),
         source_segment="quantbase-account-generation",
     ),
     ProviderDescriptor(
@@ -1867,6 +1861,12 @@ def _quantbase_positions(
     one risky holding cannot be valued that way and refuses.
     """
 
+    if not any(
+        item.artifact_id == f"source/{_QUANTBASE_HOLDINGS}"
+        for item in manifest.artifacts
+    ):
+        # An earlier capture carries no holdings file: no positions fact, not an error.
+        return []
     account_id = _CSV_FACT_ACCOUNT[_QUANTBASE]
     run_id = _run_id(
         _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
@@ -5642,7 +5642,6 @@ _CSV_FACT_BUILDERS: Final = {
     (_QUANTBASE, "capital_anchors"): _csv_quantbase_capital_anchors,
     (_QUANTBASE, "flows"): _csv_quantbase_flows,
     (_QUANTBASE, "nav_observations"): _csv_quantbase_nav_observations,
-    (_QUANTBASE, "positions"): _csv_quantbase_positions,
     (_QUANTBASE, "transactions"): _csv_quantbase_cash_activity,
 }
 
@@ -5738,7 +5737,6 @@ def _project_account_facts(
             "capital_anchors",
             "flows",
             "nav_observations",
-            "positions",
             "transactions",
         }:
             if manifest is None or root is None:
