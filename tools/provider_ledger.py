@@ -2862,6 +2862,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "run_observation",
             "account_roles",
             "quantbase_fill_closes",
+            "quantbase_position_closes",
             "zero_financing_observations",
         )
         allowed.update(
@@ -4496,25 +4497,27 @@ def _zero_financing_rows(
     return provider_id, out, artifacts
 
 
-def _quantbase_fill_closes(value: object) -> dict[str, dict[date, Decimal]]:
+def _quantbase_fill_closes(
+    value: object, key: str = "quantbase_fill_closes"
+) -> dict[str, dict[date, Decimal]]:
     """Governed daily closes of the Volatis fund's symbols (#909): hash-pinned CSVs
     (``date,close,...``), one per symbol, used to value a fill day after its fills."""
 
     out: dict[str, dict[date, Decimal]] = {}
-    for item in _objects(value, "quantbase_fill_closes"):
-        ref = _object(item, "quantbase_fill_closes item")
+    for item in _objects(value, key):
+        ref = _object(item, f"{key} item")
         if set(ref) != {"symbol", "path", "sha256", "size_bytes"}:
-            raise ProviderLedgerError("quantbase_fill_closes reference keys differ")
-        symbol = _text(ref["symbol"], "quantbase_fill_closes.symbol")
+            raise ProviderLedgerError(f"{key} reference keys differ")
+        symbol = _text(ref["symbol"], f"{key}.symbol")
         if symbol in out:
-            raise ProviderLedgerError("quantbase_fill_closes symbol is duplicated")
-        path = _absolute_regular_path(ref["path"], "quantbase_fill_closes.path")
+            raise ProviderLedgerError(f"{key} symbol is duplicated")
+        path = _absolute_regular_path(ref["path"], f"{key}.path")
         raw = path.read_bytes()
         if (
             hashlib.sha256(raw).hexdigest() != ref["sha256"]
             or len(raw) != ref["size_bytes"]
         ):
-            raise ProviderLedgerError("quantbase_fill_closes identity differs")
+            raise ProviderLedgerError(f"{key} identity differs")
         series: dict[date, Decimal] = {}
         for row in csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))):
             close = _observed_decimal(row.get("close"), "quantbase fill close")
@@ -4522,7 +4525,7 @@ def _quantbase_fill_closes(value: object) -> dict[str, dict[date, Decimal]]:
                 raise ProviderLedgerError("quantbase fill close is not positive")
             series[date.fromisoformat(str(row["date"]))] = close
         if not series:
-            raise ProviderLedgerError("quantbase_fill_closes is empty")
+            raise ProviderLedgerError(f"{key} is empty")
         out[symbol] = series
     return out
 
@@ -5651,6 +5654,7 @@ class _CsvFactContext(NamedTuple):
     financial_cutoff: date | None
     exceptions: list[dict[str, Any]]
     fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None
+    position_closes: Mapping[str, Mapping[date, Decimal]] | None = None
 
 
 def _csv_matrixport_capital_anchors(ctx: _CsvFactContext) -> list[dict[str, Any]]:
@@ -5736,7 +5740,7 @@ def _csv_quantbase_positions(ctx: _CsvFactContext) -> list[dict[str, Any]]:
         ctx.strategies,
         ctx.assignments,
         financial_cutoff=ctx.financial_cutoff,
-        fill_closes=ctx.fill_closes,
+        fill_closes=ctx.position_closes,
     )
 
 
@@ -5784,6 +5788,7 @@ def _project_account_facts(
     *,
     requested_as_of: date | None = None,
     fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None,
+    position_closes: Mapping[str, Mapping[date, Decimal]] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     projections: dict[str, list[dict[str, Any]]] = defaultdict(list)
     exceptions: list[dict[str, Any]] = []
@@ -5881,6 +5886,7 @@ def _project_account_facts(
                     financial_cutoff,
                     exceptions,
                     fill_closes,
+                    position_closes,
                 )
             )
             projections[target_fact].extend(rows)
@@ -11477,6 +11483,15 @@ def build_catalog(
         if "quantbase_fill_closes" in spec
         else None
     )
+    # Governed official closes that only test a position's share count; unlike
+    # ``quantbase_fill_closes`` they never restate a NAV day.
+    position_closes = (
+        _quantbase_fill_closes(
+            spec["quantbase_position_closes"], "quantbase_position_closes"
+        )
+        if "quantbase_position_closes" in spec
+        else None
+    )
     provenance, provenance_artifact = _provenance(spec)
     accounts, strategies, assignments = _assignment_index(
         provenance, _object(authority.get("contract"), "financial MVP contract")
@@ -11531,6 +11546,7 @@ def build_catalog(
             root=root,
             fx_rates=fx_rates if provider_id == "matrixport" else None,
             fill_closes=fill_closes,
+            position_closes=position_closes,
             requested_as_of=as_of if run_observation is not None else None,
             financial_cutoff=(
                 min(

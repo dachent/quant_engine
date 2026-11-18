@@ -65,6 +65,7 @@ CARRIED = (
     "portfolio_fx_rates",
     "account_roles",
     "quantbase_fill_closes",
+    "quantbase_position_closes",
     "zero_financing_observations",
 )
 REGENERATED = (
@@ -327,6 +328,10 @@ def build(
         spec["account_roles"] = predecessor_spec["account_roles"]
     if "quantbase_fill_closes" in predecessor_spec:
         spec["quantbase_fill_closes"] = predecessor_spec["quantbase_fill_closes"]
+    if "quantbase_position_closes" in predecessor_spec:
+        spec["quantbase_position_closes"] = predecessor_spec[
+            "quantbase_position_closes"
+        ]
     if account_roles is not None:
         raw = account_roles.resolve().read_bytes()
         spec["account_roles"] = {

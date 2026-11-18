@@ -361,3 +361,36 @@ def test_the_builder_is_not_yet_registered_as_a_declared_fact() -> None:
 
     assert "positions" not in ledger._ACCOUNT_FACTS["quantbase"]
     assert callable(ledger._csv_quantbase_positions)
+
+
+def test_the_position_close_spec_key_is_pinned_and_never_restates_a_nav_day(
+    tmp_path: Path,
+) -> None:
+    """The governed SHV close pin (spec key quantbase_position_closes): hash- and
+    size-verified, accepted as an optional ledger spec key, and parsed apart from
+    ``quantbase_fill_closes`` so it can never switch on the fill-day NAV restatement."""
+
+    import hashlib
+
+    csv_path = tmp_path / "SHV.csv"
+    csv_path.write_text(
+        "date,close,adjclose\n2026-11-06,110.13,110.13\n", encoding="utf-8"
+    )
+    raw = csv_path.read_bytes()
+    ref = {
+        "symbol": "SHV",
+        "path": str(csv_path),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+    }
+    closes = ledger._quantbase_fill_closes([ref], "quantbase_position_closes")
+    assert closes == {"SHV": {date(2026, 11, 6): Decimal("110.13")}}
+    with pytest.raises(ledger.ProviderLedgerError, match="quantbase_position_closes"):
+        ledger._quantbase_fill_closes(
+            [{**ref, "sha256": "0" * 64}], "quantbase_position_closes"
+        )
+    # the closes reach the position builder, and only it
+    (row,) = _rows_with_closes(tmp_path / "w", closes)
+    assert row["closure"]["independent_price_check"] == "PASSED"
+    source = Path(ledger.__file__).read_text(encoding="utf-8")
+    assert "position_closes=position_closes" in source
