@@ -11,7 +11,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
-from typing import Any
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 from quant_engine.core import (
@@ -205,14 +205,82 @@ def _load_spec(path: Path) -> dict[str, Any]:
     return spec
 
 
+_EMPTY_EVIDENCE_TOLERANCE: Final = Decimal("0.05")
+_PAGE_ACCOUNT = re.compile(r"Account ending in\s+((?:\d\s*){3,4})")
+
+
+def _check_empty_evidence(
+    account_id: str,
+    text: str,
+    suffix: str,
+    snapshot_accounts: Sequence[Mapping[str, Any]],
+) -> None:
+    """Refuse a declared empty account whose evidence page does not prove it empty."""
+
+    try:
+        account_value, market_value = derived_positions.parse_balances_values(text)
+    except derived_positions.SchwabDerivedPositionError as exc:
+        raise SchwabGenerationError(
+            f"declared empty position evidence is not a Balances page: {exc}"
+        ) from exc
+    match = _PAGE_ACCOUNT.search(text)
+    digits = re.sub(r"\D", "", match.group(1)) if match else ""
+    if not suffix or not digits or digits[-3:] != suffix:
+        raise SchwabGenerationError(
+            "declared empty position evidence is not the page of the declared account"
+        )
+    if market_value != 0:
+        raise SchwabGenerationError(
+            "declared empty position evidence shows a Market Value that is not zero"
+        )
+    row = next(
+        (item for item in snapshot_accounts if str(item["account_id"]) == account_id),
+        None,
+    )
+    liquidation = (
+        _object(row["liquidation_value"], "liquidation_value") if row else None
+    )
+    if liquidation is None or liquidation["status"] != "AVAILABLE":
+        raise SchwabGenerationError(
+            "declared empty position account has no proved liquidation value in the snapshot"
+        )
+    if (
+        abs(Decimal(str(liquidation["value"])) - account_value)
+        > _EMPTY_EVIDENCE_TOLERANCE
+    ):
+        raise SchwabGenerationError(
+            "declared empty position evidence Account Value differs from the proved "
+            "liquidation value"
+        )
+    cash = _object(row["cash_available"], "cash_available") if row else None
+    if (
+        cash is not None
+        and cash["status"] == "AVAILABLE"
+        and abs(Decimal(str(cash["value"])) - Decimal(str(liquidation["value"])))
+        > Decimal("0.01")
+    ):
+        raise SchwabGenerationError(
+            "declared empty position account holds value beyond its cash: liquidation value "
+            "differs from cash"
+        )
+
+
 def _declared_empty_accounts(
     value: object,
     *,
     roots: Mapping[str, Path],
     generation_as_of: date,
     account_ids: set[str],
+    suffix_by_account: Mapping[str, str],
+    snapshot_accounts: Sequence[Mapping[str, Any]],
 ) -> tuple[list[str], list[SourceArtifact]]:
     """Accounts the spec declares to hold no position, each with a hash-pinned evidence file.
+
+    The evidence is OPENED and read, never taken on its hash alone: it must be a Schwab Balances
+    page of the declared account (its "Account ending in" digits match the crosswalk), whose Market
+    Value is zero (no non-cash holding), whose Account Value equals the snapshot's own proved
+    liquidation value of that account within the derivation tolerance, and, where the snapshot
+    states the account's cash, equals that cash to the cent.
 
     The catalog lists an account as having an empty position set only on this governed evidence
     (for example a live balances capture whose Market Value is zero), never by inferring it from
@@ -270,6 +338,12 @@ def _declared_empty_accounts(
             "declared_empty_position_accounts.expected_size_bytes",
         ):
             raise SchwabGenerationError("declared empty position evidence size differs")
+        _check_empty_evidence(
+            account_id,
+            path.read_bytes().decode("utf-8", errors="replace"),
+            suffix_by_account.get(account_id, ""),
+            snapshot_accounts,
+        )
         accounts.append(account_id)
         artifacts.append(
             SourceArtifact(
@@ -2168,6 +2242,8 @@ def build_generation(
         roots=roots,
         generation_as_of=generation_as_of,
         account_ids=set(crosswalk.values()),
+        suffix_by_account={internal: ext[-3:] for ext, internal in crosswalk.items()},
+        snapshot_accounts=current_accounts or [],
     )
     if declared_empty_artifacts:
         artifacts = tuple(
