@@ -3286,10 +3286,11 @@
     return { time: line.live.time, value: before.length ? before[before.length - 1].value : null, liveReturn: line.live.liveReturn };
   }
   // The window each zoom really shows: the later of the requested start and the group anchor.
-  function perfWindows(built) {
+  function perfWindows(built, commonStart = null) {
     const { starts, ends, anchorIndex } = built;
     const lastTime = ends[ends.length - 1];
-    const anchor = anchorIndex ?? 0;
+    // The common start is the published group anchor unless the caller passes the later of the visible strategies' first weeks.
+    const anchor = commonStart ?? anchorIndex ?? 0;
     return PERF_ZOOMS.map(([label, days]) => {
       const requestedTime = days == null ? null : days === "ytd" ? Date.UTC(new Date(lastTime).getUTCFullYear(), 0, 1) : lastTime - days * PERF_DAY;
       const found = requestedTime == null ? 0 : starts.findIndex((time) => time >= requestedTime);
@@ -3436,7 +3437,12 @@
       return;
     }
     const { starts, ends } = built;
-    const windows = perfWindows(built);
+    // The common window follows the strategy lines on screen: hiding the newest strategy lengthens the history every remaining
+    // line shares.  With every strategy visible this is exactly the published group anchor.
+    const visibleStrategyStarts = built.lines.filter((line) => line.kind === "strategy" && !perfHidden.has(line.key)).map((line) => line.firstIndex);
+    const commonStart = visibleStrategyStarts.length ? Math.max(...visibleStrategyStarts) : null;
+    const dynamicStart = commonStart != null && commonStart !== (built.anchorIndex ?? 0);
+    const windows = perfWindows(built, commonStart);
     const current = windows.find((item) => item.label === perfZoom) || windows[windows.length - 1];
     if (current.unavailable) {
       host.innerHTML = `<div class="callout callout-neutral">${safe(current.label)} has no full week yet: no week of the weekly grid starts on or after ${safe(perfDate(current.requestedTime))}. Choose another zoom.</div>`;
@@ -3554,8 +3560,8 @@
     const rebaseNote = own
       ? `Own-start view, log axis: each line is rebased to 1.00 at the start of its own first week${built.unionStart ? ` (the grid begins ${safe(formatDate(built.unionStart))})` : ""}, so lines cover different windows (each chip names its own); this is not a like-for-like comparison.`
       : maxView
-        ? `Common window: every line is rebased to 1.00 at the start of <strong>${safe(formatDate(perfDate(starts[baseIndex])))}</strong>, the group anchor${anchorSetBy}; history before it is not drawn here (use Own start to see each line's full history).`
-        : `Every line is rebased to 1.00 at the start of <strong>${safe(formatDate(perfDate(starts[baseIndex])))}</strong>, the later of the window start and the group anchor.`;
+        ? `Common window: every line is rebased to 1.00 at the start of <strong>${safe(formatDate(perfDate(starts[baseIndex])))}</strong>, ${dynamicStart ? "the first week every visible strategy line has data" : `the group anchor${anchorSetBy}`}; history before it is not drawn here (use Own start to see each line's full history).`
+        : `Every line is rebased to 1.00 at the start of <strong>${safe(formatDate(perfDate(starts[baseIndex])))}</strong>, the later of the window start and ${dynamicStart ? "the first week every visible strategy line has data" : "the group anchor"}.`;
     const anchorNote = built.anchorDate ? ` Group anchor <strong>${safe(formatDate(built.anchorDate))}</strong>: the first week every strategy line has data${anchorSetBy}.` : "";
     const benchmarkNote = " SPY and SPXL are the benchmark's own weekly total return, rebased the same way (the dollar chart below puts the same cash flows into the benchmark instead).";
     const basesNote = " The equal-weight line here is one portfolio basis; the governed index and the money-weighted return are different bases and appear in the value readout below.";
@@ -3565,7 +3571,7 @@
     if (windowNote) {
       windowNote.textContent = own
         ? `Own start: each line from its own first week, ${perfDate(from)} to ${perfDate(lastTime)}.`
-        : current.limited
+        : current.limited && !dynamicStart
           ? `${current.label} is limited by the group anchor: the window starts ${perfDate(current.start)} (${integer.format(current.spanDays)} days of the ${integer.format(current.requestedDays)} requested).`
           : `${current.label}: ${perfDate(current.start)} to ${perfDate(lastTime)} (${integer.format(current.spanDays)} days).`;
     }
