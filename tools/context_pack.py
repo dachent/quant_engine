@@ -22,7 +22,6 @@ import json
 import math
 from pathlib import Path
 import re
-import sys
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -895,7 +894,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--prior-pack", type=Path)
     args = parser.parse_args(argv)
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
     import portfolio_decision
 
     data = json.loads(args.payload.read_bytes())
