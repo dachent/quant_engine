@@ -79,4 +79,4 @@ def test_unmapped_account_duplicates_and_unreadable_headers_refuse() -> None:
     with pytest.raises(scs.StatementSummaryError, match="two statements"):
         scs.build_rows([_stmt(RAW, "a.pdf"), _stmt(RAW, "b.pdf")], MAPPING)
     with pytest.raises(scs.StatementSummaryError, match="period"):
-        scs.build_rows([_stmt(BODY)], MAPPING)
+        scs.build_rows([_stmt("Account Number\n2525-5620\n" + BODY)], MAPPING)
