@@ -196,6 +196,8 @@ def _load_spec(path: Path) -> dict[str, Any]:
     keys = {"as_of_date", "baseline", "crosswalk", "roots", "schema_version", "sources"}
     if "flow_classification" in spec:
         keys.add("flow_classification")
+    if "statement_cash_summaries" in spec:
+        keys.add("statement_cash_summaries")
     if version == SPEC_SCHEMA_VERSION:
         keys.add("current_snapshot")
         if "transaction_history_manifest" in spec:
@@ -1057,6 +1059,116 @@ def _current_snapshot(
         artifact,
         valuation_cutoff,
     )
+
+
+_SUMMARY_AMOUNTS = (
+    "beginning_cash",
+    "deposits",
+    "dividends_interest",
+    "ending_cash",
+    "expenses",
+    "purchases",
+    "sales_redemptions",
+    "withdrawals",
+)
+_SUMMARY_ROW_KEYS = frozenset(
+    {
+        "account_id",
+        "deposits_tied",
+        "period_end",
+        "period_start",
+        "source_artifact_id",
+        "source_sha256",
+        "tie_status",
+        "withdrawals_tied",
+    }
+)
+
+
+def _statement_cash_summaries(
+    value: object, *, roots: Mapping[str, Path], account_ids: set[str]
+) -> list[dict[str, object]]:
+    """Rows of the hash-bound statement cash summary file (``tools/schwab_statement_cash_summaries``).
+
+    The file is pinned by hash and size in the spec; each row names its own statement PDF
+    by hash.  A row either carries all eight printed amounts or none (a statement whose
+    summary page could not be read, named by its ``tie_status``); rows are sorted by
+    (account, period start) with no repeat; accounts are the crosswalk's."""
+
+    source = _object(value, "statement_cash_summaries")
+    _strict(
+        source,
+        {"expected_sha256", "expected_size_bytes", "relative_path", "root_id"},
+        "statement_cash_summaries",
+    )
+    root_id = _text(source["root_id"], "statement_cash_summaries.root_id")
+    if root_id not in roots:
+        raise SchwabGenerationError("statement cash summaries root is unknown")
+    path = _source_path(
+        roots[root_id],
+        _relative(source["relative_path"], "statement_cash_summaries.relative_path"),
+    )
+    actual_hash, actual_size = hash_file(path)
+    expected_hash = _text(
+        source["expected_sha256"], "statement_cash_summaries.expected_sha256"
+    )
+    if _SHA256.fullmatch(expected_hash) is None or actual_hash != expected_hash:
+        raise SchwabGenerationError("statement cash summaries hash differs")
+    if actual_size != _integer(
+        source["expected_size_bytes"], "statement_cash_summaries.expected_size_bytes"
+    ):
+        raise SchwabGenerationError("statement cash summaries size differs")
+    rows = _objects(_json(path), "statement_cash_summaries")
+    seen: set[tuple[str, str]] = set()
+    result: list[dict[str, object]] = []
+    for row in rows:
+        row = dict(row)
+        has_amounts = _SUMMARY_AMOUNTS[0] in row
+        _strict(
+            row,
+            set(_SUMMARY_ROW_KEYS) | (set(_SUMMARY_AMOUNTS) if has_amounts else set()),
+            "statement_cash_summaries row",
+        )
+        account = _text(row["account_id"], "statement_cash_summaries.account_id")
+        if account not in account_ids:
+            raise SchwabGenerationError("statement cash summary account is unknown")
+        start = _date(row["period_start"], "statement_cash_summaries.period_start")
+        end = _date(row["period_end"], "statement_cash_summaries.period_end")
+        if start > end:
+            raise SchwabGenerationError("statement cash summary period is reversed")
+        if _SHA256.fullmatch(_text(row["source_sha256"], "source_sha256")) is None:
+            raise SchwabGenerationError("statement cash summary source hash is invalid")
+        _text(row["source_artifact_id"], "source_artifact_id")
+        _text(row["tie_status"], "tie_status")
+        for flag in ("deposits_tied", "withdrawals_tied"):
+            if not isinstance(row[flag], bool):
+                raise SchwabGenerationError(
+                    f"statement cash summary {flag} is not a boolean"
+                )
+        if row["tie_status"] == "TIED" and not (
+            has_amounts and row["deposits_tied"] and row["withdrawals_tied"]
+        ):
+            raise SchwabGenerationError(
+                "statement cash summary is TIED without a full tie"
+            )
+        if has_amounts:
+            for name in _SUMMARY_AMOUNTS:
+                amount = _object(row[name], f"statement_cash_summaries.{name}")
+                _strict(amount, {"currency", "status", "value"}, name)
+                if amount["status"] != "AVAILABLE" or amount["currency"] != "USD":
+                    raise SchwabGenerationError("statement cash summary amount differs")
+                _decimal(amount["value"], f"statement_cash_summaries.{name}")
+        key = (account, start.isoformat())
+        if key in seen:
+            raise SchwabGenerationError("statement cash summary month repeats")
+        seen.add(key)
+        result.append(row)
+    ordered = sorted(
+        result, key=lambda r: (str(r["account_id"]), str(r["period_start"]))
+    )
+    if ordered != result:
+        raise SchwabGenerationError("statement cash summaries are not sorted")
+    return result
 
 
 def _terminal_transaction_history_coverage(
@@ -2551,6 +2663,14 @@ def build_generation(
         },
         "transactions": transactions,
     }
+    if spec.get("statement_cash_summaries") is not None:
+        summary_rows = _statement_cash_summaries(
+            spec["statement_cash_summaries"],
+            roots=roots,
+            account_ids=set(crosswalk.values()),
+        )
+        if summary_rows:
+            catalog["statement_cash_summaries"] = summary_rows
     if "flow_classification" in spec and spec["flow_classification"] is not True:
         raise SchwabGenerationError(
             "spec flow_classification must be true when present"

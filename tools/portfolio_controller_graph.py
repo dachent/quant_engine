@@ -391,6 +391,9 @@ _PATH_STAGES = {
     # derives the cutoff-day Schwab NAV from the verified holdings and official closes; an operator
     # step before the ingest, it writes no delivery artifact itself
     "tools/schwab_nav_derive.py": [],
+    # operator tool: builds the hash-bound statement cash summary file the Schwab generation spec binds;
+    # it writes no delivery artifact itself
+    "tools/schwab_statement_cash_summaries.py": [],
     "tools/schwab_page_actions.py": [],
     "tools/schwab_rollback.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],

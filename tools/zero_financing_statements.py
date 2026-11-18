@@ -1240,7 +1240,7 @@ _REALIZED = re.compile(r"\(?[\d,]+\.\d\d\)?,?\((?:ST|LT)\)")
 _ROW_AMOUNT = re.compile(r"(?<![\d$.,/\-])\(?-?[\d,]+\.\d\d\)?(?![\d.,%])")
 
 
-def _pdftotext_raw(path: Path) -> str:
+def pdftotext_raw(path: Path) -> str:
     """The statement text in content-stream order (one transaction per run of lines, the
     amounts beside their own rows), where the physical layout interleaves columns."""
 
@@ -1531,7 +1531,7 @@ def build(
 ) -> dict[str, Any]:
     if provider_id != LAYOUT_PROVIDER_ID:
         raise ZeroFinancingError("the statement layout reader is bound to one provider")
-    raw_extract = extract_raw or (_pdftotext_raw if extract is None else None)
+    raw_extract = extract_raw or (pdftotext_raw if extract is None else None)
     extract = extract or _pdftotext  # resolved at call time
     names = sorted(sums)
     if not names:

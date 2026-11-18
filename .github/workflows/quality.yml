@@ -230,6 +230,7 @@ jobs:
           tools/quantbase_cdp_navigator.py
           tools/schwab_capture_ingest.py
           tools/schwab_nav_derive.py
+          tools/schwab_statement_cash_summaries.py
           tools/schwab_page_actions.py
           tools/schwab_rollback.py
           tools/p123_cdp_recorder.py
