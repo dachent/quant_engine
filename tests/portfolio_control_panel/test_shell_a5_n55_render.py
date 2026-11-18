@@ -34,6 +34,7 @@ verification).
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
 
 import pytest
@@ -114,7 +115,9 @@ def test_a5_account_live_cagr_label_renders_beside_the_cagr_not_the_cumulative_r
         "CAGR 21.0% · annualized over 182 calendar days (183 daily returns), "
         "2026-01-09..2026-07-10 (<1 year)",
     )
-    assert any(variant in table for variant in label_html_variants)
+    assert any(
+        variant in re.sub(r"<[^>]+>", "", table) for variant in label_html_variants
+    )
     # The old (buggy) rendering attached the CAGR label directly to the cumulative
     # figure with no "CAGR" marker at all -- prove that shape is absent.
     assert '10.0%<span class="cell-secondary">annualized' not in table
