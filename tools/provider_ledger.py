@@ -2118,7 +2118,7 @@ def _quantbase_positions(
                     "status": "AVAILABLE",
                     "value": format(values[symbol], "f"),
                 },
-                "provider_id": "quantbase",
+                "provider_id": _QUANTBASE,
                 "quantity": format(quantity, "f"),
                 "record_id": f"quantbase:position:{source_id}",
                 "security_id": "security-quantbase-"
