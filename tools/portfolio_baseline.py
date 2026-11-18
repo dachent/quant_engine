@@ -2592,6 +2592,7 @@ def _classify_excluded_history_only_costs(
             and item.get("derived_annual_cost_usd") is None
             and not str(item.get("cost_status", "")).startswith("known")
         ):
+            assert isinstance(membership, dict) and ruling is not None
             item["cost_classification"] = {
                 "classification": COST_CLASS_EXCLUDED_HISTORY_ONLY,
                 "product_interval_end": interval["effective_end"],
