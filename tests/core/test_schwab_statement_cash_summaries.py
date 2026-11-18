@@ -102,7 +102,9 @@ LEGACY = "\n".join(
 )
 
 
-def test_the_old_pcra_layout_is_read_when_it_closes_and_named_when_it_does_not() -> None:
+def test_the_old_pcra_layout_is_read_when_it_closes_and_named_when_it_does_not() -> (
+    None
+):
     (row,) = scs.build_rows([_stmt(LEGACY)], MAPPING)
     assert row["tie_status"] == "LEGACY_LAYOUT_CLOSES"
     assert row["dividends_interest"]["value"] == "1673.34"

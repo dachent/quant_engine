@@ -111,9 +111,12 @@ def _legacy_summary(raw_text: str) -> dict[str, Any] | None:
     if set(values) != set(_LEGACY_LABELS.values()):
         return None
     movement = sum(
-        (values[n] for n in zfs.CASH_SUMMARY_COLUMNS if n != "beginning_cash"), Decimal(0)
+        (values[n] for n in zfs.CASH_SUMMARY_COLUMNS if n != "beginning_cash"),
+        Decimal(0),
     )
-    return values if values["beginning_cash"] + movement == values["ending_cash"] else None
+    return (
+        values if values["beginning_cash"] + movement == values["ending_cash"] else None
+    )
 
 
 def summary_row(
@@ -202,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = pdf.read_bytes()
         statements.append(
             {
-                "raw_text": zfs._pdftotext_raw(pdf),
+                "raw_text": zfs.pdftotext_raw(pdf),
                 "source_artifact_id": f"statements/{pdf.name}",
                 "source_sha256": hashlib.sha256(payload).hexdigest(),
             }
