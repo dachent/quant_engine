@@ -866,3 +866,39 @@ def test_a_complete_quantbase_snapshot_names_the_position_records_it_proved() ->
     assert row["proven_records"] == [
         {"record_id": rid, "event_date": "2026-11-06", "amount": "48037.62"}
     ]
+
+
+@pytest.mark.parametrize(
+    "closure",
+    [
+        {"independent_price_check": "UNAVAILABLE"},
+        {"independent_price_check": None},
+        {"independent_price_check": "passed"},
+        {"independent_price_check": "PASSED "},
+        {"independent_price_check": True},
+        {"independent_price_check": "PASSED", "independent_close_date": "2026-11-05"},
+        {"independent_price_check": "PASSED", "independent_close_date": None},
+    ],
+)
+def test_the_positions_fact_is_never_declared_complete_without_a_passed_independent_check(
+    closure: dict[str, Any],
+) -> None:
+    """UNAVAILABLE (no governed close was supplied), a missing or non-exact value, or a close dated
+    another day must not declare the Quantbase positions cell complete."""
+
+    row = _qb_run(rows=[_qb_row(closure=closure)])
+    assert row["status"] == ec.CLOSURE_FAILED
+    assert "INDEPENDENT_PRICE_CHECK_PASSED" in _qb_failed(row)
+
+
+def test_a_closure_object_without_the_independent_check_key_does_not_declare_complete() -> (
+    None
+):
+    bare = _qb_row()
+    del bare["closure"]["independent_price_check"]
+    row = _qb_run(rows=[bare])
+    assert row["status"] == ec.CLOSURE_FAILED
+    assert "INDEPENDENT_PRICE_CHECK_PASSED" in _qb_failed(row)
+    no_closure = _qb_row()
+    del no_closure["closure"]
+    assert _qb_run(rows=[no_closure])["status"] == ec.CLOSURE_FAILED
