@@ -11831,7 +11831,7 @@ def _panel_data(
         )
     # The block cuts its windows at the invested-capital completeness date, else the
     # weekly-returns as-of: the reference lookup uses exactly those two values.
-    model_account_gap_references: dict[str, Mapping[str, Any]] = {}
+    model_account_gap_references: Mapping[str, Mapping[str, Any]] = {}
     if model_vs_actual_gap_input is not None:
         try:
             model_account_gap_references = model_account_gap_references_for(
