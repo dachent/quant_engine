@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo
 
 import statement_reserve_nav
 
+import quant_engine.schwab as schwab
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -1640,14 +1641,52 @@ def _schwab_facts(
     positions: list[dict[str, Any]] = []
     transactions: list[dict[str, Any]] = []
     securities: dict[str, dict[str, Any]] = {}
-    for item in _objects(catalog.get("positions"), "Schwab positions"):
+    position_items = _objects(catalog.get("positions"), "Schwab positions")
+    derived_items = [
+        item
+        for item in position_items
+        if "as_of_basis" in item or item.get("evidence_class") == schwab.DERIVED_BASIS
+    ]
+    admitted_derived: set[str] = set()
+    if derived_items:
+        snapshot = _object(catalog.get("position_snapshot_as_of"), "Schwab snapshot")
+        try:
+            admitted_derived = set(
+                schwab.admit_derived_position_rows(
+                    derived_items,
+                    accepted_accounts=accepted_accounts,
+                    transactions=_objects(
+                        catalog.get("transactions"), "Schwab transactions"
+                    ),
+                    valuation_cutoff=_date(
+                        snapshot.get("valuation_cutoff"), "Schwab valuation cutoff"
+                    ),
+                    snapshot_day=datetime.fromisoformat(
+                        _text(snapshot.get("observed_at"), "Schwab snapshot clock")
+                    ).date(),
+                    artifact_ids={
+                        str(a["artifact_id"])
+                        for a in _objects(
+                            catalog.get("source_artifacts"), "Schwab artifacts"
+                        )
+                    },
+                )
+            )
+        except (schwab.SchwabDerivedPositionError, ValueError) as exc:
+            raise BaselineValidationError(
+                f"Schwab derived position refused: {exc}"
+            ) from exc
+    for item in position_items:
         account_id = _text(item.get("account_id"), "Schwab position account_id")
         if account_id not in accepted_accounts:
             raise BaselineValidationError("Schwab position account is outside scope")
         as_of = _date(item.get("as_of_date"), "Schwab position as_of_date")
         if as_of > baseline_as_of:
             raise BaselineValidationError("Schwab position is newer than baseline")
-        if item.get("evidence_class") != "WCH_CURRENT":
+        if (
+            item.get("record_id") not in admitted_derived
+            and item.get("evidence_class") != "WCH_CURRENT"
+        ):
             raise BaselineValidationError("Schwab position evidence class differs")
         symbol = _text(item.get("symbol"), "Schwab position symbol")
         security_id = _text(item.get("security_id"), "Schwab position security_id")

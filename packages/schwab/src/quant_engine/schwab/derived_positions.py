@@ -20,13 +20,15 @@ but a $1.00 money-market fund) cannot be carried back and refuses.
 from __future__ import annotations
 
 import csv
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import date
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
 import re
 from typing import Any, Final
+
+from quant_engine.core import canonical_json_bytes
 
 DERIVED_BASIS: Final = "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT"
 _CASH_ROW: Final = "Cash & Cash Investments"
@@ -229,3 +231,174 @@ def parse_balances_values(page_text: str) -> tuple[Decimal, Decimal]:
             "balances page lacks Account Value or Market Value"
         )
     return found["Account Value"], found["Market Value"]
+
+
+_CLOSURE_KEYS: Final = frozenset(
+    {
+        "cash_usd",
+        "earlier_market_value_days",
+        "history_through",
+        "holdings_usd",
+        "positions_total_usd",
+    }
+)
+
+
+def _decimal_text(value: object, name: str) -> Decimal:
+    if not isinstance(value, str):
+        raise SchwabDerivedPositionError(f"{name} is not a decimal text")
+    return _money(value, name)
+
+
+def _day(value: object, name: str) -> date:
+    if not isinstance(value, str):
+        raise SchwabDerivedPositionError(f"{name} is not a date text")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise SchwabDerivedPositionError(f"{name} is not a date") from exc
+
+
+def admit_derived_position_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    accepted_accounts: Collection[str],
+    transactions: Sequence[Mapping[str, Any]],
+    valuation_cutoff: date,
+    snapshot_day: date,
+    artifact_ids: Collection[str],
+) -> dict[str, Mapping[str, Any]]:
+    """Re-verify catalog position rows derived at the cutoff from a later snapshot.
+
+    The generation derived each row once; a ledger that consumes the catalog re-checks the
+    same closure on the catalog bytes alone and refuses on any difference.  The derived
+    position at the cutoff plus the flows after it equal the captured position only when
+    those flows are nil, so the account must have no transaction dated in
+    ``(cutoff, history_through]`` and the days from the history to the capture must be
+    covered by an earlier independent market value equal to the holdings.  Returns the
+    admitted rows by record id (empty when ``rows`` is empty).
+    """
+
+    accepted = set(accepted_accounts)
+    known_artifacts = set(artifact_ids)
+    admitted: dict[str, Mapping[str, Any]] = {}
+    by_account: dict[str, list[Mapping[str, Any]]] = {}
+    captures: dict[str, date] = {}
+    for row in rows:
+        record_id = row.get("record_id")
+        account_id = row.get("account_id")
+        symbol = row.get("symbol")
+        if (
+            not isinstance(record_id, str)
+            or not isinstance(account_id, str)
+            or not isinstance(symbol, str)
+            or not symbol
+        ):
+            raise SchwabDerivedPositionError("derived position identity is invalid")
+        if account_id not in accepted:
+            raise SchwabDerivedPositionError(
+                "derived position account is not an accepted account"
+            )
+        if (
+            row.get("evidence_class") != DERIVED_BASIS
+            or row.get("as_of_basis") != DERIVED_BASIS
+        ):
+            raise SchwabDerivedPositionError("derived position evidence class differs")
+        if row.get("as_of_date") != valuation_cutoff.isoformat():
+            raise SchwabDerivedPositionError(
+                "derived position date is not the valuation cutoff"
+            )
+        capture = _day(row.get("capture_date"), "derived position capture_date")
+        if not (valuation_cutoff < capture and snapshot_day <= capture):
+            raise SchwabDerivedPositionError(
+                "derived position capture day is not later than the cutoff and the snapshot"
+            )
+        if captures.setdefault(account_id, capture) != capture:
+            raise SchwabDerivedPositionError(
+                "derived positions of an account disagree on their capture day"
+            )
+        if row.get("security_id") != _security_id(symbol):
+            raise SchwabDerivedPositionError("derived position security differs")
+        if (
+            row.get("mapping_status") != "UNMAPPED"
+            or row.get("strategy_id") is not None
+        ):
+            raise SchwabDerivedPositionError("derived position must be unmapped")
+        if row.get("source_artifact_id") not in known_artifacts:
+            raise SchwabDerivedPositionError(
+                "derived position source artifact is not a catalog artifact"
+            )
+        identity = {
+            "account_id": account_id,
+            "as_of_date": valuation_cutoff.isoformat(),
+            "basis": DERIVED_BASIS,
+            "security_id": row["security_id"],
+        }
+        expected_id = (
+            "position-"
+            + hashlib.sha256(canonical_json_bytes(identity)).hexdigest()[:24]
+        )
+        if record_id != expected_id or record_id in admitted:
+            raise SchwabDerivedPositionError("derived position record id differs")
+        value = row.get("market_value")
+        quantity = _decimal_text(row.get("quantity"), "derived position quantity")
+        if (
+            not isinstance(value, Mapping)
+            or value.get("status") != "AVAILABLE"
+            or value.get("currency") != "USD"
+            or _decimal_text(value.get("value"), "derived position value") != quantity
+        ):
+            raise SchwabDerivedPositionError(
+                "derived position is not a $1.00 holding valued at its quantity"
+            )
+        admitted[record_id] = row
+        by_account.setdefault(account_id, []).append(row)
+    for account_id, group in by_account.items():
+        closure = group[0].get("closure")
+        if not isinstance(closure, Mapping) or set(closure) != _CLOSURE_KEYS:
+            raise SchwabDerivedPositionError("derived position closure is invalid")
+        if any(item.get("closure") != closure for item in group):
+            raise SchwabDerivedPositionError(
+                "derived positions of an account disagree on their closure"
+            )
+        cash = _decimal_text(closure["cash_usd"], "closure cash")
+        holdings = _decimal_text(closure["holdings_usd"], "closure holdings")
+        total = _decimal_text(closure["positions_total_usd"], "closure total")
+        held = sum(
+            (_decimal_text(item["quantity"], "quantity") for item in group), Decimal(0)
+        )
+        if held != holdings or holdings + cash != total:
+            raise SchwabDerivedPositionError(
+                "derived positions do not close to the captured positions total"
+            )
+        through = _day(closure["history_through"], "closure history_through")
+        capture_date = captures[account_id]
+        if not valuation_cutoff <= through <= capture_date:
+            raise SchwabDerivedPositionError(
+                "derived position history does not reach the cutoff or passes the capture"
+            )
+        later = [
+            t
+            for t in transactions
+            if str(t.get("account_id")) == account_id
+            and valuation_cutoff
+            < _day(t.get("event_date"), "transaction date")
+            <= through
+        ]
+        if later:
+            raise SchwabDerivedPositionError(
+                "the account has transactions after the cutoff: the snapshot is not the cutoff"
+            )
+        days = closure["earlier_market_value_days"]
+        if not isinstance(days, list):
+            raise SchwabDerivedPositionError("closure earlier days are invalid")
+        observed = [_day(item, "closure earlier day") for item in days]
+        if through < capture_date and not observed:
+            raise SchwabDerivedPositionError(
+                "no independent observation covers the days after the history"
+            )
+        if any(not through < day <= capture_date for day in observed):
+            raise SchwabDerivedPositionError(
+                "an earlier observation day lies outside the history-to-capture window"
+            )
+    return admitted

@@ -607,6 +607,7 @@ def _staged_observation(
     cutoff: date = DAY,
     schwab_point_capture: str | None = None,
     schwab_valuation_cutoff: str | None = None,
+    schwab_derived: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """Small synthetic sources using native formats, no asserted finality flag."""
     from datetime import datetime, timedelta, timezone
@@ -891,6 +892,49 @@ def _staged_observation(
                     },
                     source_artifacts=[point_artifact.to_dict()],
                 )
+                if schwab_derived is not None:
+                    # the empty account holds a $1.00 fund derived at the cutoff
+                    derived_account = "synthetic-schwab-empty"
+                    derived_security = (
+                        "security-schwab-" + hashlib.sha256(b"SWVXX").hexdigest()[:24]
+                    )
+                    derived_identity = {
+                        "account_id": derived_account,
+                        "as_of_date": schwab_valuation_cutoff,
+                        "basis": "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT",
+                        "security_id": derived_security,
+                    }
+                    derived_row: dict[str, Any] = {
+                        "account_id": derived_account,
+                        "as_of_basis": "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT",
+                        "as_of_date": schwab_valuation_cutoff,
+                        "capture_date": schwab_point_capture[:10],
+                        "closure": {
+                            "cash_usd": "1.00",
+                            "earlier_market_value_days": [schwab_point_capture[:10]],
+                            "history_through": schwab_valuation_cutoff,
+                            "holdings_usd": "100",
+                            "positions_total_usd": "101.00",
+                        },
+                        "evidence_class": "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT",
+                        "mapping_status": "UNMAPPED",
+                        "market_value": {
+                            "currency": "USD",
+                            "status": "AVAILABLE",
+                            "value": "100",
+                        },
+                        "quantity": "100",
+                        "record_id": "position-"
+                        + hashlib.sha256(
+                            canonical_json_bytes(derived_identity)
+                        ).hexdigest()[:24],
+                        "security_id": derived_security,
+                        "source_artifact_id": point_artifact.artifact_id,
+                        "strategy_id": None,
+                        "symbol": "SWVXX",
+                    }
+                    derived_row.update(schwab_derived)
+                    catalog["positions"] = [*catalog["positions"], derived_row]
                 bind(
                     "native/empty-nav.csv",
                     root / "native/empty-nav.csv",
@@ -1033,6 +1077,7 @@ def _source_bound_stage(
     schwab_point_capture: str | None = None,
     requested_as_of: date = date(2026, 9, 17),
     schwab_valuation_cutoff: str | None = None,
+    schwab_derived: dict[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any], Path]:
     """Real stage, real financial contract/schema/registry, tiny synthetic inputs."""
     _, identities, manifests, catalogs, _ = _fixture(unreferenced_dataset=True)
@@ -1044,6 +1089,7 @@ def _source_bound_stage(
         cutoff=source_cutoff,
         schwab_point_capture=schwab_point_capture,
         schwab_valuation_cutoff=schwab_valuation_cutoff,
+        schwab_derived=schwab_derived,
     )
     contract_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
     schema_path = ROOT / "schemas/portfolio/financial-mvp-source-contract.schema.json"
