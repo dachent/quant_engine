@@ -6196,6 +6196,12 @@ def _schwab_position_observation(
                     valuation_cutoff=valuation_cutoff,
                     snapshot_day=day,
                     artifact_ids={a.artifact_id for a in artifacts},
+                    transaction_history=_object(
+                        _object(catalog.get("coverage"), label).get(
+                            "transaction_history"
+                        ),
+                        label,
+                    ),
                     nav_observations=_objects(
                         catalog.get("nav_observations", []), label
                     ),

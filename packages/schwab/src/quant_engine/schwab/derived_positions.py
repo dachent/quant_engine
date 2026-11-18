@@ -267,6 +267,7 @@ def admit_derived_position_rows(
     valuation_cutoff: date,
     snapshot_day: date,
     artifact_ids: Collection[str],
+    transaction_history: Mapping[str, Any],
     nav_observations: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Mapping[str, Any]]:
     """Re-verify catalog position rows derived at the cutoff from a later snapshot.
@@ -276,7 +277,8 @@ def admit_derived_position_rows(
     position at the cutoff plus the flows after it equal the captured position only when
     those flows are nil, so the account must have no transaction dated in
     ``(cutoff, history_through]`` and the days from the history to the capture must be
-    covered by an earlier independent market value equal to the holdings.  A NAV
+    covered by an earlier independent market value equal to the holdings.  The catalog states the account's transaction history, spanning the cutoff to
+    ``history_through``.  A NAV
     observation of the account on the cutoff day must equal the positions total.  Returns the
     admitted rows by record id (empty when ``rows`` is empty).
     """
@@ -378,6 +380,22 @@ def admit_derived_position_rows(
         if not valuation_cutoff <= through <= capture_date:
             raise SchwabDerivedPositionError(
                 "derived position history does not reach the cutoff or passes the capture"
+            )
+        history = (
+            transaction_history.get("accounts", {}).get(account_id)
+            if isinstance(transaction_history.get("accounts"), Mapping)
+            else None
+        )
+        if not isinstance(history, Mapping):
+            raise SchwabDerivedPositionError(
+                "the catalog states no transaction history for the account"
+            )
+        if not (
+            _day(history.get("effective_start"), "history start") <= valuation_cutoff
+            and through <= _day(history.get("effective_end"), "history end")
+        ):
+            raise SchwabDerivedPositionError(
+                "the account's transaction history does not span the cutoff to history_through"
             )
         later = [
             t

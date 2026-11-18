@@ -1223,6 +1223,7 @@ def _schwab_selected_point_positions(
                     valuation_cutoff=valuation_cutoff,
                     snapshot_day=day,
                     artifact_ids={a["artifact_id"] for a in source["source_artifacts"]},
+                    transaction_history=source["coverage"]["transaction_history"],
                     nav_observations=source["nav_observations"],
                 )
             except schwab.SchwabDerivedPositionError as exc:

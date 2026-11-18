@@ -934,6 +934,17 @@ def _staged_observation(
                         "symbol": "SWVXX",
                     }
                     derived_row.update(schwab_derived)
+                    catalog["coverage"] = {
+                        **(catalog.get("coverage") or {}),
+                        "transaction_history": {
+                            "accounts": {
+                                derived_account: {
+                                    "effective_start": "2020-01-01",
+                                    "effective_end": schwab_valuation_cutoff,
+                                }
+                            }
+                        },
+                    }
                     catalog["positions"] = [*catalog["positions"], derived_row]
                 bind(
                     "native/empty-nav.csv",

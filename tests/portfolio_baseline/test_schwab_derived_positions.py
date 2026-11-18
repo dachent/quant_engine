@@ -62,7 +62,17 @@ def _facts(row: dict[str, Any], **catalog_over: Any) -> list[dict[str, Any]]:
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
             }
         ],
-        "coverage": {"known_gaps": []},
+        "coverage": {
+            "known_gaps": [],
+            "transaction_history": {
+                "accounts": {
+                    ACCOUNT: {
+                        "effective_start": "2022-11-08",
+                        "effective_end": "2026-11-08",
+                    }
+                }
+            },
+        },
         "position_snapshot_as_of": {
             "observed_at": "2026-11-08T23:15:39+00:00",
             "valuation_cutoff": CUTOFF,
@@ -116,3 +126,9 @@ def test_an_unlabelled_non_current_position_is_still_refused() -> None:
         baseline.BaselineValidationError, match="evidence class differs"
     ):
         _facts(row)
+
+
+def test_a_transaction_after_the_cutoff_refuses_the_derived_position() -> None:
+    late = {"account_id": ACCOUNT, "event_date": "2026-11-07", "record_id": "t-late"}
+    with pytest.raises(baseline.BaselineValidationError, match="after the cutoff"):
+        _facts(_derived_row(), transactions=[late])

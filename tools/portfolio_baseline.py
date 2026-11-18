@@ -1670,6 +1670,12 @@ def _schwab_facts(
                             catalog.get("source_artifacts"), "Schwab artifacts"
                         )
                     },
+                    transaction_history=_object(
+                        _object(catalog.get("coverage"), "Schwab coverage").get(
+                            "transaction_history"
+                        ),
+                        "Schwab transaction history",
+                    ),
                     nav_observations=_objects(
                         catalog.get("nav_observations", []), "Schwab NAV"
                     ),

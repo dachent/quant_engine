@@ -66,6 +66,14 @@ def _admit(rows: list[dict[str, Any]], **over: Any) -> dict[str, Any]:
         valuation_cutoff=CUTOFF,
         snapshot_day=SNAPSHOT,
         artifact_ids={ARTIFACT},
+        transaction_history={
+            "accounts": {
+                ACCOUNT: {
+                    "effective_start": "2022-11-08",
+                    "effective_end": "2026-11-08",
+                }
+            }
+        },
     )
     args.update(over)
     return admit_derived_position_rows(rows, **args)
@@ -172,3 +180,33 @@ def test_a_nav_observed_at_the_cutoff_must_equal_the_positions_total() -> None:
     # another day or another account is not a cutoff observation of this account
     other = [{**bad, "as_of_date": "2026-11-05"}, {**bad, "account_id": "account-x"}]
     assert _admit([row], nav_observations=other)
+
+
+@pytest.mark.parametrize(
+    "history",
+    [
+        {},
+        {"accounts": {}},
+        {
+            "accounts": {
+                ACCOUNT: {
+                    "effective_start": "2022-11-08",
+                    "effective_end": "2026-11-07",
+                }
+            }
+        },
+        {
+            "accounts": {
+                ACCOUNT: {
+                    "effective_start": "2026-11-07",
+                    "effective_end": "2026-11-08",
+                }
+            }
+        },
+    ],
+)
+def test_the_catalog_must_state_a_transaction_history_spanning_the_window(
+    history: dict[str, Any],
+) -> None:
+    with pytest.raises(SchwabDerivedPositionError, match="transaction history"):
+        _admit([_row()], transaction_history=history)

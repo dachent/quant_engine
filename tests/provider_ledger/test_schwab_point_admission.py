@@ -465,7 +465,7 @@ def test_a_statement_derived_financing_row_is_admitted_only_under_the_provider_g
         _verify(forged, authority)
 
 
-def test_the_ledger_refuses_a_catalog_carrying_a_derived_position_row(
+def test_the_ledger_refuses_a_derived_position_row_without_a_valuation_cutoff(
     point_stage: PointStage, tmp_path: Path
 ) -> None:
     """KILL: a DERIVED_AT_CUTOFF row that does not re-verify (no closure, forged ids) is refused."""
