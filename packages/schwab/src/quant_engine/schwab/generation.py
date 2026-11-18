@@ -476,6 +476,17 @@ def _derived_position_rows(
         ):
             _strict(entry, {"day", "page"}, "derived_position_rows.earlier_balances[]")
             day = _date(entry["day"], "derived_position_rows.earlier_balances.day")
+            # an independent observation proves the holdings did not move only if it lies AFTER the
+            # transaction history ends and not after the capture: an earlier day proves nothing
+            if not (
+                _date(item["history_through"], "derived_position_rows.history_through")
+                <= day
+                <= _date(item["capture_date"], "derived_position_rows.capture_date")
+            ):
+                raise SchwabGenerationError(
+                    "derived position refused: an earlier balances page is dated outside "
+                    "[history_through, capture_date]"
+                )
             page_text, page_artifact = _pinned_text(
                 entry["page"],
                 roots=roots,

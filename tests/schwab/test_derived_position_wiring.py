@@ -148,3 +148,21 @@ def test_an_account_with_a_derived_position_can_never_be_declared_empty(
         SchwabGenerationError, match="declared empty|has a position row"
     ):
         build_generation(spec)
+
+
+def test_an_earlier_balances_page_must_lie_after_the_history_and_not_after_the_capture(
+    tmp_path: Path,
+) -> None:
+    """KILL (ci-qc-2): an observation dated before the history ends, or after the capture, proves
+    nothing about the days in between."""
+
+    for name, day in (("a", "2026-01-01"), ("b", "2099-01-01")):
+        (tmp_path / name).mkdir()
+        spec = _spec_with_derived(tmp_path / name)
+        document = json.loads(spec.read_text(encoding="utf-8"))
+        document["derived_position_rows"][0]["earlier_balances"][0]["day"] = day
+        spec.write_text(json.dumps(document), encoding="utf-8")
+        with pytest.raises(
+            SchwabGenerationError, match="earlier balances page is dated"
+        ):
+            build_generation(spec)
