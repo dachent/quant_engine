@@ -256,6 +256,7 @@ jobs:
           tools/release_cycle_seeds.py
           tools/release_fresh_world.py
           tools/decision_refresh.py
+          tools/release_world.py
           tools/release_post_commit.py
           tools/post_commit_validation.py
           tools/release_spec_remap.py
