@@ -455,6 +455,9 @@ _PATH_STAGES = {
     # Operator CLI that builds, stages or publishes one IBKR generation candidate; consumers
     # read only the generation they are handed, never this tool.
     "tools/ibkr_generation.py": [],
+    # Operator tool that derives the governed overlap-equivalence listing of an IBKR generation spec;
+    # consumers read only the generation they are handed, never this tool.
+    "tools/ibkr_overlap_equivalences.py": [],
     # Plans and stages the Portfolio123 generation (HAR roots and transaction captures);
     # consumers read only the generation they are handed, never this tool.
     "tools/portfolio123_generation.py": [],

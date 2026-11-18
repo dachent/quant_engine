@@ -902,6 +902,82 @@ def _statements(
     )
 
 
+_OVERLAP_CASH_REASON: Final = (
+    "a one-day Flex pull cannot carry month/year-to-date broker interest: accepted history "
+    "holds the value, the refresh holds none; accepted history wins"
+)
+_OVERLAP_ROW_REASON: Final = (
+    "a one-day Flex pull does not list a currency row that holds only month/year-to-date broker "
+    "interest (every other figure zero or absent); accepted history keeps the row"
+)
+
+
+def _accrual_reason(difference: Mapping[str, Any]) -> str:
+    def net(rows: Sequence[Sequence[Any]]) -> Decimal:
+        return sum(
+            ((row[1] or Decimal(0)) + (row[2] or Decimal(0)) for row in rows),
+            Decimal(0),
+        )
+
+    return (
+        "interest accrual gross split differs between accepted history and the refresh while the "
+        f"net (accrued plus reversal) is identical ({format(net(difference['history']), 'f')}); "
+        "accepted history wins"
+    )
+
+
+def derive_overlap_equivalence_entries(
+    sources: Sequence[tuple[str, str, Path]],
+) -> list[dict[str, Any]]:
+    """The canonical, sorted equivalence entries for a spec's overlapping sources.
+
+    The listing is derived with the builder's own comparison (never hand written); the
+    generator tool ``tools/ibkr_overlap_equivalences.py`` writes it.
+    """
+
+    found: list[dict[str, Any]] = []
+    _statements(sources, None, collect=found)
+    entries = [
+        _overlap_entry(
+            item["key"][0],
+            item["key"][1],
+            item["difference"],
+            _OVERLAP_CASH_REASON
+            if item["difference"]["family"] == _OVERLAP_FAMILY_CASH
+            else _OVERLAP_ROW_REASON
+            if item["difference"]["family"] == _OVERLAP_FAMILY_AGGREGATES_ROW
+            else _accrual_reason(item["difference"]),
+        )
+        for item in found
+    ]
+    return sorted(
+        entries,
+        key=lambda e: (
+            e["raw_account_id"],
+            e["report_date"],
+            e["family"],
+            e["currency"],
+            e["level_of_detail"],
+        ),
+    )
+
+
+def derive_overlap_equivalence_entries_for_spec(
+    spec_path: Path,
+) -> list[dict[str, Any]]:
+    """``derive_overlap_equivalence_entries`` for the sources of a generation spec file."""
+
+    spec = _load_spec(spec_path)
+    roots = _roots(spec["roots"])
+    sources, _ = _sources(
+        spec["sources"],
+        roots,
+        _date(spec["as_of_date"], "spec.as_of_date"),
+        _integer(spec["schema_version"], "schema_version"),
+    )
+    return derive_overlap_equivalence_entries(sources)
+
+
 def _next_weekday(day: date) -> date:
     candidate = day + timedelta(days=1)
     while candidate.weekday() >= 5:

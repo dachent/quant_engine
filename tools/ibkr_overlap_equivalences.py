@@ -15,83 +15,25 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
-from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
 import sys
 from typing import Any
 
-from quant_engine.ibkr import generation as gen
-
-_CASH_REASON = (
-    "a one-day Flex pull cannot carry month/year-to-date broker interest: accepted history "
-    "holds the value, the refresh holds none; accepted history wins"
-)
-
-
-_ROW_REASON = (
-    "a one-day Flex pull does not list a currency row that holds only month/year-to-date broker "
-    "interest (every other figure zero or absent); accepted history keeps the row"
-)
-
-
-def _accrual_reason(difference: dict[str, Any]) -> str:
-    def net(rows: Sequence[Sequence[Any]]) -> Decimal:
-        return sum(
-            ((row[1] or Decimal(0)) + (row[2] or Decimal(0)) for row in rows),
-            Decimal(0),
-        )
-
-    return (
-        "interest accrual gross split differs between accepted history and the refresh while the "
-        f"net (accrued plus reversal) is identical ({format(net(difference['history']), 'f')}); "
-        "accepted history wins"
-    )
+import quant_engine.ibkr as gen
 
 
 def derive(spec_path: Path) -> list[dict[str, Any]]:
     """The canonical, sorted equivalence entries for a spec's overlapping sources."""
 
-    spec = gen._load_spec(spec_path)
-    roots = gen._roots(spec["roots"])
-    sources, _ = gen._sources(
-        spec["sources"],
-        roots,
-        gen._date(spec["as_of_date"], "spec.as_of_date"),
-        gen._integer(spec["schema_version"], "schema_version"),
-    )
-    return derive_from_sources(sources)
+    return gen.derive_overlap_equivalence_entries_for_spec(spec_path)
 
 
 def derive_from_sources(
     sources: Sequence[tuple[str, str, Path]],
 ) -> list[dict[str, Any]]:
-    found: list[dict[str, Any]] = []
-    gen._statements(sources, None, collect=found)
-    entries = [
-        gen._overlap_entry(
-            item["key"][0],
-            item["key"][1],
-            item["difference"],
-            _CASH_REASON
-            if item["difference"]["family"] == gen._OVERLAP_FAMILY_CASH
-            else _ROW_REASON
-            if item["difference"]["family"] == gen._OVERLAP_FAMILY_AGGREGATES_ROW
-            else _accrual_reason(item["difference"]),
-        )
-        for item in found
-    ]
-    return sorted(
-        entries,
-        key=lambda e: (
-            e["raw_account_id"],
-            e["report_date"],
-            e["family"],
-            e["currency"],
-            e["level_of_detail"],
-        ),
-    )
+    return gen.derive_overlap_equivalence_entries(sources)
 
 
 def canonical_bytes(entries: Sequence[dict[str, Any]]) -> bytes:
