@@ -123,3 +123,28 @@ def test_the_spec_key_is_unknown_without_the_current_snapshot_schema(
     spec.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(SchwabGenerationError):
         build_generation(spec)
+
+
+def test_an_account_with_a_derived_position_can_never_be_declared_empty(
+    tmp_path: Path,
+) -> None:
+    """KILL (ci-qc-2): the money-market fund sits inside 'Cash & Cash Investments', so a genuine-looking
+    Balances page can truthfully show Market Value 0.00 for an account that holds SWVXX (691).  With the
+    derived row present the declaration must refuse, whatever the page says."""
+
+    spec = _spec_with_derived(tmp_path)
+    fixture._set_first_account_cash(spec, "100")  # type: ignore[attr-defined]
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    root = Path(document["roots"]["source"])
+    evidence = root / "balances-evidence.txt"
+    evidence.write_bytes(fixture._page("001", "100.00", "0.00"))  # type: ignore[attr-defined]
+    document["declared_empty_position_accounts"] = [
+        fixture._empty_declaration(
+            document["derived_position_rows"][0]["account_id"], evidence
+        )  # type: ignore[attr-defined]
+    ]
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(
+        SchwabGenerationError, match="declared empty|has a position row"
+    ):
+        build_generation(spec)
