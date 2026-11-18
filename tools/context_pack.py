@@ -77,6 +77,7 @@ GLOSSARY: dict[str, str] = {
     "SELL_TO_CASH": "Reduction under the status rule or the breach action; proceeds stay in cash.",
     "PARTIAL": "The accepted records for this kind of fact are incomplete: what is shown is correct as far as it goes and is never zero-filled. It cannot turn complete by itself; the missing records or a ruling would have to arrive. It does not make the shown numbers wrong.",
     "COMPLETE_WITHIN_DECLARED_BOUNDARY": "Complete inside a stated boundary; says nothing outside it.",
+    "CLOSED_BY_CAPTURE_B_STATE_EVIDENCED_BY_ABSENCE_OF_TRADES": "Pull status: the pull was closed by the release B capture; the vendor's live-signal file was not received, and the state is evidenced by the absence of trades, not by that file.",
     "NO_ACCEPTED_FACT_PATH": "No admitted source path exists for this fact on this account. Structural: more data pulls of the same kind will not change it; an admitted source or a ruling is needed.",
     "OBSERVED_NOT_COMPLETENESS_PROOF": "Records were observed; no provider export can prove it listed everything. Structural: stays this status whatever is pulled.",
     "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF": "The provider reported no events; that is not proof that none occurred.",
