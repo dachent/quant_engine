@@ -249,6 +249,40 @@ def test_without_the_contract_fx_path_there_are_no_positions(tmp_path: Path) -> 
     assert _positions(tmp_path, [_row("2026-11-06", "10")], None) == []
 
 
+def test_positions_are_pure_additions_to_the_projected_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [_row("2026-11-05", "49891.55"), _row("2026-11-06", "49862.27")]
+    fx = _fx({"2026-11-05": "0.999", "2026-11-06": "1.001"})
+    manifest, catalog = _setup(tmp_path, rows)
+
+    def project() -> dict[str, list[dict[str, Any]]]:
+        facts, _ = ledger._project_account_facts(  # noqa: SLF001
+            "matrixport",
+            "gen-1",
+            catalog,
+            {ACCOUNT},
+            STRATEGIES,
+            {},
+            manifest=manifest,
+            root=tmp_path,
+            fx_rates=fx,
+        )
+        return {key: list(value) for key, value in facts.items()}
+
+    monkeypatch.setitem(ledger._ACCOUNT_FACTS, "matrixport", ("nav_observations",))  # noqa: SLF001
+    before = project()
+    monkeypatch.setitem(
+        ledger._ACCOUNT_FACTS,  # noqa: SLF001
+        "matrixport",
+        ("nav_observations", "positions"),
+    )
+    after = project()
+    assert "positions" not in before
+    assert after.pop("positions") and len(after["nav_observations"]) == 2
+    assert after == before  # every other fact byte-identical: positions only add
+
+
 REAL = os.environ.get("QE_MATRIXPORT_DAILY_HOLDINGS")
 
 
