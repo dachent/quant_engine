@@ -580,6 +580,10 @@ def _holes(data: Mapping[str, Any]) -> list[dict[str, str]]:
             }
         )
     for pull in (data.get("model_vs_actual") or {}).get("pulls") or []:
+        # A pull whose status says it is closed is no longer a hole: the audit-bridges artifact keeps
+        # such pulls in its list unless the derive recipe names them in completed_pulls.
+        if str(pull.get("status") or "").startswith("CLOSED"):
+            continue
         holes.append(
             {
                 "what": f"Pull {pull.get('pull_id')}: {_clean(str(pull.get('title')))[:170]}",

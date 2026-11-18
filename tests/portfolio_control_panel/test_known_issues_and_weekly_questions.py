@@ -221,3 +221,27 @@ def test_the_stress_bound_is_not_a_forecast_and_uses_the_published_rule_when_pre
         data, decision, json.loads(policy_bytes), sha, sources, None, None, _issues()
     )
     assert "Rule as published: 1.25x prior rule text" in _section(pack, "do_not_rely")
+
+
+def test_a_closed_pull_is_not_a_data_hole_and_an_open_one_is() -> None:
+    data = dict(_data())
+    mva = dict(data.get("model_vs_actual") or {})
+    mva["pulls"] = [
+        {
+            "pull_id": "X-OPEN",
+            "title": "open pull",
+            "replaces": ["timing"],
+            "access": "public",
+            "status": "REQUESTED_NOT_DOWNLOADED",
+        },
+        {
+            "pull_id": "X-CLOSED",
+            "title": "closed pull",
+            "replaces": ["timing"],
+            "access": "public",
+            "status": "CLOSED_BY_CAPTURE_X",
+        },
+    ]
+    data["model_vs_actual"] = mva
+    whats = " | ".join(h["what"] for h in cp._holes(data))
+    assert "X-OPEN" in whats and "X-CLOSED" not in whats
