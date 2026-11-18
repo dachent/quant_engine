@@ -776,7 +776,7 @@
     const root = $("#decision-root");
     const block = data.decision;
     if (!root) return;
-    if (!block) { root.innerHTML = '<p class="dec-missing">The decision block is not in this payload: treat every limit as unchecked.</p>'; return; }
+    if (!block) { root.innerHTML = '<p class="dec-missing">The decision block is not in this payload: treat the limits as unchecked.</p>'; return; }
     const num = (value) => (value == null ? null : Number(value));
     const dp = (value, digits = 1) => (value == null ? "—" : `${(num(value) * 100).toFixed(digits)}%`);
     const ratio = (value) => (value == null ? "—" : num(value).toFixed(2));
@@ -825,7 +825,7 @@
       <section class="dec-block"><h3>Data dates</h3><ul class="dec-sources">${sources}</ul><p class="dec-note">Evaluated on ${safe(formatDate(block.evaluated_on))}; panel cutoff ${safe(formatDate(block.as_of))}.</p></section>
       <section class="dec-block"><h3>Stress loss</h3><p class="dec-big">${dp(p.stress_loss)} of capital, about ${usd(p.stress_loss_usd)}</p><p class="dec-note">${safe(p.stress_rule)} The policy constant published earlier reads ${dp(p.published_policy_constant_stress)}.</p><ul class="dec-list">${clusters}</ul></section>
       <section class="dec-block"><h3>Strategies</h3><div class="dec-cards">${cards}</div></section>
-      <section class="dec-block"><h3>What changed since last week</h3><ul class="dec-list">${changes}</ul></section>
+      <section class="dec-block"><h3>Changes since the previous run</h3><ul class="dec-list">${changes}</ul></section>
       ${placeholders}
       <p class="dec-note">Policy ${safe(block.policy.policy_id)}, file digest ${safe(block.policy.sha256.slice(0, 12))}. No agent places trades.</p>`;
   }

@@ -41,10 +41,13 @@ def _log(tmp_path: Path) -> Path:
     return tmp_path / "log.jsonl"
 
 
-def test_repo_log_exists_verifies_and_is_lf() -> None:
-    assert rl.DEFAULT_LOG.exists()
-    assert b"\r" not in rl.DEFAULT_LOG.read_bytes()
-    rl.load_log(rl.DEFAULT_LOG)
+def test_repo_log_when_present_verifies_and_is_lf_and_when_absent_reads_empty() -> None:
+    # The real log is retained outside Git (the boundary forbids .jsonl); a missing file is an empty log.
+    if rl.DEFAULT_LOG.exists():
+        assert b"\r" not in rl.DEFAULT_LOG.read_bytes()
+        rl.load_log(rl.DEFAULT_LOG)
+    else:
+        assert rl.load_log(rl.DEFAULT_LOG) == []
 
 
 def test_append_builds_a_verifiable_chain(tmp_path: Path) -> None:

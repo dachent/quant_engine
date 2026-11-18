@@ -531,7 +531,7 @@ def test_first_tab_renders_every_section_from_the_golden_block(tmp_path: Path) -
         "Stress loss",
         "44.2% of capital",
         "Strategies",
-        "What changed since last week",
+        "Changes since the previous run",
         "12.5%",
         "2.52 points of headroom",
         "Volatis Strategy",

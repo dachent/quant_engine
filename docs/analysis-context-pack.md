@@ -38,7 +38,7 @@ D model, vendor or backtest (context only); P policy constant or rule output.
 
 ## Known limits of v0
 
-- "What changed since last week" needs the previous pack or decision block; the producer has none yet, so the
+- "Changes since the previous run" needs the previous pack or decision block; the producer has none yet, so the
   first pack says `NO_PRIOR_PACK`. `tools/context_pack.py --prior-pack` and the diff are tested.
 - The payload has no model weekly series for most strategies, so account-versus-model for last week and 4 weeks
   shows the account return and no gap; the since-start gap comes from the pinned audit (grade C).
