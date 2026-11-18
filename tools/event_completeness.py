@@ -542,7 +542,9 @@ def _evaluate_quantbase_positions(
         if rows
         else 1,
     )
-    return checks, []
+    # the snapshot rows are the records this closure proves (the baseline compares them as a
+    # multiset of (id, as_of_date, market value))
+    return checks, sorted(str(p["record_id"]) for p in rows if p.get("record_id"))
 
 
 def _evaluate_ibkr_flows(
@@ -748,6 +750,15 @@ def evaluate(
             )
         passed = all(item["status"] == "PASS" for item in checks)
         by_id = {str(f.get("record_id")): f for f in flows}
+        if fact == "positions":
+            # a snapshot fact: dated by as_of_date, valued by market_value
+            by_id = {
+                str(p.get("record_id")): {
+                    "event_date": p.get("as_of_date"),
+                    "amount": p.get("market_value"),
+                }
+                for p in positions
+            }
         rows.append(
             {
                 "account_id": declaration.account_id,

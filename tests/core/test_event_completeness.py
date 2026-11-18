@@ -853,3 +853,16 @@ def test_the_quantbase_closure_fits_only_the_positions_fact() -> None:
                 )
             )
         )
+
+
+def test_a_complete_quantbase_snapshot_names_the_position_records_it_proved() -> None:
+    """The baseline compares accepted and proven records as a multiset of (id, date, amount): a
+    snapshot closure that proves nothing by name could never declare its cell complete."""
+
+    rid = "quantbase:position:2026-11-06:SHV"
+    row = _qb_run(rows=[_qb_row(record_id=rid)])
+    assert row["status"] == ec.DECLARED_COMPLETE, row["checks"]
+    assert row["proven_record_ids"] == [rid]
+    assert row["proven_records"] == [
+        {"record_id": rid, "event_date": "2026-11-06", "amount": "48037.62"}
+    ]
