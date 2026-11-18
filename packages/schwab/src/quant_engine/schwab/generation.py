@@ -2403,10 +2403,10 @@ def build_generation(
         ),
         *(
             (
-                f"{len(crosswalk) - current_position_account_count - cash_only_count} accepted accounts have no reported non-cash position row",
+                f"{len(crosswalk) - len(positioned_accounts) - cash_only_count} accepted accounts have no reported non-cash position row",
             )
             if current_accounts is not None
-            and current_position_account_count + cash_only_count < len(crosswalk)
+            and len(positioned_accounts) + cash_only_count < len(crosswalk)
             else ()
         ),
         *(
