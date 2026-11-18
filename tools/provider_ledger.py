@@ -1395,6 +1395,22 @@ def _matrixport_nav_observations(
     return observations
 
 
+def _security_id(product_id: str) -> str:
+    return (
+        "security-matrixport-"
+        + hashlib.sha256(product_id.encode("utf-8")).hexdigest()[:24]
+    )
+
+
+def _product_name(names: Mapping[str, str], product_id: str) -> str:
+    try:
+        return names[product_id]
+    except KeyError as exc:
+        raise ProviderLedgerError(
+            f"MATRIXPORT_POSITIONS_PRODUCT_UNNAMED: no product record for {product_id}"
+        ) from exc
+
+
 # Closure between a day's position rows and the same day's account NAV: both are built from the
 # same hash-bound daily_holdings.csv rows and the same admitted daily FX, so they must agree to
 # the cent; a difference beyond this half cent is a builder or source defect and is refused.
@@ -1427,12 +1443,19 @@ def _matrixport_positions(
     that has a NAV observation must close against its position rows to within
     ``MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD`` or the build refuses.
 
-    The closure is independent: the position value is ``share x holdings unit NAV x FX`` while
-    the account NAV is the holdings ``native_value x FX``; the closure then compares
-    ``share x the published unit NAV in csv/nav_daily.csv x FX`` (a different file) with the
-    account NAV.  A day whose product has no ``nav_daily`` row cannot be closed independently:
-    its rows carry ``closure_status = NAV_DAILY_ABSENT`` (a typed gap, never a silent pass).
-    A NAV day without position rows, or a position day without a NAV, is refused with the dates.
+    What is checked (and what is not).  ``native_value`` is derived as share x unit NAV and the
+    published NAV in csv/nav_daily.csv is the same endpoint's value, so the per-day NAV
+    comparison is a CONSISTENCY check (``CONSISTENT_WITH_PUBLISHED_NAV``), not an independent
+    valuation: it catches inconsistent edits, not a consistent forgery.  The only quantity the
+    daily files cannot derive from each other is the share count, so it is anchored to the
+    API-reported holding (``csv/holdings.csv`` shares) and the reconciled subscription events
+    (``csv/holding_reconciliation.csv``): the last day's share must equal both, with no
+    unexplained opening share.  The API-reported current value (``holding_balance``) is carried
+    as ``api_reported_value_gap_usd`` on the last row (disclosed, not a refusal).  A day with no
+    ``nav_daily`` row is typed ``NAV_DAILY_ABSENT``, an active day with no native value is
+    typed ``NATIVE_VALUE_ABSENT`` (``UNAVAILABLE``); more than 5% of active days absent is
+    refused, as are unexplained calendar gaps, a NAV day without positions and the reverse.
+    ``symbol`` is the product name from ``csv/holdings.csv`` (the unit is the share).
     """
 
     if fx_rates is None:
@@ -1474,10 +1497,83 @@ def _matrixport_positions(
                 ),
             )
         ] = published
+    holding_rows = _verified_csv_rows(
+        _exact_file(run_root, Path("csv/holdings.csv"), "matrixport holdings"),
+        _find_manifest_artifact(
+            manifest, "csv/holdings.csv", "matrixport holdings"
+        ).sha256,
+        {"display_name", "holding_balance", "product_id", "shares"},
+        "matrixport holdings",
+    )
+    reconciliation_rows = _verified_csv_rows(
+        _exact_file(
+            run_root,
+            Path("csv/holding_reconciliation.csv"),
+            "matrixport holding reconciliation",
+        ),
+        _find_manifest_artifact(
+            manifest,
+            "csv/holding_reconciliation.csv",
+            "matrixport holding reconciliation",
+        ).sha256,
+        {
+            "current_share",
+            "event_share_sum",
+            "product_id",
+            "unexplained_opening_share",
+        },
+        "matrixport holding reconciliation",
+    )
+    product_names: dict[str, str] = {}
+    api_share: dict[str, Decimal] = {}
+    api_value: dict[str, Decimal] = {}
+    for holding in holding_rows:
+        key = _text(holding.get("product_id"), "matrixport holdings product_id")
+        try:
+            names = json.loads(str(holding.get("display_name")))
+            name = next(str(n["text"]) for n in names if n.get("language") == "en-US")
+        except (ValueError, StopIteration, TypeError, KeyError) as exc:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_PRODUCT_UNNAMED: holdings.csv has no en-US "
+                f"display_name for product {key}"
+            ) from exc
+        product_names[key] = name
+        shares_value = _observed_decimal(holding.get("shares"), "matrixport api share")
+        balance_value = _observed_decimal(
+            holding.get("holding_balance"), "matrixport api holding balance"
+        )
+        if shares_value is None or balance_value is None:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_API_ANCHOR_ABSENT: holdings.csv has no API "
+                f"share or balance for product {key}"
+            )
+        api_share[key], api_value[key] = shares_value, balance_value
+    for rec in reconciliation_rows:
+        key = _text(rec.get("product_id"), "matrixport reconciliation product_id")
+        current = _observed_decimal(
+            rec.get("current_share"), "matrixport current_share"
+        )
+        events = _observed_decimal(rec.get("event_share_sum"), "matrixport event_share")
+        opening = _observed_decimal(
+            rec.get("unexplained_opening_share"), "matrixport opening share"
+        )
+        if (
+            current is None
+            or events is None
+            or opening is None
+            or current != events
+            or opening != 0
+            or current != api_share.get(key)
+        ):
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_SHARE_ANCHOR: the API share, the reconciled "
+                f"event shares and the opening share disagree for product {key}"
+            )
     fx_end = _admitted_fx_end(fx_rates)
     positions: list[dict[str, Any]] = []
     totals: dict[date, Decimal] = defaultdict(Decimal)
     independent: dict[date, Decimal] = defaultdict(Decimal)
+    last_row: dict[str, tuple[date, Decimal, Decimal]] = {}
     unclosed: set[date] = set()
     native_absent: set[date] = set()
     held_days: set[tuple[str, date]] = set()
@@ -1538,9 +1634,7 @@ def _matrixport_positions(
                         "source_artifact_id": artifact_id,
                         "source_record_id": source_id,
                         "strategy_id": strategy_id,
-                        "symbol": _text(
-                            row.get("currency"), "matrixport holding currency"
-                        ),
+                        "symbol": _product_name(product_names, product_id),
                         "value_basis": "NAV_SHARE_PRODUCT",
                     }
                 )
@@ -1565,6 +1659,8 @@ def _matrixport_positions(
                 rate, fx_evidence = Decimal(str(fx["rate"])), [fx]
             value = share * unit_nav * rate
             totals[day] += value
+            if product_id not in last_row or day > last_row[product_id][0]:
+                last_row[product_id] = (day, share, value)
             published = published_nav.get((product_id, day))
             if published is None:
                 unclosed.add(day)
@@ -1589,7 +1685,7 @@ def _matrixport_positions(
                     "closure_status": (
                         "NAV_DAILY_ABSENT"
                         if published is None
-                        else "CLOSED_AGAINST_PUBLISHED_NAV"
+                        else "CONSISTENT_WITH_PUBLISHED_NAV"
                     ),
                     "native_value": {
                         "currency": currency,
@@ -1605,11 +1701,35 @@ def _matrixport_positions(
                     "source_artifact_id": artifact_id,
                     "source_record_id": source_id,
                     "strategy_id": strategy_id,
-                    "symbol": currency,
+                    "symbol": _product_name(product_names, product_id),
                     "valuation_fx": fx_evidence,
                     "value_basis": "NAV_SHARE_PRODUCT",
                 }
             )
+    for key, (last_day, last_share, last_value) in last_row.items():
+        if last_share != api_share.get(key):
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_SHARE_ANCHOR: the last position share on "
+                f"{last_day.isoformat()} differs from the API-reported holding"
+            )
+        for row_out in reversed(positions):
+            if row_out["security_id"] == _security_id(key) and (
+                row_out["as_of_date"] == last_day.isoformat()
+            ):
+                row_out["api_reported_value_gap_usd"] = format(
+                    (api_value[key] - last_value).normalize(), "f"
+                )
+                break
+    typed = sum(
+        1
+        for row_out in positions
+        if row_out["closure_status"] != "CONSISTENT_WITH_PUBLISHED_NAV"
+    )
+    if positions and Decimal(typed) > Decimal(len(positions)) * Decimal("0.05"):
+        raise ProviderLedgerError(
+            "MATRIXPORT_POSITIONS_TOO_MANY_GAPS: more than 5% of position days lack "
+            f"a published unit NAV or native value ({typed} of {len(positions)})"
+        )
     navs = _matrixport_nav_observations(
         generation_id,
         manifest,

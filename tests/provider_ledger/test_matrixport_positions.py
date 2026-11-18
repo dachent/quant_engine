@@ -111,7 +111,11 @@ def _manifest(*paths: tuple[Path, str]) -> GenerationManifest:
 
 
 def _setup(
-    tmp_path: Path, rows: list[str], nav_rows: list[str] | None = None
+    tmp_path: Path,
+    rows: list[str],
+    nav_rows: list[str] | None = None,
+    api_share: str = SHARE,
+    event_share: str | None = None,
 ) -> tuple[GenerationManifest, dict[str, Any]]:
     csv_dir = tmp_path / "output" / RUN_ID / "csv"
     csv_dir.mkdir(parents=True)
@@ -123,6 +127,19 @@ def _setup(
     published.write_text(
         NAV_HEADER + "\n" + "\n".join(nav_rows) + "\n", encoding="utf-8-sig"
     )
+    anchors = csv_dir / "holdings.csv"
+    name = '[{"language":"en-US","text":"Test Product"}]'.replace('"', '""')
+    anchors.write_text(
+        "currency,display_name,holding_balance,product_id,shares\n"
+        f'USDT,"{name}",0,{PRODUCT},{api_share}\n',
+        encoding="utf-8-sig",
+    )
+    reconciliation = csv_dir / "holding_reconciliation.csv"
+    reconciliation.write_text(
+        "current_share,event_share_sum,product_id,unexplained_opening_share\n"
+        f"{api_share},{event_share or api_share},{PRODUCT},0\n",
+        encoding="utf-8-sig",
+    )
     catalog = {
         "catalog_schema_version": 2,
         "observed_boundary_date": "2026-11-07",
@@ -130,10 +147,21 @@ def _setup(
     }
     return (
         _manifest(
-            (holdings, "csv/daily_holdings.csv"), (published, "csv/nav_daily.csv")
+            (holdings, "csv/daily_holdings.csv"),
+            (published, "csv/nav_daily.csv"),
+            (anchors, "csv/holdings.csv"),
+            (reconciliation, "csv/holding_reconciliation.csv"),
         ),
         catalog,
     )
+
+
+def _span(count: int) -> list[str]:
+    """``count`` consecutive days ending on the fixture boundary 2026-11-07."""
+    end = date(2026, 11, 7)
+    return [date.fromordinal(end.toordinal() - i).isoformat() for i in range(count)][
+        ::-1
+    ]
 
 
 def _fx(days: dict[str, str]) -> Any:
@@ -179,7 +207,7 @@ def test_each_day_yields_one_nav_share_position_valued_with_the_admitted_fx(
     assert [p["as_of_date"] for p in positions] == ["2026-11-05", "2026-11-06"]
     first, second = positions
     assert first["quantity"] == "100" and first["unit_nav"] == "498.9155"
-    assert first["symbol"] == "USDT" and first["account_id"] == ACCOUNT
+    assert first["symbol"] == "Test Product" and first["account_id"] == ACCOUNT
     assert first["market_value"] == {
         "currency": "USD",
         "status": "AVAILABLE",
@@ -191,7 +219,7 @@ def test_each_day_yields_one_nav_share_position_valued_with_the_admitted_fx(
     assert first["security_id"] == second["security_id"]
     assert first["record_id"] != second["record_id"]
     assert first["value_basis"] == "NAV_SHARE_PRODUCT"
-    assert first["closure_status"] == "CLOSED_AGAINST_PUBLISHED_NAV"
+    assert first["closure_status"] == "CONSISTENT_WITH_PUBLISHED_NAV"
 
 
 def test_positions_close_against_the_account_nav_every_day(tmp_path: Path) -> None:
@@ -214,7 +242,8 @@ def test_a_perturbed_share_count_fails_the_closure(tmp_path: Path) -> None:
     rows = [_row("2026-11-06", "498.6227", share="100", native="49862.27")]
     rows[0] = rows[0].replace(",100,derived", ",101,derived")
     with pytest.raises(
-        ledger.ProviderLedgerError, match="MATRIXPORT_POSITIONS_NAV_CLOSURE"
+        ledger.ProviderLedgerError,
+        match="MATRIXPORT_POSITIONS_(SHARE_ANCHOR|NAV_CLOSURE)",
     ):
         _positions(tmp_path, rows, _fx({"2026-11-06": "1"}))
 
@@ -233,17 +262,60 @@ def test_a_published_unit_nav_that_disagrees_with_the_holdings_fails(
 def test_a_day_without_a_published_unit_nav_is_typed_not_silent(
     tmp_path: Path,
 ) -> None:
-    rows = [_row("2026-11-05", "498.9155"), _row("2026-11-06", "498.6227")]
+    days = _span(30)
+    rows = [_row(day, "10") for day in days]
+    nav_rows = [_nav_row(day, "10") for day in days if day != "2026-11-06"]
     positions = _positions(
-        tmp_path,
-        rows,
-        _fx({"2026-11-05": "1", "2026-11-06": "1"}),
-        nav_rows=[_nav_row("2026-11-05", "498.9155")],
+        tmp_path, rows, _fx({day: "1" for day in days}), nav_rows=nav_rows
     )
-    assert [p["closure_status"] for p in positions] == [
-        "CLOSED_AGAINST_PUBLISHED_NAV",
-        "NAV_DAILY_ABSENT",
-    ]
+    status = {p["as_of_date"]: p["closure_status"] for p in positions}
+    assert status["2026-11-06"] == "NAV_DAILY_ABSENT"
+    assert list(status.values()).count("CONSISTENT_WITH_PUBLISHED_NAV") == 29
+
+
+def test_too_many_untyped_days_are_refused(tmp_path: Path) -> None:
+    # A product-id mismatch would otherwise type every day absent and still pass.
+    days = _span(10)
+    rows = [_row(day, "10") for day in days]
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="MATRIXPORT_POSITIONS_TOO_MANY_GAPS"
+    ):
+        _positions(
+            tmp_path,
+            rows,
+            _fx({day: "1" for day in days}),
+            nav_rows=[_nav_row(days[0], "10").replace(PRODUCT, "1")],
+        )
+
+
+def test_a_consistent_share_forgery_fails_against_the_api_share(tmp_path: Path) -> None:
+    # Share and native_value doubled together: every per-day check is self-consistent, only the
+    # API-reported holding (a different endpoint) can catch it.
+    days = _span(3)
+    rows = [_row(day, "10", share="200") for day in days]
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="MATRIXPORT_POSITIONS_SHARE_ANCHOR"
+    ):
+        _positions(tmp_path, rows, _fx({day: "1" for day in days}))
+
+
+def test_unreconciled_event_shares_are_refused(tmp_path: Path) -> None:
+    days = _span(3)
+    rows = [_row(day, "10") for day in days]
+    manifest, catalog = _setup(tmp_path, rows, event_share="90")
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="MATRIXPORT_POSITIONS_SHARE_ANCHOR"
+    ):
+        ledger._matrixport_positions(  # noqa: SLF001
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {ACCOUNT},
+            STRATEGIES,
+            {},
+            fx_rates=_fx({day: "1" for day in days}),
+        )
 
 
 def test_a_position_that_drifts_from_the_nav_beyond_the_tolerance_is_refused(
@@ -334,12 +406,9 @@ def test_days_cut_out_of_the_middle_are_refused_with_the_dates(tmp_path: Path) -
 def test_an_active_day_without_a_native_value_is_typed_unavailable(
     tmp_path: Path,
 ) -> None:
-    rows = [
-        _row("2026-11-05", "10"),
-        _row("2026-11-06", "10", native=""),
-        _row("2026-11-07", "10"),
-    ]
-    fx = _fx({"2026-11-05": "1", "2026-11-06": "1", "2026-11-07": "1"})
+    days = _span(30)
+    rows = [_row(day, "10", native="" if day == "2026-11-06" else None) for day in days]
+    fx = _fx({day: "1" for day in days})
     positions = _positions(tmp_path, rows, fx)
     by_day = {p["as_of_date"]: p for p in positions}
     gap = by_day["2026-11-06"]
@@ -350,7 +419,7 @@ def test_an_active_day_without_a_native_value_is_typed_unavailable(
         "value": None,
     }
     assert gap["quantity"] == "100"
-    assert by_day["2026-11-05"]["closure_status"] == "CLOSED_AGAINST_PUBLISHED_NAV"
+    assert by_day["2026-11-05"]["closure_status"] == "CONSISTENT_WITH_PUBLISHED_NAV"
 
 
 def test_a_duplicate_product_day_is_refused(tmp_path: Path) -> None:
@@ -391,7 +460,12 @@ def test_the_real_run_closes_independently_and_types_its_gaps(tmp_path: Path) ->
     csv_dir = tmp_path / "output" / RUN_ID / "csv"
     csv_dir.mkdir(parents=True)
     paths = []
-    for name in ("daily_holdings.csv", "nav_daily.csv"):
+    for name in (
+        "daily_holdings.csv",
+        "nav_daily.csv",
+        "holdings.csv",
+        "holding_reconciliation.csv",
+    ):
         target = csv_dir / name
         target.write_bytes((source / name).read_bytes())
         paths.append((target, f"csv/{name}"))
@@ -415,10 +489,10 @@ def test_the_real_run_closes_independently_and_types_its_gaps(tmp_path: Path) ->
         "gen-real", manifest, catalog, tmp_path, {ACCOUNT}, STRATEGIES, {}, fx_rates=fx
     )
     assert len(positions) >= 250
-    assert {p["symbol"] for p in positions} == {"USDT"}
+    assert {p["symbol"] for p in positions} == {"High Sharpe High Vol"}
     assert len({p["security_id"] for p in positions}) == 1
     assert {p["closure_status"] for p in positions} <= {
-        "CLOSED_AGAINST_PUBLISHED_NAV",
+        "CONSISTENT_WITH_PUBLISHED_NAV",
         "NAV_DAILY_ABSENT",
         "NATIVE_VALUE_ABSENT",
     }
