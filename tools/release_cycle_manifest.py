@@ -450,7 +450,10 @@ def _generation_facts(directory: Path) -> dict[str, Any]:
 
     declared = _read_json(directory / "generation.json")
     if not isinstance(declared, dict):
-        return {"verified": False, "as_of": None, "observed_end": None}
+        raise CycleManifestError(
+            "GENERATION_INVALID",
+            f"{directory.name[:12]}: generation.json is not an object",
+        )
     coverage = declared.get("coverage")
     end = coverage.get("observed_end") if isinstance(coverage, dict) else None
     as_of = declared.get("as_of_date")
@@ -554,6 +557,7 @@ def _select_latest(
     cutoff: str,
     evaluated_on: str,
     record_of: Mapping[str, Any] | None = None,
+    allow_older_on_bad_newest: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """Newest verified generation that covers the cutoff and was captured by ``evaluated_on``.
 
@@ -562,10 +566,15 @@ def _select_latest(
     when the provider must reach the cutoff, its observed coverage ends on or after the cutoff.
     The newest ``as_of_date`` wins; a tie is a refusal. Every candidate and its verdict is
     recorded in the resolved cycle, so the choice is bound into everything built on it.
+
+    A newer generation whose finality record is missing or unusable is never skipped silently in
+    favour of an older one: that is a refusal (``FINALITY_RECORD_BAD``) unless
+    ``allow_older_on_bad_newest`` is set, in which case the skip stays visible in the candidates.
     """
 
     required = _coverage_required(provider)
     rows: list[dict[str, Any]] = []
+    bad_record: list[tuple[str, str, str]] = []  # (as_of, generation id, error)
     for path in sorted(p for p in generations.iterdir() if p.is_dir()):
         facts = _generation_facts(path)
         if not facts["verified"]:
@@ -583,8 +592,9 @@ def _select_latest(
                     final, _pin_unused = _read_finality_record(
                         what, record_of["root"], record_of["provider_id"], path.name
                     )
-                except CycleManifestError:
+                except CycleManifestError as exc:
                     verdict = "REJECTED_NO_FINALITY_RECORD"
+                    bad_record.append((facts["as_of"], path.name, f"{exc.code}: {exc}"))
                 else:
                     if required and final < cutoff:
                         verdict = "REJECTED_FINALITY_BEFORE_CUTOFF"
@@ -611,6 +621,16 @@ def _select_latest(
         raise CycleManifestError(
             "AMBIGUOUS_GENERATION",
             f"{what}: {len(best)} eligible generations share as_of {newest} ({shown})",
+        )
+    newer_bad = [b for b in bad_record if b[0] > newest]
+    if newer_bad and not allow_older_on_bad_newest:
+        as_of, generation_id, error = max(newer_bad)
+        raise CycleManifestError(
+            "FINALITY_RECORD_BAD",
+            f"{what}: the newest generation {generation_id[:12]} (as_of {as_of}) has no usable "
+            f"finality record ({error}); refusing to fall back to the older "
+            f"{best[0]['generation_id'][:12]} (as_of {newest}). Fix the record, or pass "
+            "--allow-older-on-bad-newest to accept the older generation on purpose",
         )
     for row in rows:
         if row is best[0]:
@@ -655,6 +675,7 @@ def _generation(
     roots: Mapping[str, Path],
     cutoff: str,
     evaluated_on: str,
+    allow_older_on_bad_newest: bool = False,
 ) -> dict[str, Any]:
     what = provider_id
     root = _resolve_ref(provider["root"], roots, f"{what}.root")
@@ -676,6 +697,7 @@ def _generation(
             {"root": root, "provider_id": provider_id}
             if provider["finality_source"] != GENERATION_MANIFEST
             else None,
+            allow_older_on_bad_newest,
         )
         directory = generations / generation_id
     elif chosen["mode"] == "explicit":
@@ -757,7 +779,10 @@ def _generation(
 
 
 def resolve(
-    manifest_bytes: bytes, roots: Mapping[str, Path], manifest_sha256: str | None = None
+    manifest_bytes: bytes,
+    roots: Mapping[str, Path],
+    manifest_sha256: str | None = None,
+    allow_older_on_bad_newest: bool = False,
 ) -> dict[str, Any]:
     digest = _sha256(manifest_bytes)
     if manifest_sha256 is not None and manifest_sha256 != digest:
@@ -786,6 +811,7 @@ def resolve(
                 roots,
                 manifest["cutoff"],
                 manifest["evaluated_on"],
+                allow_older_on_bad_newest,
             )
             for provider_id, provider in sorted(manifest["providers"].items())
         },
@@ -858,6 +884,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands.choices["resolve"].add_argument(
         "--out", type=Path, help="create-only; stdout when absent"
     )
+    for name in ("validate", "resolve"):
+        commands.choices[name].add_argument(
+            "--allow-older-on-bad-newest",
+            action="store_true",
+            help="late mode: accept an older generation when the newest has no usable finality record",
+        )
     write = commands.add_parser(
         "write-finality",
         help="a capture stage records the finality of the generation it just created",
@@ -898,7 +930,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "release-cycle-manifest: static checks OK (no roots given; files not checked)"
             )
             return 0
-        resolved = resolve(data, roots, args.manifest_sha256)
+        resolved = resolve(
+            data,
+            roots,
+            args.manifest_sha256,
+            getattr(args, "allow_older_on_bad_newest", False),
+        )
         _note_legacy(resolved)
         schema_problem = _resolved_errors(resolved)
         if schema_problem:

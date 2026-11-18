@@ -532,3 +532,8 @@ generation without a valid record is not eligible (`REJECTED_NO_FINALITY_RECORD`
 `REJECTED_FINALITY_BEFORE_CUTOFF`. A capture stage writes the record, create-only, with
 `release_cycle_manifest.write_finality_record(...)` or
 `python tools/release_cycle_manifest.py write-finality --provider-root DIR --provider-id P --generation-id G --finalized-through D --evidence REL`.
+
+A bad newest generation is never skipped silently: when the newest generation under a late-bound provider has a missing or
+unusable finality record and an older one would be selected, `resolve` refuses (`FINALITY_RECORD_BAD`, naming both). Pass
+`--allow-older-on-bad-newest` to accept the older generation on purpose; the skip stays visible in `selection.candidates`.
+A `generation.json` that is not a JSON object is `GENERATION_INVALID`.
