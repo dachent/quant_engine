@@ -2586,10 +2586,16 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
 
     The pins moved once, with cluster 2 task T1 (the catalog gained the
     ``current_capital`` and ``audit_snapshot`` blocks and the two audit checks
-    left ``reconciliation_checks``; the builder version went 1.2.0 -> 1.3.0; R2.1 then added the per-strategy execution_cost block and the optional cost evidence, 1.3.0 -> 1.4.0).
+    left ``reconciliation_checks``; the builder version went 1.2.0 -> 1.3.0; R2.1 then added the per-strategy execution_cost block and the optional cost evidence, 1.3.0 -> 1.4.0; the costs fact then counts derived and classified cost rows, 1.4.0 -> 1.5.0: only the manifest hash moved, the catalog bytes of this fixture did not).
     ``test_allocations_stay_byte_identical_to_the_dated_audit_snapshot`` proves
     that nothing else moved: undoing exactly those changes reproduces the
-    previous catalog hash ``fde46f73...``."""
+    previous catalog hash ``fde46f73...``.
+
+    Moved again when the nav fact claim began disclosing calendar
+    MISSING_ON_PROVIDER_OBSERVED_DATE days: with the reserve refresh (the ledger NAV rows
+    admitted for reserve-pool accounts) the fixture's account-schwab-b has one provider-observed
+    day (2026-07-02) with no NAV observation, so fact_coverage[nav].known_gaps gained exactly one
+    line; nothing else in the catalog differs (catalog 9be761a4... -> 98205cbc...)."""
     spec_path, _spec_data = _spec(tmp_path)
     output_root = tmp_path / "private-output"
     evidence = baseline.stage_baseline(spec_path, output_root)
@@ -2599,11 +2605,11 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
     assert b'"hwm_inputs"' not in catalog_bytes
     assert (
         hashlib.sha256(catalog_bytes).hexdigest()
-        == "9be761a40d9b6254edb8091a2dd4a76a4e0c2e0507f45db3674dabd26a5d9c72"
+        == "98205cbcba50d8306d6091a473d16e2db04b51301fbfc37ae448a96d3896d6fd"
     )
     assert (
         hashlib.sha256(manifest_bytes).hexdigest()
-        == "e33b4af4cb47ab99acad2d8156b3c1b0f16cc6716299d466b6311bb826d2d8ec"
+        == "e6878ea7afe4fc9f8b01f64d71397ceec3938984462902ff64cc775d1484d92b"
     )
 
 
@@ -4232,6 +4238,22 @@ def test_allocations_stay_byte_identical_to_the_dated_audit_snapshot(
     legacy["costs"] = [
         {key: value for key, value in row.items() if key != "execution_cost"}
         for row in catalog["costs"]
+    ]
+    # The nav fact claim later began disclosing calendar days missing on provider-observed
+    # dates (a known_gaps line, present here because the reserve refresh admits the fixture's
+    # account-schwab-b ledger rows): that line is the only difference it adds.
+    legacy["fact_coverage"] = [
+        {
+            **row,
+            "known_gaps": [
+                gap
+                for gap in row.get("known_gaps", [])
+                if "NAV day(s) missing on provider-observed dates" not in gap
+            ],
+        }
+        if "known_gaps" in row
+        else row
+        for row in catalog["fact_coverage"]
     ]
     assert (
         hashlib.sha256(canonical_json_bytes(legacy)).hexdigest()
@@ -5878,7 +5900,7 @@ def test_statement_reserve_pin_carrying_a_role_is_read(tmp_path: Path) -> None:
         "role": "EXCLUDED_IMMATERIAL",
     }
     facts = baseline._statement_reserve_facts([pin], date(2026, 9, 17))
-    assert facts["excluded"], facts
+    assert facts["nav"], facts
 
 
 def test_statement_reserve_pin_with_a_misspelled_key_is_refused(tmp_path: Path) -> None:
@@ -5960,7 +5982,6 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
     spec["provider_ledger"] = ref
     spec["statement_reserves"] = [
         _statement_pin(tmp_path, "c", "JOHN_HANCOCK", "RESERVE"),
-        _statement_pin(tmp_path, "d", "COMPOSER", "EXCLUDED_IMMATERIAL"),
     ]
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
 
@@ -5977,5 +5998,228 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
         r for r in catalog["calendar_coverage"] if r["account_id"] == "account-jh"
     ]
     assert [r["status"] for r in jh_calendar] == ["STATEMENT_CADENCE_NAV_OBSERVATIONS"]
+    jh_nav = next(
+        r
+        for r in catalog["fact_coverage_matrix"]
+        if r["account_id"] == "account-jh" and r["fact_type"] == "nav"
+    )
+    assert (jh_nav["authority"], jh_nav["cadence"]) == (
+        "PINNED_STATEMENT_POINTS",
+        "STATEMENT_PERIODIC",
+    )
+    jh_points = [
+        r for r in catalog["nav_observations"] if r["account_id"] == "account-jh"
+    ]
+    assert jh_points and all(
+        r["statement_catalog_sha256"] == spec["statement_reserves"][0]["sha256"]
+        for r in jh_points
+    )
     assert members["account-jh"]["authority"] == "AUTHORITATIVE"
     assert members["account-jh"]["as_of_date"] == "2026-06-30"
+
+
+def test_statement_excluded_point_binds_to_the_retained_member_and_counts_once(
+    tmp_path: Path,
+) -> None:
+    """Kill test (#900 Composer): the point lands on the census retained-excluded member
+    account, so the retained-excluded value is that point exactly once (no extra statement
+    addend) and the independent recompute agrees; bound elsewhere it is refused."""
+
+    pin = _statement_pin(tmp_path, "d", "COMPOSER", "EXCLUDED_IMMATERIAL")
+    facts = baseline._statement_reserve_facts([pin], date(2026, 9, 17))
+    assert facts["excluded"] == []
+    census = [{"account_id": "acct-z1", "provider": "COMPOSER", "role": "INVESTMENT"}]
+    nav, _ = baseline._bind_statement_accounts(facts, census, {"acct-z1"})
+    assert [r["account_id"] for r in nav] == ["acct-z1"]
+    with pytest.raises(baseline.BaselineValidationError, match="retained-excluded"):
+        baseline._bind_statement_accounts(facts, census, {"acct-other"})
+
+    case = _cc_case()
+    case["provider_admissions"] = [
+        row for row in case["provider_admissions"] if row["account_id"] != "acct-r1"
+    ] + [
+        _cc_admission("acct-r1", "AUTHORITATIVE"),
+        _cc_admission("acct-r2", "AUTHORITATIVE"),
+    ]
+    case["nav"].append(_cc_nav("acct-r2", "2026-09-17", "10"))
+    # e1 carries 5; z1 (the census Composer member) had no NAV until the bound point
+    case["nav"].append(_cc_nav("acct-z1", "2026-09-01", "20", source_key="manual"))
+    block = baseline._build_current_capital(**case)
+    assert block["retained_excluded"]["status"] == "AVAILABLE"
+    assert block["retained_excluded"]["current_value"]["value"] == "25"
+    rows = baseline._current_capital_checks(
+        block,
+        assignments=case["assignments"],
+        nav=case["nav"],
+        provider_admissions=case["provider_admissions"],
+    )
+    assert {r["check_id"]: r for r in rows}["capital-identity-at-cutoff"][
+        "status"
+    ] == "PASS"
+
+
+def test_total_liquid_lists_every_parts_own_date_and_is_dated_at_the_oldest() -> None:
+    """Ruling F2: never a mixed-date sum labelled at one day."""
+
+    case = _cc_case()
+    case["provider_admissions"] = [
+        row for row in case["provider_admissions"] if row["account_id"] != "acct-r1"
+    ] + [
+        _cc_admission("acct-r1", "AUTHORITATIVE"),
+        _cc_admission("acct-r2", "AUTHORITATIVE"),
+    ]
+    case["nav"].append(_cc_nav("acct-r2", "2026-09-17", "10"))
+    case["nav"].append(_cc_nav("acct-z1", "2026-09-01", "2.5", source_key="manual"))
+
+    total = baseline._build_current_capital(**case)["total_liquid"]
+
+    assert total["status"] == "AVAILABLE"
+    parts = total["part_dates"]
+    assert {p["part"] for p in parts} >= {
+        "systematic",
+        "retained_excluded:echo-x",
+        "retained_excluded:zulu-x",
+    }
+    assert any(p["part"].startswith("reserve:JOHN HANCOCK:acct-r2") for p in parts)
+    dates = [p["as_of_date"] for p in parts if p["as_of_date"] is not None]
+    assert total["as_of_date"] == min(dates)
+
+
+@pytest.mark.parametrize(
+    "schema_name",
+    ("report-data.schema.json", "control-panel-data.schema.json"),
+)
+def test_total_liquid_with_part_dates_validates_in_report_and_panel_schemas(
+    schema_name: str,
+) -> None:
+    """Kill test: the published projections accept the per-part dates (ruling F2); the
+    first AVAILABLE total liquid must not be refused by a closed aggregate definition."""
+
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas" / "portfolio" / schema_name).read_text(
+            encoding="utf-8"
+        )
+    )
+    node = {
+        "$ref": "#/$defs/custody_handoff_current_aggregate",
+        "$defs": schema["$defs"],
+    }
+    total = {
+        "as_of_date": "2026-09-30",
+        "components": ["reserve", "retained_excluded", "systematic"],
+        "current_value": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+        "part_dates": [
+            {"as_of_date": "2026-11-06", "part": "systematic"},
+            {"as_of_date": "2026-09-30", "part": "reserve:JOHN HANCOCK:account-x"},
+        ],
+        "reason": None,
+        "status": "AVAILABLE",
+    }
+    Draft202012Validator(node).validate(total)
+    with pytest.raises(ValidationError):
+        Draft202012Validator(node).validate({**total, "unknown_key": 1})
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    (("MAPPING_NO_ACTIVE_INTERVAL", ("45", "2026-07-29")), ("OTHER_REASON", None)),
+)
+def test_reserve_account_total_nav_needs_no_strategy_interval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    expected: tuple[str, str] | None,
+) -> None:
+    """Refresh kill test: a reserve-pool account's later AUTHORITATIVE NAV that the ledger
+    left UNMAPPED (no active strategy interval) is its account total and is admitted;
+    an UNMAPPED row for any other reason is still not."""
+
+    spec_path, spec = _spec(tmp_path, reserve_accounts=("account-schwab-b",))
+    row = {
+        **_ledger_nav("account-schwab-b", "schwab", "2026-07-29", "45"),
+        "mapping_status": "UNMAPPED",
+        "mapping_reason": reason,
+    }
+    root, ref = _provider_ledger_generation(
+        tmp_path,
+        catalog_schema_version=2,
+        nav_observations=[row],
+        admissions=[_ledger_admission("account-schwab-b", "schwab", "AUTHORITATIVE")],
+    )
+    spec["roots"]["provider-ledger"] = str(root)
+    spec["schema_version"] = 3
+    spec["provider_ledger"] = ref
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(
+        baseline,
+        "_hwm_policy_exclusions",
+        lambda: (
+            RETIRED_EXCLUSIONS
+            | {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)}
+        ),
+    )
+
+    catalog, _, _ = baseline.build_catalog(spec_path)
+
+    members = {
+        m["account_id"]: m for m in catalog["current_capital"]["reserve"]["members"]
+    }
+    member = members["account-schwab-b"]
+    if expected is None:
+        assert member["as_of_date"] != "2026-07-29"
+    else:
+        assert (member["value"]["value"], member["as_of_date"]) == expected
+
+
+def _nav_claim(calendar: list[dict[str, Any]]) -> dict[str, Any]:
+    accounts = [{"account_id": "acct-ibkr", "role": "INVESTMENT", "provider": "IBKR"}]
+    claims, _ = baseline._fact_coverage(
+        accounts, [], [], [], [], [], 0, date(2026, 11, 6), calendar=calendar
+    )
+    return next(c for c in claims if c["fact_type"] == "nav")
+
+
+def test_nav_missing_on_provider_observed_dates_is_a_disclosed_gap_not_clean() -> None:
+    """Kill test: a live account with NAV missing on dates its provider observed (the IBKR
+    f34e5b78 2026-01/02 window) must not read 'Accepted within the declared boundary'."""
+
+    days = ["2026-01-01", "2026-01-02", "2026-01-05"]
+    calendar = [
+        {
+            "account_id": "acct-ibkr",
+            "provider": "IBKR",
+            "date": day,
+            "status": "MISSING_ON_PROVIDER_OBSERVED_DATE",
+        }
+        for day in days
+    ]
+
+    claim = _nav_claim(calendar)
+
+    assert claim["status"] == "PARTIAL"
+    assert claim["known_gaps"] == [
+        "3 NAV day(s) missing on provider-observed dates for account acct-ibkr "
+        "(IBKR), 2026-01-01..2026-01-05: no NAV observation despite the provider "
+        "reporting those dates"
+    ]
+
+
+def test_nav_claim_stays_clean_when_the_calendar_has_no_missing_days() -> None:
+    calendar = [
+        {
+            "account_id": "acct-ibkr",
+            "provider": "IBKR",
+            "date": "2026-01-02",
+            "status": status,
+        }
+        for status in (
+            "OBSERVED",
+            "NON_BUSINESS_WEEKEND",
+            "UNRESOLVED_NO_CALENDAR_EVIDENCE",
+        )
+    ]
+
+    claim = _nav_claim(calendar)
+
+    assert claim["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert claim["known_gaps"] == []

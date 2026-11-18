@@ -103,14 +103,15 @@ def test_a_lens_with_an_extra_unplanned_source_still_blocks(tmp_path: Path) -> N
 
 
 def test_the_lag_is_read_from_the_plan_policy_id(tmp_path: Path) -> None:
-    """A 60 day policy makes 2026-06 the last eligible month at 2026-09-17."""
+    """A 60 day policy makes 2026-06 the last eligible month at 2026-09-17; the 45 day policy
+    makes it 2026-07, so the same 2026-06 lens is stale under 45 days and current under 60."""
 
     plan = copy.deepcopy(PLAN)
     for source in ("us-economic", "europe-economic"):
         plan["sources"][source]["freshness_policy_id"] = POLICY_60
-    assert _classes(tmp_path / "late", "ECONOMIC_FACTOR", BOTH, plan) == {
-        checks.BLOCKER_AUTHORITY
-    }
+    assert _classes(
+        tmp_path / "june45", "ECONOMIC_FACTOR", BOTH, as_of="2026-06-30"
+    ) == {checks.BLOCKER_AUTHORITY}
     assert (
         _classes(tmp_path / "june", "ECONOMIC_FACTOR", BOTH, plan, as_of="2026-06-30")
         == set()

@@ -224,6 +224,20 @@ def _fixture(
         ],
     }
     policy = {
+        "adverse_loss_rule": {
+            "rule_id": "underwriting_stressed_component_max_drawdown",
+            "prior_multiplier": "1.25",
+            "live_multiplier": "1.5",
+            "platform_only_uplift": "0.05",
+            "cap": "1",
+            "minimum_live_observations": "0",
+            "statement": "synthetic",
+            "audit_input": {
+                "file": "synthetic.csv",
+                "sha256": "f" * 64,
+                "note": "synthetic",
+            },
+        },
         "history_authority": {
             "generation_id": "a" * 64,
             "receipt_sha256": "b" * 64,
@@ -239,7 +253,11 @@ def _fixture(
                 "strategy_id": strategy_id,
                 "series_id": series_id,
                 "allocation_weight": weight,
-                "adverse_loss_fraction": loss,
+                "audit_adverse_loss_fraction": loss,
+                "platform_only_history": False,
+                "backtest_layer_required": False,
+                # the rule gives the stated loss: 1.25 x this prior, above 1.5 x the fixture's live drawdown
+                "prior_max_drawdown": str(Decimal(loss) / Decimal("1.25")),
             }
             for strategy_id, series_id, weight, loss in (
                 ("alpha", "Alpha", "0.2", "0.3"),
