@@ -469,6 +469,8 @@ def test_a_position_derived_from_a_later_snapshot_keeps_its_own_basis_and_says_s
         "position inferred, not observed: derived at cutoff from a later snapshot "
         "(captured 2026-09-25); net zero change in the account total over the days since "
         "the cutoff, holdings/cash split inferred from the 2026-09-22 page; "
-        "per-symbol split not proven from 2026-09-19 to 2026-09-22"
+        "same-total reallocation cannot be excluded between 2026-09-19 and 2026-09-25; "
+        "the 2026-09-22 page fixes only the later holdings, so the per-symbol split is "
+        "not proven for those days"
     )
     assert row["snapshot_status"] == "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"

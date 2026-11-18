@@ -8658,7 +8658,9 @@ def _positions(
                 "total over the days since the cutoff, holdings/cash split inferred from "
                 + (f"the {window[1]} page" if len(window) == 2 else "the capture")
                 + (
-                    f"; per-symbol split not proven from {window[0]} to {window[1]}"
+                    f"; same-total reallocation cannot be excluded between {window[0]} "
+                    f"and {item.get('capture_date')}; the {window[1]} page fixes only the "
+                    "later holdings, so the per-symbol split is not proven for those days"
                     if len(window) == 2
                     else ""
                 )
