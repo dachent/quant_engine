@@ -463,3 +463,48 @@ def test_a_statement_derived_financing_row_is_admitted_only_under_the_provider_g
         match="materialized provider fact cutoff or generation differs",
     ):
         _verify(forged, authority)
+
+
+def test_the_ledger_refuses_a_catalog_carrying_a_derived_position_row(
+    point_stage: PointStage, tmp_path: Path
+) -> None:
+    """KILL: a DERIVED_AT_CUTOFF row is not selected-point evidence; the seam refuses it."""
+
+    _, authority, _ = point_stage
+    _, original_manifest, catalog = _selected(authority)
+    derived = copy.deepcopy(catalog["positions"][0])
+    derived.update(
+        {
+            "as_of_date": CUTOFF.isoformat(),
+            "as_of_basis": "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT",
+            "evidence_class": "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT",
+            "record_id": "position-derived-" + "0" * 16,
+            "security_id": "security-schwab-" + "1" * 24,
+            "symbol": "SWVXX",
+        }
+    )
+    derived.pop("observed_at", None)
+    catalog["positions"].append(derived)
+    content = canonical_json_bytes(catalog)
+    manifest = GenerationManifest.build(
+        as_of_date=original_manifest.as_of_date,
+        adapter=original_manifest.adapter,
+        coverage=original_manifest.coverage,
+        verification=original_manifest.verification,
+        artifacts=tuple(
+            replace(
+                a, sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content)
+            )
+            if a.artifact_id == "schwab-generation.json"
+            else a
+            for a in original_manifest.artifacts
+        ),
+    )
+    generation = tmp_path / "generations" / manifest.generation_id
+    generation.mkdir(parents=True)
+    (generation / "generation.json").write_bytes(manifest.to_json_bytes())
+    (generation / "schwab-generation.json").write_bytes(content)
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="position record/date/clock scope differs"
+    ):
+        ledger._schwab_position_observation(catalog, manifest, tmp_path, REQUESTED)
