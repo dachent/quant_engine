@@ -1411,6 +1411,11 @@ details.orthogonal-data { margin-top: 12px; }
 @media (max-width: 760px) {
   .perf-tooltip { position: static; max-width: none; width: 100%; max-height: 200px; margin-top: 6px; }
 }
+/* Fixed-viewBox charts keep a readable text size on a phone: scroll sideways inside the card instead of shrinking to 4 px. */
+@media (max-width: 760px) {
+  .capital-chart-wrap, .risk-contrib { overflow-x: auto; }
+  .capital-chart, .risk-contrib > .perf-svg { min-width: 760px; }
+}
 
 /* ===== BEGIN strategy concepts ===== */
 .concept-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 14px; margin-top: 10px; }
