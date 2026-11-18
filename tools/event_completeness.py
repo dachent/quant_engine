@@ -33,10 +33,17 @@ DECLARED_COMPLETE: Final = "DECLARED_COMPLETE"
 CLOSURE_FAILED: Final = "CLOSURE_FAILED"
 CLOSURE_IBKR_FLOWS: Final = "IBKR_CHANGE_IN_NAV_FLOW_TIE_OUT"
 CLOSURE_SCHWAB_EMPTY: Final = "SCHWAB_EMPTY_POSITION_SET"
+CLOSURE_QUANTBASE_POSITIONS: Final = "QUANTBASE_HOLDINGS_SNAPSHOT_AT_CUTOFF"
 _CLOSURES: Final = {
     CLOSURE_IBKR_FLOWS: ("ibkr", "flows"),
     CLOSURE_SCHWAB_EMPTY: ("schwab", "positions"),
+    CLOSURE_QUANTBASE_POSITIONS: ("quantbase", "positions"),
 }
+_QUANTBASE_VALUE_BASES: Final = frozenset(
+    {"DERIVED_FROM_STRATEGY_NAV_AT_CUTOFF", "CAPTURE_TIME_SNAPSHOT_VALUE"}
+)
+_QUANTBASE_CENT: Final = Decimal("0.01")
+_QUANTBASE_CLOSE_TOLERANCE: Final = Decimal("0.001")
 # Typed outcomes that are NOT completeness: the evidence files are cited by hash and the ledger
 # verifies each file, but nothing is proved about the events themselves.
 OUTCOME_CAPTURED_NOT_ADMITTED: Final = "CAPTURED_NOT_ADMITTED"
@@ -406,6 +413,138 @@ def _evaluate_schwab_empty(
     return checks, []
 
 
+def _evaluate_quantbase_positions(
+    declaration: Declaration,
+    nav_values: Mapping[date, Decimal | None],
+    positions: Sequence[Mapping[str, Any]],
+    as_of_date: date,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The strategy's holdings at the cutoff are a verified capture-time snapshot.
+
+    Evaluated on the ledger rows alone (the cited evidence files are hash-verified by the
+    ledger).  Every check must pass: the interval is the cutoff day; position rows exist for
+    exactly that day; the independent price check is ``PASSED`` (never defaulted) with the
+    official close dated the cutoff; nothing happened in the account after the cutoff and the
+    snapshot closes to the cent; the rows plus the cash equal the LEDGER's strategy NAV of that
+    day (not the figure stored in the row) to the cent; shares times the official close match
+    each value within 0.1 percent; and the value basis is one the builder emits.
+    """
+
+    start, end = declaration.declared_start, declaration.declared_end
+    account = declaration.account_id
+    checks: list[dict[str, Any]] = []
+
+    def record(name: str, failures: int, detail: dict[str, Any] | None = None) -> None:
+        checks.append(
+            {
+                "check": name,
+                "status": "PASS" if failures == 0 else "FAIL",
+                "failures": failures,
+                **(detail or {}),
+            }
+        )
+
+    record(
+        "INTERVAL_IS_THE_CUTOFF_DAY",
+        0 if start == end == as_of_date else 1,
+    )
+    rows = [
+        p
+        for p in positions
+        if p.get("account_id") == account and p.get("as_of_date") == end.isoformat()
+    ]
+    record(
+        "POSITION_ROWS_AT_THE_CUTOFF_FROM_QUANTBASE",
+        0 if rows and all(p.get("provider_id") == "quantbase" for p in rows) else 1,
+        {"rows": len(rows)},
+    )
+
+    def closure_of(row: Mapping[str, Any]) -> Mapping[str, Any]:
+        value = row.get("closure")
+        return value if isinstance(value, Mapping) else {}
+
+    record(
+        "INDEPENDENT_PRICE_CHECK_PASSED",
+        sum(
+            1
+            for p in rows
+            if closure_of(p).get("independent_price_check") != "PASSED"
+            or closure_of(p).get("independent_close_date") != end.isoformat()
+        )
+        if rows
+        else 1,
+    )
+
+    def number(value: object) -> Decimal | None:
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+        return parsed if parsed.is_finite() else None
+
+    def activity_failures() -> int:
+        bad = 0
+        for p in rows:
+            c = closure_of(p)
+            difference = number(c.get("snapshot_difference_usd"))
+            snapshot_day = str(c.get("snapshot_day") or "")
+            if (
+                c.get("activity_after_cutoff_count") != 0
+                or difference is None
+                or abs(difference) > _QUANTBASE_CENT
+                or not snapshot_day
+                or snapshot_day < end.isoformat()
+            ):
+                bad += 1
+        return bad if rows else 1
+
+    record(
+        "NO_ACTIVITY_AFTER_CUTOFF_AND_SNAPSHOT_CLOSES_TO_THE_CENT", activity_failures()
+    )
+    values = [
+        number(p["market_value"].get("value"))
+        if isinstance(p.get("market_value"), Mapping)
+        and p["market_value"].get("status") == "AVAILABLE"
+        else None
+        for p in rows
+    ]
+    cash = number(closure_of(rows[0]).get("usd_cash")) if rows else None
+    ledger_nav = nav_values.get(end)
+    record(
+        "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV",
+        0
+        if rows
+        and cash is not None
+        and ledger_nav is not None
+        and all(v is not None for v in values)
+        and abs(
+            sum((v for v in values if v is not None), Decimal(0)) + cash - ledger_nav
+        )
+        <= _QUANTBASE_CENT
+        else 1,
+    )
+    mismatched = 0
+    for p, value in zip(rows, values, strict=True):
+        quantity = number(p.get("quantity"))
+        close = number(closure_of(p).get("independent_close"))
+        if (
+            quantity is None
+            or close is None
+            or value is None
+            or value == 0
+            or abs(quantity * close - value) > _QUANTBASE_CLOSE_TOLERANCE * abs(value)
+        ):
+            mismatched += 1
+    record("SHARES_TIMES_OFFICIAL_CLOSE_MATCH_VALUE", mismatched if rows else 1)
+    record(
+        "VALUE_BASIS_IS_ONE_THE_BUILDER_EMITS",
+        sum(1 for p in rows if p.get("value_basis") not in _QUANTBASE_VALUE_BASES)
+        if rows
+        else 1,
+    )
+    return checks, []
+
+
 def _evaluate_ibkr_flows(
     declaration: Declaration,
     flows: Sequence[Mapping[str, Any]],
@@ -580,6 +719,13 @@ def evaluate(
                     "failures": 1,
                 }
             ]
+        elif declaration.closure == CLOSURE_QUANTBASE_POSITIONS:
+            checks, proven_ids = _evaluate_quantbase_positions(
+                declaration,
+                nav_values_by_account.get(declaration.account_id, {}),
+                positions,
+                as_of_date,
+            )
         elif declaration.closure == CLOSURE_SCHWAB_EMPTY:
             checks, proven_ids = _evaluate_schwab_empty(
                 declaration,

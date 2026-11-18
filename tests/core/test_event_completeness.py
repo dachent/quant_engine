@@ -687,3 +687,169 @@ def test_a_complete_flow_closure_names_each_proven_record_with_date_and_canonica
             "amount": "300",
         }
     ]
+
+
+# ------------------------------------------------------------------ Quantbase positions
+
+QB = "account-quantbase-q"
+QB_DAY = date(2026, 11, 6)
+
+
+def _qb_row(**over: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "account_id": QB,
+        "as_of_date": QB_DAY.isoformat(),
+        "provider_id": "quantbase",
+        "symbol": "SHV",
+        "quantity": "436.19",
+        "market_value": {"currency": "USD", "status": "AVAILABLE", "value": "48037.62"},
+        "value_basis": "DERIVED_FROM_STRATEGY_NAV_AT_CUTOFF",
+        "closure": {
+            "usd_cash": "20.00",
+            "nav_usd": "48057.62",
+            "snapshot_day": "2026-11-09",
+            "snapshot_difference_usd": "0.00",
+            "activity_after_cutoff_count": 0,
+            "independent_price_check": "PASSED",
+            "independent_close": "110.12999725",
+            "independent_close_date": QB_DAY.isoformat(),
+        },
+    }
+    for key, value in over.items():
+        if key == "closure":
+            row["closure"] = {**row["closure"], **value}
+        else:
+            row[key] = value
+    return row
+
+
+def _qb_run(
+    rows: list[dict[str, Any]] | None = None,
+    nav: Decimal | None = Decimal("48057.62"),
+    **entry_over: Any,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "account_id": QB,
+        "fact_type": "positions",
+        "closure": ec.CLOSURE_QUANTBASE_POSITIONS,
+        "declared_start": QB_DAY.isoformat(),
+        "declared_end": QB_DAY.isoformat(),
+    }
+    fields.update(entry_over)
+    entry = _entry(**fields)
+    return ec.evaluate(
+        ec.load_declaration(_doc(entry)),
+        flows=[],
+        change_in_nav_by_provider={},
+        nav_values_by_account={QB: {QB_DAY: nav} if nav is not None else {}},
+        account_provider={QB: "quantbase"},
+        as_of_date=QB_DAY,
+        positions=[_qb_row()] if rows is None else rows,
+    )[0]
+
+
+def _qb_failed(row: dict[str, Any]) -> set[str]:
+    return {c["check"] for c in row["checks"] if c["status"] == "FAIL"}
+
+
+def test_a_verified_quantbase_snapshot_is_declared_complete() -> None:
+    row = _qb_run()
+    assert row["status"] == ec.DECLARED_COMPLETE, row["checks"]
+    assert row["provider_id"] == "quantbase" and row["fact_type"] == "positions"
+
+
+@pytest.mark.parametrize(
+    "rows,failed",
+    [
+        (
+            [_qb_row(closure={"independent_price_check": "UNAVAILABLE"})],
+            "INDEPENDENT_PRICE_CHECK_PASSED",
+        ),
+        (
+            [_qb_row(closure={"independent_price_check": None})],
+            "INDEPENDENT_PRICE_CHECK_PASSED",
+        ),
+        (
+            [_qb_row(closure={"independent_close_date": "2026-11-05"})],
+            "INDEPENDENT_PRICE_CHECK_PASSED",
+        ),
+        (
+            [_qb_row(closure={"activity_after_cutoff_count": 1})],
+            "NO_ACTIVITY_AFTER_CUTOFF_AND_SNAPSHOT_CLOSES_TO_THE_CENT",
+        ),
+        (
+            [_qb_row(closure={"snapshot_difference_usd": "240.00"})],
+            "NO_ACTIVITY_AFTER_CUTOFF_AND_SNAPSHOT_CLOSES_TO_THE_CENT",
+        ),
+        (
+            [_qb_row(closure={"snapshot_day": "2026-11-05"})],
+            "NO_ACTIVITY_AFTER_CUTOFF_AND_SNAPSHOT_CLOSES_TO_THE_CENT",
+        ),
+        ([_qb_row(quantity="400")], "SHARES_TIMES_OFFICIAL_CLOSE_MATCH_VALUE"),
+        (
+            [_qb_row(value_basis="SELF_ASSERTED")],
+            "VALUE_BASIS_IS_ONE_THE_BUILDER_EMITS",
+        ),
+        ([_qb_row(provider_id="schwab")], "POSITION_ROWS_AT_THE_CUTOFF_FROM_QUANTBASE"),
+        (
+            [_qb_row(as_of_date="2026-11-05")],
+            "POSITION_ROWS_AT_THE_CUTOFF_FROM_QUANTBASE",
+        ),
+        ([], "POSITION_ROWS_AT_THE_CUTOFF_FROM_QUANTBASE"),
+    ],
+)
+def test_a_quantbase_snapshot_that_fails_any_check_is_not_declared_complete(
+    rows: list[dict[str, Any]], failed: str
+) -> None:
+    """KILL: each proof is required; an absent or defaulted one fails."""
+
+    row = _qb_run(rows)
+    assert row["status"] == ec.CLOSURE_FAILED
+    assert failed in _qb_failed(row)
+
+
+def test_rows_plus_cash_must_equal_the_ledger_nav_not_the_stored_figure() -> None:
+    """KILL: the row's own nav_usd says it closes; the ledger's NAV says it does not."""
+
+    row = _qb_run(nav=Decimal("48999.00"))
+    assert "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV" in _qb_failed(row)
+    assert "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV" in _qb_failed(_qb_run(nav=None))
+
+
+def test_the_interval_must_be_the_cutoff_day() -> None:
+    row = _qb_run(declared_start="2026-11-05")
+    assert "INTERVAL_IS_THE_CUTOFF_DAY" in _qb_failed(row)
+
+
+def test_the_quantbase_closure_refuses_another_providers_account() -> None:
+    entry = _entry(
+        account_id=A,
+        fact_type="positions",
+        closure=ec.CLOSURE_QUANTBASE_POSITIONS,
+        declared_start=QB_DAY.isoformat(),
+        declared_end=QB_DAY.isoformat(),
+    )
+    row = ec.evaluate(
+        ec.load_declaration(_doc(entry)),
+        flows=[],
+        change_in_nav_by_provider={},
+        nav_values_by_account={},
+        account_provider={A: "ibkr"},
+        as_of_date=QB_DAY,
+        positions=[_qb_row(account_id=A)],
+    )[0]
+    assert row["status"] == ec.CLOSURE_FAILED
+    assert "ACCOUNT_BELONGS_TO_CLOSURE_PROVIDER" in _qb_failed(row)
+
+
+def test_the_quantbase_closure_fits_only_the_positions_fact() -> None:
+    with pytest.raises(ec.EventCompletenessError):
+        ec.load_declaration(
+            _doc(
+                _entry(
+                    account_id=QB,
+                    fact_type="flows",
+                    closure=ec.CLOSURE_QUANTBASE_POSITIONS,
+                )
+            )
+        )
