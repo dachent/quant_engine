@@ -860,3 +860,44 @@ def test_an_observed_cash_debit_of_any_size_replaces_an_interest_zero(
         and r["classification"] == "ZERO_FINANCING_OBSERVED"
     ]
     zf.validate_rows(artifact, {ACCOUNT})
+
+
+def test_the_printed_cash_summary_columns_are_returned_with_the_ladder() -> None:
+    """F2: deposits/withdrawals (cash only) survive instead of being discarded."""
+
+    ladder, begin, why, totals = zf.parse_cash_ladder_totals(
+        RAW, date(2026, 3, 1), date(2026, 3, 31)
+    )
+    assert why == "CASH_LADDER_CLOSES" and ladder is not None and begin == 100
+    assert totals == {
+        "beginning_cash": 100,
+        "ending_cash": 50,
+        "deposits": 0,
+        "withdrawals": -300,
+        "purchases": 0,
+        "sales_redemptions": 250,
+        "dividends_interest": 0,
+        "expenses": 0,
+    }
+    # the compatible wrapper is unchanged
+    assert zf.parse_cash_ladder(RAW, date(2026, 3, 1), date(2026, 3, 31)) == (
+        ladder,
+        begin,
+        why,
+    )
+
+
+def test_an_untied_month_still_names_its_printed_totals() -> None:
+    """KILL: a month whose rows do not tie keeps the printed totals and the reason."""
+
+    differ = RAW.replace("(300.00)", "(299.00)")
+    ladder, begin, why, totals = zf.parse_cash_ladder_totals(
+        differ, date(2026, 3, 1), date(2026, 3, 31)
+    )
+    assert ladder is None and begin is None and why == "CASH_CATEGORY_TOTALS_DIFFER"
+    assert totals is not None and totals["withdrawals"] == -300
+    # an unreadable summary has no totals at all
+    nothing = zf.parse_cash_ladder_totals(
+        RAW.replace("$250.00 ", ""), date(2026, 3, 1), date(2026, 3, 31)
+    )
+    assert nothing[2] == "CASH_SUMMARY_ROW_NOT_FOUND" and nothing[3] is None

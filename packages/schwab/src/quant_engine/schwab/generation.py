@@ -26,6 +26,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.schwab import flow_classification
 from quant_engine.portfolio_ledger import (
     MappingStatus,
     NavObservation,
@@ -192,6 +193,8 @@ def _load_spec(path: Path) -> dict[str, Any]:
     if version not in SUPPORTED_SPEC_SCHEMA_VERSIONS:
         raise SchwabGenerationError("Schwab spec schema version is unsupported")
     keys = {"as_of_date", "baseline", "crosswalk", "roots", "schema_version", "sources"}
+    if "flow_classification" in spec:
+        keys.add("flow_classification")
     if version == SPEC_SCHEMA_VERSION:
         keys.add("current_snapshot")
         if "transaction_history_manifest" in spec:
@@ -2120,6 +2123,22 @@ def build_generation(
         },
         "transactions": transactions,
     }
+    if "flow_classification" in spec and spec["flow_classification"] is not True:
+        raise SchwabGenerationError(
+            "spec flow_classification must be true when present"
+        )
+    classified = (
+        flow_classification.classification_table(transactions)
+        if spec.get("flow_classification") is True
+        else []
+    )
+    if classified:
+        # every transaction is exactly one of cash flow, security transfer or not a
+        # flow; the cash flows are derived from the transactions (F2)
+        catalog["transaction_flow_classification"] = classified
+        cash_flows = flow_classification.flow_rows(transactions)
+        if cash_flows:
+            catalog["flows"] = cash_flows
     if current_accounts is not None:
         catalog.update(
             {
