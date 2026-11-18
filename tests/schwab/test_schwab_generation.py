@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import csv
 import hashlib
 import json
@@ -2325,7 +2326,7 @@ def test_a_declared_empty_account_needs_true_evidence_and_no_position_row(
     for name in "abcd":
         (tmp_path / name).mkdir()
 
-    def declared(directory: str, mutate: Any) -> Path:
+    def declared(directory: str, mutate: Callable[[dict[str, object]], object]) -> Path:
         spec = _spec_with_current(tmp_path / directory)
         document = json.loads(spec.read_text(encoding="utf-8"))
         source_root = Path(document["roots"]["source"])
