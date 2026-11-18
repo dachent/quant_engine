@@ -248,6 +248,23 @@ def validate_static(manifest: Mapping[str, Any]) -> None:
             f"cutoff {manifest['cutoff']} is after evaluated_on {manifest['evaluated_on']}",
         )
     for provider_id, provider in manifest["providers"].items():
+        late = provider["generation"]["mode"] == "latest_at_or_before"
+        if "manifest_sha256" not in provider and not late:
+            raise CycleManifestError(
+                "MANIFEST_SHA256_REQUIRED",
+                f"{provider_id}: only the latest_at_or_before mode may omit manifest_sha256",
+            )
+        if provider.get("cutoff_coverage") == "NOT_REQUIRED":
+            if not provider.get("cutoff_coverage_reason"):
+                raise CycleManifestError(
+                    "COVERAGE_EXEMPTION_REASON",
+                    f"{provider_id}: cutoff_coverage NOT_REQUIRED needs a cutoff_coverage_reason",
+                )
+        elif "cutoff_coverage_reason" in provider:
+            raise CycleManifestError(
+                "COVERAGE_EXEMPTION_REASON",
+                f"{provider_id}: a cutoff_coverage_reason without a NOT_REQUIRED exemption",
+            )
         needs = provider["finality_source"] != GENERATION_MANIFEST
         has = "finality_evidence" in provider
         if needs and not has:
@@ -379,20 +396,25 @@ def _resolve_ref(ref: Mapping[str, str], roots: Mapping[str, Path], what: str) -
     return target
 
 
-def _file(path: Path, sha256: str, size_bytes: int | None, what: str) -> dict[str, Any]:
+def _file(
+    path: Path, sha256: str | None, size_bytes: int | None, what: str
+) -> dict[str, Any]:
+    """Bytes of a declared file; ``sha256=None`` records the hash instead of checking a pin."""
+
     if not path.is_file():
         raise CycleManifestError("MISSING", f"{what}: no file at the declared path")
     data = path.read_bytes()
-    if _sha256(data) != sha256:
+    actual = _sha256(data)
+    if sha256 is not None and actual != sha256:
         raise CycleManifestError(
             "HASH_MISMATCH",
-            f"{what}: bytes hash to {_sha256(data)[:12]}, pinned {sha256[:12]}",
+            f"{what}: bytes hash to {actual[:12]}, pinned {sha256[:12]}",
         )
     if size_bytes is not None and len(data) != size_bytes:
         raise CycleManifestError(
             "SIZE_MISMATCH", f"{what}: {len(data)} bytes, pinned {size_bytes}"
         )
-    return {"path": path.as_posix(), "sha256": sha256, "size_bytes": len(data)}
+    return {"path": path.as_posix(), "sha256": actual, "size_bytes": len(data)}
 
 
 def _pin(
@@ -406,8 +428,127 @@ def _pin(
     )
 
 
+def _coverage_required(provider: Mapping[str, Any]) -> bool:
+    """A provider's data must reach the cutoff unless it is finite or declared not to."""
+
+    if provider["qualification"] == "FINITE_STATIC":
+        return False
+    return bool(provider.get("cutoff_coverage", "REQUIRED") == "REQUIRED")
+
+
+def _generation_facts(directory: Path) -> dict[str, Any]:
+    """The few manifest fields selection and the coverage guard read (value-free)."""
+
+    declared = _read_json(directory / "generation.json")
+    if not isinstance(declared, dict):
+        return {"verified": False, "as_of": None, "observed_end": None}
+    coverage = declared.get("coverage")
+    end = coverage.get("observed_end") if isinstance(coverage, dict) else None
+    as_of = declared.get("as_of_date")
+    return {
+        "verified": declared.get("verification") == "VERIFIED",
+        "as_of": as_of if isinstance(as_of, str) else None,
+        "observed_end": end if isinstance(end, str) else None,
+    }
+
+
+def _select_latest(
+    what: str,
+    provider: Mapping[str, Any],
+    generations: Path,
+    cutoff: str,
+    evaluated_on: str,
+) -> tuple[str, dict[str, Any]]:
+    """Newest verified generation that covers the cutoff and was captured by ``evaluated_on``.
+
+    A generation is eligible when it is VERIFIED, was captured on or before ``evaluated_on``
+    (a capture is usually dated after the cutoff, so the cutoff itself cannot bound it) and,
+    when the provider must reach the cutoff, its observed coverage ends on or after the cutoff.
+    The newest ``as_of_date`` wins; a tie is a refusal. Every candidate and its verdict is
+    recorded in the resolved cycle, so the choice is bound into everything built on it.
+    """
+
+    required = _coverage_required(provider)
+    rows: list[dict[str, Any]] = []
+    for path in sorted(p for p in generations.iterdir() if p.is_dir()):
+        facts = _generation_facts(path)
+        if not facts["verified"]:
+            verdict = "REJECTED_NOT_VERIFIED"
+        elif facts["as_of"] is None or facts["as_of"] > evaluated_on:
+            verdict = "REJECTED_AS_OF_AFTER_EVALUATION"
+        elif required and (
+            facts["observed_end"] is None or facts["observed_end"] < cutoff
+        ):
+            verdict = "REJECTED_COVERAGE_BEFORE_CUTOFF"
+        else:
+            verdict = "ELIGIBLE"
+        rows.append(
+            {
+                "generation_id": path.name,
+                "as_of_date": facts["as_of"],
+                "observed_end": facts["observed_end"],
+                "verdict": verdict,
+            }
+        )
+    eligible = [row for row in rows if row["verdict"] == "ELIGIBLE"]
+    if not eligible:
+        shown = ", ".join(f"{r['generation_id'][:12]}={r['verdict']}" for r in rows)
+        raise CycleManifestError(
+            "NO_ELIGIBLE_GENERATION",
+            f"{what}: no verified generation covers cutoff {cutoff} captured by "
+            f"{evaluated_on} ({shown or 'none under its root'})",
+        )
+    newest = max(row["as_of_date"] for row in eligible)
+    best = [row for row in eligible if row["as_of_date"] == newest]
+    if len(best) > 1:
+        shown = ", ".join(row["generation_id"][:12] for row in best)
+        raise CycleManifestError(
+            "AMBIGUOUS_GENERATION",
+            f"{what}: {len(best)} eligible generations share as_of {newest} ({shown})",
+        )
+    for row in rows:
+        if row is best[0]:
+            row["verdict"] = "SELECTED"
+    return best[0]["generation_id"], {
+        "rule": "NEWEST_VERIFIED_COVERING_CUTOFF_CAPTURED_BY_EVALUATION",
+        "cutoff": cutoff,
+        "evaluated_on": evaluated_on,
+        "coverage_required": required,
+        "candidates": rows,
+    }
+
+
+def _check_cutoff_coverage(
+    what: str,
+    provider: Mapping[str, Any],
+    declared: Mapping[str, Any],
+    cutoff: str,
+) -> None:
+    """Refuse a provider whose data, or whose declared finality, stops before the cutoff."""
+
+    if not _coverage_required(provider):
+        return
+    coverage = declared.get("coverage")
+    end = coverage.get("observed_end") if isinstance(coverage, dict) else None
+    if not isinstance(end, str) or end < cutoff:
+        raise CycleManifestError(
+            "COVERAGE_BEFORE_CUTOFF",
+            f"{what}: observed coverage ends {end}, before the cutoff {cutoff}",
+        )
+    finalized = provider.get("finalized_through")
+    if finalized is not None and finalized < cutoff:
+        raise CycleManifestError(
+            "FINALITY_BEFORE_CUTOFF",
+            f"{what}: finalized_through {finalized} is before the cutoff {cutoff}",
+        )
+
+
 def _generation(
-    provider_id: str, provider: Mapping[str, Any], roots: Mapping[str, Path]
+    provider_id: str,
+    provider: Mapping[str, Any],
+    roots: Mapping[str, Path],
+    cutoff: str,
+    evaluated_on: str,
 ) -> dict[str, Any]:
     what = provider_id
     root = _resolve_ref(provider["root"], roots, f"{what}.root")
@@ -417,7 +558,13 @@ def _generation(
             "MISSING", f"{what}: no generations directory under its root"
         )
     chosen = provider["generation"]
-    if chosen["mode"] == "explicit":
+    selection: dict[str, Any] | None = None
+    if chosen["mode"] == "latest_at_or_before":
+        generation_id, selection = _select_latest(
+            what, provider, generations, cutoff, evaluated_on
+        )
+        directory = generations / generation_id
+    elif chosen["mode"] == "explicit":
         generation_id = chosen["generation_id"]
         directory = generations / generation_id
         if not directory.is_dir():
@@ -450,7 +597,7 @@ def _generation(
         )
     manifest = _file(
         directory / "generation.json",
-        provider["manifest_sha256"],
+        provider.get("manifest_sha256"),
         None,
         f"{what} generation manifest",
     )
@@ -463,6 +610,7 @@ def _generation(
             "ID_MISMATCH",
             f"{what}: generation.json names another generation than its directory",
         )
+    _check_cutoff_coverage(what, provider, declared, cutoff)
     source = provider["finality_source"]
     if source == GENERATION_MANIFEST:
         evidence: dict[str, Any] | None = dict(manifest)
@@ -470,7 +618,7 @@ def _generation(
         evidence = _pin(
             provider["finality_evidence"], roots, f"{what} finality evidence"
         )
-    return {
+    row: dict[str, Any] = {
         "qualification": provider["qualification"],
         "finalized_through": provider.get("finalized_through"),
         "root": root.as_posix(),
@@ -482,6 +630,11 @@ def _generation(
         "finality_source": source,
         "finality_evidence": evidence,
     }
+    if (
+        selection is not None
+    ):  # only the late-binding mode adds a key: other output is unchanged
+        row["selection"] = selection
+    return row
 
 
 def resolve(
@@ -508,7 +661,13 @@ def resolve(
         "roots": {key: path.as_posix() for key, path in sorted(roots.items())},
         "scratch": _resolve_ref(manifest["scratch"], roots, "scratch").as_posix(),
         "providers": {
-            provider_id: _generation(provider_id, provider, roots)
+            provider_id: _generation(
+                provider_id,
+                provider,
+                roots,
+                manifest["cutoff"],
+                manifest["evaluated_on"],
+            )
             for provider_id, provider in sorted(manifest["providers"].items())
         },
         "strategy_evidence": _pin(
