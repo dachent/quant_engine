@@ -1426,6 +1426,13 @@ def _matrixport_positions(
     uses.  Positions exist only on the contract-FX path that admits the USD NAV.  Every day
     that has a NAV observation must close against its position rows to within
     ``MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD`` or the build refuses.
+
+    The closure is independent: the position value is ``share x holdings unit NAV x FX`` while
+    the account NAV is the holdings ``native_value x FX``; the closure then compares
+    ``share x the published unit NAV in csv/nav_daily.csv x FX`` (a different file) with the
+    account NAV.  A day whose product has no ``nav_daily`` row cannot be closed independently:
+    its rows carry ``closure_status = NAV_DAILY_ABSENT`` (a typed gap, never a silent pass).
+    A NAV day without position rows, or a position day without a NAV, is refused with the dates.
     """
 
     if fx_rates is None:
@@ -1440,12 +1447,38 @@ def _matrixport_positions(
     rows = _verified_csv_rows(
         _exact_file(run_root, Path(artifact_id), "matrixport daily holdings"),
         artifact.sha256,
-        {"currency", "native_value", "product_id", "share", "utc_date"},
+        {"currency", "native_value", "nav", "product_id", "share", "utc_date"},
         "matrixport daily holdings",
     )
+    nav_artifact = _find_manifest_artifact(
+        manifest, "csv/nav_daily.csv", "matrixport published unit NAV"
+    )
+    published_nav: dict[tuple[str, date], Decimal] = {}
+    for nav_row in _verified_csv_rows(
+        _exact_file(
+            run_root, Path("csv/nav_daily.csv"), "matrixport published unit NAV"
+        ),
+        nav_artifact.sha256,
+        {"day_timestamp_utc", "nav", "product_id"},
+        "matrixport published unit NAV",
+    ):
+        published = _observed_decimal(nav_row.get("nav"), "matrixport published nav")
+        if published is None:
+            continue
+        published_nav[
+            (
+                _text(nav_row.get("product_id"), "matrixport nav product_id"),
+                _day(
+                    str(nav_row.get("day_timestamp_utc"))[:10],
+                    "matrixport nav_daily day",
+                ),
+            )
+        ] = published
     fx_end = _admitted_fx_end(fx_rates)
     positions: list[dict[str, Any]] = []
     totals: dict[date, Decimal] = defaultdict(Decimal)
+    independent: dict[date, Decimal] = defaultdict(Decimal)
+    unclosed: set[date] = set()
     seen: set[tuple[date, str]] = set()
     with localcontext() as context:
         context.prec = 80
@@ -1477,12 +1510,24 @@ def _matrixport_positions(
                 )
             seen.add((day, product_id))
             currency = _text(row.get("currency"), "matrixport holding currency")
+            unit_nav = _observed_decimal(row.get("nav"), "matrixport holding unit nav")
+            if unit_nav is None:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_POSITIONS_UNIT_NAV_ABSENT: an active holding has no "
+                    f"unit NAV on {day.isoformat()}"
+                )
             if currency == "USD":
-                value, fx_evidence = native, []
+                rate, fx_evidence = Decimal(1), []
             else:
                 fx = _daily_fx_evidence(currency, day, fx_rates)
-                value, fx_evidence = native * Decimal(str(fx["rate"])), [fx]
+                rate, fx_evidence = Decimal(str(fx["rate"])), [fx]
+            value = share * unit_nav * rate
             totals[day] += value
+            published = published_nav.get((product_id, day))
+            if published is None:
+                unclosed.add(day)
+            else:
+                independent[day] += share * published * rate
             strategy_id, mapping_status = _mapped_strategy_for_account(
                 account_id, day, accounts, strategies, assignments
             )
@@ -1499,6 +1544,11 @@ def _matrixport_positions(
                         "status": "AVAILABLE",
                         "value": format(value.normalize(), "f"),
                     },
+                    "closure_status": (
+                        "NAV_DAILY_ABSENT"
+                        if published is None
+                        else "CLOSED_AGAINST_PUBLISHED_NAV"
+                    ),
                     "native_value": {
                         "currency": currency,
                         "status": "AVAILABLE",
@@ -1506,6 +1556,7 @@ def _matrixport_positions(
                     },
                     "provider_id": "matrixport",
                     "quantity": format(share.normalize(), "f"),
+                    "unit_nav": format(unit_nav.normalize(), "f"),
                     "record_id": f"matrixport:position:{source_id}",
                     "security_id": "security-matrixport-"
                     + hashlib.sha256(product_id.encode("utf-8")).hexdigest()[:24],
@@ -1537,21 +1588,27 @@ def _matrixport_positions(
                 "MATRIXPORT_POSITIONS_NAV_CLOSURE: an account NAV is unavailable"
             )
         nav_days[date.fromisoformat(str(observation["as_of_date"]))] = nav_value
+    for label, days in (
+        ("a NAV day has no position rows", sorted(set(nav_days) - set(totals))),
+        ("a position day has no NAV observation", sorted(set(totals) - set(nav_days))),
+    ):
+        if days:
+            raise ProviderLedgerError(
+                f"MATRIXPORT_POSITIONS_NAV_CLOSURE: {label}: "
+                + ", ".join(d.isoformat() for d in days)
+            )
     for day in sorted(nav_days):
-        if day not in totals:
-            raise ProviderLedgerError(
-                "MATRIXPORT_POSITIONS_NAV_CLOSURE: a NAV day has no position rows: "
-                f"{day.isoformat()}"
-            )
-        if abs(totals[day] - nav_days[day]) > MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD:
-            raise ProviderLedgerError(
-                "MATRIXPORT_POSITIONS_NAV_CLOSURE: position rows differ from the "
-                f"account NAV on {day.isoformat()} by more than "
-                f"{MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD} USD"
-            )
-    return [
-        row for row in positions if date.fromisoformat(row["as_of_date"]) in nav_days
-    ]
+        # The position value and the independent published-NAV value must both close
+        # to the account NAV; a day with no published unit NAV only gets the first test.
+        checks = [totals[day]] + ([] if day in unclosed else [independent[day]])
+        for amount in checks:
+            if abs(amount - nav_days[day]) > MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_POSITIONS_NAV_CLOSURE: position rows differ from the "
+                    f"account NAV on {day.isoformat()} by more than "
+                    f"{MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD} USD"
+                )
+    return positions
 
 
 def _matrixport_capital_anchors(
