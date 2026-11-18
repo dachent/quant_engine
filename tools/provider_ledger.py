@@ -11176,7 +11176,6 @@ def _generation_as_of_date(
     return max(financial_cutoff, *(artifact.as_of_date for artifact in artifacts))
 
 
-@_catalog_decimal_context
 def _own_account_items(
     provider_id: str,
     catalog: Mapping[str, Any],
@@ -11202,6 +11201,7 @@ def _own_account_items(
     return list(items)
 
 
+@_catalog_decimal_context
 def build_catalog(
     spec_path: Path,
 ) -> tuple[dict[str, Any], GenerationManifest, bytes, bytes]:

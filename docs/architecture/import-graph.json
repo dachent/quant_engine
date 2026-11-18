@@ -144,6 +144,11 @@
       1
     ],
     [
+      "event_completeness",
+      "leverage_disclosure",
+      1
+    ],
+    [
       "gate_profile",
       "verify_release_restore",
       1
@@ -746,6 +751,11 @@
     [
       "provider_ledger",
       "account_financing",
+      1
+    ],
+    [
+      "provider_ledger",
+      "event_completeness",
       1
     ],
     [

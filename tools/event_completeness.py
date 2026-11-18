@@ -34,10 +34,21 @@ CLOSURE_FAILED: Final = "CLOSURE_FAILED"
 CLOSURE_IBKR_FLOWS: Final = "IBKR_CHANGE_IN_NAV_FLOW_TIE_OUT"
 CLOSURE_SCHWAB_EMPTY: Final = "SCHWAB_EMPTY_POSITION_SET"
 CLOSURE_QUANTBASE_POSITIONS: Final = "QUANTBASE_HOLDINGS_SNAPSHOT_AT_CUTOFF"
+
+
+def _closure_provider(closure: str) -> str:
+    """The provider a closure belongs to: its name starts with the provider id."""
+
+    return closure.split("_", 1)[0].lower()
+
+
 _CLOSURES: Final = {
-    CLOSURE_IBKR_FLOWS: ("ibkr", "flows"),
-    CLOSURE_SCHWAB_EMPTY: ("schwab", "positions"),
-    CLOSURE_QUANTBASE_POSITIONS: ("quantbase", "positions"),
+    CLOSURE_IBKR_FLOWS: (_closure_provider(CLOSURE_IBKR_FLOWS), "flows"),
+    CLOSURE_SCHWAB_EMPTY: (_closure_provider(CLOSURE_SCHWAB_EMPTY), "positions"),
+    CLOSURE_QUANTBASE_POSITIONS: (
+        _closure_provider(CLOSURE_QUANTBASE_POSITIONS),
+        "positions",
+    ),
 }
 _QUANTBASE_VALUE_BASES: Final = frozenset(
     {"DERIVED_FROM_STRATEGY_NAV_AT_CUTOFF", "CAPTURE_TIME_SNAPSHOT_VALUE"}
@@ -455,7 +466,13 @@ def _evaluate_quantbase_positions(
     ]
     record(
         "POSITION_ROWS_AT_THE_CUTOFF_FROM_QUANTBASE",
-        0 if rows and all(p.get("provider_id") == "quantbase" for p in rows) else 1,
+        0
+        if rows
+        and all(
+            p.get("provider_id") == _closure_provider(CLOSURE_QUANTBASE_POSITIONS)
+            for p in rows
+        )
+        else 1,
         {"rows": len(rows)},
     )
 
