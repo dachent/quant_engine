@@ -387,3 +387,28 @@ def test_the_not_computed_drawdown_note_is_collapsed(tmp_path: Path) -> None:
     cell = _cells(_rows(table)[0])[3]
     assert "<summary>not computed on this path</summary>" in cell
     assert "interior is not observed" in _text(cell)
+
+
+def test_a_levered_return_below_the_unlevered_one_gets_a_path_note_from_the_rows_own_figures(
+    tmp_path: Path,
+) -> None:
+    below = _geared(
+        return_levered_cumulative="0.05"
+    )  # unlevered 0.10, peak 1.60, now 1.30
+    table = _render(tmp_path, below)["#implementation-table"]["innerHTML"]
+    levered_cell = _text(_cells(_rows(table)[0])[7])
+    assert (
+        "path effect: lower than unlevered because of when borrowing was on"
+        in levered_cell
+    )
+    assert "gross/equity peak 1.60x, now 1.30x" in levered_cell
+    # no note when levered is at or above unlevered, nor without borrowing
+    above = _render(tmp_path, _geared())["#implementation-table"]["innerHTML"]
+    assert "path effect" not in above
+    unborrowed = _geared(
+        return_levered_cumulative="0.05", return_levered_peak_gross_to_equity="1.00"
+    )
+    assert (
+        "path effect"
+        not in _render(tmp_path, unborrowed)["#implementation-table"]["innerHTML"]
+    )

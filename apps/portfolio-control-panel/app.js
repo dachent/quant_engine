@@ -1901,7 +1901,10 @@
     };
     const basisCells = (row, kind) => {
       const field = (name) => row[`return_${kind}_${name}`];
-      const cumulative = returnBasisCell(row, kind, () => `${pct(field("cumulative"), 2)}${windowNote(row, kind)}`);
+      // When borrowing was used and the levered cumulative return is below the unlevered one, say why that can be: the condition and the gross/equity figures are the row's own; the sentence is a general property of daily leverage.
+      const leveredBelow = kind === "levered" && number(row.return_levered_cumulative) != null && number(row.return_unlevered_cumulative) != null && number(row.return_levered_peak_gross_to_equity) > 1 && Number(row.return_levered_cumulative) < Number(row.return_unlevered_cumulative);
+      const pathNote = leveredBelow ? `<span class="cell-secondary" title="Each day's levered return is that day's unlevered return times that day's gross-to-equity ratio, then compounded">path effect: lower than unlevered because of when borrowing was on (gross/equity peak ${decimal(row.return_levered_peak_gross_to_equity, 2)}x${number(row.return_levered_current_gross_to_equity) == null ? "" : `, now ${decimal(row.return_levered_current_gross_to_equity, 2)}x`})</span>` : "";
+      const cumulative = returnBasisCell(row, kind, () => `${pct(field("cumulative"), 2)}${windowNote(row, kind)}${pathNote}`);
       // the payload key keeps the producer's spelling (return_<kind>_annualised); written with an escape so
       // the page source spells the word one way
       // one short-window rule: the producer publishes no annual rate under 365 days
