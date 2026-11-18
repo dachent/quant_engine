@@ -2179,7 +2179,7 @@ def build_generation(
         # every transaction is exactly one of cash flow, security transfer or not a
         # flow; the cash flows are derived from the transactions (F2)
         catalog["transaction_flow_classification"] = classified
-        cash_flows = flow_classification.flow_rows(transactions)
+        cash_flows = flow_classification.flow_rows(transactions, suffix_to_internal)
         if cash_flows:
             catalog["flows"] = cash_flows
     if current_accounts is not None:
