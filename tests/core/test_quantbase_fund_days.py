@@ -185,3 +185,53 @@ def test_a_close_series_that_fails_the_rebuild_on_many_non_fill_days_is_distrust
     assert not q.closes_reproduce_the_dashboard(bad, legs)
     ok = q.corrected_values(dashboard, legs, good)
     assert q.closes_reproduce_the_dashboard(ok, legs)
+
+
+def test_a_next_day_without_closes_that_trades_the_position_away_does_not_prove_the_fill() -> (
+    None
+):
+    """Opus P1: E3 sells the TQQQ for SHV but its TQQQ close row is absent; the proof must not skip
+    E3 and let E4 (SHV only) prove E2 (the series is 3 % low: a scale error the proof catches
+    whenever E3's close is present)."""
+
+    e4 = date(2025, 8, 8)
+    legs = [
+        *REAL_LEGS,
+        (E3, "TQQQ", Decimal("-245.0799626930")),
+        (E3, "SHV", Decimal("199.0")),
+    ]
+    low = _real_closes(("83.0", "86.2", "87.1"))
+    shv = {**low["SHV"], e4: Decimal("110.18")}
+    dashboard = {
+        E1: REAL_DASHBOARD[E1],
+        E2: REAL_DASHBOARD[E2],
+        E3: REAL_DASHBOARD[E3],
+        e4: Decimal("17.2060885064") + Decimal("199.0") * Decimal("110.18"),
+    }
+    # E3's TQQQ close is present: the 3 % scale error is caught on E3's pre-fill rebuild
+    present = q.corrected_values(dashboard, legs, {"SHV": shv, "TQQQ": low["TQQQ"]})
+    assert present[E2].status == q.UNRESTATED_NEXT_DAY_UNPROVEN
+    # E3's TQQQ close is absent: E3 trades, so it is the proving day and cannot prove
+    missing = {"SHV": shv, "TQQQ": {E1: low["TQQQ"][E1], E2: low["TQQQ"][E2]}}
+    out = q.corrected_values(dashboard, legs, missing)
+    assert out[E2].status == q.UNRESTATED_NEXT_DAY_UNPROVEN
+    assert out[E2].value == REAL_DASHBOARD[E2]
+
+
+def test_too_few_valued_non_fill_days_do_not_show_that_the_closes_reproduce() -> None:
+    days = [date(2025, 9, 1 + i) for i in range(10)]
+    legs = [(days[0], "TQQQ", Decimal("100"))]
+    halved = q.corrected_values(
+        {d: Decimal("8800") for d in days},
+        legs,
+        {"TQQQ": {d: Decimal("44") for d in days}},
+    )
+    assert not q.closes_reproduce_the_dashboard(halved, legs)  # 9 valued days: refused
+    good = q.corrected_values(
+        {d: Decimal("8800") for d in days},
+        legs,
+        {"TQQQ": {d: Decimal("88") for d in days}},
+    )
+    assert not q.closes_reproduce_the_dashboard(
+        good, legs
+    )  # also unproven: too short to judge

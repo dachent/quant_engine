@@ -24,6 +24,16 @@ RUN = "legacy-20260814-6b0538e2cc69"
 ACCOUNT = "account-58e75e8d952fa1b8"
 
 
+@pytest.fixture(autouse=True)
+def _short_histories(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fixtures here are a few days long: the close-pin guard's minimum valued-day count
+    (tested in tests/core/test_quantbase_fund_days.py) does not apply to them."""
+
+    import quantbase_fund_days
+
+    monkeypatch.setattr(quantbase_fund_days, "MIN_NON_FILL_DAYS", 0)
+
+
 def _world(
     tmp_path: Path,
     price_text: str | None = None,
@@ -156,21 +166,19 @@ def test_the_spec_pins_the_closes_and_refuses_a_hash_mismatch(tmp_path: Path) ->
         ledger._quantbase_fill_closes([ref, ref])
 
 
-def test_closes_in_other_units_than_the_legs_keep_the_dashboard_value(
-    tmp_path: Path,
-) -> None:
+def test_closes_in_other_units_than_the_legs_are_refused_loudly(tmp_path: Path) -> None:
     """B blocker: a split-adjusted close (here half the as-traded 44) values the post-fill
-    holdings at about half the fund; the restatement is refused and the dashboard kept."""
+    holdings at about half the fund and fails the rebuild on the days the fund holds the symbol:
+    the pin is refused (the per-day 5 % gate on its own keeps the dashboard value)."""
 
     halved = {
         "SHV": CLOSES["SHV"],
         "TQQQ": {date(2026, 1, d): Decimal("22") for d in (5, 6, 7)},
     }
-    rows = _observations(tmp_path, halved)
-    assert rows["2026-01-06"]["nav"]["value"] == "1000.00"
-    assert rows["2026-01-06"]["fill_restatement"]["status"] == (
-        "DASHBOARD_RESTATEMENT_EXCEEDS_TOLERANCE"
-    )
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="do not reproduce the dashboard"
+    ):
+        _observations(tmp_path, halved)
 
 
 def test_the_ledger_refuses_a_close_pin_that_fails_the_rebuild_on_non_fill_days(

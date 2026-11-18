@@ -121,16 +121,23 @@ def corrected_values(
     for position, day in enumerate(ordered):
         if result[day].status != RESTATED:
             continue
-        # the next dashboard day the rebuild could value (weekend and holiday days have no close)
-        following = next(
+        # The proving day is the next day the fund's holdings were evaluated or changed: a day with
+        # a valued pre-fill rebuild, or a day with fills.  A day without closes that trades is never
+        # skipped (it would let a later day "prove" holdings the missing day had already sold);
+        # weekend and holiday days (no fills, no close) carry no information and are passed over.
+        proving = next(
             (
-                result[later]
+                later
                 for later in ordered[position + 1 :]
-                if result[later].residual is not None
+                if result[later].residual is not None or later in by_day
             ),
             None,
         )
-        proved = following is not None and following.status != UNRESTATED_NO_CLOSURE
+        proved = (
+            proving is not None
+            and result[proving].residual is not None
+            and result[proving].status != UNRESTATED_NO_CLOSURE
+        )
         if not proved:
             result[day] = FundDay(
                 dashboard[day], UNRESTATED_NEXT_DAY_UNPROVEN, result[day].residual
@@ -156,9 +163,11 @@ def non_fill_closure_failures(
 def closes_reproduce_the_dashboard(
     result: Mapping[date, FundDay], legs: Sequence[Leg]
 ) -> bool:
-    """False when the close series fails the rebuild on too many non-fill days to be trusted."""
+    """False when too few non-fill days are valued, or too many fail the rebuild, to trust the closes."""
 
     valued, failed = non_fill_closure_failures(result, legs)
-    return valued < MIN_NON_FILL_DAYS or Decimal(failed) <= Decimal(valued) * (
+    # too few valued non-fill days cannot show that the closes reproduce the dashboard: refused,
+    # not trusted (a short history of halved days must not pass)
+    return valued >= MIN_NON_FILL_DAYS and Decimal(failed) <= Decimal(valued) * (
         MAX_NON_FILL_CLOSURE_FAILURE
     )
