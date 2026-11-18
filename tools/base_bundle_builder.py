@@ -286,6 +286,19 @@ def load_config(path: Path, overrides: Mapping[str, Any] | None = None) -> Bundl
 # --------------------------------------------------------------------------- capture record
 
 
+# files of the governed capture run each construction reads (names under the capture dir)
+CAPTURE_FILES: Final = {
+    "ADJUSTED_RATIO": (
+        "artifacts/yahoo-base-proxies-history_adjusted.json",
+        "artifacts/yahoo-base-proxies-history_adjusted.json.manifest.json",
+    ),
+    "TOTAL_RETURN_FRENCH_RF": (
+        "artifacts/yahoo-base-proxies-history.json",
+        "artifacts/yahoo-base-proxies-history.json.manifest.json",
+    ),
+}
+
+
 def capture_record(inputs: BundleInputs) -> dict[str, Any]:
     """The capture run record, from the governed stage manifest and governance file.
 
@@ -308,7 +321,21 @@ def capture_record(inputs: BundleInputs) -> dict[str, Any]:
         raise BaseBundleError("governance evidence names another run")
     if stage.get("not_fetched"):
         raise BaseBundleError("stage manifest lists tickers not fetched")
-    for name, entry in _object(stage.get("files"), "stage manifest files").items():
+    listed = _object(stage.get("files"), "stage manifest files")
+    # the stage manifest vouches only for the files it lists: the capture, its manifest
+    # and (where one is used) the native raw file must all be listed, or a tampered
+    # price would build a bundle credited to the run
+    required = set(CAPTURE_FILES[inputs.construction])
+    if inputs.native_raw is not None and inputs.native_raw.is_relative_to(
+        inputs.capture_dir
+    ):
+        required.add(inputs.native_raw.relative_to(inputs.capture_dir).as_posix())
+    unlisted = sorted(required - set(listed))
+    if unlisted:
+        raise BaseBundleError(
+            f"stage manifest does not list the capture file(s): {unlisted}"
+        )
+    for name, entry in listed.items():
         data = (inputs.capture_dir / name).read_bytes()
         if sha256(data) != entry["sha256"] or len(data) != entry["size_bytes"]:
             raise BaseBundleError(
@@ -350,10 +377,14 @@ def capture_record(inputs: BundleInputs) -> dict[str, Any]:
             "config_effective_sha256": stage["config_effective_sha256"],
         }
         for key, expected in agree.items():
-            if key in given and given[key] != expected:
+            if key not in given:
+                raise BaseBundleError(f"run record lacks {key}")
+            if given[key] != expected:
                 raise BaseBundleError(
                     f"run record {key} differs from the stage manifest"
                 )
+        if "returncode" not in given:
+            raise BaseBundleError("run record lacks returncode")
         record["returncode"] = given["returncode"]
         if "driver_sha256" in given:
             record["driver_sha256"] = given["driver_sha256"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
 from datetime import date, timedelta
 import hashlib
 import io
@@ -396,3 +397,80 @@ def test_the_retained_reference_bundle_reproduces_byte_for_byte(
     out = tmp_path / "bundle"
     bb.build_bundle(bb.load_config(Path(os.environ["QE_BASE_BUNDLE_CONFIG"])), out)
     assert bb.compare_reference(out, Path(os.environ["QE_BASE_BUNDLE_REFERENCE"])) == []
+
+
+def _stage(
+    tmp_path: Path, *, list_files: bool = True
+) -> tuple[Path, "bb.BundleInputs"]:
+    """A tiny governed capture dir: MANIFEST.json, governance evidence, the capture files."""
+
+    capture = tmp_path / "capture"
+    (capture / "artifacts").mkdir(parents=True)
+    files = {}
+    for name in bb.CAPTURE_FILES["TOTAL_RETURN_FRENCH_RF"]:
+        data = f"content of {name}".encode()
+        (capture / name).write_bytes(data)
+        files[name] = {
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size_bytes": len(data),
+        }
+    if not list_files:
+        files.pop(bb.CAPTURE_FILES["TOTAL_RETURN_FRENCH_RF"][0])
+    stage = {
+        "run_id": "R-T",
+        "run_label": "t",
+        "cutoff": "2026-11-06",
+        "fetch_started_utc": "2026-11-17T00:00:00Z",
+        "fetch_completed_utc": "2026-11-17T00:01:00Z",
+        "adapter_sha256": "a" * 64,
+        "config_effective_sha256": "c" * 64,
+        "files": files,
+        "not_fetched": [],
+    }
+    (capture / "MANIFEST.json").write_text(json.dumps(stage))
+    (capture / "governance-evidence.json").write_text(
+        json.dumps({"run_id": "R-T", "review": "https://example.invalid/review"})
+    )
+    inputs = bb.BundleInputs(
+        construction="TOTAL_RETURN_FRENCH_RF",
+        anchor="2026-11-06",
+        capture_dir=capture,
+        ledger_generation=tmp_path,
+        ledger_catalog=tmp_path,
+        modes={},
+    )
+    return capture, inputs
+
+
+def test_a_stage_manifest_that_omits_the_capture_file_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Review follow-on: an entry-less manifest vouched for nothing, yet a bundle was built."""
+
+    _capture, inputs = _stage(tmp_path, list_files=False)
+    with pytest.raises(bb.BaseBundleError, match="does not list the capture file"):
+        bb.capture_record(inputs)
+
+
+def test_a_complete_stage_manifest_gives_a_record(tmp_path: Path) -> None:
+    _capture, inputs = _stage(tmp_path)
+    record = bb.capture_record(inputs)
+    assert record["run_id"] == "R-T" and record["returncode"] == 0
+
+
+def test_a_tampered_listed_capture_file_is_refused(tmp_path: Path) -> None:
+    capture, inputs = _stage(tmp_path)
+    name = bb.CAPTURE_FILES["TOTAL_RETURN_FRENCH_RF"][0]
+    (capture / name).write_bytes(b"tampered")
+    with pytest.raises(bb.BaseBundleError, match="differs from its stage manifest"):
+        bb.capture_record(inputs)
+
+
+def test_a_run_record_must_state_every_agreement_key_and_a_return_code(
+    tmp_path: Path,
+) -> None:
+    capture, inputs = _stage(tmp_path)
+    record_path = tmp_path / "record.json"
+    record_path.write_text(json.dumps({"returncode": 0}))
+    with pytest.raises(bb.BaseBundleError, match="run record lacks"):
+        bb.capture_record(replace(inputs, run_record=record_path))
