@@ -650,11 +650,11 @@
       "owner": "sprint-qc-validator",
       "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
       "close_by": "2026-12-31",
-      "reason": "cash drag is derived and evidenced for four strategies since release B; qsi (provider row), robuxio, volatis, echotrade and composer have no daily cash path (F10)",
+      "reason": "cash drag is derived and evidenced for four strategies since release B; the qsi provider row, robuxio and volatis have no daily cash path (F10)",
       "defect": "E6",
       "owner_view": {
         "owner_class": "REAL_DATA_GAP",
-        "what": "Cash drag is derived and evidenced for four strategies since release B; the strategies under Where have no daily cash path to derive it from (qsi provider row, robuxio, volatis, echotrade, composer).",
+        "what": "Cash drag is derived and evidenced for four strategies since release B; the strategies under Where have no daily cash path to derive it from (qsi provider row, robuxio, volatis).",
         "fix": "Capture a daily cash path for each strategy under Where (#901 b); the derivation already exists.",
         "who": "Engineering (#901); provider capture",
         "how_long": "after the daily cash capture exists for each strategy",
