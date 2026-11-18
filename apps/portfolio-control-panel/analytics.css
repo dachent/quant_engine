@@ -1361,6 +1361,18 @@ details.orthogonal-data { margin-top: 12px; }
 
 #implementation-table .basis-cell:not(.is-na) { font-variant-numeric: tabular-nums; }
 
+#implementation-table .cell-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+#implementation-table .cell-details[open] .cell-secondary {
+  display: block;
+  max-width: 320px;
+  margin-top: 4px;
+}
+
 #implementation-table .basis-cell.is-na {
   color: var(--text-soft);
   white-space: normal;

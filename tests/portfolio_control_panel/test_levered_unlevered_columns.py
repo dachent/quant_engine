@@ -363,3 +363,27 @@ def test_a_row_without_a_leverage_record_says_so_once(tmp_path: Path) -> None:
         "#implementation-table"
     ]["innerHTML"]
     assert _text(table).count("Synthetic once") == 1
+
+
+def test_the_long_return_basis_sentence_is_collapsed_not_a_tall_cell(
+    tmp_path: Path,
+) -> None:
+    long_label = "Return basis: " + "a restated row's long sentence " * 20
+    row = _geared(return_scope_label=long_label, return_scope={"basis": "SLEEVE_EPOCH"})
+    table = _render(tmp_path, row)["#implementation-table"]["innerHTML"]
+    first_cell = _cells(_rows(table)[0])[0]
+    assert (
+        "<details" in first_cell
+        and "<summary>Return basis: sleeve epoch</summary>" in first_cell
+    )
+    assert long_label.strip() in html.unescape(
+        first_cell
+    )  # nothing is dropped, only collapsed
+
+
+def test_the_not_computed_drawdown_note_is_collapsed(tmp_path: Path) -> None:
+    row = _geared(account_live_max_drawdown=None, account_live_cumulative_return="0.02")
+    table = _render(tmp_path, row)["#implementation-table"]["innerHTML"]
+    cell = _cells(_rows(table)[0])[3]
+    assert "<summary>not computed on this path</summary>" in cell
+    assert "interior is not observed" in _text(cell)
