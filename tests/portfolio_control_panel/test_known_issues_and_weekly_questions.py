@@ -8,6 +8,8 @@ pack for a real analyst run; this test is the floor that run starts from.
 from __future__ import annotations
 
 import copy
+import functools
+import os
 import hashlib
 import json
 import re
@@ -25,7 +27,17 @@ import portfolio_decision as pd  # noqa: E402
 POLICY_PATH = ROOT / "contracts" / "portfolio-decision-policy-v1.json"
 SOURCES_PATH = ROOT / "contracts" / "strategy-return-sources-v1.json"
 ISSUES_PATH = ROOT / "contracts" / "portfolio-known-issues-v1.json"
-FIXTURE = Path(__file__).with_name("decision_fixture_330da1a0.json")
+# QE_PACK_PAYLOAD points the rubric at a real panel payload (a candidate's dashboard_data.json);
+# without it the committed 330da1a0 fixture is used.
+FIXTURE = Path(
+    os.environ.get("QE_PACK_PAYLOAD")
+    or Path(__file__).with_name("decision_fixture_330da1a0.json")
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _data() -> dict:
+    return json.loads(FIXTURE.read_bytes())
 
 
 def _issues() -> dict:
@@ -33,11 +45,11 @@ def _issues() -> dict:
 
 
 def _pack(issues=None, prior=None) -> dict:
-    data = json.loads(FIXTURE.read_bytes())
+    data = _data()
     policy_bytes = POLICY_PATH.read_bytes()
     policy = json.loads(policy_bytes)
     sha = hashlib.sha256(policy_bytes).hexdigest()
-    decision = pd.build_decision(data, policy, sha)
+    decision = data.get("decision") or pd.build_decision(data, policy, sha)
     sources = json.loads(SOURCES_PATH.read_bytes())["strategies"]
     return cp.build_pack(data, decision, policy, sha, sources, None, prior, issues)
 
@@ -193,7 +205,11 @@ def test_the_stress_bound_is_not_a_forecast_and_uses_the_published_rule_when_pre
 ):
     plain = _section(_pack(_issues()), "do_not_rely")
     assert "bound under the stated rule, not a forecast" in plain
-    data = json.loads(FIXTURE.read_bytes())
+    if os.environ.get("QE_PACK_PAYLOAD"):
+        # a real payload carries its own published rule statement; the injected one below is for the fixture
+        assert "Rule as published:" in plain
+        return
+    data = dict(_data())
     data["correlation"] = {
         "rows": [{"adverse_loss_basis": {"rule_statement": "1.25x prior rule text"}}]
     }
