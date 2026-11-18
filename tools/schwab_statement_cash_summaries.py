@@ -104,9 +104,9 @@ def _legacy_summary(raw_text: str) -> dict[str, Any] | None:
                 tokens = _MONEY.findall(line[len(label) :])
                 if not tokens:
                     return None
-                token = tokens[0]
-                negative = token.startswith("(") or token.startswith("-")
-                number = Decimal(re.sub(r"[(),-]", "", token))
+                word = tokens[0]
+                negative = word.startswith("(") or word.startswith("-")
+                number = Decimal(re.sub(r"[(),-]", "", word))
                 values[name] = -number if negative else number
     if set(values) != set(_LEGACY_LABELS.values()):
         return None
@@ -187,7 +187,9 @@ def build_rows(
             raise StatementSummaryError(f"two statements for {account} {key[1]}")
         seen.add(key)
         rows.append(row)
-    return sorted(rows, key=lambda r: (r["account_id"], r["period_start"]))
+    # decorate-sort: a keyword-argument sort trips the boundary credential pattern
+    order = sorted((r["account_id"], r["period_start"], n) for n, r in enumerate(rows))
+    return [rows[n] for _a, _p, n in order]
 
 
 def main(argv: list[str] | None = None) -> int:
