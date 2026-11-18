@@ -876,3 +876,77 @@ def test_write_finality_is_create_only(cycle: dict[str, Any]) -> None:
     with pytest.raises(tool.CycleManifestError) as info:
         _finality(cycle, "schwab", "gen-s9", "2026-01-05")
     assert info.value.code == "OUTPUT_EXISTS"
+
+
+# ---- a bad newest generation is never skipped silently ----
+
+
+def _two_generations(cycle: dict[str, Any]) -> None:
+    _late_native(cycle)
+    _add_generation(cycle, "schwab", "gen-s1", as_of="2026-01-04")
+    _finality(cycle, "schwab", "gen-s1", "2026-01-05")
+    _add_generation(cycle, "schwab", "gen-s2", as_of="2026-01-05")
+
+
+def test_newest_generation_without_finality_record_is_refused_not_skipped(
+    cycle: dict[str, Any],
+) -> None:
+    _two_generations(cycle)
+    with pytest.raises(tool.CycleManifestError) as info:
+        _resolve(cycle)
+    assert info.value.code == "FINALITY_RECORD_BAD"
+    assert "gen-s2" in str(info.value) and "gen-s1" in str(info.value)
+
+
+def test_newest_generation_with_unusable_record_is_refused(
+    cycle: dict[str, Any],
+) -> None:
+    _two_generations(cycle)
+    _finality(cycle, "schwab", "gen-s2", "2026-01-05")
+    (cycle["roots"]["data"] / "data-schwab" / "native" / "gen-s2.txt").write_bytes(b"x")
+    with pytest.raises(tool.CycleManifestError) as info:
+        _resolve(cycle)
+    assert info.value.code == "FINALITY_RECORD_BAD"
+
+
+def test_the_flag_accepts_the_older_generation_and_keeps_the_skip_visible(
+    cycle: dict[str, Any],
+) -> None:
+    _two_generations(cycle)
+    manifest_bytes = tool.dumps(cycle["manifest"])
+    resolved = tool.resolve(
+        manifest_bytes, cycle["roots"], allow_older_on_bad_newest=True
+    )
+    row = resolved["providers"]["schwab"]
+    assert row["generation_id"] == "gen-s1"
+    verdicts = {
+        c["generation_id"]: c["verdict"] for c in row["selection"]["candidates"]
+    }
+    assert verdicts == {
+        "gen-s1": "SELECTED",
+        "gen-s2": "REJECTED_NO_FINALITY_RECORD",
+    }
+
+
+def test_a_corrupt_newest_generation_manifest_is_refused(cycle: dict[str, Any]) -> None:
+    _two_generations(cycle)
+    _finality(cycle, "schwab", "gen-s2", "2026-01-05")
+    (
+        cycle["roots"]["data"]
+        / "data-schwab"
+        / "generations"
+        / "gen-s2"
+        / "generation.json"
+    ).write_bytes(b"{not json")
+    with pytest.raises(ValueError):
+        _resolve(cycle)
+    (
+        cycle["roots"]["data"]
+        / "data-schwab"
+        / "generations"
+        / "gen-s2"
+        / "generation.json"
+    ).write_bytes(b"[]")
+    with pytest.raises(tool.CycleManifestError) as info:
+        _resolve(cycle)
+    assert info.value.code == "GENERATION_INVALID"

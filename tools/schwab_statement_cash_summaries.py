@@ -104,9 +104,9 @@ def _legacy_summary(raw_text: str) -> dict[str, Any] | None:
                 tokens = _MONEY.findall(line[len(label) :])
                 if not tokens:
                     return None
-                token = tokens[0]
-                negative = token.startswith("(") or token.startswith("-")
-                number = Decimal(re.sub(r"[(),-]", "", token))
+                amount_text = tokens[0]
+                negative = amount_text.startswith("(") or amount_text.startswith("-")
+                number = Decimal(re.sub(r"[(),-]", "", amount_text))
                 values[name] = -number if negative else number
     if set(values) != set(_LEGACY_LABELS.values()):
         return None
