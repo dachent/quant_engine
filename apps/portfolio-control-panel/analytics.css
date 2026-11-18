@@ -1350,8 +1350,16 @@ details.orthogonal-data { margin-top: 12px; }
 
 #implementation-table .basis-cell {
   min-width: 112px;
-  white-space: nowrap;
+  max-width: 190px;
+  white-space: normal;
 }
+
+#implementation-table .basis-cell .cell-secondary {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+#implementation-table .basis-cell:not(.is-na) { font-variant-numeric: tabular-nums; }
 
 #implementation-table .basis-cell.is-na {
   color: var(--text-soft);

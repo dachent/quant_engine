@@ -1913,7 +1913,17 @@
     };
     const grossToEquityCell = (row) => returnBasisCell(row, "levered", () => `${number(row.return_levered_peak_gross_to_equity) == null ? "—" : `${decimal(row.return_levered_peak_gross_to_equity, 2)}x`}<span class="cell-secondary">peak${number(row.return_levered_current_gross_to_equity) == null ? "" : ` · now ${decimal(row.return_levered_current_gross_to_equity, 2)}x`}</span>`);
     // One legend for the basis of each group: the distinct labels the rows publish.
-    const basisLegendText = (kind) => [...new Set(currentStrategies().map((row) => row[`return_${kind}_basis_label`]).filter((label) => typeof label === "string" && label))].join(" · ");
+    // The producer's basis label starts with an enum code (`GROSS_SLEEVE_ASSETS_SLEEVE_TWR: ...`); the code is printed as words.
+    const basisLabelWords = (label) => label.replace(/^([A-Z][A-Z0-9_]+): /, (_match, code) => `${humanStatus(code)}: `);
+    // A row whose levered and unlevered figures are both absent says why once, across the seven columns.
+    const basisColumns = (row) => {
+      const absent = (kind) => number(row[`return_${kind}_cumulative`]) == null;
+      if (performanceLineageMismatch || !absent("unlevered") || !absent("levered")) return basisCells(row, "unlevered") + basisCells(row, "levered") + grossToEquityCell(row);
+      const reasons = [...new Set(["unlevered", "levered"].map((kind) => row[`return_${kind}_na_reason`]).filter((value) => typeof value === "string" && value))];
+      const text = reasons.length ? reasons.map(humanStatus).join(" · ") : ("return_unlevered_na_reason" in row || "return_levered_na_reason" in row ? "No reason published" : "Not published in this payload");
+      return `<td colspan="7" class="basis-cell is-na">—<span class="cell-secondary">${safe(text)}</span></td>`;
+    };
+    const basisLegendText = (kind) => [...new Set(currentStrategies().map((row) => row[`return_${kind}_basis_label`]).filter((label) => typeof label === "string" && label).map(basisLabelWords))].join(" · ");
     const basisLegend = $("#return-basis-legend");
     if (basisLegend) {
       const parts = [["Unlevered", basisLegendText("unlevered")], ["Levered", basisLegendText("levered")]].filter(([, text]) => text);
@@ -1932,7 +1942,7 @@
         : (number(row.account_live_max_drawdown) == null && number(row.account_live_cumulative_return) != null
           ? `—<span class="cell-secondary">not computed on this path: it holds accepted multi-day return spans whose interior is not observed; the per-account table shows the drawdown from the observed account NAV</span>`
           : pct(row.account_live_max_drawdown));
-      return `<tr><td>${safe(row.strategy_name)}${scopeNote(row)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td>${basisCells(row, "unlevered")}${basisCells(row, "levered")}${grossToEquityCell(row)}<td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${endDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
+      return `<tr><td>${safe(row.strategy_name)}${scopeNote(row)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td>${basisColumns(row)}<td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${endDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
     $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative (since observed start)", "numeric"], ["Account max drawdown (same window)", "numeric"], ["Cumulative (% total)", "numeric"], ["Return per year (%)", "numeric"], ["Max drawdown (%)", "numeric"], ["Cumulative (% total)", "numeric"], ["Return per year (%)", "numeric"], ["Max drawdown (%)", "numeric"], ["Gross ÷ equity (x)", "numeric"], ["Provider/model comparison"], ["Cost status"], ["Version"]], implementationRows, evidenceCaption("Strategy implementation gaps and costs"), "", [["", 4], ["Unlevered", 3, "Return on gross sleeve assets, before the margin loan"], ["Levered", 4, "Return on equity after margin financing"], ["", 3]]);
     // F36: a blocking item's value is shown beside its gap text, and a check's tolerance and maximum

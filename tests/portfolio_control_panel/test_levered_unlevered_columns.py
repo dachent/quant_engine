@@ -105,7 +105,12 @@ def test_every_strategy_row_carries_all_new_columns(tmp_path: Path) -> None:
     assert len(rows) == 3
     assert len(header_cells) == 14
     for row in rows:
-        assert len(_cells(row)) == len(header_cells)
+        # a row without a leverage record spans the seven new columns with one cell
+        spans = [
+            int((re.search(r'colspan="(\d+)"', cell) or [0, 1])[1])
+            for cell in _cells(row)
+        ]
+        assert sum(spans) == len(header_cells)
     # The group row spans exactly the 14 columns and names both bases.
     group = head.split("</tr>")[0]
     assert sum(int(n) for n in re.findall(r'colspan="(\d+)"', group)) == 14
@@ -143,9 +148,10 @@ def test_not_applicable_reason_is_the_rows_own_field(tmp_path: Path) -> None:
     table = _render(tmp_path, _plain(reason))["#implementation-table"]["innerHTML"]
     cells = [_text(cell) for cell in _cells(_rows(table)[0])]
 
-    for index in (4, 5, 6, 7, 8, 9, 10):
-        assert cells[index].startswith("—")
-        assert "Synthetic reason from data" in cells[index]
+    # one cell across the seven columns, reason from the row's own data
+    assert len(cells) == 8 and cells[4].startswith("—")
+    assert "Synthetic reason from data" in cells[4]
+    assert 'colspan="7"' in _cells(_rows(table)[0])[4]
     # Levered is null with a reason; the unlevered figure is never copied across.
     both = _render(
         tmp_path,
@@ -270,8 +276,11 @@ def test_absent_fields_with_only_reasons_print_the_reasons(tmp_path: Path) -> No
     )
     table = _render(tmp_path, row)["#implementation-table"]["innerHTML"]
     cells = [_text(cell) for cell in _cells(_rows(table)[0])]
-    assert "Synthetic unlevered reason" in cells[4]
-    assert "Synthetic levered reason" in cells[7]
+    assert 'colspan="7"' in _cells(_rows(table)[0])[4]
+    assert (
+        "Synthetic unlevered reason" in cells[4]
+        and "Synthetic levered reason" in cells[4]
+    )
     assert "Not published" not in table
 
 
@@ -336,3 +345,21 @@ def test_derived_leverage_rows_are_counted_as_derived_not_unavailable(
         "Unavailable measures": "2",
     }, kpis
     assert "derived 2" in _flat(dom, "#leverage-status")
+
+
+def test_the_legend_prints_the_basis_code_as_words(tmp_path: Path) -> None:
+    coded = _geared(
+        return_unlevered_basis_label="GROSS_SLEEVE_ASSETS_SLEEVE_TWR: profit over the prior-close value",
+        return_levered_basis_label="SLEEVE_EQUITY_AFTER_MARGIN_FINANCING: the same profit over equity",
+    )
+    legend = _flat(_render(tmp_path, coded), "#return-basis-legend")
+    assert "Gross sleeve assets sleeve twr: profit over the prior-close value" in legend
+    assert "Sleeve equity after margin financing: the same profit over equity" in legend
+    assert "GROSS_SLEEVE_ASSETS" not in legend
+
+
+def test_a_row_without_a_leverage_record_says_so_once(tmp_path: Path) -> None:
+    table = _render(tmp_path, _geared(), _plain("SYNTHETIC_ONCE"))[
+        "#implementation-table"
+    ]["innerHTML"]
+    assert _text(table).count("Synthetic once") == 1
