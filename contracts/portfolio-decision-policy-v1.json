@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "policy_id": "PORT-DECISION-1",
+  "policy_version": "1",
+  "status": "OWNER_ADOPTED_DEFAULTS_2026_11_17",
+  "authority": "Owner ruling O2 of 2026-11-17 adopted these defaults as starting numbers, editable in this one file. The two cap values and the allowed ages were not named in the ruling: they are placeholders marked owner_set false.",
+  "standing_rules": [
+    {"id": "SR1", "text": "Recommendations only. The owner decides and executes. Agents never place trades.", "source": "OWNER-RULINGS-2026-11-17 item 3; owner standing rule"},
+    {"id": "SR2", "text": "A partial or accepted-gap source on a live account is an error, not an accepted gap: find the data, derive it with closure checks, then name the exact pull that is missing.", "source": "owner standing rule, 2026-10"},
+    {"id": "SR3", "text": "After-tax reporting equals pre-tax reporting; this is not a gap.", "source": "owner confirmation 2026-11-12"},
+    {"id": "SR4", "text": "Never propose dropping or descoping a strategy to close a data gap.", "source": "owner standing rule"},
+    {"id": "SR5", "text": "The 15% drawdown limit is the owner's. The high-water-mark index is the official drawdown measure; flag any later material change to it.", "source": "OWNER-RULINGS-2026-11-17 items 1 and 4"},
+    {"id": "SR6", "text": "Backtest history counts as loss evidence in the restated stress number; the owner may overturn this.", "source": "control ruling 2026-11-16, OWNER-RULINGS-2026-11-17 item 4"},
+    {"id": "SR7", "text": "Give every time and ETA to the owner in CST (UTC-6).", "source": "owner standing rule, 2026-11-11"}
+  ],
+  "owner_set_default_note": "Fields marked owner_set false are the builder's placeholders; the page labels them as such until the owner edits the file.",
+  "limit": {
+    "drawdown_limit": "0.15",
+    "normal_below": "0.10",
+    "measure": "PORT_HWM_INDEX_DRAWDOWN_FROM_HIGH_WATER_MARK",
+    "acceptance": {
+      "ruling": "OWNER-RULINGS-2026-11-17 item 1",
+      "accepted_on": "2026-11-17",
+      "note": "753 daily points through 2026-11-06; two missing daily points filled by span returns. If a later release materially changes the index, flag the change to the owner."
+    },
+    "zones": {
+      "NORMAL": "No restriction.",
+      "NO_NEW_RISK": "No new risk, no leverage increase, no new strategy. Rebalance moves wait; reductions to cash are allowed.",
+      "LIMIT_BREACH": "The pre-set reduction applies."
+    },
+    "breach_action": {
+      "kind": "UNSET",
+      "reduce_each_strategy_by": null,
+      "owner_set": false,
+      "note": "The ruling says the pre-set reduction applies over the limit but names no amount. Until the owner sets one here the page says so instead of inventing a number."
+    }
+  },
+  "rebalance_band": {
+    "absolute_points": "0.03",
+    "relative_to_target": "0.20",
+    "rule": "LARGER_OF"
+  },
+  "status_rule": {
+    "ratio": "live drawdown divided by prior worst drawdown",
+    "ratio_basis": "CURRENT_DRAWDOWN",
+    "ratio_basis_choices": ["CURRENT_DRAWDOWN", "WORST_LIVE_DRAWDOWN"],
+    "bands": [
+      {"from": "0", "status": "HOLD", "action": "Hold."},
+      {"from": "1.0", "status": "WATCH", "action": "Watch: no additions."},
+      {"from": "1.25", "status": "REDUCE", "action": "Reduce by half.", "sell_fraction": "0.5"},
+      {"from": "1.5", "status": "EXIT", "action": "Exit and review.", "sell_fraction": "1"}
+    ]
+  },
+  "stress_rule": {
+    "label": "Stress loss, policy rule re-applied at the cutoff: each strategy loses max(1.25 x its prior worst drawdown, 1.5 x its worst live drawdown), plus 5 points where its live history is platform-only, capped at 100%; every strategy at that loss on the same day. A scenario, not a forecast.",
+    "prior_multiplier": "1.25",
+    "live_multiplier": "1.5",
+    "platform_only_addition": "0.05",
+    "cap": "1",
+    "backtest_counts_as_loss_evidence": true,
+    "backtest_ruling": "Control ruling 2026-11-16, mechanical re-application of the owner's own rule; the owner may overturn.",
+    "platform_only_strategies": ["volatis-strategy", "robuxio-crypto"],
+    "prior_worst_drawdown": {
+      "p123-ai-factor": {"value": "0.1733", "source": "the correlation-one loss audit of 2026-11: hybrid backtest plus live maximum drawdown"},
+      "p123-eu": {"value": "0.5550", "source": "same audit: governed backtest maximum drawdown (2008), vendor series across a calendar gap"},
+      "qsi": {"value": "0.473", "source": "same audit: prior used by the policy constant"},
+      "tt-portfolio": {"value": "0.1816", "source": "same audit: hybrid maximum drawdown"},
+      "volatis-strategy": {"value": "0.388", "source": "same audit: prior used by the policy constant"},
+      "grizzlybears-vtma": {"value": "0.4713", "source": "same audit: governed backtest maximum drawdown"},
+      "robuxio-crypto": {"value": "0.352", "source": "same audit: prior used by the policy constant"}
+    },
+    "dependency": "PR 971 restates the stress number in the payload with the same rule. When its payload field is present this block prefers it; until then the page computes the figure from the payload weights and the numbers above."
+  },
+  "targets": {
+    "method": "Weight in inverse proportion to the stress loss fraction, pulled halfway to equal weight, then capped.",
+    "blend_to_equal": "0.5",
+    "max_strategy_weight": "0.25",
+    "max_strategy_weight_owner_set": false,
+    "max_cluster_weight": "0.60",
+    "max_cluster_weight_owner_set": false,
+    "clusters_from": "contracts/portfolio-economic-driver-clusters-v1.json"
+  },
+  "data_ages": {
+    "basis": "Days from the evaluation date to each source's data date.",
+    "allowed_days": {
+      "ibkr": 4,
+      "matrixport": 4,
+      "schwab": 8,
+      "quantbase": 8,
+      "portfolio123": 8
+    },
+    "allowed_days_owner_set": false,
+    "inactive_sources": ["alpaca", "fidelity"]
+  },
+  "display": {
+    "dollar_rounding": "100",
+    "change_threshold_points": "0.01"
+  }
+}

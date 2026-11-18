@@ -320,6 +320,11 @@
     ],
     [
       "portfolio_control_panel",
+      "portfolio_decision",
+      1
+    ],
+    [
+      "portfolio_control_panel",
       "portfolio_invested_capital",
       1
     ],

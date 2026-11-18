@@ -15,17 +15,20 @@
       <aside class="sidebar" aria-label="Control panel navigation">
         <div class="brand"><span class="brand-mark" aria-hidden="true">VC</span><div><div class="brand-name">V Capital</div><div class="brand-subtitle">Portfolio control</div></div></div>
         <nav class="nav-stack" aria-label="Dashboard sections">
-          <button class="nav-item is-active" type="button" data-nav="command" aria-current="page"><span class="nav-index">01</span><span>Portfolio</span></button>
-          <button class="nav-item" type="button" data-nav="capital"><span class="nav-index">02</span><span>Allocation &amp; lifecycle</span></button>
-          <button class="nav-item" type="button" data-nav="risk"><span class="nav-index">03</span><span>Performance &amp; HWM</span></button>
-          <button class="nav-item" type="button" data-nav="signals"><span class="nav-index">04</span><span>Signals</span></button>
-          <button class="nav-item" type="button" data-nav="attribution"><span class="nav-index">05</span><span>Factors &amp; alpha</span></button>
-          <button class="nav-item" type="button" data-nav="dependence"><span class="nav-index">06</span><span>Dependence</span></button>
-          <button class="nav-item" type="button" data-nav="weekly"><span class="nav-index">07</span><span>Weekly returns</span></button>
-          <button class="nav-item" type="button" data-nav="performance"><span class="nav-index">08</span><span>Performance charts</span></button>
-          <button class="nav-item" type="button" data-nav="modelvsactual"><span class="nav-index">09</span><span>Model vs actual</span></button>
-          <button class="nav-item" type="button" data-nav="concepts"><span class="nav-index">10</span><span>Strategy concepts</span></button>
-          <button class="nav-item" type="button" data-nav="data"><span class="nav-index">11</span><span>Data health</span></button>
+          <button class="nav-item is-active" aria-current="page" type="button" data-nav="decision"><span class="nav-index">01</span><span>Decision</span></button>
+          <button class="nav-item" type="button" data-nav="contextpack"><span class="nav-index">02</span><span>Context pack</span></button>
+          <button class="nav-item" type="button" data-nav="recommendations"><span class="nav-index">03</span><span>Recommendations</span></button>
+          <button class="nav-item" type="button" data-nav="command"><span class="nav-index">04</span><span>Portfolio</span></button>
+          <button class="nav-item" type="button" data-nav="capital"><span class="nav-index">05</span><span>Allocation &amp; lifecycle</span></button>
+          <button class="nav-item" type="button" data-nav="risk"><span class="nav-index">06</span><span>Performance &amp; HWM</span></button>
+          <button class="nav-item" type="button" data-nav="signals"><span class="nav-index">07</span><span>Signals</span></button>
+          <button class="nav-item" type="button" data-nav="attribution"><span class="nav-index">08</span><span>Factors &amp; alpha</span></button>
+          <button class="nav-item" type="button" data-nav="dependence"><span class="nav-index">09</span><span>Dependence</span></button>
+          <button class="nav-item" type="button" data-nav="weekly"><span class="nav-index">10</span><span>Weekly returns</span></button>
+          <button class="nav-item" type="button" data-nav="performance"><span class="nav-index">11</span><span>Performance charts</span></button>
+          <button class="nav-item" type="button" data-nav="modelvsactual"><span class="nav-index">12</span><span>Model vs actual</span></button>
+          <button class="nav-item" type="button" data-nav="concepts"><span class="nav-index">13</span><span>Strategy concepts</span></button>
+          <button class="nav-item" type="button" data-nav="data"><span class="nav-index">14</span><span>Data health</span></button>
         </nav>
       </aside>
 
@@ -53,7 +56,22 @@
           <div id="loading-state" class="loading-state" role="status"><span class="loading-pulse" aria-hidden="true"></span>Loading accepted portfolio evidence…</div>
           <div id="error-state" class="error-state" role="alert" hidden><strong>The local snapshot could not be loaded.</strong><span>Rebuild and verify it with <code>tools/portfolio_control_panel.py</code>.</span></div>
 
-          <section class="view is-active" data-view="command" aria-labelledby="command-heading">
+          <section class="view is-active" data-view="decision" aria-labelledby="decision-heading">
+            <div class="section-intro"><div><div class="eyebrow">Decision</div><h2 id="decision-heading">What the rules say to do now</h2></div></div>
+            <div id="decision-root" class="decision-root"><p>Decision block not in this payload.</p></div>
+          </section>
+
+          <section class="view" data-view="contextpack" aria-labelledby="contextpack-heading" hidden>
+            <div class="section-intro"><div><div class="eyebrow">Decisions</div><h2 id="contextpack-heading">Context pack: what the analyst reads</h2></div></div>
+            <div id="contextpack-root" class="decision-root"><p>Context pack not in this payload.</p></div>
+          </section>
+
+          <section class="view" data-view="recommendations" aria-labelledby="recommendations-heading" hidden>
+            <div class="section-intro"><div><div class="eyebrow">Decisions</div><h2 id="recommendations-heading">Recommendation log</h2></div></div>
+            <div id="recommendations-root" class="decision-root"><p>Recommendation log not in this payload.</p></div>
+          </section>
+
+          <section class="view" data-view="command" aria-labelledby="command-heading" hidden>
             <section id="owner-view" class="owner-view" aria-label="Release owner view"><div class="eyebrow">Release owner view</div><p id="owner-view-verdict">Owner view not loaded: assume the gaps are real.</p><div id="owner-view-items"></div></section>
             <div class="status-banner status-danger"><div><div class="eyebrow">Data status</div><h2 id="command-heading">Loading</h2><p id="command-reason"></p></div></div>
             <div id="command-kpis" class="kpi-grid" aria-label="Capital and evidence summary"></div>
