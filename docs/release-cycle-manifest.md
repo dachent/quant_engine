@@ -520,3 +520,15 @@ For **every** mode, `resolve` refuses a provider whose chosen generation's obser
 `cutoff_coverage_reason` (a reason without the exemption is refused). A cycle manifest that names a live-qualified provider
 whose data ends before the cutoff (for example the Alpaca generation, which ends 2026-07-17) must now declare that
 exemption explicitly.
+
+### Finality records (refs #418)
+
+For `latest_at_or_before` a provider whose finality is not its generation manifest (`SELECTED_SOURCE_ARTIFACT`,
+`CYCLE_MANIFEST_NATIVE`) takes `finalized_through` and the finality-evidence file from a record the capture stage left
+beside the generation: `<provider root>/finality/<generation_id>.json` (`qe-capture-finality/1`: provider, generation,
+`finalized_through`, and the evidence file as `{relative, sha256, size_bytes}` under the provider root). A hand-typed
+`finality_evidence` or `finalized_through` in the cycle manifest is refused in this mode (`FINALITY_HAND_TYPED`). A
+generation without a valid record is not eligible (`REJECTED_NO_FINALITY_RECORD`); a record final before the cutoff is
+`REJECTED_FINALITY_BEFORE_CUTOFF`. A capture stage writes the record, create-only, with
+`release_cycle_manifest.write_finality_record(...)` or
+`python tools/release_cycle_manifest.py write-finality --provider-root DIR --provider-id P --generation-id G --finalized-through D --evidence REL`.
