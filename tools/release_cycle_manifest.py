@@ -248,8 +248,34 @@ def validate_static(manifest: Mapping[str, Any]) -> None:
             f"cutoff {manifest['cutoff']} is after evaluated_on {manifest['evaluated_on']}",
         )
     for provider_id, provider in manifest["providers"].items():
+        late = provider["generation"]["mode"] == "latest_at_or_before"
+        if "manifest_sha256" not in provider and not late:
+            raise CycleManifestError(
+                "MANIFEST_SHA256_REQUIRED",
+                f"{provider_id}: only the latest_at_or_before mode may omit manifest_sha256",
+            )
+        if provider.get("cutoff_coverage") == "NOT_REQUIRED":
+            if not provider.get("cutoff_coverage_reason"):
+                raise CycleManifestError(
+                    "COVERAGE_EXEMPTION_REASON",
+                    f"{provider_id}: cutoff_coverage NOT_REQUIRED needs a cutoff_coverage_reason",
+                )
+        elif "cutoff_coverage_reason" in provider:
+            raise CycleManifestError(
+                "COVERAGE_EXEMPTION_REASON",
+                f"{provider_id}: a cutoff_coverage_reason without a NOT_REQUIRED exemption",
+            )
         needs = provider["finality_source"] != GENERATION_MANIFEST
         has = "finality_evidence" in provider
+        if late and needs:
+            # late binding: the capture stage's finality record supplies both values
+            if has or "finalized_through" in provider:
+                raise CycleManifestError(
+                    "FINALITY_HAND_TYPED",
+                    f"{provider_id}: latest_at_or_before takes finality from the capture "
+                    "stage's finality record, not from the cycle manifest",
+                )
+            continue
         if needs and not has:
             raise CycleManifestError(
                 "FINALITY_EVIDENCE_REQUIRED",
@@ -379,20 +405,25 @@ def _resolve_ref(ref: Mapping[str, str], roots: Mapping[str, Path], what: str) -
     return target
 
 
-def _file(path: Path, sha256: str, size_bytes: int | None, what: str) -> dict[str, Any]:
+def _file(
+    path: Path, sha256: str | None, size_bytes: int | None, what: str
+) -> dict[str, Any]:
+    """Bytes of a declared file; ``sha256=None`` records the hash instead of checking a pin."""
+
     if not path.is_file():
         raise CycleManifestError("MISSING", f"{what}: no file at the declared path")
     data = path.read_bytes()
-    if _sha256(data) != sha256:
+    actual = _sha256(data)
+    if sha256 is not None and actual != sha256:
         raise CycleManifestError(
             "HASH_MISMATCH",
-            f"{what}: bytes hash to {_sha256(data)[:12]}, pinned {sha256[:12]}",
+            f"{what}: bytes hash to {actual[:12]}, pinned {sha256[:12]}",
         )
     if size_bytes is not None and len(data) != size_bytes:
         raise CycleManifestError(
             "SIZE_MISMATCH", f"{what}: {len(data)} bytes, pinned {size_bytes}"
         )
-    return {"path": path.as_posix(), "sha256": sha256, "size_bytes": len(data)}
+    return {"path": path.as_posix(), "sha256": actual, "size_bytes": len(data)}
 
 
 def _pin(
@@ -406,8 +437,245 @@ def _pin(
     )
 
 
+def _coverage_required(provider: Mapping[str, Any]) -> bool:
+    """A provider's data must reach the cutoff unless it is finite or declared not to."""
+
+    if provider["qualification"] == "FINITE_STATIC":
+        return False
+    return bool(provider.get("cutoff_coverage", "REQUIRED") == "REQUIRED")
+
+
+def _generation_facts(directory: Path) -> dict[str, Any]:
+    """The few manifest fields selection and the coverage guard read (value-free)."""
+
+    declared = _read_json(directory / "generation.json")
+    if not isinstance(declared, dict):
+        raise CycleManifestError(
+            "GENERATION_INVALID",
+            f"{directory.name[:12]}: generation.json is not an object",
+        )
+    coverage = declared.get("coverage")
+    end = coverage.get("observed_end") if isinstance(coverage, dict) else None
+    as_of = declared.get("as_of_date")
+    return {
+        "verified": declared.get("verification") == "VERIFIED",
+        "as_of": as_of if isinstance(as_of, str) else None,
+        "observed_end": end if isinstance(end, str) else None,
+    }
+
+
+FINALITY_RECORD_VERSION = "qe-capture-finality/1"
+_FINALITY_RECORD_KEYS = {
+    "evidence",
+    "finalized_through",
+    "generation_id",
+    "provider_id",
+    "schema_version",
+}
+
+
+def finality_record_path(root: Path, generation_id: str) -> Path:
+    """Where a capture stage leaves the finality record of a generation (beside, not inside, it)."""
+
+    return root / "finality" / f"{generation_id}.json"
+
+
+def _read_finality_record(
+    what: str, root: Path, provider_id: str, generation_id: str
+) -> tuple[str, dict[str, Any]]:
+    """The date a capture stage declared final and the hash-checked evidence file it names."""
+
+    refuse_links(root, ["finality", f"{generation_id}.json"], what)
+    path = finality_record_path(root, generation_id)
+    if not path.is_file():
+        raise CycleManifestError(
+            "FINALITY_RECORD_MISSING",
+            f"{what}: no finality record for generation {generation_id[:12]}",
+        )
+    record = _read_json(path)
+    evidence = record.get("evidence") if isinstance(record, dict) else None
+    if (
+        not isinstance(record, dict)
+        or set(record) != _FINALITY_RECORD_KEYS
+        or record["schema_version"] != FINALITY_RECORD_VERSION
+        or not isinstance(evidence, dict)
+        or set(evidence) != {"relative", "sha256", "size_bytes"}
+    ):
+        raise CycleManifestError(
+            "FINALITY_RECORD_INVALID", f"{what}: finality record shape differs"
+        )
+    if record["provider_id"] != provider_id or record["generation_id"] != generation_id:
+        raise CycleManifestError(
+            "FINALITY_RECORD_INVALID",
+            f"{what}: finality record names another provider or generation",
+        )
+    _day(record["finalized_through"], f"{what}.finalized_through")
+    parts = _relative_parts(evidence["relative"], f"{what}.finality evidence")
+    refuse_links(root, parts, f"{what} finality evidence")
+    pin = _file(
+        root.joinpath(*parts),
+        evidence["sha256"],
+        evidence["size_bytes"],
+        f"{what} finality evidence",
+    )
+    return record["finalized_through"], pin
+
+
+def write_finality_record(
+    root: Path,
+    provider_id: str,
+    generation_id: str,
+    finalized_through: str,
+    evidence_relative: str,
+) -> Path:
+    """Capture stages call this once the generation exists: create-only, hashes the evidence file."""
+
+    _day(finalized_through, "finalized_through")
+    parts = _relative_parts(evidence_relative, "finality evidence")
+    refuse_links(root, parts, "finality evidence")
+    data = root.joinpath(*parts).read_bytes()
+    record = {
+        "schema_version": FINALITY_RECORD_VERSION,
+        "provider_id": provider_id,
+        "generation_id": generation_id,
+        "finalized_through": finalized_through,
+        "evidence": {
+            "relative": evidence_relative,
+            "sha256": _sha256(data),
+            "size_bytes": len(data),
+        },
+    }
+    path = finality_record_path(root, generation_id)
+    _write_create_only(path, dumps(record))
+    return path
+
+
+def _select_latest(
+    what: str,
+    provider: Mapping[str, Any],
+    generations: Path,
+    cutoff: str,
+    evaluated_on: str,
+    record_of: Mapping[str, Any] | None = None,
+    allow_older_on_bad_newest: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    """Newest verified generation that covers the cutoff and was captured by ``evaluated_on``.
+
+    A generation is eligible when it is VERIFIED, was captured on or before ``evaluated_on``
+    (a capture is usually dated after the cutoff, so the cutoff itself cannot bound it) and,
+    when the provider must reach the cutoff, its observed coverage ends on or after the cutoff.
+    The newest ``as_of_date`` wins; a tie is a refusal. Every candidate and its verdict is
+    recorded in the resolved cycle, so the choice is bound into everything built on it.
+
+    A newer generation whose finality record is missing or unusable is never skipped silently in
+    favour of an older one: that is a refusal (``FINALITY_RECORD_BAD``) unless
+    ``allow_older_on_bad_newest`` is set, in which case the skip stays visible in the candidates.
+    """
+
+    required = _coverage_required(provider)
+    rows: list[dict[str, Any]] = []
+    bad_record: list[tuple[str, str, str]] = []  # (as_of, generation id, error)
+    for path in sorted(p for p in generations.iterdir() if p.is_dir()):
+        facts = _generation_facts(path)
+        if not facts["verified"]:
+            verdict = "REJECTED_NOT_VERIFIED"
+        elif facts["as_of"] is None or facts["as_of"] > evaluated_on:
+            verdict = "REJECTED_AS_OF_AFTER_EVALUATION"
+        elif required and (
+            facts["observed_end"] is None or facts["observed_end"] < cutoff
+        ):
+            verdict = "REJECTED_COVERAGE_BEFORE_CUTOFF"
+        else:
+            verdict = "ELIGIBLE"
+            if record_of is not None:
+                try:
+                    final, _pin_unused = _read_finality_record(
+                        what, record_of["root"], record_of["provider_id"], path.name
+                    )
+                except CycleManifestError as exc:
+                    verdict = "REJECTED_NO_FINALITY_RECORD"
+                    bad_record.append((facts["as_of"], path.name, f"{exc.code}: {exc}"))
+                else:
+                    if required and final < cutoff:
+                        verdict = "REJECTED_FINALITY_BEFORE_CUTOFF"
+        rows.append(
+            {
+                "generation_id": path.name,
+                "as_of_date": facts["as_of"],
+                "observed_end": facts["observed_end"],
+                "verdict": verdict,
+            }
+        )
+    eligible = [row for row in rows if row["verdict"] == "ELIGIBLE"]
+    if not eligible:
+        shown = ", ".join(f"{r['generation_id'][:12]}={r['verdict']}" for r in rows)
+        raise CycleManifestError(
+            "NO_ELIGIBLE_GENERATION",
+            f"{what}: no verified generation covers cutoff {cutoff} captured by "
+            f"{evaluated_on} ({shown or 'none under its root'})",
+        )
+    newest = max(row["as_of_date"] for row in eligible)
+    best = [row for row in eligible if row["as_of_date"] == newest]
+    if len(best) > 1:
+        shown = ", ".join(row["generation_id"][:12] for row in best)
+        raise CycleManifestError(
+            "AMBIGUOUS_GENERATION",
+            f"{what}: {len(best)} eligible generations share as_of {newest} ({shown})",
+        )
+    newer_bad = [b for b in bad_record if b[0] > newest]
+    if newer_bad and not allow_older_on_bad_newest:
+        as_of, generation_id, error = max(newer_bad)
+        raise CycleManifestError(
+            "FINALITY_RECORD_BAD",
+            f"{what}: the newest generation {generation_id[:12]} (as_of {as_of}) has no usable "
+            f"finality record ({error}); refusing to fall back to the older "
+            f"{best[0]['generation_id'][:12]} (as_of {newest}). Fix the record, or pass "
+            "--allow-older-on-bad-newest to accept the older generation on purpose",
+        )
+    for row in rows:
+        if row is best[0]:
+            row["verdict"] = "SELECTED"
+    return best[0]["generation_id"], {
+        "rule": "NEWEST_VERIFIED_COVERING_CUTOFF_CAPTURED_BY_EVALUATION",
+        "cutoff": cutoff,
+        "evaluated_on": evaluated_on,
+        "coverage_required": required,
+        "candidates": rows,
+    }
+
+
+def _check_cutoff_coverage(
+    what: str,
+    provider: Mapping[str, Any],
+    declared: Mapping[str, Any],
+    cutoff: str,
+    finalized: str | None,
+) -> None:
+    """Refuse a provider whose data, or whose declared finality, stops before the cutoff."""
+
+    if not _coverage_required(provider):
+        return
+    coverage = declared.get("coverage")
+    end = coverage.get("observed_end") if isinstance(coverage, dict) else None
+    if not isinstance(end, str) or end < cutoff:
+        raise CycleManifestError(
+            "COVERAGE_BEFORE_CUTOFF",
+            f"{what}: observed coverage ends {end}, before the cutoff {cutoff}",
+        )
+    if finalized is not None and finalized < cutoff:
+        raise CycleManifestError(
+            "FINALITY_BEFORE_CUTOFF",
+            f"{what}: finalized_through {finalized} is before the cutoff {cutoff}",
+        )
+
+
 def _generation(
-    provider_id: str, provider: Mapping[str, Any], roots: Mapping[str, Path]
+    provider_id: str,
+    provider: Mapping[str, Any],
+    roots: Mapping[str, Path],
+    cutoff: str,
+    evaluated_on: str,
+    allow_older_on_bad_newest: bool = False,
 ) -> dict[str, Any]:
     what = provider_id
     root = _resolve_ref(provider["root"], roots, f"{what}.root")
@@ -417,7 +685,22 @@ def _generation(
             "MISSING", f"{what}: no generations directory under its root"
         )
     chosen = provider["generation"]
-    if chosen["mode"] == "explicit":
+    selection: dict[str, Any] | None = None
+    late = chosen["mode"] == "latest_at_or_before"
+    if late:
+        generation_id, selection = _select_latest(
+            what,
+            provider,
+            generations,
+            cutoff,
+            evaluated_on,
+            {"root": root, "provider_id": provider_id}
+            if provider["finality_source"] != GENERATION_MANIFEST
+            else None,
+            allow_older_on_bad_newest,
+        )
+        directory = generations / generation_id
+    elif chosen["mode"] == "explicit":
         generation_id = chosen["generation_id"]
         directory = generations / generation_id
         if not directory.is_dir():
@@ -450,7 +733,7 @@ def _generation(
         )
     manifest = _file(
         directory / "generation.json",
-        provider["manifest_sha256"],
+        provider.get("manifest_sha256"),
         None,
         f"{what} generation manifest",
     )
@@ -464,15 +747,21 @@ def _generation(
             f"{what}: generation.json names another generation than its directory",
         )
     source = provider["finality_source"]
+    finalized = provider.get("finalized_through")
     if source == GENERATION_MANIFEST:
         evidence: dict[str, Any] | None = dict(manifest)
+    elif late:
+        finalized, evidence = _read_finality_record(
+            what, root, provider_id, generation_id
+        )
     else:
         evidence = _pin(
             provider["finality_evidence"], roots, f"{what} finality evidence"
         )
-    return {
+    _check_cutoff_coverage(what, provider, declared, cutoff, finalized)
+    row: dict[str, Any] = {
         "qualification": provider["qualification"],
-        "finalized_through": provider.get("finalized_through"),
+        "finalized_through": finalized,
         "root": root.as_posix(),
         "generation_id": generation_id,
         "generation_dir": directory.as_posix(),
@@ -482,10 +771,18 @@ def _generation(
         "finality_source": source,
         "finality_evidence": evidence,
     }
+    if (
+        selection is not None
+    ):  # only the late-binding mode adds a key: other output is unchanged
+        row["selection"] = selection
+    return row
 
 
 def resolve(
-    manifest_bytes: bytes, roots: Mapping[str, Path], manifest_sha256: str | None = None
+    manifest_bytes: bytes,
+    roots: Mapping[str, Path],
+    manifest_sha256: str | None = None,
+    allow_older_on_bad_newest: bool = False,
 ) -> dict[str, Any]:
     digest = _sha256(manifest_bytes)
     if manifest_sha256 is not None and manifest_sha256 != digest:
@@ -508,7 +805,14 @@ def resolve(
         "roots": {key: path.as_posix() for key, path in sorted(roots.items())},
         "scratch": _resolve_ref(manifest["scratch"], roots, "scratch").as_posix(),
         "providers": {
-            provider_id: _generation(provider_id, provider, roots)
+            provider_id: _generation(
+                provider_id,
+                provider,
+                roots,
+                manifest["cutoff"],
+                manifest["evaluated_on"],
+                allow_older_on_bad_newest,
+            )
             for provider_id, provider in sorted(manifest["providers"].items())
         },
         "strategy_evidence": _pin(
@@ -580,7 +884,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands.choices["resolve"].add_argument(
         "--out", type=Path, help="create-only; stdout when absent"
     )
+    for name in ("validate", "resolve"):
+        commands.choices[name].add_argument(
+            "--allow-older-on-bad-newest",
+            action="store_true",
+            help="late mode: accept an older generation when the newest has no usable finality record",
+        )
+    write = commands.add_parser(
+        "write-finality",
+        help="a capture stage records the finality of the generation it just created",
+    )
+    write.add_argument("--provider-root", type=Path, required=True)
+    write.add_argument("--provider-id", required=True)
+    write.add_argument("--generation-id", required=True)
+    write.add_argument("--finalized-through", required=True)
+    write.add_argument(
+        "--evidence", required=True, help="path of the evidence file under the root"
+    )
     args = parser.parse_args(argv)
+    if args.command == "write-finality":
+        try:
+            path = write_finality_record(
+                args.provider_root.resolve(),
+                args.provider_id,
+                args.generation_id,
+                args.finalized_through,
+                args.evidence,
+            )
+        except (CycleManifestError, OSError) as exc:
+            print(f"release-cycle-manifest: FAIL: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"finality_record": path.as_posix()}))
+        return 0
     try:
         data = args.manifest.read_bytes()
         roots = parse_roots(args.root, args.roots_file)
@@ -595,7 +930,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "release-cycle-manifest: static checks OK (no roots given; files not checked)"
             )
             return 0
-        resolved = resolve(data, roots, args.manifest_sha256)
+        resolved = resolve(
+            data,
+            roots,
+            args.manifest_sha256,
+            getattr(args, "allow_older_on_bad_newest", False),
+        )
         _note_legacy(resolved)
         schema_problem = _resolved_errors(resolved)
         if schema_problem:

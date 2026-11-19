@@ -426,3 +426,52 @@ def test_a_position_row_with_value_basis_must_state_the_derived_as_of_basis() ->
         [{"value_basis": {**basis, "provider_finality_guarantee": True}}],
         "account_rows_with_value_basis",
     )
+
+
+def test_a_position_derived_from_a_later_snapshot_keeps_its_own_basis_and_says_so(
+    tmp_path: Path,
+) -> None:
+    """A finality entry for the same account and day must not relabel it as official-close derived."""
+
+    index = reporter._derived_value_index(
+        _evidence(tmp_path, ["acct-derived"], ["2026-09-17"])
+    )
+    kind = "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT"
+    catalog = {
+        "positions": [
+            {
+                "account_id": "acct-derived",
+                "as_of_basis": kind,
+                "as_of_date": "2026-09-17",
+                "capture_date": "2026-09-25",
+                "evidence_class": kind,
+                "market_value": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "5",
+                },
+                "mapping_status": "UNMAPPED",
+                "quantity": "5",
+                "closure": {"earlier_market_value_days": ["2026-09-22"]},
+                "residual_reallocation_window_days": ["2026-09-19", "2026-09-25"],
+                "security_id": "sec-1",
+                "strategy_id": None,
+                "symbol": "FUND",
+            }
+        ]
+    }
+    (row,) = reporter._positions(catalog, None, index)
+    assert row["as_of_basis"] == kind
+    assert row["evidence_class"] == kind
+    assert "value_basis" not in row
+    assert row["capture_date"] == "2026-09-25"
+    assert row["residual_reallocation_window_days"] == ["2026-09-19", "2026-09-25"]
+    assert row["basis_note"] == (
+        "position inferred, not observed: derived at cutoff from a later snapshot "
+        "(captured 2026-09-25); net zero change in the account total over the days since "
+        "the cutoff, holdings/cash split inferred from the 2026-09-22 page; "
+        "same-total reallocation cannot be excluded between 2026-09-19 and 2026-09-25; "
+        "a later page equal in total does not rule it out, so the per-symbol split is "
+        "not proven for those days"
+    )
+    assert row["snapshot_status"] == "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"

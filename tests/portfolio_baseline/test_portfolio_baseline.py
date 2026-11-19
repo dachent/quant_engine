@@ -6018,6 +6018,427 @@ def test_statement_reserve_with_census_account_builds_end_to_end(
     assert members["account-jh"]["as_of_date"] == "2026-06-30"
 
 
+def _matrix_row(
+    unattributed: Any,
+    accepted: list[dict[str, Any]],
+    completeness: Any = None,
+) -> dict[str, Any]:
+    account = {
+        "account_id": "account-reserve",
+        "base_currency": "USD",
+        "provider": "schwab",
+        "role": "INVESTMENT",
+    }
+    admission = {
+        "account_id": "account-reserve",
+        "disposition": "AUTHORITATIVE",
+        "effective_end": "2026-07-30",
+        "effective_start": "2026-01-01",
+        "fact_type": "transactions",
+    }
+    matrix, _, _ = baseline._coverage_evidence(
+        accounts=[account],
+        assignments=[],
+        provider_admissions=[admission],
+        provider_coverage=[],
+        nav=[],
+        positions=[],
+        transactions=accepted,
+        flows=[],
+        as_of_date=date(2026, 7, 30),
+        **({} if unattributed is None else {"unattributed": unattributed}),
+        **({} if completeness is None else {"completeness": completeness}),
+    )
+    return next(row for row in matrix if row["fact_type"] == "transactions")
+
+
+def test_a_reason_names_the_provider_records_that_were_excluded_not_attributed() -> (
+    None
+):
+    """An account whose provider events were all excluded for lack of a strategy
+    attribution must not be described as having no events: the reason states the count
+    (status vocabulary unchanged)."""
+
+    plain = _matrix_row(None, [])
+    assert plain["status"] == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+    assert "lack a strategy attribution" not in plain["missing_interval_reason"]
+    # absent or zero counts leave the row byte-identical
+    assert _matrix_row({}, []) == plain
+    assert _matrix_row({("account-reserve", "transactions"): 0}, []) == plain
+
+    row = _matrix_row({("account-reserve", "transactions"): 444}, [])
+    # events exist but none is attributed: neither "no reported events" nor accepted
+    assert row["status"] == "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF"
+    assert row["disposition"] == "RETAINED_PROVIDER_EVENTS_NOT_ATTRIBUTED"
+    assert row["missing_interval_reason"] == (
+        plain["missing_interval_reason"]
+        + "; provider ledger transactions for this account: 444 lack a strategy "
+        "attribution and are left out of the accepted records"
+    )
+    # accepted records keep the observed status; the reason still names the excluded ones
+    observed = _matrix_row(
+        {("account-reserve", "transactions"): 3},
+        [
+            {
+                "account_id": "account-reserve",
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+                "event_date": "2026-02-01",
+                "record_id": "t-1",
+            }
+        ],
+    )
+    assert observed["status"] == "OBSERVED_NOT_COMPLETENESS_PROOF"
+    assert "3 lack a strategy attribution" in observed["missing_interval_reason"]
+    # another account's or another fact's count never leaks into this row
+    other = _matrix_row(
+        {("account-other", "transactions"): 9, ("account-reserve", "flows"): 7}, []
+    )
+    assert other == plain
+
+
+def test_unattributed_provider_records_counts_only_records_that_are_not_mapped() -> (
+    None
+):
+    catalog = {
+        "transactions": [
+            {"account_id": "a", "mapping_status": "UNMAPPED"},
+            {"account_id": "a", "mapping_status": "UNMAPPED"},
+            {"account_id": "a", "mapping_status": "MAPPED"},
+            {"account_id": "b", "mapping_status": "UNMAPPED"},
+        ],
+        "flows": [{"account_id": "a", "mapping_status": "UNMAPPED"}],
+        "positions": [{"account_id": "a", "mapping_status": "UNMAPPED"}],
+    }
+    assert baseline._unattributed_provider_records(catalog) == {
+        ("a", "transactions"): 2,
+        ("b", "transactions"): 1,
+        ("a", "flows"): 1,
+    }
+    assert baseline._unattributed_provider_records(None) == {}
+    assert baseline._unattributed_provider_records({"transactions": "x"}) == {}
+
+
+def _closure_row(
+    status: str,
+    failed: list[tuple[str, int]] | None = None,
+    proven: list[str] | None = None,
+    records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    checks = [
+        {
+            "check": "STATEMENT_TOTALS_EQUAL_LEDGER_FLOWS",
+            "status": "PASS",
+            "failures": 0,
+        }
+    ]
+    checks += [
+        {"check": name, "status": "FAIL", "failures": n} for name, n in failed or []
+    ]
+    return {
+        "account_id": "account-reserve",
+        "fact_type": "transactions",
+        "status": status,
+        "closure": "IBKR_CHANGE_IN_NAV_FLOW_TIE_OUT",
+        "declared_start": "2026-01-02",
+        "declared_end": "2026-07-30",
+        "checks": checks,
+        "proven_record_ids": proven or [],
+        "proven_records": (
+            records
+            if records is not None
+            else [
+                {"record_id": rid, "event_date": "2026-02-01", "amount": "1"}
+                for rid in proven or []
+            ]
+        ),
+    }
+
+
+def test_a_ledger_closure_proof_declares_the_row_complete() -> None:
+    row = _matrix_row(
+        None,
+        [],
+        {("account-reserve", "transactions"): _closure_row("DECLARED_COMPLETE")},
+    )
+    assert row["status"] == "DECLARED_COMPLETE"
+    assert (row["declared_start"], row["declared_end"]) == ("2026-01-02", "2026-07-30")
+    assert row["boundary_basis"] == "LEDGER_CLOSURE"
+    assert row["authority"] == "PROVIDER_LEDGER_CLOSURE"
+    assert row["missing_intervals"] == [] and row["unavailable_amount_count"] == 0
+    assert baseline._declares_complete(row, date(2026, 7, 30))
+    # the proof is for one account and fact only
+    other = _matrix_row(
+        None, [], {("account-other", "transactions"): _closure_row("DECLARED_COMPLETE")}
+    )
+    assert other["status"] == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+
+
+def test_a_failed_closure_never_declares_and_names_what_failed() -> None:
+    plain = _matrix_row(None, [])
+    failed = _matrix_row(
+        None,
+        [],
+        {
+            ("account-reserve", "transactions"): _closure_row(
+                "CLOSURE_FAILED", [("NAV_ON_EVERY_MARKET_DAY", 39)]
+            )
+        },
+    )
+    assert failed["status"] == plain["status"]
+    assert failed["declared_start"] is None and failed["declared_end"] is None
+    assert failed["missing_interval_reason"].endswith(
+        "completeness declaration not proved by ledger closure; failed: NAV_ON_EVERY_MARKET_DAY (39)"
+    )
+    assert not baseline._declares_complete(failed, date(2026, 7, 30))
+
+
+def test_a_closure_proof_does_not_hide_unavailable_amounts() -> None:
+    row = _matrix_row(
+        None,
+        [
+            {
+                "account_id": "account-reserve",
+                "amount": {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+                "event_date": "2026-02-01",
+                "record_id": "t-1",
+            }
+        ],
+        {
+            ("account-reserve", "transactions"): _closure_row(
+                "DECLARED_COMPLETE", proven=["t-1"]
+            )
+        },
+    )
+    # the consumer's own rule still refuses a row with an unavailable amount
+    assert row["unavailable_amount_count"] == 1
+    assert not baseline._declares_complete(row, date(2026, 7, 30))
+
+
+def test_ledger_completeness_reads_only_the_ledgers_event_completeness_rows() -> None:
+    row = _closure_row("DECLARED_COMPLETE")
+    assert baseline._ledger_completeness({"event_completeness": [row]}) == {
+        ("account-reserve", "transactions"): row
+    }
+    assert baseline._ledger_completeness({}) == {}
+    assert baseline._ledger_completeness(None) == {}
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status", "disposition"),
+    [
+        (
+            "CAPTURED_NOT_ADMITTED",
+            "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF",
+            "RETAINED_CAPTURED_NOT_ADMITTED",
+        ),
+        (
+            "EXCLUDED_BY_RULING",
+            "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF",
+            "RETAINED_EXCLUDED_BY_RULING",
+        ),
+    ],
+)
+def test_a_governed_outcome_types_the_row_and_never_declares_it_complete(
+    outcome: str, status: str, disposition: str
+) -> None:
+    proof = {
+        "account_id": "account-reserve",
+        "fact_type": "transactions",
+        "status": outcome,
+        "citation": "owner ruling 2026-11-17",
+    }
+    row = _matrix_row(None, [], {("account-reserve", "transactions"): proof})
+    assert row["status"] == status and row["disposition"] == disposition
+    assert row["authority"] == "GOVERNED_DECLARATION"
+    assert "owner ruling 2026-11-17" in row["missing_interval_reason"]
+    assert row["declared_start"] is None and row["declared_end"] is None
+    assert not baseline._declares_complete(row, date(2026, 7, 30))
+
+
+def _accepted(record_id: str, day: str = "2026-02-01") -> dict[str, Any]:
+    return {
+        "account_id": "account-reserve",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+        "event_date": day,
+        "record_id": record_id,
+    }
+
+
+def test_a_closure_proof_declares_complete_only_over_the_records_it_proved() -> None:
+    """Opus probe on real A5 inputs: the closure proved 31 ledger rows that were all excluded
+    (no strategy attribution) while the baseline accepted 18 others; the row must not be complete."""
+
+    proof = {
+        ("account-reserve", "transactions"): _closure_row(
+            "DECLARED_COMPLETE", proven=["t-1", "t-2", "t-3"]
+        )
+    }
+    complete = _matrix_row(
+        None, [_accepted("t-1"), _accepted("t-2"), _accepted("t-3")], proof
+    )
+    assert complete["status"] == "DECLARED_COMPLETE"
+    assert baseline._declares_complete(complete, date(2026, 7, 30))
+
+    # a proven record the baseline did not accept (here two were excluded as unattributed)
+    short = _matrix_row(
+        {("account-reserve", "transactions"): 2},
+        [_accepted("t-1")],
+        proof,
+    )
+    assert short["status"] != "DECLARED_COMPLETE"
+    assert not baseline._declares_complete(short, date(2026, 7, 30))
+    assert "2 proven records are not accepted" in short["missing_interval_reason"]
+    assert short["declared_start"] is None
+
+    # an accepted record the closure never saw
+    extra = _matrix_row(
+        None,
+        [_accepted("t-1"), _accepted("t-2"), _accepted("t-3"), _accepted("t-9")],
+        proof,
+    )
+    assert extra["status"] != "DECLARED_COMPLETE"
+    assert "1 accepted records are not proven" in extra["missing_interval_reason"]
+
+    # identical records but one was ALSO excluded: still not complete
+    excluded = _matrix_row(
+        {("account-reserve", "transactions"): 1},
+        [_accepted("t-1"), _accepted("t-2"), _accepted("t-3")],
+        proof,
+    )
+    assert excluded["status"] != "DECLARED_COMPLETE"
+
+    # records outside the declared interval do not count against it
+    outside = _matrix_row(
+        None,
+        [
+            _accepted("t-1"),
+            _accepted("t-2"),
+            _accepted("t-3"),
+            _accepted("t-0", "2025-12-01"),
+        ],
+        proof,
+    )
+    assert outside["status"] == "DECLARED_COMPLETE"
+
+
+def test_a_row_with_all_events_unattributed_stays_typed_not_complete_despite_a_proof() -> (
+    None
+):
+    row = _matrix_row(
+        {("account-reserve", "transactions"): 31},
+        [],
+        {
+            ("account-reserve", "transactions"): _closure_row(
+                "DECLARED_COMPLETE", proven=[f"t-{i}" for i in range(31)]
+            )
+        },
+    )
+    assert row["status"] == "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF"
+    assert "31 proven records are not accepted" in row["missing_interval_reason"]
+
+
+def test_a_complete_row_states_the_accepted_records_outside_its_declaration() -> None:
+    proof = {
+        ("account-reserve", "transactions"): _closure_row(
+            "DECLARED_COMPLETE", proven=["t-1"]
+        )
+    }
+    row = _matrix_row(None, [_accepted("t-1"), _accepted("t-0", "2025-12-01")], proof)
+    assert row["status"] == "DECLARED_COMPLETE"
+    assert (
+        "1 accepted records dated before the declared start 2026-01-02 lie outside the declaration"
+        in row["missing_interval_reason"]
+    )
+    plain = _matrix_row(None, [_accepted("t-1")], proof)
+    assert "outside the declaration" not in plain["missing_interval_reason"]
+
+
+def _proof_with_records(*records: tuple[str, str, str]) -> dict[Any, Any]:
+    return {
+        ("account-reserve", "transactions"): _closure_row(
+            "DECLARED_COMPLETE",
+            proven=[r[0] for r in records],
+            records=[
+                {"record_id": r[0], "event_date": r[1], "amount": r[2]} for r in records
+            ],
+        )
+    }
+
+
+def test_the_proven_and_accepted_flows_compare_as_a_multiset_of_id_date_amount() -> (
+    None
+):
+    proof = _proof_with_records(("t-1", "2026-02-01", "1"), ("t-2", "2026-02-01", "1"))
+    same = _matrix_row(None, [_accepted("t-1"), _accepted("t-2")], proof)
+    assert same["status"] == "DECLARED_COMPLETE"
+    # an accepted duplicate of one id
+    dup = _matrix_row(
+        None, [_accepted("t-1"), _accepted("t-1"), _accepted("t-2")], proof
+    )
+    assert dup["status"] != "DECLARED_COMPLETE"
+    assert "accepted records are not proven" in dup["missing_interval_reason"]
+    # the same id with another amount
+    other = _accepted("t-2")
+    other["amount"] = {"currency": "USD", "status": "AVAILABLE", "value": "1001"}
+    moved = _matrix_row(None, [_accepted("t-1"), other], proof)
+    assert moved["status"] != "DECLARED_COMPLETE"
+    # the same id on another date
+    later = _matrix_row(None, [_accepted("t-1"), _accepted("t-2", "2026-02-02")], proof)
+    assert later["status"] != "DECLARED_COMPLETE"
+    # 1.0 and 1E0 are the same amount
+    spelled = _accepted("t-2")
+    spelled["amount"] = {"currency": "USD", "status": "AVAILABLE", "value": "1.00"}
+    assert (
+        _matrix_row(None, [_accepted("t-1"), spelled], proof)["status"]
+        == "DECLARED_COMPLETE"
+    )
+
+
+def test_an_accepted_record_without_a_date_cannot_sit_inside_a_complete_row() -> None:
+    proof = _proof_with_records(("t-1", "2026-02-01", "1"))
+    undated = _accepted("t-9")
+    undated.pop("event_date")
+    row = _matrix_row(None, [_accepted("t-1"), undated], proof)
+    assert row["status"] != "DECLARED_COMPLETE"
+    assert "1 accepted records lack a date" in row["missing_interval_reason"]
+
+
+def test_a_closure_row_without_proven_records_never_declares_complete() -> None:
+    row = _closure_row("DECLARED_COMPLETE", proven=["t-1"])
+    del row["proven_records"]  # a catalog built before the rows carried them
+    proof = {("account-reserve", "transactions"): row}
+    matrix = _matrix_row(None, [_accepted("t-1")], proof)
+    assert matrix["status"] != "DECLARED_COMPLETE"
+    assert "has an absent proven record list" in matrix["missing_interval_reason"]
+
+
+def test_records_before_the_declared_start_in_covered_time_refuse_completeness() -> (
+    None
+):
+    row = _closure_row("DECLARED_COMPLETE", proven=["t-1"])
+    row["checks"].append(
+        {
+            "check": "NO_FLOWS_BEFORE_DECLARED_START_WITH_STATEMENT_COVERAGE",
+            "status": "PASS",
+            "failures": 0,
+            "statement_days_before_start": 3,
+        }
+    )
+    proof = {("account-reserve", "transactions"): row}
+    early = [_accepted("t-1"), _accepted("t-0", "2025-12-01")]
+    refused = _matrix_row(None, early, proof)
+    assert refused["status"] != "DECLARED_COMPLETE"
+    assert (
+        "lie in the statement history outside the declaration"
+        in refused["missing_interval_reason"]
+    )
+    # no statement day before the start: the earlier record is disclosed, not refused
+    row["checks"][-1]["statement_days_before_start"] = 0
+    disclosed = _matrix_row(None, early, proof)
+    assert disclosed["status"] == "DECLARED_COMPLETE"
+    assert "outside the declaration" in disclosed["missing_interval_reason"]
+
+
 def test_statement_excluded_point_binds_to_the_retained_member_and_counts_once(
     tmp_path: Path,
 ) -> None:

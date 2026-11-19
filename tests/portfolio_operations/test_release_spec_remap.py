@@ -537,3 +537,20 @@ def test_the_old_prefix_is_counted_in_both_slash_styles_and_must_equal_the_rewri
     sibling = copy.deepcopy(world["spec"])
     sibling["note"] = "see D:\\legacy\\srcX\\file"
     assert tool.count_old_prefix_occurrences(sibling, rules) == 5
+
+
+@pytest.mark.parametrize("key", release_ledger_spec.CARRIED)
+def test_every_key_the_ledger_spec_carries_is_carried_and_path_remapped(
+    world: dict[str, Any], key: str
+) -> None:
+    """A carried pin the remap does not list would be dropped by --carried-only, so every
+    release_ledger_spec.CARRIED key must be in CARRIED_KEYS and have its path field rewritten."""
+
+    assert key in tool.CARRIED_KEYS
+    spec = {
+        **world["spec"],
+        key: {"path": "D:\\legacy\\src\\targets.csv", "size_bytes": 2},
+    }
+    carried, _dropped = _remap(world, spec=spec, carried_only=True)
+    assert key in carried.document
+    assert "legacy" not in json.dumps(carried.document[key])

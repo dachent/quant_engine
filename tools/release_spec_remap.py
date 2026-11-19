@@ -63,7 +63,9 @@ CARRIED_KEYS = (
     "portfolio_fx_rates",
     "account_roles",
     "quantbase_fill_closes",
+    "quantbase_position_closes",
     "zero_financing_observations",
+    "event_completeness_declaration",
 )
 REGENERATED_KEYS = (
     "as_of_date",

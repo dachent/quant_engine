@@ -463,3 +463,132 @@ def test_a_statement_derived_financing_row_is_admitted_only_under_the_provider_g
         match="materialized provider fact cutoff or generation differs",
     ):
         _verify(forged, authority)
+
+
+def test_the_ledger_refuses_a_derived_position_row_without_a_valuation_cutoff(
+    point_stage: PointStage, tmp_path: Path
+) -> None:
+    """KILL: a DERIVED_AT_CUTOFF row that does not re-verify (no closure, forged ids) is refused."""
+
+    _, authority, _ = point_stage
+    _, original_manifest, catalog = _selected(authority)
+    derived = copy.deepcopy(catalog["positions"][0])
+    derived.update(
+        {
+            "as_of_date": CUTOFF.isoformat(),
+            "as_of_basis": "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT",
+            "evidence_class": "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT",
+            "record_id": "position-derived-" + "0" * 16,
+            "security_id": "security-schwab-" + "1" * 24,
+            "symbol": "SWVXX",
+        }
+    )
+    derived.pop("observed_at", None)
+    catalog["positions"].append(derived)
+    content = canonical_json_bytes(catalog)
+    manifest = GenerationManifest.build(
+        as_of_date=original_manifest.as_of_date,
+        adapter=original_manifest.adapter,
+        coverage=original_manifest.coverage,
+        verification=original_manifest.verification,
+        artifacts=tuple(
+            replace(
+                a, sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content)
+            )
+            if a.artifact_id == "schwab-generation.json"
+            else a
+            for a in original_manifest.artifacts
+        ),
+    )
+    generation = tmp_path / "generations" / manifest.generation_id
+    generation.mkdir(parents=True)
+    (generation / "generation.json").write_bytes(manifest.to_json_bytes())
+    (generation / "schwab-generation.json").write_bytes(content)
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="derived positions need an explicit valuation cutoff",
+    ):
+        ledger._schwab_position_observation(catalog, manifest, tmp_path, REQUESTED)
+
+
+DERIVED_CLOSURE = {
+    "cash_usd": "0.00",
+    "earlier_market_value_days": ["2026-09-20"],
+    "history_through": "2026-09-17",
+    "holdings_usd": "100",
+    "positions_total_usd": "100.00",
+}
+
+
+def _derived_stage(tmp_path: Path, derived: dict[str, Any]) -> PointStage:
+    return cast(
+        PointStage,
+        fixtures._source_bound_stage(
+            tmp_path,
+            source_cutoff=CUTOFF,
+            schwab_point_capture=CLOCK,
+            requested_as_of=REQUESTED,
+            schwab_valuation_cutoff=CUTOFF.isoformat(),
+            schwab_derived=derived,
+        ),
+    )
+
+
+def test_a_derived_position_is_admitted_with_its_evidence_class_end_to_end(
+    tmp_path: Path,
+) -> None:
+    generation, authority, spec_path = _derived_stage(tmp_path, {})
+    catalog, _, _, _ = ledger.build_catalog(spec_path)
+    rows = [
+        row
+        for row in catalog["positions"]
+        if row["provider_id"] == "schwab" and row.get("evidence_class")
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert (
+        row["evidence_class"]
+        == row["as_of_basis"]
+        == ("DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT")
+    )
+    assert row["as_of_date"] == row["valuation_cutoff"] == CUTOFF.isoformat()
+    assert row["closure"] == DERIVED_CLOSURE
+    assert "observed_at" not in row and "average_price" not in row
+    # the current observed row keeps its own, different shape
+    current = [
+        r
+        for r in catalog["positions"]
+        if r["provider_id"] == "schwab" and "observed_at" in r
+    ]
+    assert len(current) == 1 and "evidence_class" not in current[0]
+    # the materializer rebuilds the same rows from the source bytes alone
+    assert _verify(generation, authority)["provider_count"] == 7
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"evidence_class": "WCH_CURRENT"},
+        {"observed_at": CLOCK},
+        {"average_price": "1"},
+        {"strategy_id": "strategy-x"},
+        {"market_value": {"currency": "EUR", "status": "AVAILABLE", "value": "100"}},
+        {"__late_transaction__": True},
+        {"closure": {**DERIVED_CLOSURE, "positions_total_usd": "102.00"}},
+        {"closure": {**DERIVED_CLOSURE, "earlier_market_value_days": []}},
+        {"closure": {**DERIVED_CLOSURE, "history_through": "2026-09-16"}},
+        {"capture_date": "2026-09-17"},
+        {"closure": {**DERIVED_CLOSURE, "earlier_market_value_days": ["2026-09-25"]}},
+        {"source_artifact_id": "web/not-a-catalog-artifact.json"},
+        {
+            "quantity": "101",
+            "market_value": {"currency": "USD", "status": "AVAILABLE", "value": "101"},
+        },
+    ],
+)
+def test_a_derived_position_that_does_not_close_is_refused_by_the_ledger(
+    tmp_path: Path, override: dict[str, Any]
+) -> None:
+    # the fixture stages the candidate, which builds the catalog: the seam refuses there
+    with pytest.raises(ledger.ProviderLedgerError, match="derived position refused"):
+        _derived_stage(tmp_path, override)

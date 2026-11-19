@@ -246,8 +246,15 @@ def test_a_deprecated_history_only_strategy_is_excluded_with_the_policy_reason()
     )
     classification = row["cost_classification"]
     assert classification["classification"] == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
-    assert "2025-11-24" in classification["reason"]
-    assert classification["effective_date"] == "2025-11-25"
+    assert classification["reason"]
+    assert classification["product_interval_end"] == "2025-11-24"
+    # the ruling is the owner comment the financial-MVP contract names, not free text
+    assert (
+        classification["ruling_reference"] == "OWNER_302_COMMENT_5349926811_DEPRECATED"
+    )
+    assert classification["ruling_url"] == (
+        "https://github.com/dachent/quant_engine/issues/302#issuecomment-5349926811"
+    )
     assert baseline._costs_claim([row])["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
 
 
@@ -267,9 +274,56 @@ def test_a_de_minimis_exclusion_is_not_a_deprecation() -> None:
     assert "cost_classification" not in row
 
 
-def test_the_exclusion_applies_only_from_its_effective_date() -> None:
+def test_the_exclusion_applies_only_after_the_product_interval_ended() -> None:
     (row,) = baseline._classify_excluded_history_only_costs(
-        [_unknown("echotrade-growth-pivots")], date(2025, 11, 24)
+        [_unknown("echotrade-growth-pivots")], date(2025, 11, 23)
+    )
+    assert "cost_classification" not in row
+
+
+def _contract_with(tmp_path: Path, mutate: Any) -> Path:
+    import json
+
+    contract = json.loads(baseline._FINANCIAL_MVP_CONTRACT_PATH.read_bytes())
+    entry = next(
+        row
+        for row in contract["strategies"]
+        if row["strategy_id"] == "echotrade-growth-pivots"
+    )
+    mutate(entry)
+    path = tmp_path / "contract.json"
+    path.write_bytes(json.dumps(contract).encode())
+    return path
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda e: e.update(lifecycle_status="ACTIVE"),
+        lambda e: e.update(product_requirement="REQUIRED"),
+        lambda e: e["funded_membership"].update(authority="CENSUS_STRING"),
+        lambda e: e["effective_product_interval"].update(effective_end=None),
+    ],
+)
+def test_each_structured_field_is_required_for_the_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutate: Any
+) -> None:
+    path = _contract_with(tmp_path, mutate)
+    monkeypatch.setattr(baseline, "_FINANCIAL_MVP_CONTRACT_PATH", path)
+    (row,) = baseline._classify_excluded_history_only_costs(
+        [_unknown("echotrade-growth-pivots")], AS_OF
+    )
+    assert "cost_classification" not in row
+
+
+def test_free_text_no_longer_decides_the_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the readiness text still says deprecated, but the structured lifecycle does not
+    path = _contract_with(tmp_path, lambda e: e.update(lifecycle_status="ACTIVE"))
+    monkeypatch.setattr(baseline, "_FINANCIAL_MVP_CONTRACT_PATH", path)
+    (row,) = baseline._classify_excluded_history_only_costs(
+        [_unknown("echotrade-growth-pivots")], AS_OF
     )
     assert "cost_classification" not in row
 
@@ -286,8 +340,12 @@ def test_a_classification_without_its_reason_does_not_count() -> None:
         "cost_classification": {
             "classification": "EXCLUDED_DEPRECATED_HISTORY_ONLY",
             "reason": "",
+            "ruling_reference": "OWNER_302_COMMENT_5349926811_DEPRECATED",
         },
     }
+    assert baseline._costs_claim([row])["status"] == "PARTIAL"
+    row["cost_classification"]["reason"] = "stated"
+    row["cost_classification"]["ruling_reference"] = ""
     assert baseline._costs_claim([row])["status"] == "PARTIAL"
 
 

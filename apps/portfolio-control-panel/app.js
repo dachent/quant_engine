@@ -208,6 +208,9 @@
     // F33: dispositions that say a fact is observed without proving it complete.
     OBSERVED_NOT_COMPLETENESS_PROOF: "Observed; not a completeness proof",
     NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF: "No reported events; not a completeness proof",
+    PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF: "Provider events exist but lack a strategy attribution; not a completeness proof",
+    CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF: "Statements captured, not admitted; not a completeness proof",
+    EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF: "Excluded by governed ruling; not a completeness proof",
     NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF: "No reported fact; not a completeness proof",
   };
   const ACCOUNT_MANIFEST_AUTHORITY_LABELS = Object.freeze({
@@ -420,7 +423,11 @@
           ? "Excluded from live costs (deprecated record, history kept)"
           : isPercentCost(row) ? "No dollar cost (percent-based)" : "Pre-tax cost unavailable";
     // The producer builds the percent-rate sentence from the row's own fields; it is printed verbatim.
-    const rateSentence = typeof row.cost_rate_disclosure === "string" && row.cost_rate_disclosure ? `<span class="cell-secondary">${safe(row.cost_rate_disclosure)}</span>` : "";
+    const classification = row.cost_classification && row.cost_classification.classification ? row.cost_classification : null;
+    const classificationLine = classification
+      ? `<span class="cell-secondary">${safe(`${humanStatus(classification.classification)} · ruling ${classification.ruling_reference || "not stated"}${classification.ruling_url ? ` (${classification.ruling_url})` : ""} · ${classification.reason || ""}`)}</span>`
+      : "";
+    const rateSentence = (typeof row.cost_rate_disclosure === "string" && row.cost_rate_disclosure ? `<span class="cell-secondary">${safe(row.cost_rate_disclosure)}</span>` : "") + classificationLine;
     // N64: a rate divides by the sleeve value at the cutoff and says which date that value
     // and the cost schedule carry.  A report older than schema 4 publishes neither date.
     const rateStatus = typeof row.cost_rate_status === "string" ? row.cost_rate_status : null;
@@ -456,7 +463,7 @@
     // A5: `benchmark_annualization.label` already encodes basis/window (and "(<1 year)"
     // when short); render it beside the annualized figure it describes.
     const benchmarkAnnualizedLabel = row.benchmark_annualization?.label;
-    return `${assignment}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.benchmark_comparison_observed_start)}–${formatDateHtml(row.benchmark_comparison_observed_end)} · ${integer.format(row.benchmark_comparison_observations || 0)} observations</span><span class="cell-secondary">Strategy ${pct(row.benchmark_account_cumulative_return)} · benchmark ${pct(row.benchmark_reference_cumulative_return)} · gap ${ppFromFraction(row.benchmark_cumulative_gap)} · active annualized ${pct(row.benchmark_active_return_annualized)}${annualizationSuffix(benchmarkAnnualizedLabel)}</span><span class="cell-secondary">Tracking error ${pct(row.benchmark_tracking_error_annualized)} · information ratio ${decimal(row.benchmark_information_ratio)} · beta ${decimal(row.benchmark_beta)} · correlation ${decimal(row.benchmark_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.benchmark_upside_capture)} · down capture ${pct(row.benchmark_downside_capture)} · relative drawdown ${pct(row.benchmark_relative_drawdown)}</span><span class="cell-secondary">${safe(row.benchmark_comparison_disposition)}</span>${reason}`;
+    return `${assignment}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.benchmark_comparison_observed_start)}–${formatDateHtml(row.benchmark_comparison_observed_end)} · ${integer.format(row.benchmark_comparison_observations || 0)} observations</span><span class="cell-secondary">Strategy ${pct(row.benchmark_account_cumulative_return)} · benchmark ${pct(row.benchmark_reference_cumulative_return)} · gap ${ppFromFraction(row.benchmark_cumulative_gap)} · active annualized ${pct(row.benchmark_active_return_annualized)}${annualizationSuffix(benchmarkAnnualizedLabel)}</span><span class="cell-secondary">Tracking error ${pct(row.benchmark_tracking_error_annualized)} · information ratio ${decimal(row.benchmark_information_ratio)} · beta ${decimal(row.benchmark_beta)} · correlation ${decimal(row.benchmark_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.benchmark_upside_capture)} · down capture ${pct(row.benchmark_downside_capture)} · relative drawdown ${pct(row.benchmark_relative_drawdown)} · cash drag ${statusText(row.benchmark_cash_drag_status)}${row.benchmark_cash_drag_reason ? ` · ${safe(row.benchmark_cash_drag_reason)}` : ""}</span><span class="cell-secondary">${safe(row.benchmark_comparison_disposition)}</span>${reason}`;
   };
   const hwmQualification = (row) => {
     if (performanceLineageMismatch) return { status: "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH", note: performanceLineageReason };
@@ -997,7 +1004,7 @@
     const asOf = typeof row.as_of_date === "string" && row.as_of_date !== "" ? row.as_of_date.slice(0, 10) : "";
     return `${humanStatus(row.value_basis.basis)}${asOf ? ` as of ${formatDate(asOf)}` : ""}${seen && seen !== asOf ? ` (observed ${formatDate(seen)})` : ""}`;
   };
-  const positionBasisNote = (row) => (row.value_basis ? `<span class="cell-secondary"${valueBasisTitle(row)}>${safe(valueBasisLabel(row))}</span>` : row.as_of_basis ? `<span class="cell-secondary"${valueBasisTitle(row)}>${safe(humanStatus(row.as_of_basis))}${row.capture_date ? ` · captured ${safe(formatDate(row.capture_date))}` : ""}</span>` : "");
+  const positionBasisNote = (row) => (row.basis_note ? `<span class="cell-secondary" title="${safe(row.basis_note)}">${safe(row.basis_note)}</span>` : row.value_basis ? `<span class="cell-secondary"${valueBasisTitle(row)}>${safe(valueBasisLabel(row))}</span>` : row.as_of_basis ? `<span class="cell-secondary"${valueBasisTitle(row)}>${safe(humanStatus(row.as_of_basis))}${row.capture_date ? ` · captured ${safe(formatDate(row.capture_date))}` : ""}</span>` : "");
 
   // An account NAV row whose value the report declares derived says so beside the figure, with the same label and
   // tooltip a position row carries.  The account_summary row is the source: it is matched by account id, and for an
@@ -1634,7 +1641,7 @@
       const observedStart = row.observed_start || row.effective_start || "—";
       const observedEnd = row.observed_end || row.effective_end || "—";
       const evidence = row.nav_observations != null ? `${integer.format(row.nav_observations)} account NAV observations` : "—";
-      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}${sleeveEpochRowNote(row)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}${ownWindowNote(row.return_window_start || row.observed_start, row.return_close_date || row.observed_end)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(mwrShortWindow(row) ? mwrShortWindow(row).windowReturn : row.mwr_xirr)}${mwrBasisNote(row)}${ownWindowNote(row.mwr_opening_date, row.mwr_terminal_date)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}${sleeveEpochRowNote(row)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}${ownWindowNote(row.return_window_start || row.observed_start, row.return_close_date || row.observed_end)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(mwrShortWindow(row) ? mwrShortWindow(row).windowReturn : row.mwr_xirr)}${mwrBasisNote(row)}${ownWindowNote(row.mwr_opening_date, row.mwr_terminal_date)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF", "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF", "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF", "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
     });
     const performanceHeaders = performanceLineageMismatch
       ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
@@ -2118,7 +2125,7 @@
       // implementation contract it is the only older gap shown, with its basis and window.
       const legacyGapMarkup = gap.total_gap == null
         ? `${statusText(gap.status)}<span class="cell-secondary">No accepted model/provider path can be compared with the account. No gap or cause is inferred.</span>`
-        : `<span class="cell-primary">Reference ${pct(gap.reference_cumulative_return)} · account ${pct(gap.account_cumulative_return)} · gap ${ppFromFraction(gap.total_gap)}</span><span class="cell-secondary">${safe(humanStatus(gap.signature))} · β ${decimal(gap.beta)} · correlation ${decimal(gap.correlation)} · tracking error ${pct(gap.tracking_error_annualized)}</span><span class="cell-secondary">Causally bound components ${integer.format(gap.causally_bound_components.length)} · unresolved residual ${pct(gap.unresolved_residual)} · reconciliation error ${decimal(gap.reconciliation_error, 8)}</span><span class="cell-secondary">Unknown: ${safe((gap.unresolved_causes || []).map(humanStatus).join(" · ") || "none")}</span>`;
+        : `<span class="cell-primary">Reference ${pct(gap.reference_cumulative_return)} · account ${pct(gap.account_cumulative_return)} · gap ${ppFromFraction(gap.total_gap)}</span><span class="cell-secondary">${safe(humanStatus(gap.signature))} · β ${decimal(gap.beta)} · correlation ${decimal(gap.correlation)} · tracking error ${pct(gap.tracking_error_annualized)}${gap.path_statistics_basis ? ` · path statistics from ${safe(humanStatus(gap.path_statistics_basis))}` : ""}</span>${gap.reference_note ? `<span class="cell-secondary">${safe(gap.reference_note)}</span>` : ""}<span class="cell-secondary">Causally bound components ${integer.format(gap.causally_bound_components.length)} · unresolved residual ${pct(gap.unresolved_residual)} · reconciliation error ${decimal(gap.reconciliation_error, 8)}</span><span class="cell-secondary">Unknown: ${safe((gap.unresolved_causes || []).map(humanStatus).join(" · ") || "none")}</span>`;
       const staleShadowMarkup = staleReconciliation && gap.total_gap != null && typeof gap.observed_start === "string" && typeof gap.observed_end === "string"
         ? `<span class="cell-primary">Provider composite shadow (retained) · reference ${pct(gap.reference_cumulative_return, 2)} · account ${pct(gap.account_cumulative_return, 2)} · ${formatDateHtml(gap.observed_start)}–${formatDateHtml(gap.observed_end)}</span><span class="cell-secondary">Gap ${ppFromFraction(gap.total_gap)}${gap.observations == null ? "" : ` · ${integer.format(gap.observations)} observations`} · ${safe(humanStatus(gap.signature))}; not the implementation gap</span>`
         : "";

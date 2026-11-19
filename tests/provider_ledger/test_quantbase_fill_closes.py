@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 import hashlib
 from pathlib import Path
@@ -24,21 +24,39 @@ RUN = "legacy-20260814-6b0538e2cc69"
 ACCOUNT = "account-58e75e8d952fa1b8"
 
 
-def _world(tmp_path: Path) -> tuple[GenerationManifest, dict[str, Any]]:
+@pytest.fixture(autouse=True)
+def _short_histories(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fixtures here are a few days long: the close-pin guard's minimum valued-day count
+    (tested in tests/core/test_quantbase_fund_days.py) does not apply to them."""
+
+    import quantbase_fund_days
+
+    monkeypatch.setattr(quantbase_fund_days, "MIN_NON_FILL_DAYS", 0)
+
+
+def _world(
+    tmp_path: Path,
+    price_text: str | None = None,
+    activity_text: str | None = None,
+) -> tuple[GenerationManifest, dict[str, Any]]:
     root = tmp_path / "source-runs" / RUN / "artifacts"
     (root / "csv").mkdir(parents=True)
     price = root / ledger._QUANTBASE_PRICEHISTORY
-    # 01-05 holds SHV (10 x 100 = 1000); the 01-06 fill swaps it for TQQQ (22 x 40 = 880).
+    # 01-05 holds SHV (10 x 100 = 1000); the 01-06 fill swaps it for TQQQ (22 x 44.5 = 979).
     price.write_text(
-        "time,value,cost_basis,profit_loss\n"
+        price_text
+        if price_text is not None
+        else "time,value,cost_basis,profit_loss\n"
         "01/05/2026,1000.00,1000.00,0\n"
         "01/06/2026,1000.00,1000.00,0\n"
-        "01/07/2026,880.00,1000.00,0\n",
+        "01/07/2026,979.00,1000.00,0\n",
         encoding="utf-8-sig",
     )
     activity = root / "csv" / "account_activity.csv"
     activity.write_text(
-        "activity_type,filled_at,fund,fund_title,quantity,symbol\n"
+        activity_text
+        if activity_text is not None
+        else "activity_type,filled_at,fund,fund_title,quantity,symbol\n"
         "order,2026-01-02T20:54:00.000000Z,107,Volatis Strategy,10,SHV\n"
         "order,2026-01-06T20:54:00.000000Z,107,Volatis Strategy,-10,SHV\n"
         "order,2026-01-06T20:54:01.000000Z,107,Volatis Strategy,22,TQQQ\n",
@@ -103,7 +121,7 @@ def _observations(
 
 CLOSES = {
     "SHV": {date(2026, 1, d): Decimal("100") for d in (5, 6, 7)},
-    "TQQQ": {date(2026, 1, d): Decimal("40") for d in (5, 6, 7)},
+    "TQQQ": {date(2026, 1, d): Decimal("44.5") for d in (5, 6, 7)},
 }
 
 
@@ -120,7 +138,7 @@ def test_a_fill_day_is_restated_to_its_post_fill_value_with_governed_closes(
     ended that day in TQQQ, which is what 01-07 shows."""
 
     rows = _observations(tmp_path, CLOSES)
-    assert rows["2026-01-06"]["nav"]["value"] == "880.00"
+    assert rows["2026-01-06"]["nav"]["value"] == "979.00"
     assert rows["2026-01-06"]["fill_restatement"] == {
         "dashboard_value": "1000.00",
         "status": "RESTATED_POST_FILL",
@@ -146,3 +164,81 @@ def test_the_spec_pins_the_closes_and_refuses_a_hash_mismatch(tmp_path: Path) ->
         ledger._quantbase_fill_closes([{**ref, "sha256": "0" * 64}])
     with pytest.raises(ledger.ProviderLedgerError, match="duplicated"):
         ledger._quantbase_fill_closes([ref, ref])
+
+
+def test_closes_in_other_units_than_the_legs_are_refused_loudly(tmp_path: Path) -> None:
+    """B blocker: a split-adjusted close (here half the as-traded 44) values the post-fill
+    holdings at about half the fund and fails the rebuild on the days the fund holds the symbol:
+    the pin is refused (the per-day 3 % gate on its own keeps the dashboard value)."""
+
+    halved = {
+        "SHV": CLOSES["SHV"],
+        "TQQQ": {date(2026, 1, d): Decimal("22") for d in (5, 6, 7)},
+    }
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="do not reproduce the dashboard"
+    ):
+        _observations(tmp_path, halved)
+
+
+def test_the_ledger_refuses_a_close_pin_that_fails_the_rebuild_on_non_fill_days(
+    tmp_path: Path,
+) -> None:
+    """A pin whose closes do not reproduce the dashboard on most non-fill days is refused loudly
+    (split-adjusted closes against as-traded quantities), not silently kept as dashboard values."""
+
+    days = [date(2026, 2, 2) + timedelta(days=i) for i in range(30)]
+    price = "time,value,cost_basis,profit_loss\n" + "".join(
+        f"{d.month:02d}/{d.day:02d}/{d.year},8800.00,8800.00,0\n" for d in days
+    )
+    activity = (
+        "activity_type,filled_at,fund,fund_title,quantity,symbol\n"
+        "order,2026-01-30T20:54:00.000000Z,107,Volatis Strategy,100,TQQQ\n"
+    )
+    manifest, catalog = _world(tmp_path, price, activity)
+    for scale, refused in ((Decimal("44"), True), (Decimal("88"), False)):
+        closes = {"TQQQ": {d: scale for d in days}}
+        kwargs: dict[str, Any] = {
+            "generation_id": "gen-1",
+            "manifest": manifest,
+            "catalog": catalog,
+            "root": tmp_path,
+            "accounts": {ACCOUNT},
+            "strategies": {"volatis-strategy"},
+            "assignments": {
+                ACCOUNT: [
+                    {
+                        "effective_start": "2024-10-01",
+                        "mapping_status": "MAPPED",
+                        "strategy_id": "volatis-strategy",
+                    }
+                ]
+            },
+            "fill_closes": closes,
+        }
+        if refused:
+            with pytest.raises(
+                ledger.ProviderLedgerError, match="do not reproduce the dashboard"
+            ):
+                ledger._quantbase_nav_observations(**kwargs)
+        else:
+            assert ledger._quantbase_nav_observations(**kwargs)
+
+
+def test_a_fill_at_or_after_23_utc_is_refused_as_calendar_ambiguous(
+    tmp_path: Path,
+) -> None:
+    activity = (
+        "activity_type,filled_at,fund,fund_title,quantity,symbol\n"
+        "order,2026-01-02T20:54:00.000000Z,107,Volatis Strategy,10,SHV\n"
+        "order,2026-01-06T23:30:00.000000Z,107,Volatis Strategy,-10,SHV\n"
+    )
+    manifest, catalog = _world(tmp_path, None, activity)
+    with pytest.raises(ledger.ProviderLedgerError, match="calendar day is ambiguous"):
+        ledger._quantbase_restated_days(
+            manifest,
+            tmp_path,
+            RUN,
+            [{"time": "01/05/2026", "value": "1000.00"}],
+            CLOSES,
+        )

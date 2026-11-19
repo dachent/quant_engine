@@ -66,6 +66,10 @@ def real_cycle(tmp_path: Path) -> dict[str, Any]:
             "manifest_sha256": ref["manifest_sha256"],
             "finality_source": _source(provider_id),
             "qualification": ref["qualification"],
+            # the staged test generations are not under a cutoff-coverage test here; the driver
+            # staging suite resolves this manifest in a child process, where no test lift applies
+            "cutoff_coverage": "NOT_REQUIRED",
+            "cutoff_coverage_reason": "synthetic provider-ledger test generations",
         }
         if _source(provider_id) != "GENERATION_MANIFEST":
             evidence = selected["finality_evidence"]

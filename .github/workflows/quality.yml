@@ -230,6 +230,7 @@ jobs:
           tools/quantbase_cdp_navigator.py
           tools/schwab_capture_ingest.py
           tools/schwab_nav_derive.py
+          tools/schwab_statement_cash_summaries.py
           tools/schwab_page_actions.py
           tools/schwab_rollback.py
           tools/p123_cdp_recorder.py
@@ -255,6 +256,8 @@ jobs:
           tools/release_provenance_spec.py
           tools/release_cycle_seeds.py
           tools/release_fresh_world.py
+          tools/decision_refresh.py
+          tools/release_world.py
           tools/release_post_commit.py
           tools/post_commit_validation.py
           tools/release_spec_remap.py
@@ -278,6 +281,8 @@ jobs:
           tools/portfolio_cash_drag.py
           tools/portfolio_cash_drag_spec.py
           tools/zero_financing_statements.py
+          tools/ibkr_overlap_equivalences.py
+          tools/event_completeness.py
       - name: Resolve controller graph change range
         id: controller_graph_range
         shell: bash

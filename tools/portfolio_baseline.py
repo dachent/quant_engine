@@ -9,7 +9,7 @@ walks a directory or calls a provider.
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
 import csv
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo
 
 import statement_reserve_nav
 
+import quant_engine.schwab as schwab
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -1640,14 +1641,65 @@ def _schwab_facts(
     positions: list[dict[str, Any]] = []
     transactions: list[dict[str, Any]] = []
     securities: dict[str, dict[str, Any]] = {}
-    for item in _objects(catalog.get("positions"), "Schwab positions"):
+    position_items = _objects(catalog.get("positions"), "Schwab positions")
+    derived_items = [
+        item
+        for item in position_items
+        if "as_of_basis" in item or item.get("evidence_class") == schwab.DERIVED_BASIS
+    ]
+    admitted_derived: set[str] = set()
+    if derived_items:
+        snapshot = _object(catalog.get("position_snapshot_as_of"), "Schwab snapshot")
+        try:
+            admitted_derived = set(
+                schwab.admit_derived_position_rows(
+                    derived_items,
+                    accepted_accounts=accepted_accounts,
+                    transactions=_objects(
+                        catalog.get("transactions"), "Schwab transactions"
+                    ),
+                    valuation_cutoff=_date(
+                        snapshot.get("valuation_cutoff"), "Schwab valuation cutoff"
+                    ),
+                    snapshot_day=datetime.fromisoformat(
+                        _text(snapshot.get("observed_at"), "Schwab snapshot clock")
+                    ).date(),
+                    artifact_schemas={
+                        str(a["artifact_id"]): str(
+                            _object(a.get("schema"), "Schwab artifact schema").get(
+                                "name"
+                            )
+                        )
+                        for a in _objects(
+                            catalog.get("source_artifacts"), "Schwab artifacts"
+                        )
+                    },
+                    transaction_history=_object(
+                        _object(catalog.get("coverage"), "Schwab coverage").get(
+                            "transaction_history"
+                        ),
+                        "Schwab transaction history",
+                    ),
+                    nav_observations=_objects(
+                        catalog.get("nav_observations", []), "Schwab NAV"
+                    ),
+                )
+            )
+        except (schwab.SchwabDerivedPositionError, ValueError) as exc:
+            raise BaselineValidationError(
+                f"Schwab derived position refused: {exc}"
+            ) from exc
+    for item in position_items:
         account_id = _text(item.get("account_id"), "Schwab position account_id")
         if account_id not in accepted_accounts:
             raise BaselineValidationError("Schwab position account is outside scope")
         as_of = _date(item.get("as_of_date"), "Schwab position as_of_date")
         if as_of > baseline_as_of:
             raise BaselineValidationError("Schwab position is newer than baseline")
-        if item.get("evidence_class") != "WCH_CURRENT":
+        if (
+            item.get("record_id") not in admitted_derived
+            and item.get("evidence_class") != "WCH_CURRENT"
+        ):
             raise BaselineValidationError("Schwab position evidence class differs")
         symbol = _text(item.get("symbol"), "Schwab position symbol")
         security_id = _text(item.get("security_id"), "Schwab position security_id")
@@ -1657,6 +1709,11 @@ def _schwab_facts(
             "symbol": symbol,
         }
         record = dict(item)
+        if item.get("record_id") in admitted_derived:
+            # the admitted key set is exactly the derived one; state what stays inferred
+            record["residual_reallocation_window_days"] = schwab.residual_window_days(
+                item
+            )
         mapping_status, strategy_id = _strategy_for_date(assignments, account_id, as_of)
         record.update(
             {
@@ -2546,37 +2603,63 @@ def _derive_rate_dollar_costs(
     return carried
 
 
+_FINANCIAL_MVP_CONTRACT_PATH: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-financial-mvp-source-v1.json"
+)
+_OWNER_RULING_AUTHORITY = re.compile(r"^OWNER_(\d+)_COMMENT_(\d+)_DEPRECATED$")
+
+
 def _classify_excluded_history_only_costs(
     costs: Sequence[Mapping[str, Any]], as_of: date
 ) -> list[dict[str, Any]]:
-    """A cost row with no price whose strategy the governed policy excludes as a
-    deprecated or history-only record, effective by the cutoff, is a structural
-    exclusion from live costs (with the policy's own reason), not a gap."""
+    """A cost row with no price whose strategy the financial-MVP contract declares
+    DEPRECATED_HISTORY_ONLY and EXCLUDED from the product, with an owner-ruling
+    authority and a product interval that ended by the cutoff, is a structural
+    exclusion from live costs.  The classification carries the ruling reference the
+    contract names (an owner comment on a repository issue); no free text decides it."""
 
-    policy = _load_json(_HWM_POLICY_PATH, "hwm policy contract")
-    exclusions = {
+    contract = _load_json(_FINANCIAL_MVP_CONTRACT_PATH, "financial MVP contract")
+    declared = {
         str(row["strategy_id"]): row
-        for row in policy.get("material_perimeter", {}).get("exclusions", [])
+        for row in contract.get("strategies", [])
         if isinstance(row, dict) and "strategy_id" in row
     }
     carried: list[dict[str, Any]] = []
     for row in costs:
         item = dict(row)
-        excluded = exclusions.get(str(item["strategy_id"]))
-        reason = str(excluded.get("reason", "")) if excluded else ""
+        entry = declared.get(str(item["strategy_id"]))
+        interval = entry.get("effective_product_interval") if entry else None
+        membership = entry.get("funded_membership") if entry else None
+        ruling = (
+            _OWNER_RULING_AUTHORITY.match(str(membership.get("authority")))
+            if isinstance(membership, dict)
+            else None
+        )
         if (
-            excluded is not None
+            entry is not None
+            and ruling is not None
+            and isinstance(interval, dict)
+            and entry.get("lifecycle_status") == "DEPRECATED_HISTORY_ONLY"
+            and entry.get("product_requirement") == "EXCLUDED"
+            and interval.get("effective_end")
+            and _date(interval["effective_end"], "product interval end") <= as_of
             and item["annual_external_cost_usd"] is None
             and item.get("derived_annual_cost_usd") is None
             and not str(item.get("cost_status", "")).startswith("known")
-            and _date(excluded["effective_date"], "exclusion.effective_date") <= as_of
-            and ("deprecated" in reason.lower() or "history-only" in reason.lower())
         ):
+            assert isinstance(membership, dict) and ruling is not None
             item["cost_classification"] = {
                 "classification": COST_CLASS_EXCLUDED_HISTORY_ONLY,
-                "effective_date": excluded["effective_date"],
-                "reason": reason,
-                "source": "contracts/portfolio-hwm-policy-v3.json",
+                "product_interval_end": interval["effective_end"],
+                "reason": str(entry.get("readiness_reason", "")),
+                "ruling_reference": str(membership["authority"]),
+                "ruling_url": (
+                    "https://github.com/dachent/quant_engine/issues/"
+                    f"{ruling.group(1)}#issuecomment-{ruling.group(2)}"
+                ),
+                "source": "contracts/portfolio-financial-mvp-source-v1.json",
             }
         carried.append(item)
     return carried
@@ -5105,6 +5188,7 @@ def _costs_claim(costs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             isinstance(classification, Mapping)
             and classification.get("classification") == COST_CLASS_EXCLUDED_HISTORY_ONLY
             and classification.get("reason")
+            and classification.get("ruling_reference")
         ):
             return True
         if str(row.get("cost_status", "")).startswith("known"):
@@ -5539,6 +5623,65 @@ def _fact_coverage(
     return claims, exceptions
 
 
+_TYPED_OUTCOME_STATUS: Final = {
+    "CAPTURED_NOT_ADMITTED": (
+        "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF",
+        "RETAINED_CAPTURED_NOT_ADMITTED",
+    ),
+    "EXCLUDED_BY_RULING": (
+        "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF",
+        "RETAINED_EXCLUDED_BY_RULING",
+    ),
+}
+
+
+def _ledger_completeness(
+    provider_catalog: Mapping[str, Any] | None,
+) -> dict[tuple[str, str], Mapping[str, Any]]:
+    """The ledger's per (account, fact) closure verdicts, when it evaluated declarations."""
+
+    rows = (provider_catalog or {}).get("event_completeness")
+    if not isinstance(rows, list):
+        return {}
+    return {
+        (str(row["account_id"]), str(row["fact_type"])): row
+        for row in rows
+        if isinstance(row, Mapping)
+    }
+
+
+def _unattributed_provider_records(
+    provider_catalog: Mapping[str, Any] | None,
+) -> dict[tuple[str, str], int]:
+    """Provider-ledger flows and transactions per (account, fact) that are not MAPPED to a strategy."""
+
+    counts: dict[tuple[str, str], int] = defaultdict(int)
+    for fact_type in ("flows", "transactions"):
+        rows = (provider_catalog or {}).get(fact_type)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if (
+                isinstance(row, Mapping)
+                and row.get("account_id") is not None
+                and row.get("mapping_status") != "MAPPED"
+            ):
+                counts[(str(row["account_id"]), fact_type)] += 1
+    return dict(counts)
+
+
+def _canonical_amount(amount: Any) -> str:
+    """An AVAILABLE amount as canonical decimal text, so 1.0, 1.00 and 1E0 compare equal."""
+
+    if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
+        return "None"
+    try:
+        value = Decimal(str(amount.get("value")))
+    except InvalidOperation:
+        return "None"
+    return format(value.normalize(), "f") if value != 0 else "0"
+
+
 def _coverage_evidence(
     accounts: Sequence[Mapping[str, Any]],
     assignments: Sequence[Mapping[str, Any]],
@@ -5550,8 +5693,14 @@ def _coverage_evidence(
     flows: Sequence[Mapping[str, Any]],
     as_of_date: date,
     statement_accounts: Collection[str] = frozenset(),
+    unattributed: Mapping[tuple[str, str], int] | None = None,
+    completeness: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Build value-free account/fact evidence without inventing completeness."""
+    """Build value-free account/fact evidence without inventing completeness.
+
+    ``unattributed`` counts, per (account, fact), the provider-ledger records that carry no
+    strategy attribution and so are not among the accepted records: a row's reason names them,
+    so an account whose events were all excluded is never described as having none."""
 
     fact_specs = {
         "nav": (nav, "as_of_date", "nav_observations", "nav", "DAILY"),
@@ -5660,6 +5809,7 @@ def _coverage_evidence(
                 if isinstance(item.get(amount_field), Mapping)
                 and item[amount_field].get("status") != "AVAILABLE"
             )
+            excluded = (unattributed or {}).get((account_id, fact_type), 0)
             if accepted:
                 status = (
                     "OBSERVED_WITH_UNAVAILABLE_AMOUNTS_NOT_COMPLETENESS_PROOF"
@@ -5682,16 +5832,22 @@ def _coverage_evidence(
                     authority = "PINNED_STATEMENT_POINTS"
                     row_cadence = "STATEMENT_PERIODIC"
             elif admitted:
-                status = (
-                    "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
-                    if cadence == "EVENT_STREAM"
-                    else "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF"
-                )
-                disposition = (
-                    "RETAINED_UNATTESTED_EVENT_INTERVAL"
-                    if cadence == "EVENT_STREAM"
-                    else "RETAINED_NO_REPORTED_FACT"
-                )
+                if excluded and cadence == "EVENT_STREAM":
+                    # events exist in the provider ledger but none is attributed to a strategy:
+                    # they are neither accepted nor absent
+                    status = "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF"
+                    disposition = "RETAINED_PROVIDER_EVENTS_NOT_ATTRIBUTED"
+                else:
+                    status = (
+                        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+                        if cadence == "EVENT_STREAM"
+                        else "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF"
+                    )
+                    disposition = (
+                        "RETAINED_UNATTESTED_EVENT_INTERVAL"
+                        if cadence == "EVENT_STREAM"
+                        else "RETAINED_NO_REPORTED_FACT"
+                    )
                 missing_reason = (
                     "an effective-dated provider admission exists, but it is not a "
                     "fact completeness declaration"
@@ -5707,6 +5863,116 @@ def _coverage_evidence(
                 )
                 authority = "ACCOUNT_REGISTRY_NO_PROVIDER_SOURCE"
                 boundary_basis = "NO_ACCEPTED_SOURCE"
+            declared_start: str | None = None
+            declared_end: str | None = None
+            proof = (completeness or {}).get((account_id, fact_type))
+            proof_gap: str | None = None
+            if proof is not None and proof.get("status") == "DECLARED_COMPLETE":
+                # the closure proved the ledger's rows: the accepted records of this interval must
+                # be exactly those rows, and none may have been excluded
+                lo, hi = str(proof["declared_start"]), str(proof["declared_end"])
+                # a multiset of (id, date, amount): a duplicated id, a changed amount or a moved
+                # date is a difference; a record without a date cannot be placed in the interval
+                proven_rows = proof.get("proven_records")
+
+                def keyed(item: Mapping[str, Any]) -> tuple[str, ...]:
+                    amount = item.get(amount_field)
+                    return (
+                        str(item.get("record_id")),
+                        str(item.get(date_field)),
+                        _canonical_amount(amount),
+                    )
+
+                accepted_keys: Counter[tuple[str, ...]] = Counter(
+                    keyed(item)
+                    for item in accepted
+                    if item.get(date_field) and lo <= str(item[date_field]) <= hi
+                )
+                undated = sum(1 for item in accepted if not item.get(date_field))
+                proven_keys: Counter[tuple[str, ...]] = Counter(
+                    (
+                        str(row["record_id"]),
+                        str(row["event_date"]),
+                        str(row["amount"]),
+                    )
+                    for row in (proven_rows or [])
+                )
+                before_start = sum(
+                    1
+                    for item in accepted
+                    if item.get(date_field) and str(item[date_field]) < lo
+                )
+                covered_before = any(
+                    check.get("check")
+                    == "NO_FLOWS_BEFORE_DECLARED_START_WITH_STATEMENT_COVERAGE"
+                    and int(check.get("statement_days_before_start") or 0) > 0
+                    for check in proof.get("checks", [])
+                )
+                if proven_rows is None:
+                    # a closure row without the proven (id, date, amount) records cannot be
+                    # compared: refused, never reduced to ids alone
+                    proof_gap = f"; the ledger closure row has an absent proven record list: {proof['closure']}"
+                elif before_start and covered_before:
+                    # accepted records dated before the declared start, where the statements
+                    # already covered that time, sit in covered history outside the claim
+                    proof_gap = (
+                        f"; {before_start} accepted records dated before the declared start "
+                        f"{proof['declared_start']} lie in the statement history outside the declaration"
+                    )
+                elif excluded or undated or accepted_keys != proven_keys:
+                    proof_gap = (
+                        f"; ledger closure {proof['closure']} proved the provider event stream "
+                        f"but the accepted records differ: "
+                        f"{sum((proven_keys - accepted_keys).values())} proven records are not "
+                        f"accepted, {sum((accepted_keys - proven_keys).values())} accepted "
+                        f"records are not proven, {undated} accepted records lack a date"
+                    )
+            if (
+                proof is not None
+                and proof.get("status") == "DECLARED_COMPLETE"
+                and proof_gap is None
+            ):
+                # the ledger evaluated the declaration's closure on its own rows: every check passed
+                status = "DECLARED_COMPLETE"
+                disposition = "DECLARED_COMPLETE_BY_LEDGER_CLOSURE"
+                authority = "PROVIDER_LEDGER_CLOSURE"
+                boundary_basis = "LEDGER_CLOSURE"
+                declared_start = str(proof["declared_start"])
+                declared_end = str(proof["declared_end"])
+                missing_reason = (
+                    f"completeness proved by ledger closure {proof['closure']}"
+                )
+                before = sum(
+                    1
+                    for item in accepted
+                    if item.get(date_field) and str(item[date_field]) < lo
+                )
+                if before:
+                    missing_reason += (
+                        f"; {before} accepted records dated before the declared start "
+                        f"{declared_start} lie outside the declaration"
+                    )
+            elif proof_gap is not None:
+                missing_reason += proof_gap
+            elif proof is not None and proof.get("status") in _TYPED_OUTCOME_STATUS:
+                # governed, evidence-cited outcome that proves nothing about completeness
+                status, disposition = _TYPED_OUTCOME_STATUS[str(proof["status"])]
+                authority = "GOVERNED_DECLARATION"
+                missing_reason = (
+                    f"governed declaration {proof['status']}: {proof['citation']}"
+                )
+            elif proof is not None:
+                failed = ", ".join(
+                    f"{check['check']} ({check['failures']})"
+                    for check in proof.get("checks", [])
+                    if check.get("status") != "PASS"
+                )
+                missing_reason += f"; completeness declaration not proved by ledger closure; failed: {failed}"
+            if excluded:
+                missing_reason += (
+                    f"; provider ledger {fact_type} for this account: {excluded} "
+                    "lack a strategy attribution and are left out of the accepted records"
+                )
             matrix.append(
                 {
                     "account_id": account_id,
@@ -5719,8 +5985,8 @@ def _coverage_evidence(
                     "authority": authority,
                     "boundary_basis": boundary_basis,
                     "cadence": row_cadence,
-                    "declared_end": None,
-                    "declared_start": None,
+                    "declared_end": declared_end,
+                    "declared_start": declared_start,
                     "disposition": disposition,
                     "fact_type": fact_type,
                     "missing_interval_end": None,
@@ -6778,6 +7044,9 @@ def build_catalog(
     custody_authority: dict[str, Any] = {}
     fx_authority: dict[str, Any] = {}
     statement_excluded: list[dict[str, Any]] = []
+    ledger_catalog: Mapping[str, Any] | None = (
+        None  # the provider-ledger catalog, when this spec has one
+    )
     statement_nav: list[dict[str, Any]] = []
     if spec["schema_version"] == 2:
         schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
@@ -6817,6 +7086,7 @@ def build_catalog(
             custody_authority=custody_authority,
             fx_authority=fx_authority,
         )
+        ledger_catalog = provider_catalog
         (
             nav,
             flows,
@@ -7036,6 +7306,8 @@ def build_catalog(
             flows,
             as_of,
             {str(item["account_id"]) for item in statement_nav},
+            unattributed=_unattributed_provider_records(ledger_catalog),
+            completeness=_ledger_completeness(ledger_catalog),
         )
     )
     fact_coverage, exceptions = _fact_coverage(
