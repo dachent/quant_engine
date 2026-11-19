@@ -886,8 +886,8 @@ def cr2_custody_native_source(
     for provider, classes in {
         "ibkr": ["ACCOUNT_NAV"],
         "schwab": ["ACCOUNT_NAV"],
-        "matrixport": ["ACCOUNT_NAV", "CAPITAL_ANCHOR", "EXTERNAL_FLOW"],
-        "quantbase": ["ACCOUNT_NAV", "CAPITAL_ANCHOR", "EXTERNAL_FLOW"],
+        "matrixport": ["ACCOUNT_NAV", "CAPITAL_ANCHOR", "POSITION", "EXTERNAL_FLOW"],
+        "quantbase": ["ACCOUNT_NAV", "CAPITAL_ANCHOR", "POSITION", "EXTERNAL_FLOW"],
     }.items():
         source = next(
             (
