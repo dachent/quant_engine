@@ -3009,7 +3009,12 @@
     const outsideNote = outsideByAccount.size
       ? ` Not in this matrix, but counted in the coverage totals: ${[...outsideByAccount].map(([key, counts]) => `${key} (${counts.join(", ")})`).join("; ")}.`
       : "";
-    $("#fact-matrix-summary").innerHTML = `<strong>${integer.format(factMatrix.length)} account-by-fact rows</strong> · <span class="status-text danger">${integer.format(noPathRows.length)} NO_ACCEPTED_FACT_PATH</span>. No-path means the system has no admitted source for that account/fact boundary; it is not a zero balance, zero activity, or proof the fact does not exist. Showing ${integer.format(visible.length)} row(s).${safe(outsideNote)}`;
+    // F1: a strategy the baseline classifies as excluded keeps no table row; name it here, from its own row, so its absence is stated.
+    const classifiedRows = (Array.isArray(data.strategies) ? data.strategies : []).filter((row) => row.cost_classification && row.cost_classification.classification);
+    const classifiedNote = classifiedRows.length
+      ? ` Excluded from live costs, history kept: ${classifiedRows.map((row) => `${row.strategy_id} (${humanStatus(row.cost_classification.classification)}${row.cost_classification.ruling_reference ? ` · ruling ${row.cost_classification.ruling_reference}` : ""})`).join("; ")}.`
+      : "";
+    $("#fact-matrix-summary").innerHTML = `<strong>${integer.format(factMatrix.length)} account-by-fact rows</strong> · <span class="status-text danger">${integer.format(noPathRows.length)} NO_ACCEPTED_FACT_PATH</span>. No-path means the system has no admitted source for that account/fact boundary; it is not a zero balance, zero activity, or proof the fact does not exist. Showing ${integer.format(visible.length)} row(s).${safe(outsideNote)}${safe(classifiedNote)}`;
     const intervalText = (row) => {
       if (Array.isArray(row.missing_intervals) && row.missing_intervals.length) return row.missing_intervals.map((item) => typeof item === "object" ? `${item.start || item.missing_interval_start || "?"}–${item.end || item.missing_interval_end || "?"}: ${item.reason || item.missing_interval_reason || "reason not recorded"}` : String(item)).join(" · ");
       if (row.missing_interval_start || row.missing_interval_end) return `${row.missing_interval_start || "?"}–${row.missing_interval_end || "?"}: ${row.missing_interval_reason || "reason not recorded"}`;
