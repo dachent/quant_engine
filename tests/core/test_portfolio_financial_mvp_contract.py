@@ -1128,13 +1128,13 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             "product_data_class_set_sha256": (
                 "9f9c5f50e9cc0c9fdbc7123197897e20a4c7ab444cca73caad37aeda88a8943f"
             ),
-            # Moved from 24 to 25 when CAPITAL_ANCHOR materialized: netting
-            # each statement account's capital events on their own recognition
-            # date cancels IBKR's deposit advance against its reversal, which
-            # a per-row rule reads as opening capital that never funded. Only
-            # the opening is an anchor, because every later IBKR capital
-            # movement is already one of the flow rows the anchor was netted
-            # from.
+            # Moved from 24 to 25 when CAPITAL_ANCHOR materialized (netting each
+            # statement account's capital events on their own recognition date
+            # cancels IBKR's deposit advance against its reversal), then to 69
+            # for the B generation ab5774fb, then to 111 (+42) for F1 generation
+            # 662a0318: its manifest lists 107 artifacts against 65, the 42 added
+            # being the January-February 2026 verified statements
+            # (source-runs/r-janfeb-2026-verified-20261117/flex-*/statement.xml).
             "admitted_item_count": 111,
             "admitted_item_set_sha256": (
                 "58fad56b0a28909f646ae2a4d8043a3c82269d9fe72ad35d942bfc7f823931cc"

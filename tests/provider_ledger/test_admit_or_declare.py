@@ -608,6 +608,7 @@ def _staged_observation(
     schwab_point_capture: str | None = None,
     schwab_valuation_cutoff: str | None = None,
     schwab_derived: dict[str, Any] | None = None,
+    quantbase_holdings: bool = True,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """Small synthetic sources using native formats, no asserted finality flag."""
     from datetime import datetime, timedelta, timezone
@@ -823,10 +824,14 @@ def _staged_observation(
                 "date,symbol,proportion\n"
                 f"{(cutoff - timedelta(days=5)).isoformat()},SHV,1.000000000\n"
             ).encode()
-            for extra_relative, extra in (
-                (holdings_relative, holdings),
-                (rebalance_relative, rebalance),
-            ):
+            # without the holdings snapshot the Quantbase positions builder returns
+            # no rows: the REQUIRED POSITION class then materializes nothing
+            extras = (
+                ((holdings_relative, holdings), (rebalance_relative, rebalance))
+                if quantbase_holdings
+                else ()
+            )
+            for extra_relative, extra in extras:
                 bind(
                     "source/" + extra_relative,
                     root / "source-runs" / run_id / "artifacts" / extra_relative,
@@ -835,11 +840,8 @@ def _staged_observation(
                 (root / "conversion/artifacts" / extra_relative).write_bytes(extra)
             conversion = json.loads(evidence_path.read_bytes())
             conversion["refreshed_datasets"].extend(
-                [
-                    "account_activity.csv",
-                    Path(holdings_relative).name,
-                    Path(rebalance_relative).name,
-                ]
+                ["account_activity.csv"]
+                + [Path(extra_relative).name for extra_relative, _ in extras]
             )
             evidence_path.write_bytes(canonical_json_bytes(conversion))
             catalog.update(
@@ -861,8 +863,7 @@ def _staged_observation(
                     for rel, raw in (
                         (relative, content),
                         (activity_relative, activity.encode()),
-                        (holdings_relative, holdings),
-                        (rebalance_relative, rebalance),
+                        *extras,
                     )
                 ],
             )
@@ -1183,6 +1184,7 @@ def _source_bound_stage(
     requested_as_of: date = date(2026, 9, 17),
     schwab_valuation_cutoff: str | None = None,
     schwab_derived: dict[str, Any] | None = None,
+    quantbase_holdings: bool = True,
 ) -> tuple[Path, dict[str, Any], Path]:
     """Real stage, real financial contract/schema/registry, tiny synthetic inputs."""
     _, identities, manifests, catalogs, _ = _fixture(unreferenced_dataset=True)
@@ -1195,6 +1197,7 @@ def _source_bound_stage(
         schwab_point_capture=schwab_point_capture,
         schwab_valuation_cutoff=schwab_valuation_cutoff,
         schwab_derived=schwab_derived,
+        quantbase_holdings=quantbase_holdings,
     )
     contract_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
     schema_path = ROOT / "schemas/portfolio/financial-mvp-source-contract.schema.json"
@@ -3258,3 +3261,35 @@ def test_a_point_row_states_why_it_is_unmapped() -> None:
         )
         == "MAPPING_ACCOUNT_OR_DAY_UNKNOWN"
     )
+
+
+def test_quantbase_without_the_holdings_snapshot_is_required_not_ready(
+    tmp_path: Path,
+) -> None:
+    """POSITION is a REQUIRED class: a Quantbase capture with no holdings file has no
+    positions (the builder returns none, it does not raise), and that absence blocks."""
+
+    def receipt(root: Path, holdings: bool) -> dict[str, Any]:
+        generation, _, _ = _source_bound_stage(
+            root,
+            source_cutoff=date(2026, 9, 17),
+            requested_as_of=date(2026, 9, 17),
+            quantbase_holdings=holdings,
+        )
+        return json.loads((generation / "admit-or-declare-receipt.json").read_bytes())
+
+    def blocked_quantbase_classes(value: dict[str, Any]) -> set[str]:
+        return {
+            row["item_id"]
+            for row in value["dispositions"]
+            if row["provider_id"] == "quantbase"
+            and row["readiness_impact"] == "REQUIRED_NOT_READY"
+            and row["reason"] == "REQUIRED_DATA_CLASS_NOT_MATERIALIZED"
+        }
+
+    with_holdings = receipt(tmp_path / "with", True)
+    without = receipt(tmp_path / "without", False)
+
+    assert "POSITION" not in blocked_quantbase_classes(with_holdings)
+    assert "POSITION" in blocked_quantbase_classes(without)
+    assert without["product_readiness"] == "REQUIRED_NOT_READY"
