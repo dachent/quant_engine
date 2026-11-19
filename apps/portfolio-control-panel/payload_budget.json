@@ -1,5 +1,5 @@
 {
-  "basis": "committed_bytes is the measured figure of each block as last raised, and the base of the code ceiling (1.5 x, acceptance/validate/payload_rule.py): R3c committed panel b45631f8 for the blocks no justification below names, the release A A3 lane-replica measure for leverage_disclosures, model_vs_actual, portfolio_twr_cumulative and strategy_underwriting before int14, the int14 panel 96e7e450 for the blocks whose justification says int14, the release B candidate 0c06ae10 for index_html and dashboard_data_js, and the release B staged panel 8ee4e52c for total_physical. Block limits are the reviewed floor: measured + 1 percent rounded up to 1000 B. The physical total_bytes floor is the exception: the release driver's constant-qa estimate of the staged total (413832321 B, 108519 B above the 413723802 B measured on 8ee4e52c) plus 2 percent, rounded up to 1000 B (history entry, reason). Weekly growth is NOT edited here: lint.payload_size computes each limit from the previous committed release (#893), but that relative rule never goes below these floors and never above the ceiling. Raise a floor only by rerunning tools/panel_payload_size.py --raise-all in the change that deliberately grows a block.",
+  "basis": "committed_bytes is the measured figure of each block as last raised, and the base of the code ceiling (1.5 x, acceptance/validate/payload_rule.py). Block limits are the reviewed floor: measured + 1 percent rounded up to 1000 B, or up to measured + 5 percent where a justification below records a deliberate raise (release F1, carrier 9: every block re-raised with tools/panel_payload_size.py --raise-all --margin 0.05 on the F1 candidate 6a6bdb2e, so every block carries 5 percent). The physical floors carry at least 5 percent of the limit as headroom over the F1 figures (history entry 6a6bdb2e). Weekly growth is NOT edited here: lint.payload_size computes each limit from the previous committed release (#893), but that relative rule never goes below these floors and never above the ceiling. Raise a floor only by rerunning tools/panel_payload_size.py --raise-all in the change that deliberately grows a block.",
   "committed_bytes": {
     "total_physical": 413723802,
     "index_html": 50371122,
@@ -134,10 +134,10 @@
   "unlisted_block_max_bytes": 50000,
   "other_blocks_max_bytes": 400000,
   "physical": {
-    "total_bytes": 436297000,
-    "index_html_bytes": 53036000,
-    "dashboard_data_json_bytes": 304657000,
-    "dashboard_data_js_bytes": 48224000
+    "total_bytes": 437276000,
+    "index_html_bytes": 53169000,
+    "dashboard_data_json_bytes": 305421000,
+    "dashboard_data_js_bytes": 48345000
   },
   "fixture": {
     "basis": "performance_tab built from the eight-week panel of tests/portfolio_control_panel/test_performance_tab.py measured 9549 B at R2 (schema 2) and 15898 B on r21-integration (schema 3: union grid, benchmark series); guards block shape in CI, where no real generation exists",
@@ -1967,32 +1967,32 @@
     {
       "generation": "6a6bdb2ed4e6cc6c3922963a7d1acdb4663ba5ad30676028a03409f4e2360fd3 (F1 candidate, cutoff 2026-11-06)",
       "margin": 0.05,
-      "rule": "physical limit = ceil(measured x (1 + margin) / 1000) x 1000; total_bytes on the release driver staged estimate 415520313 B (qa fallback 28.3 MB; the measured qa-native phase had not run), the three files on the F1 candidate as measured by tools/panel_payload_size.py. Explicit reviewed floors; the ceiling (1.5 x committed) stays in code.",
-      "reason": "F1 content growth (leverage_disclosures +1370725 B in dashboard_data.json, .js and index.html) leaves the old floors 0.4 % (dashboard_data_json), 0.7 % (js, index_html) and 1.6 % (total) above the F1 figures, so a small change after the qa-native measure would refuse a late lane. 5 % headroom on the physical figures, because each is a sum or copy of data that moves.",
+      "rule": "physical limit = ceil(measured / 0.95 / 1000) x 1000, i.e. at least 5 % of the limit is headroom; total_bytes on the F1 staged total with the B qa (28207658 B) and its generation.json (83484 B): 415411455 B, the three files on the F1 candidate as measured by tools/panel_payload_size.py. Explicit reviewed floors; the ceiling (1.5 x committed) stays in code.",
+      "reason": "F1 content growth (leverage_disclosures +1370725 B in dashboard_data.json, .js and index.html) left the old floors 0.4 % (dashboard_data_json), 0.7 % (js, index_html) and 1.6 % (total) above the F1 figures. 5 % headroom, because each figure is a sum or copy of data that moves and a refusal after the build is a new freeze.",
       "physical": {
         "total_bytes": {
           "before": 413723802,
-          "after": 415520313,
+          "after": 415411455,
           "previous_limit": 422109000,
-          "limit": 436297000
+          "limit": 437276000
         },
         "index_html_bytes": {
           "before": 50371122,
           "after": 50510344,
           "previous_limit": 50875000,
-          "limit": 53036000
+          "limit": 53169000
         },
         "dashboard_data_json_bytes": {
           "before": 288439398,
           "after": 290149081,
           "previous_limit": 291324000,
-          "limit": 304657000
+          "limit": 305421000
         },
         "dashboard_data_js_bytes": {
           "before": 45776547,
           "after": 45927611,
           "previous_limit": 46235000,
-          "limit": 48224000
+          "limit": 48345000
         }
       }
     },
