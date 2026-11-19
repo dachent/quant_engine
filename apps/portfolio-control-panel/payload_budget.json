@@ -8,14 +8,14 @@
     "blocks": {
       "decomposition_lenses": 221211161,
       "weekly_returns": 27853584,
-      "leverage_disclosures": 30428390,
+      "leverage_disclosures": 31799115,
       "factor_analysis": 2479761,
       "account_manifest": 1740634,
       "invested_capital": 999253,
       "positions": 268556,
       "dependence_modes": 288141,
       "dependence_analysis": 141984,
-      "coverage": 128423,
+      "coverage": 142994,
       "strategies": 177527,
       "hwm_governed_proof": 121036,
       "performance_tab": 393155,
@@ -37,13 +37,13 @@
       "counts": 150,
       "custody_current_capital": 10924,
       "default_dependence_mode": 11,
-      "fact_coverage_matrix": 49048,
+      "fact_coverage_matrix": 53187,
       "fact_status": 464,
       "gates": 2069,
       "hwm_summary": 556,
       "hybrid_mode_gate": 2984,
       "lifecycle_schema_version": 1,
-      "limitations": 10752,
+      "limitations": 17869,
       "meta": 6448,
       "observation_windows": 3736,
       "panel_schema_version": 2,
@@ -62,14 +62,14 @@
   "blocks": {
     "decomposition_lenses": 223424000,
     "weekly_returns": 28133000,
-    "leverage_disclosures": 30733000,
+    "leverage_disclosures": 32118000,
     "factor_analysis": 2505000,
     "account_manifest": 1759000,
     "invested_capital": 1010000,
     "positions": 272000,
     "dependence_modes": 292000,
     "dependence_analysis": 144000,
-    "coverage": 130000,
+    "coverage": 145000,
     "strategies": 180000,
     "hwm_governed_proof": 123000,
     "performance_tab": 398000,
@@ -91,13 +91,13 @@
     "counts": 1000,
     "custody_current_capital": 12000,
     "default_dependence_mode": 1000,
-    "fact_coverage_matrix": 50000,
+    "fact_coverage_matrix": 54000,
     "fact_status": 1000,
     "gates": 3000,
     "hwm_summary": 1000,
     "hybrid_mode_gate": 4000,
     "lifecycle_schema_version": 1000,
-    "limitations": 11000,
+    "limitations": 19000,
     "meta": 7000,
     "observation_windows": 4000,
     "panel_schema_version": 1000,
@@ -113,7 +113,7 @@
     "vendor_gap_fills": 2000
   },
   "justifications": {
-    "limitations": "R2.2 e78cb9f2 measured 12677 B against 11121 B at the B-integration measure (+1556 B) and 11056 B on the R2.1 panel. All growth is four existing limitation entries that now state the sleeve basis of p123-ai-factor, no entry is added and none is duplicated: flow timing bounds +527 B (the parent-account series its row is restated from), HWM member series +330 B (the sleeve series start and the days it carries no value), product perimeter +303 B (sleeve gains and entry-day differences), sleeve capital basis +461 B (gross allocations and margin-funded allocations). These disclose what changed under the restatement; trimming was declined. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block limitations.",
+    "limitations": "R2.2 e78cb9f2 measured 12677 B against 11121 B at the B-integration measure (+1556 B) and 11056 B on the R2.1 panel. All growth is four existing limitation entries that now state the sleeve basis of p123-ai-factor, no entry is added and none is duplicated: flow timing bounds +527 B (the parent-account series its row is restated from), HWM member series +330 B (the sleeve series start and the days it carries no value), product perimeter +303 B (sleeve gains and entry-day differences), sleeve capital basis +461 B (gross allocations and margin-funded allocations). These disclose what changed under the restatement; trimming was declined. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block limitations. F1 re-measure (carrier 9): F1 candidate 6a6bdb2e (qe-r3 world-F1, G2 preflight) measures 17869 B against 10752 B committed (+7117 B, +66%) in 68 entries. The growth is entries the F1 provider ledger bundle makes true: per-account ledger-closure and accepted-versus-proven statements (IBKR flow tie-out, Quantbase holdings snapshot at cutoff, Schwab empty position set), per-account counts of provider-ledger flows and transactions left out for lack of a strategy attribution, per-provider source-clock lines, and governed declarations (CAPTURED_NOT_ADMITTED, EXCLUDED_BY_RULING). No entry is duplicated; trimming was declined because each states a limit of the figures. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block limitations.",
     "strategies": "int14 panel measured 177527 B against 175089 B at A5 (+2438 B, +1.4%) on the same inputs; no row or field was added in the int14 diff. The release B staged panel 8ee4e52c measures 177519 B (-8 B against int14), so the figure holds; this text does not claim anything about fields added by later code. Limit = measured + 1%, rounded up to 1000 B.",
     "performance": "New top-level block (distinct from performance_tab) carried since R2: 54048 B on R2 b216a53e, 54055 B on R2.1. It was unlisted and sat 4 KB over the 50000 B unlisted-block threshold, so the checker flagged it on every generation. Within 7 B between R2 and R2.1. Limit = committed + 3%, rounded up to 1000 B.",
     "performance_tab": "R2.1 re-measure 381004 B (schema 3: union grid, flow-matched benchmarks), against 375785 B on the r21-integration panel the previous limit was cut from. The limit is re-cut at committed + 3% (393000 B, was 388000 B at 98.2% of committed) so the block has the same headroom every other block has.",
@@ -121,11 +121,13 @@
     "strategy_underwriting": "int14 panel measured 89805 B against 84723 B at A5 (+5082 B, +6.0%), all in rows (83799 -> 88881 B) with no row or field added in the int14 diff; the cause is data in the same inputs. The release B staged panel 8ee4e52c measures 89814 B (+9 B against int14); this text does not claim anything about fields added by later code. Limit = measured + 1%, rounded up to 1000 B.",
     "model_vs_actual": "R2.2 bae512c5 measured 138438 B and +1587 B more with the final-seat basis statements: the p123-ai-factor windows and epochs (10 rows, each +basis and basis_label, about 150 B) and its portfolio-bridge line now say they are the parent account's figures (the audit input measures the whole parent account, not the restated sleeve): 140025 B. No window, epoch or component is added or duplicated; the sleeve comparison stays in governed_reference. Trimming was declined because the label is the statement the owner's basis ruling requires. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block model_vs_actual; to be confirmed on the final build. Raised for release A (A3 findings): measured 195139 B against the 150000 B floor (+31.8% over the R2.2 measure); the growth is the model-versus-actual bridge rows added for release A. No window, epoch or component is duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (198000 B).",
     "factor_analysis": "R3 generation db452885 measured 2479776 B against 2339068 B at the R3 projection (R2 b216a53e x 1.10): +140708 B (6.0%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (2505000 B, was 2363000 B) by tools/panel_payload_size.py --raise-all.",
-    "leverage_disclosures": "int14 panel 96e7e450 measured 30428390 B against 22229451 B at the A5 measure (+8198939 B, +36.9%). Rows grew 13982 -> 18678 (+4696); the 4657 added Schwab rows are the new statement-derived financing observations (4466 ZERO_FINANCING_OBSERVED account-days and 191 OBSERVED_FINANCING_DAY rows) that the int14 provider ledger projects from Schwab statements (A5 had 35 Schwab rows); IBKR rows are 13920 in both, with 13554 rows identical to A5 ignoring source ids and generation ids. There are no duplicated rows. The growth is new observed rows, not duplicated or unpruned ones; per-row size grew 1590 B -> 1629 B because the added rows carry longer source_record_ids. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block.",
+    "leverage_disclosures": "int14 panel 96e7e450 measured 30428390 B against 22229451 B at the A5 measure (+8198939 B, +36.9%). Rows grew 13982 -> 18678 (+4696); the 4657 added Schwab rows are the new statement-derived financing observations (4466 ZERO_FINANCING_OBSERVED account-days and 191 OBSERVED_FINANCING_DAY rows) that the int14 provider ledger projects from Schwab statements (A5 had 35 Schwab rows); IBKR rows are 13920 in both, with 13554 rows identical to A5 ignoring source ids and generation ids. There are no duplicated rows. The growth is new observed rows, not duplicated or unpruned ones; per-row size grew 1590 B -> 1629 B because the added rows carry longer source_record_ids. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block. F1 re-measure (carrier 9): F1 candidate 6a6bdb2e (qe-r3 world-F1, G2 preflight) measures 31799115 B against 30428390 B (+1370725 B, +4.5%). Cause is the F1 input growth only, no field or code is added: IBKR observations 1170 -> 1212 (nav), the 42 January-February 2026 verified Flex statements admitted by the IBKR 662a0318 generation (positions 31746 -> 32124, flows 74 -> 76, financing_cost 5096 -> 5843 catalog rows), the Schwab account-691 derived position row, and Quantbase and Matrixport POSITION rows. Limit = measured + 1%, rounded up to 1000 B (the relative rule of #893 still applies on top of this floor).",
     "account_manifest": "R3 generation db452885 measured 1740636 B against 1713348 B at the R3 projection (R2 b216a53e x 1.10): +27288 B (1.6%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (1759000 B, was 1731000 B) by tools/panel_payload_size.py --raise-all.",
     "portfolio_twr_cumulative": "Raised for release A (A3 findings): measured 1278 B against the 1000 B floor (committed 909 B); the block now carries the cumulative figures of the release A window. Limit = measured + 1%, rounded up to 1000 B (2000 B).",
     "dependence_analysis": "int14 panel measured 141984 B against 135963 B at A5 (+6021 B, +4.4%): correlation_one.components grows 2521 -> 5630 B (+3109 B) and cells +2146 B. The cause is data in the same inputs; no field was added in the int14 diff. The release B staged panel 8ee4e52c measures 141997 B (+13 B against int14); this text does not claim anything about fields added by later code. Limit = measured + 1%, rounded up to 1000 B.",
-    "dependence_modes": "int14 panel measured 288141 B against 274749 B at A5 (+13392 B, +4.9%): the two modes carry the same growth as dependence_analysis (LIVE_ONLY +6021 B, LIVE_PLUS_BACKTEST +7371 B: correlation_one components +3109 B each, cells +2146 B and +3191 B). Data, not code, in the int14 diff. The release B staged panel 8ee4e52c measures 288085 B (-56 B against int14); this text does not claim anything about fields added by later code. Limit = measured + 1%, rounded up to 1000 B."
+    "dependence_modes": "int14 panel measured 288141 B against 274749 B at A5 (+13392 B, +4.9%): the two modes carry the same growth as dependence_analysis (LIVE_ONLY +6021 B, LIVE_PLUS_BACKTEST +7371 B: correlation_one components +3109 B each, cells +2146 B and +3191 B). Data, not code, in the int14 diff. The release B staged panel 8ee4e52c measures 288085 B (-56 B against int14); this text does not claim anything about fields added by later code. Limit = measured + 1%, rounded up to 1000 B.",
+    "coverage": "F1 candidate 6a6bdb2e measures 142994 B (153 rows) against 128423 B committed (+14571 B, +11.3%). The growth follows the F1 provider-ledger content (the IBKR January-February 2026 statements, the Schwab account 691 derived row, the Quantbase and Matrixport POSITION fact); the committed panel is not retained for a per-row diff, so the split of the +14571 B among rows is not isolated here. No field is added by carrier 9. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block coverage.",
+    "fact_coverage_matrix": "F1 candidate 6a6bdb2e measures 53187 B (64 rows) against 49048 B committed (+4139 B, +8.4%), the same F1 provider-ledger content growth as coverage; the committed panel is not retained for a per-row diff, so the split is not isolated here. No field is added by carrier 9. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block fact_coverage_matrix."
   },
   "unlisted_block_max_bytes": 50000,
   "other_blocks_max_bytes": 400000,
@@ -1901,8 +1903,18 @@
       "rule": "limit = ceil(measured x (1 + margin) / 1000) x 1000",
       "reason": "Release B panel candidate measured 50371122 B (index.html) and 45776547 B (dashboard_data.js), 1.4 % and 1.1 % over the int14 floors that G2 compared it with (50178000 B, 45753000 B: measured + 1 % of the int14 panel). The panel carries three weeks of added history plus the B-lane data; the two files are the rendered shell and the JS copy of the same data, so they grow with the data blocks, not with code. dashboard_data.json (275.4 MB) and total bytes stay under their floors. Limit = measured + 1 %, rounded up to 1000 B. Found by the G2 validator row run by hand on the candidate before the driver's G2.",
       "physical": {
-        "index_html_bytes": {"before": 49681027, "after": 50371122, "previous_limit": 50178000, "limit": 50875000},
-        "dashboard_data_js_bytes": {"before": 45299971, "after": 45776547, "previous_limit": 45753000, "limit": 46235000}
+        "index_html_bytes": {
+          "before": 49681027,
+          "after": 50371122,
+          "previous_limit": 50178000,
+          "limit": 50875000
+        },
+        "dashboard_data_js_bytes": {
+          "before": 45299971,
+          "after": 45776547,
+          "previous_limit": 45753000,
+          "limit": 46235000
+        }
       }
     },
     {
@@ -1911,7 +1923,43 @@
       "rule": "total_bytes limit = ceil(estimate x (1 + margin) / 1000) x 1000 on the release driver constant-qa estimate 413832321 B (the staged total with a fixed qa/ allowance, measured 413723802 B on 8ee4e52c), an explicit reviewed floor (blocks stay at measured + 1 %)",
       "reason": "lint.payload_size refused the staged B generation on total_bytes 413723802 B > 404737000 B, the relative limit (previous release A 400729195 B x 1.01, 0 added days because B has the same cutoff as A); the file floor was 401175000 B. The total is 3.24 % above A with no added day, so the day-based relative rule cannot cover it. The growth is content: the 4657 Schwab financing rows in leverage_disclosures, the adverse_loss_basis fields, and the new strategy_concepts block (9502 B) with the Strategy-concepts view that renders it, carried in all four files that the total counts. Every other physical file and every listed block of the staged panel is under its floor (index_html_bytes 50371622 B of 50875000 B, dashboard_data_json_bytes 288752134 B of 291324000 B, dashboard_data_js_bytes 45776755 B of 46235000 B). The headroom is 2 % on the total, not 1 %, because the total is the sum of four files that each move with the data; the ceiling (1.5 x committed total_physical) stays in code.",
       "physical": {
-        "total_bytes": {"before": 397202029, "after": 413723802, "previous_limit": 401175000, "limit": 422109000}
+        "total_bytes": {
+          "before": 397202029,
+          "after": 413723802,
+          "previous_limit": 401175000,
+          "limit": 422109000
+        }
+      }
+    },
+    {
+      "generation": "6a6bdb2ed4e6cc6c3922963a7d1acdb4663ba5ad30676028a03409f4e2360fd3",
+      "margin": 0.01,
+      "rule": "limit = ceil(measured x (1 + margin) / 1000) x 1000",
+      "blocks": {
+        "coverage": {
+          "before": 128423,
+          "after": 142994,
+          "previous_limit": 130000,
+          "limit": 145000
+        },
+        "fact_coverage_matrix": {
+          "before": 49048,
+          "after": 53187,
+          "previous_limit": 50000,
+          "limit": 54000
+        },
+        "leverage_disclosures": {
+          "before": 30428390,
+          "after": 31799115,
+          "previous_limit": 30733000,
+          "limit": 32118000
+        },
+        "limitations": {
+          "before": 10752,
+          "after": 17869,
+          "previous_limit": 11000,
+          "limit": 19000
+        }
       }
     }
   ]
