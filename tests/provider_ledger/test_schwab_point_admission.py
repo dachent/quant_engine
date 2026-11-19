@@ -223,10 +223,16 @@ def test_materializer_reconstructs_point_from_selected_rows_despite_coherent_rec
 ) -> None:
     generation, authority, _ = point_stage
     catalog = json.loads((generation / "provider-ledger.json").read_bytes())
-    assert len(catalog["positions"]) == 1
-    position = catalog["positions"][0]
+    # the synthetic Matrixport and Quantbase runs carry positions too: attack Schwab's
+    schwab_positions = [
+        row for row in catalog["positions"] if row["provider_id"] == "schwab"
+    ]
+    assert len(schwab_positions) == 1
+    position = schwab_positions[0]
     if attack == "omit":
-        catalog["positions"] = []
+        catalog["positions"] = [
+            row for row in catalog["positions"] if row["provider_id"] != "schwab"
+        ]
     elif attack == "duplicate":
         catalog["positions"].append(copy.deepcopy(position))
     elif attack == "daily_nav":

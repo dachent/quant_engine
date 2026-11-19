@@ -608,6 +608,7 @@ def _staged_observation(
     schwab_point_capture: str | None = None,
     schwab_valuation_cutoff: str | None = None,
     schwab_derived: dict[str, Any] | None = None,
+    quantbase_holdings: bool = True,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """Small synthetic sources using native formats, no asserted finality flag."""
     from datetime import datetime, timedelta, timezone
@@ -728,8 +729,19 @@ def _staged_observation(
                 "csv/nav_daily.csv",
                 root / "output" / run_id / "csv/nav_daily.csv",
                 (
-                    "day_timestamp_ms,day_timestamp_utc,product_id\n"
-                    f"{int(nav_time.timestamp() * 1000)},{nav_time.isoformat()},SYNTHETIC\n"
+                    "day_timestamp_ms,day_timestamp_utc,product_id,nav\n"
+                    f"{int(nav_time.timestamp() * 1000)},{nav_time.isoformat()},SYNTHETIC,100\n"
+                    + "".join(
+                        f"{int(day_ts.timestamp() * 1000)},{day_ts.isoformat()},P1,100\n"
+                        for day_ts in (
+                            type(capture)(
+                                day.year, day.month, day.day, tzinfo=capture.tzinfo
+                            )
+                            for day in (
+                                cutoff - timedelta(days=back) for back in (2, 1, 0)
+                            )
+                        )
+                    )
                 ).encode(),
             )
             prior = (cutoff - timedelta(days=1)).isoformat()
@@ -737,9 +749,15 @@ def _staged_observation(
             contents = {
                 "csv/daily_portfolio_totals.csv": "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
                 + f"{prior},100,100,true\n{last},100,100,true\n",
-                "csv/daily_holdings.csv": "utc_date,product_id,share,currency,native_value,valuation_source,value_usd_api_rate,value_usd_api_reported,value_usd_strict_component\n"
-                + f"{prior},P1,1,USD,100,api_reported_usd_value,1,100,100\n{last},P1,1,USD,100,api_reported_usd_value,1,100,100\n",
+                "csv/daily_holdings.csv": "utc_date,product_id,share,currency,native_value,valuation_source,value_usd_api_rate,value_usd_api_reported,value_usd_strict_component,nav\n"
+                + f"{prior},P1,1,USD,100,api_reported_usd_value,1,100,100,100\n{last},P1,1,USD,100,api_reported_usd_value,1,100,100,100\n",
                 "csv/valuation_quality_issues.csv": "source_index,source_table,reason\n",
+                "csv/holdings.csv": "display_name,holding_balance,product_id,shares\n"
+                + '"[{""language"":""en-US"",""text"":""Synthetic""}]",100,P1,1\n',
+                "csv/holding_reconciliation.csv": "current_share,event_share_sum,product_id,unexplained_opening_share\n"
+                + "1,1,P1,0\n",
+                "csv/position_events.csv": "product_id,share_delta,utc_date\n"
+                + f"P1,1,{prior}\n",
                 "csv/subscription_details.csv": "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,subscription_amount,subscription_currency,subscription_time_utc\n"
                 + f"100,{prior}T00:00:00Z,2222222222222222222,1111111111111111111,100,USD,{prior}T00:00:00Z\n",
             }
@@ -795,8 +813,36 @@ def _staged_observation(
             (root / "conversion/artifacts" / activity_relative).write_bytes(
                 activity.encode()
             )
+            holdings_relative = "csv/dashboard_Volatis_Strategy_holdings.csv"
+            holdings = (
+                "symbol,quantity,value,latest_price,percentage\n"
+                "$USD,1.00,1.00,1.00,0.01\n"
+                "SHV,1.00,99.00,99.00,0.99\n"
+            ).encode()
+            rebalance_relative = "csv/volatis_strategy_rebalance_history.csv"
+            rebalance = (
+                "date,symbol,proportion\n"
+                f"{(cutoff - timedelta(days=5)).isoformat()},SHV,1.000000000\n"
+            ).encode()
+            # without the holdings snapshot the Quantbase positions builder returns
+            # no rows: the REQUIRED POSITION class then materializes nothing
+            extras = (
+                ((holdings_relative, holdings), (rebalance_relative, rebalance))
+                if quantbase_holdings
+                else ()
+            )
+            for extra_relative, extra in extras:
+                bind(
+                    "source/" + extra_relative,
+                    root / "source-runs" / run_id / "artifacts" / extra_relative,
+                    extra,
+                )
+                (root / "conversion/artifacts" / extra_relative).write_bytes(extra)
             conversion = json.loads(evidence_path.read_bytes())
-            conversion["refreshed_datasets"].append("account_activity.csv")
+            conversion["refreshed_datasets"].extend(
+                ["account_activity.csv"]
+                + [Path(extra_relative).name for extra_relative, _ in extras]
+            )
             evidence_path.write_bytes(canonical_json_bytes(conversion))
             catalog.update(
                 legacy_lineage={"run_id": run_id},
@@ -805,10 +851,19 @@ def _staged_observation(
                         "relative_path": rel,
                         "sha256": hashlib.sha256(raw).hexdigest(),
                         "bytes": len(raw),
+                        **(
+                            {
+                                "captured_at": f"{cutoff.isoformat()}T16:00:00Z",
+                                "snapshot_kind": "CAPTURE_TIME_SNAPSHOT",
+                            }
+                            if rel == holdings_relative
+                            else {}
+                        ),
                     }
                     for rel, raw in (
                         (relative, content),
                         (activity_relative, activity.encode()),
+                        *extras,
                     )
                 ],
             )
@@ -1129,6 +1184,7 @@ def _source_bound_stage(
     requested_as_of: date = date(2026, 9, 17),
     schwab_valuation_cutoff: str | None = None,
     schwab_derived: dict[str, Any] | None = None,
+    quantbase_holdings: bool = True,
 ) -> tuple[Path, dict[str, Any], Path]:
     """Real stage, real financial contract/schema/registry, tiny synthetic inputs."""
     _, identities, manifests, catalogs, _ = _fixture(unreferenced_dataset=True)
@@ -1141,6 +1197,7 @@ def _source_bound_stage(
         schwab_point_capture=schwab_point_capture,
         schwab_valuation_cutoff=schwab_valuation_cutoff,
         schwab_derived=schwab_derived,
+        quantbase_holdings=quantbase_holdings,
     )
     contract_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
     schema_path = ROOT / "schemas/portfolio/financial-mvp-source-contract.schema.json"
@@ -3204,3 +3261,35 @@ def test_a_point_row_states_why_it_is_unmapped() -> None:
         )
         == "MAPPING_ACCOUNT_OR_DAY_UNKNOWN"
     )
+
+
+def test_quantbase_without_the_holdings_snapshot_is_required_not_ready(
+    tmp_path: Path,
+) -> None:
+    """POSITION is a REQUIRED class: a Quantbase capture with no holdings file has no
+    positions (the builder returns none, it does not raise), and that absence blocks."""
+
+    def receipt(root: Path, holdings: bool) -> dict[str, Any]:
+        generation, _, _ = _source_bound_stage(
+            root,
+            source_cutoff=date(2026, 9, 17),
+            requested_as_of=date(2026, 9, 17),
+            quantbase_holdings=holdings,
+        )
+        return json.loads((generation / "admit-or-declare-receipt.json").read_bytes())
+
+    def blocked_quantbase_classes(value: dict[str, Any]) -> set[str]:
+        return {
+            row["item_id"]
+            for row in value["dispositions"]
+            if row["provider_id"] == "quantbase"
+            and row["readiness_impact"] == "REQUIRED_NOT_READY"
+            and row["reason"] == "REQUIRED_DATA_CLASS_NOT_MATERIALIZED"
+        }
+
+    with_holdings = receipt(tmp_path / "with", True)
+    without = receipt(tmp_path / "without", False)
+
+    assert "POSITION" not in blocked_quantbase_classes(with_holdings)
+    assert "POSITION" in blocked_quantbase_classes(without)
+    assert without["product_readiness"] == "REQUIRED_NOT_READY"

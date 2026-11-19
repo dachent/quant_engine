@@ -355,12 +355,13 @@ def test_a_capture_without_a_holdings_file_has_no_positions_not_an_error(
     assert rows == []
 
 
-def test_the_builder_is_not_yet_registered_as_a_declared_fact() -> None:
-    """Registering the fact needs the financial contract's target facts to name it
-    (carrier-7 pin): the ledger integration owner does both in one change."""
+def test_the_builder_is_registered_as_a_declared_quantbase_fact() -> None:
+    """Registered with the financial contract's target facts (carrier 8) in the same F1 change."""
 
-    assert "positions" not in ledger._ACCOUNT_FACTS["quantbase"]
-    assert callable(ledger._csv_quantbase_positions)
+    assert "positions" in ledger._ACCOUNT_FACTS["quantbase"]
+    assert ledger._CSV_FACT_BUILDERS[("quantbase", "positions")] is (
+        ledger._csv_quantbase_positions
+    )
 
 
 def test_the_position_close_spec_key_is_pinned_and_never_restates_a_nav_day(

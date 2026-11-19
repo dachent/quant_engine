@@ -130,7 +130,7 @@ for _descriptor in (
         provider_id="matrixport",
         catalog_filename="catalog.json",
         catalog_schema_versions=frozenset({1, 2}),
-        account_facts=("capital_anchors", "nav_observations"),
+        account_facts=("capital_anchors", "nav_observations", "positions"),
         source_segment="matrixport-account-generation",
     ),
     ProviderDescriptor(
@@ -144,7 +144,13 @@ for _descriptor in (
         provider_id="quantbase",
         catalog_filename="quantbase-generation.json",
         catalog_schema_versions=frozenset({1}),
-        account_facts=("capital_anchors", "flows", "nav_observations", "transactions"),
+        account_facts=(
+            "capital_anchors",
+            "flows",
+            "nav_observations",
+            "positions",
+            "transactions",
+        ),
         source_segment="quantbase-account-generation",
     ),
     ProviderDescriptor(
@@ -6280,6 +6286,21 @@ def _csv_matrixport_nav_observations(ctx: _CsvFactContext) -> list[dict[str, Any
     )
 
 
+def _csv_matrixport_positions(ctx: _CsvFactContext) -> list[dict[str, Any]]:
+    return _matrixport_positions(
+        ctx.generation_id,
+        ctx.manifest,
+        ctx.catalog,
+        ctx.root,
+        ctx.accounts,
+        ctx.strategies,
+        ctx.assignments,
+        fx_rates=ctx.fx_rates,
+        financial_cutoff=ctx.financial_cutoff,
+        cutoff_findings=ctx.exceptions,
+    )
+
+
 def _csv_quantbase_flows(ctx: _CsvFactContext) -> list[dict[str, Any]]:
     return _quantbase_flows(
         ctx.generation_id,
@@ -6355,9 +6376,11 @@ def _csv_quantbase_cash_activity(ctx: _CsvFactContext) -> list[dict[str, Any]]:
 _CSV_FACT_BUILDERS: Final = {
     (_MATRIXPORT, "capital_anchors"): _csv_matrixport_capital_anchors,
     (_MATRIXPORT, "nav_observations"): _csv_matrixport_nav_observations,
+    (_MATRIXPORT, "positions"): _csv_matrixport_positions,
     (_QUANTBASE, "capital_anchors"): _csv_quantbase_capital_anchors,
     (_QUANTBASE, "flows"): _csv_quantbase_flows,
     (_QUANTBASE, "nav_observations"): _csv_quantbase_nav_observations,
+    (_QUANTBASE, "positions"): _csv_quantbase_positions,
     (_QUANTBASE, "transactions"): _csv_quantbase_cash_activity,
 }
 
@@ -6454,6 +6477,7 @@ def _project_account_facts(
             "capital_anchors",
             "flows",
             "nav_observations",
+            "positions",
             "transactions",
         }:
             if manifest is None or root is None:
