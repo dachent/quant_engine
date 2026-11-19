@@ -1135,7 +1135,7 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             # the opening is an anchor, because every later IBKR capital
             # movement is already one of the flow rows the anchor was netted
             # from.
-            "admitted_item_count": 69,
+            "admitted_item_count": 111,
             "admitted_item_set_sha256": (
                 "58fad56b0a28909f646ae2a4d8043a3c82269d9fe72ad35d942bfc7f823931cc"
             ),
@@ -1148,19 +1148,19 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             # Moved from three items to six when the capital anchor started
             # resting on the owner-selected daily close instead of a
             # provider-reported USD value that no Robuxio holding carries.
-            "admitted_item_count": 6,
+            "admitted_item_count": 7,
             "admitted_item_set_sha256": (
                 "4713806990fa5a318d973b595aea860ed49def484a01d2a6a0cb430736414223"
             ),
         },
         "quantbase-account-generation": {
-            "admitted_item_count": 7,
+            "admitted_item_count": 9,
             "admitted_item_set_sha256": (
                 "90008612aea6228f6b24dc0ffada33d38ddb2485e2bdc68b67b1bb76d1b72947"
             ),
         },
         "schwab-account-generation": {
-            "admitted_item_count": 24,
+            "admitted_item_count": 25,
             "admitted_item_set_sha256": (
                 "0e714f3ebee64575bbf70c36ffdf04adb62e517becf540694892c365d4bc8576"
             ),
@@ -2920,9 +2920,9 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
         for row in matrix["rows"]
         if row["source_id"] == "matrixport-account-generation"
     ]
-    # Six rows per declared data class; matrixport declares two after the
-    # issue #396 deferral removed three.
-    assert len(rows) == 12
+    # Six rows per declared data class; matrixport declares three (the issue
+    # #396 deferral removed three, POSITION came back with the positions fact).
+    assert len(rows) == 18
     assert all(row["declared_gap_policy"] == policy for row in rows)
     assert all(
         row["declared_gap_policy"] is None

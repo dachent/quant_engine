@@ -50,7 +50,13 @@ GOLDEN_FACTS = {
     ),
     "matrixport": ("capital_anchors", "nav_observations", "positions"),
     "portfolio123": (),
-    "quantbase": ("capital_anchors", "flows", "nav_observations", "transactions"),
+    "quantbase": (
+        "capital_anchors",
+        "flows",
+        "nav_observations",
+        "positions",
+        "transactions",
+    ),
     "schwab": ("nav_observations", "positions", "transactions"),
 }
 GOLDEN_SEGMENTS = {
