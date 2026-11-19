@@ -519,6 +519,8 @@ def test_report_row_is_sleeve_primary_with_a_labelled_account_block(
                 f"{prefix}_annualization",
                 f"{prefix}_assignment_authority",
                 f"{prefix}_assignment_status",
+                f"{prefix}_cash_drag_reason",  # status/text, not comparison figures
+                f"{prefix}_cash_drag_status",
                 f"{prefix}_comparison_reason",
                 f"{prefix}_comparison_window",  # carried once, by the annualization
                 f"{prefix}_effective_end",
