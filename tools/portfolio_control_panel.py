@@ -28,7 +28,7 @@ import zlib
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping, Sequence, cast
 
 from quant_engine.core import check_entry_interpreter
-from quant_engine.core import last_nyse_trading_day
+from quant_engine.core import last_nyse_trading_day, timed_call
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -14573,6 +14573,7 @@ def _check_implementation_layers(
     }
 
 
+@timed_call("panel_verify_candidate")
 def verify_candidate(
     report_root: Path | None,
     legacy_panel: Path,

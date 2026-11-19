@@ -39,7 +39,7 @@ from quant_engine.core import (
     CODE_IDENTITY_TREE_SCHEME as TREE_SCHEME,
 )
 from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.core import inventory_identity
+from quant_engine.core import inventory_identity, timed_stage
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
     validate_admit_or_declare_receipt,
@@ -8091,13 +8091,14 @@ def _attended_execute(
             if role in completed:
                 continue
             command = _attended_stage_command(preflight, output_root, role)
-            result = subprocess.run(
-                command,
-                cwd=cast(Path, preflight["repo_root"]),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            with timed_stage("attended_role", role=role):
+                result = subprocess.run(
+                    command,
+                    cwd=cast(Path, preflight["repo_root"]),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
             if result.stdout:
                 print(result.stdout, end="")
             if result.stderr:
