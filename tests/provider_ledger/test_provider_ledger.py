@@ -6702,6 +6702,7 @@ def test_quantbase_dispatch_projects_fund_anchors_account_flows_and_nav(
         "capital_anchors",
         "flows",
         "nav_observations",
+        "positions",
         "transactions",
     }
     assert len(projected["capital_anchors"]) == 1
