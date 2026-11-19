@@ -728,8 +728,19 @@ def _staged_observation(
                 "csv/nav_daily.csv",
                 root / "output" / run_id / "csv/nav_daily.csv",
                 (
-                    "day_timestamp_ms,day_timestamp_utc,product_id\n"
-                    f"{int(nav_time.timestamp() * 1000)},{nav_time.isoformat()},SYNTHETIC\n"
+                    "day_timestamp_ms,day_timestamp_utc,product_id,nav\n"
+                    f"{int(nav_time.timestamp() * 1000)},{nav_time.isoformat()},SYNTHETIC,100\n"
+                    + "".join(
+                        f"{int(day_ts.timestamp() * 1000)},{day_ts.isoformat()},P1,100\n"
+                        for day_ts in (
+                            type(capture)(
+                                day.year, day.month, day.day, tzinfo=capture.tzinfo
+                            )
+                            for day in (
+                                cutoff - timedelta(days=back) for back in (2, 1, 0)
+                            )
+                        )
+                    )
                 ).encode(),
             )
             prior = (cutoff - timedelta(days=1)).isoformat()
@@ -737,9 +748,15 @@ def _staged_observation(
             contents = {
                 "csv/daily_portfolio_totals.csv": "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
                 + f"{prior},100,100,true\n{last},100,100,true\n",
-                "csv/daily_holdings.csv": "utc_date,product_id,share,currency,native_value,valuation_source,value_usd_api_rate,value_usd_api_reported,value_usd_strict_component\n"
-                + f"{prior},P1,1,USD,100,api_reported_usd_value,1,100,100\n{last},P1,1,USD,100,api_reported_usd_value,1,100,100\n",
+                "csv/daily_holdings.csv": "utc_date,product_id,share,currency,native_value,valuation_source,value_usd_api_rate,value_usd_api_reported,value_usd_strict_component,nav\n"
+                + f"{prior},P1,1,USD,100,api_reported_usd_value,1,100,100,100\n{last},P1,1,USD,100,api_reported_usd_value,1,100,100,100\n",
                 "csv/valuation_quality_issues.csv": "source_index,source_table,reason\n",
+                "csv/holdings.csv": "display_name,holding_balance,product_id,shares\n"
+                + '"[{""language"":""en-US"",""text"":""Synthetic""}]",100,P1,1\n',
+                "csv/holding_reconciliation.csv": "current_share,event_share_sum,product_id,unexplained_opening_share\n"
+                + "1,1,P1,0\n",
+                "csv/position_events.csv": "product_id,share_delta,utc_date\n"
+                + f"P1,1,{prior}\n",
                 "csv/subscription_details.csv": "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,subscription_amount,subscription_currency,subscription_time_utc\n"
                 + f"100,{prior}T00:00:00Z,2222222222222222222,1111111111111111111,100,USD,{prior}T00:00:00Z\n",
             }
