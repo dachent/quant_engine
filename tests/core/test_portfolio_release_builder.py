@@ -6228,3 +6228,20 @@ def test_lens_worker_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     assert builder._lens_worker_count(3) == 3
     monkeypatch.setenv(builder._LENS_WORKERS_ENV, "1")
     assert builder._lens_worker_count(26) == 1
+
+
+def test_release_builder_refuses_to_run_with_render_reuse_set(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import types
+
+    monkeypatch.setattr(
+        builder,
+        "_parser",
+        lambda: types.SimpleNamespace(
+            parse_args=lambda argv: types.SimpleNamespace(command="build")
+        ),
+    )
+    monkeypatch.setenv("QE_RENDER_REUSE", "provisional")
+    assert builder.main([]) == 2
+    assert "render reuse is refresh-only" in capsys.readouterr().err

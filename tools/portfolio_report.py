@@ -33,6 +33,7 @@ from jsonschema import (  # type: ignore[import-untyped]
 )
 
 from quant_engine.core import check_entry_interpreter
+from quant_engine.core import reuse_render
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -11106,7 +11107,7 @@ def _implementation_contracts(
     )
 
 
-def build_report_data(
+def build_report_data_live(
     baseline_root: Path,
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
@@ -13316,6 +13317,19 @@ def _build_workbook_exact(report: Mapping[str, Any], path: Path) -> dict[str, An
         return {**evidence, "workbook_sha256": hashlib.sha256(content).hexdigest()}
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def build_report_data(*args: Any, **kwargs: Any) -> Any:
+    """Build the report data; a PROVISIONAL refresh run reuses an earlier build of
+    unchanged inputs (#885 1d). Release runs always build live."""
+
+    return reuse_render(
+        "report_data",
+        args,
+        kwargs,
+        repo_root=Path(__file__).resolve().parents[1],
+        compute=lambda: build_report_data_live(*args, **kwargs),
+    )
 
 
 def build_candidate(
