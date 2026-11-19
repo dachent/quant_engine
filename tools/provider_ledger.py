@@ -36,6 +36,7 @@ import event_completeness
 import quantbase_fund_days
 import zero_financing_statements
 
+import quant_engine.schwab as schwab
 from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
     AdapterIdentity,
@@ -6023,6 +6024,8 @@ class _SchwabPositionObservation(NamedTuple):
     artifact: SourceArtifact
     record_ids: frozenset[str]
     valuation_cutoff: date | None = None
+    # position rows derived at the cutoff from a later snapshot, re-verified here
+    derived_record_ids: frozenset[str] = frozenset()
 
 
 def _schwab_position_observation(
@@ -6136,7 +6139,11 @@ def _schwab_position_observation(
         raise ProviderLedgerError(f"{label} account/clock scope differs")
     record_ids: set[str] = set()
     position_accounts: set[str] = set()
+    derived_rows: list[Mapping[str, Any]] = []
     for row in _objects(catalog.get("positions"), label):
+        if "as_of_basis" in row or row.get("evidence_class") == schwab.DERIVED_BASIS:
+            derived_rows.append(row)
+            continue
         account_id = _text(row.get("account_id"), label)
         security_id = _text(row.get("security_id"), label)
         symbol = _text(row.get("symbol"), label)
@@ -6174,6 +6181,38 @@ def _schwab_position_observation(
         position_accounts.add(account_id)
     if catalog.get("current_position_account_count") != len(position_accounts):
         raise ProviderLedgerError(f"{label} position account count differs")
+    derived_ids: frozenset[str] = frozenset()
+    if derived_rows:
+        if valuation_cutoff is None:
+            raise ProviderLedgerError(
+                f"{label} derived positions need an explicit valuation cutoff"
+            )
+        try:
+            derived_ids = frozenset(
+                schwab.admit_derived_position_rows(
+                    derived_rows,
+                    accepted_accounts=account_ids,
+                    transactions=_objects(catalog.get("transactions"), label),
+                    valuation_cutoff=valuation_cutoff,
+                    snapshot_day=day,
+                    artifact_schemas={a.artifact_id: a.schema_name for a in artifacts},
+                    transaction_history=_object(
+                        _object(catalog.get("coverage"), label).get(
+                            "transaction_history"
+                        ),
+                        label,
+                    ),
+                    nav_observations=_objects(
+                        catalog.get("nav_observations", []), label
+                    ),
+                )
+            )
+        except schwab.SchwabDerivedPositionError as exc:
+            raise ProviderLedgerError(
+                f"{label} derived position refused: {exc}"
+            ) from exc
+        if derived_ids & record_ids:
+            raise ProviderLedgerError(f"{label} position record identifiers collide")
     if financial_observation_date > requested_as_of:
         return None
     return _SchwabPositionObservation(
@@ -6182,6 +6221,7 @@ def _schwab_position_observation(
         artifact,
         frozenset(record_ids),
         valuation_cutoff,
+        derived_ids,
     )
 
 
@@ -6639,7 +6679,22 @@ def _project_account_facts(
                 ):
                     if row.get(field) is not None:
                         record[field] = row[field]
-            if source_fact == "positions" and position_observation is not None:
+            if (
+                source_fact == "positions"
+                and position_observation is not None
+                and source_id in position_observation.derived_record_ids
+            ):
+                # derived at the cutoff from a later snapshot: never an observed row
+                record.update(
+                    as_of_basis=row["as_of_basis"],
+                    capture_date=row["capture_date"],
+                    closure=row["closure"],
+                    evidence_class=row["evidence_class"],
+                    residual_reallocation_window_days=schwab.residual_window_days(row),
+                    source_artifact_id=row["source_artifact_id"],
+                    valuation_cutoff=row["as_of_date"],
+                )
+            elif source_fact == "positions" and position_observation is not None:
                 record.update(
                     observed_at=row["observed_at"],
                     average_price=row["average_price"],

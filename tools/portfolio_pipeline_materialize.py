@@ -16,6 +16,7 @@ import sys
 from typing import Any, Callable, Final, Mapping, Sequence, cast
 from zoneinfo import ZoneInfo
 
+import quant_engine.schwab as schwab
 from quant_engine.core import (
     CoverageStatus,
     GenerationManifest,
@@ -1143,8 +1144,17 @@ def _schwab_selected_point_positions(
             or any(row["observed_at"] != clock for row in current)
         ):
             raise ValueError("point account/clock scope differs")
+        point_provider = "schwab"
         expected = {}
+        derived_natives = [
+            native
+            for native in source["positions"]
+            if "as_of_basis" in native
+            or native.get("evidence_class") == schwab.DERIVED_BASIS
+        ]
         for native in source["positions"]:
+            if native in derived_natives:
+                continue
             identity = {
                 "account_id": native["account_id"],
                 "as_of_date": native["as_of_date"],
@@ -1187,7 +1197,7 @@ def _schwab_selected_point_positions(
                     )
                 },
                 "evidence_layer": "ACCOUNT_LIVE",
-                "provider_id": "schwab",
+                "provider_id": point_provider,
                 "record_id": "schwab:" + record_id,
                 "source_record_id": record_id,
                 "source_artifact_id": artifact["artifact_id"],
@@ -1202,6 +1212,55 @@ def _schwab_selected_point_positions(
             {row["account_id"] for row in expected.values()}
         ):
             raise ValueError("point position account count differs")
+        if derived_natives:
+            if valuation_cutoff is None:
+                raise ValueError("derived positions need a valuation cutoff")
+            try:
+                admitted = schwab.admit_derived_position_rows(
+                    derived_natives,
+                    accepted_accounts=accounts,
+                    transactions=source["transactions"],
+                    valuation_cutoff=valuation_cutoff,
+                    snapshot_day=day,
+                    artifact_schemas={
+                        a["artifact_id"]: a["schema"]["name"]
+                        for a in source["source_artifacts"]
+                    },
+                    transaction_history=source["coverage"]["transaction_history"],
+                    nav_observations=source["nav_observations"],
+                )
+            except schwab.SchwabDerivedPositionError as exc:
+                raise ValueError("derived position refused") from exc
+            for record_id, native in admitted.items():
+                if record_id in expected:
+                    raise ValueError("point position record identifiers collide")
+                expected[record_id] = {
+                    **{
+                        key: native[key]
+                        for key in (
+                            "account_id",
+                            "as_of_date",
+                            "as_of_basis",
+                            "capture_date",
+                            "closure",
+                            "evidence_class",
+                            "quantity",
+                            "market_value",
+                            "security_id",
+                            "source_artifact_id",
+                            "symbol",
+                        )
+                    },
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "provider_id": point_provider,
+                    "record_id": "schwab:" + record_id,
+                    "residual_reallocation_window_days": schwab.residual_window_days(
+                        native
+                    ),
+                    "source_record_id": record_id,
+                    "generation_id": manifest.generation_id,
+                    "valuation_cutoff": valuation_cutoff.isoformat(),
+                }
     except (KeyError, ValueError, TypeError, AttributeError) as exc:
         raise MaterializationError("Schwab selected point authority differs") from exc
     return expected if financial_observation_date <= requested_as_of else None

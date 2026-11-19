@@ -5090,6 +5090,7 @@ def _derived_value_basis(
 
 
 _PROVIDER_REPORTED_AUTHORITY: Final = "remain provider-reported USD authority"
+_DERIVED_POSITION_BASIS: Final = "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT"
 
 
 def _noun(count: int, singular: str, plural: str) -> str:
@@ -8646,10 +8647,34 @@ def _positions(
                 },
             }
         )
+        if item.get("evidence_class") == _DERIVED_POSITION_BASIS:
+            # inferred at the cutoff from a later snapshot: the row says so and names the
+            # days whose split between holdings the retained pages do not show
+            window = item.get("residual_reallocation_window_days") or []
+            accepted[-1]["residual_reallocation_window_days"] = list(window)
+            earlier = sorted(
+                (item.get("closure") or {}).get("earlier_market_value_days") or []
+            )
+            accepted[-1]["basis_note"] = (
+                "position inferred, not observed: derived at cutoff from a later snapshot "
+                f"(captured {item.get('capture_date')}); net zero change in the account "
+                "total over the days since the cutoff, holdings/cash split inferred from "
+                + (f"the {earlier[0]} page" if earlier else "the capture")
+                + (
+                    f"; same-total reallocation cannot be excluded between {window[0]} "
+                    f"and {window[1]}; a later page equal in total does not rule it out, "
+                    "so the per-symbol split is not proven for those days"
+                    if len(window) == 2
+                    else ""
+                )
+            )
         # A value the finality evidence declares derived is not "captured": the row says
         # how it was valued and keeps the capture date and clock it was held under.
         value_basis = _derived_value_basis(derived_values, account_id, as_of_date)
-        if value_basis is not None:
+        if (
+            value_basis is not None
+            and item.get("evidence_class") != _DERIVED_POSITION_BASIS
+        ):
             accepted[-1]["value_basis"] = value_basis
             accepted[-1]["as_of_basis"] = value_basis["basis"]
     return sorted(

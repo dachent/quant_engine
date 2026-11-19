@@ -607,6 +607,7 @@ def _staged_observation(
     cutoff: date = DAY,
     schwab_point_capture: str | None = None,
     schwab_valuation_cutoff: str | None = None,
+    schwab_derived: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """Small synthetic sources using native formats, no asserted finality flag."""
     from datetime import datetime, timedelta, timezone
@@ -891,6 +892,100 @@ def _staged_observation(
                     },
                     source_artifacts=[point_artifact.to_dict()],
                 )
+                if schwab_derived is not None:
+                    # the empty account holds a $1.00 fund derived at the cutoff
+                    derived_account = account
+                    export_id = "evidence/schwab-691-2026-09-25/positions-export.csv"
+                    page_id = "evidence/schwab-691-2026-09-20/balances-page.txt"
+                    bind(
+                        export_id,
+                        root / "evidence/positions-export.csv",
+                        b"export",
+                        "schwab-positions-export",
+                    )
+                    bind(
+                        page_id,
+                        root / "evidence/balances-page.txt",
+                        b"page",
+                        "schwab-live-balances-evidence",
+                    )
+                    catalog["source_artifacts"] = [
+                        *catalog["source_artifacts"],
+                        artifacts[-2].to_dict(),
+                        artifacts[-1].to_dict(),
+                    ]
+                    derived_security = (
+                        "security-schwab-" + hashlib.sha256(b"SWVXX").hexdigest()[:24]
+                    )
+                    derived_identity = {
+                        "account_id": derived_account,
+                        "as_of_date": schwab_valuation_cutoff,
+                        "basis": "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT",
+                        "security_id": derived_security,
+                    }
+                    derived_row: dict[str, Any] = {
+                        "account_id": derived_account,
+                        "as_of_basis": "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT",
+                        "as_of_date": schwab_valuation_cutoff,
+                        "capture_date": "2026-09-25",
+                        "closure": {
+                            "cash_usd": "0.00",
+                            "earlier_market_value_days": ["2026-09-20"],
+                            "history_through": schwab_valuation_cutoff,
+                            "holdings_usd": "100",
+                            "positions_total_usd": "100.00",
+                        },
+                        "evidence_class": "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT",
+                        "mapping_status": "UNMAPPED",
+                        "market_value": {
+                            "currency": "USD",
+                            "status": "AVAILABLE",
+                            "value": "100",
+                        },
+                        "quantity": "100",
+                        "record_id": "position-"
+                        + hashlib.sha256(
+                            canonical_json_bytes(derived_identity)
+                        ).hexdigest()[:24],
+                        "security_id": derived_security,
+                        "source_artifact_id": export_id,
+                        "strategy_id": None,
+                        "symbol": "SWVXX",
+                    }
+                    overrides = dict(schwab_derived)
+                    if overrides.pop("__late_transaction__", False):
+                        catalog["transactions"] = [
+                            *catalog.get("transactions", []),
+                            {
+                                "account_id": derived_account,
+                                "event_date": "2026-09-18",
+                                "record_id": "synthetic-late-transaction",
+                            },
+                        ]
+                    derived_row.update(overrides)
+                    catalog["coverage"] = {
+                        **(catalog.get("coverage") or {}),
+                        "transaction_history": {
+                            "accounts": {
+                                derived_account: {
+                                    "effective_end": schwab_valuation_cutoff,
+                                    "effective_start": "2020-01-01",
+                                    "source_manifest_sha256": "c" * 64,
+                                    "terminal_observed_at": (
+                                        schwab_valuation_cutoff + "T12:00:00-04:00"
+                                    ),
+                                    "transaction_count": 0,
+                                }
+                            },
+                            "complete_through": schwab_valuation_cutoff,
+                            "requested_interval": "ALL_AVAILABLE_HISTORY",
+                            "source_manifest_sha256": "c" * 64,
+                            "terminal_observed_at": (
+                                schwab_valuation_cutoff + "T12:00:00-04:00"
+                            ),
+                        },
+                    }
+                    catalog["positions"] = [*catalog["positions"], derived_row]
                 bind(
                     "native/empty-nav.csv",
                     root / "native/empty-nav.csv",
@@ -1033,6 +1128,7 @@ def _source_bound_stage(
     schwab_point_capture: str | None = None,
     requested_as_of: date = date(2026, 9, 17),
     schwab_valuation_cutoff: str | None = None,
+    schwab_derived: dict[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any], Path]:
     """Real stage, real financial contract/schema/registry, tiny synthetic inputs."""
     _, identities, manifests, catalogs, _ = _fixture(unreferenced_dataset=True)
@@ -1044,6 +1140,7 @@ def _source_bound_stage(
         cutoff=source_cutoff,
         schwab_point_capture=schwab_point_capture,
         schwab_valuation_cutoff=schwab_valuation_cutoff,
+        schwab_derived=schwab_derived,
     )
     contract_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
     schema_path = ROOT / "schemas/portfolio/financial-mvp-source-contract.schema.json"
