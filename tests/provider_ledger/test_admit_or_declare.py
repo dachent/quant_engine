@@ -812,8 +812,35 @@ def _staged_observation(
             (root / "conversion/artifacts" / activity_relative).write_bytes(
                 activity.encode()
             )
+            holdings_relative = "csv/dashboard_Volatis_Strategy_holdings.csv"
+            holdings = (
+                "symbol,quantity,value,latest_price,percentage\n"
+                "$USD,1.00,1.00,1.00,0.01\n"
+                "SHV,1.00,99.00,99.00,0.99\n"
+            ).encode()
+            rebalance_relative = "csv/volatis_strategy_rebalance_history.csv"
+            rebalance = (
+                "date,symbol,proportion\n"
+                f"{(cutoff - timedelta(days=5)).isoformat()},SHV,1.000000000\n"
+            ).encode()
+            for extra_relative, extra in (
+                (holdings_relative, holdings),
+                (rebalance_relative, rebalance),
+            ):
+                bind(
+                    "source/" + extra_relative,
+                    root / "source-runs" / run_id / "artifacts" / extra_relative,
+                    extra,
+                )
+                (root / "conversion/artifacts" / extra_relative).write_bytes(extra)
             conversion = json.loads(evidence_path.read_bytes())
-            conversion["refreshed_datasets"].append("account_activity.csv")
+            conversion["refreshed_datasets"].extend(
+                [
+                    "account_activity.csv",
+                    Path(holdings_relative).name,
+                    Path(rebalance_relative).name,
+                ]
+            )
             evidence_path.write_bytes(canonical_json_bytes(conversion))
             catalog.update(
                 legacy_lineage={"run_id": run_id},
@@ -822,10 +849,20 @@ def _staged_observation(
                         "relative_path": rel,
                         "sha256": hashlib.sha256(raw).hexdigest(),
                         "bytes": len(raw),
+                        **(
+                            {
+                                "captured_at": f"{cutoff.isoformat()}T16:00:00Z",
+                                "snapshot_kind": "CAPTURE_TIME_SNAPSHOT",
+                            }
+                            if rel == holdings_relative
+                            else {}
+                        ),
                     }
                     for rel, raw in (
                         (relative, content),
                         (activity_relative, activity.encode()),
+                        (holdings_relative, holdings),
+                        (rebalance_relative, rebalance),
                     )
                 ],
             )
