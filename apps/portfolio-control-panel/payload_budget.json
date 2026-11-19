@@ -19,7 +19,7 @@
       "strategies": 179502,
       "hwm_governed_proof": 121039,
       "performance_tab": 393204,
-      "orthogonal_risk_attribution": 135031,
+      "orthogonal_risk_attribution": 169425,
       "strategy_underwriting": 90483,
       "model_vs_actual": 196224,
       "account_summary": 4934,
@@ -39,7 +39,7 @@
       "default_dependence_mode": 11,
       "fact_coverage_matrix": 53187,
       "fact_status": 490,
-      "gates": 1823,
+      "gates": 2069,
       "hwm_summary": 536,
       "hybrid_mode_gate": 2984,
       "lifecycle_schema_version": 1,
@@ -74,7 +74,7 @@
     "strategies": 189000,
     "hwm_governed_proof": 128000,
     "performance_tab": 413000,
-    "orthogonal_risk_attribution": 142000,
+    "orthogonal_risk_attribution": 172000,
     "strategy_underwriting": 96000,
     "model_vs_actual": 207000,
     "account_summary": 6000,
@@ -94,7 +94,7 @@
     "default_dependence_mode": 1000,
     "fact_coverage_matrix": 56000,
     "fact_status": 1000,
-    "gates": 2000,
+    "gates": 3000,
     "hwm_summary": 1000,
     "hybrid_mode_gate": 4000,
     "lifecycle_schema_version": 1000,
@@ -2143,7 +2143,8 @@
           "before": 2069,
           "after": 1823,
           "previous_limit": 3000,
-          "limit": 2000
+          "limit": 3000,
+          "kept_previous": true
         },
         "hwm_governed_proof": {
           "before": 121036,
@@ -2209,7 +2210,8 @@
           "before": 169425,
           "after": 135031,
           "previous_limit": 172000,
-          "limit": 142000
+          "limit": 172000,
+          "kept_previous": true
         },
         "panel_schema_version": {
           "before": 2,
@@ -2313,7 +2315,8 @@
           "previous_limit": 28133000,
           "limit": 29357000
         }
-      }
+      },
+      "note": "no limit is lowered in this carrier: orthogonal_risk_attribution (F1 candidate 135031 B; B real panel 135022 B, so it did not shrink: its committed_bytes 169425 was stale from an earlier release) and gates (F1 1823 B) keep their previous limit and committed_bytes; rebasing them is left to a later change."
     }
   ]
 }
