@@ -132,10 +132,10 @@
   "unlisted_block_max_bytes": 50000,
   "other_blocks_max_bytes": 400000,
   "physical": {
-    "total_bytes": 422109000,
-    "index_html_bytes": 50875000,
-    "dashboard_data_json_bytes": 291324000,
-    "dashboard_data_js_bytes": 46235000
+    "total_bytes": 427986000,
+    "index_html_bytes": 52026000,
+    "dashboard_data_json_bytes": 298854000,
+    "dashboard_data_js_bytes": 47306000
   },
   "fixture": {
     "basis": "performance_tab built from the eight-week panel of tests/portfolio_control_panel/test_performance_tab.py measured 9549 B at R2 (schema 2) and 15898 B on r21-integration (schema 3: union grid, benchmark series); guards block shape in CI, where no real generation exists",
@@ -1959,6 +1959,38 @@
           "after": 17869,
           "previous_limit": 11000,
           "limit": 19000
+        }
+      }
+    },
+    {
+      "generation": "6a6bdb2ed4e6cc6c3922963a7d1acdb4663ba5ad30676028a03409f4e2360fd3 (F1 candidate, cutoff 2026-11-06)",
+      "margin": 0.03,
+      "rule": "physical limit = ceil(measured x (1 + margin) / 1000) x 1000; total_bytes on the release driver staged estimate 415520313 B (qa fallback 28.3 MB; the measured qa-native phase had not run), the three files on the F1 candidate as measured by tools/panel_payload_size.py. Explicit reviewed floors; the ceiling (1.5 x committed) stays in code.",
+      "reason": "F1 content growth (leverage_disclosures +1370725 B in dashboard_data.json, .js and index.html) leaves the old floors 0.4 % (dashboard_data_json), 0.7 % (js, index_html) and 1.6 % (total) above the F1 figures, so a small change after the qa-native measure would refuse a late lane. 3 % headroom on the physical figures, because each is a sum or copy of data that moves.",
+      "physical": {
+        "total_bytes": {
+          "before": 413723802,
+          "after": 415520313,
+          "previous_limit": 422109000,
+          "limit": 427986000
+        },
+        "index_html_bytes": {
+          "before": 50371122,
+          "after": 50510344,
+          "previous_limit": 50875000,
+          "limit": 52026000
+        },
+        "dashboard_data_json_bytes": {
+          "before": 288439398,
+          "after": 290149081,
+          "previous_limit": 291324000,
+          "limit": 298854000
+        },
+        "dashboard_data_js_bytes": {
+          "before": 45776547,
+          "after": 45927611,
+          "previous_limit": 46235000,
+          "limit": 47306000
         }
       }
     }
