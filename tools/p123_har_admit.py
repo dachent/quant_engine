@@ -379,7 +379,8 @@ def _corroboration_error(
         market = float(row["mktVal"])
     except (TypeError, ValueError, KeyError):
         return "cannot be compared with the list's market value"
-    if abs(value - market) > 0.011:
+    # a sum of N values each rounded to 0.01 can differ from the book total by up to 0.005*N
+    if abs(value - market) > 0.011 + 0.005 * len(positions):
         return "market value differs from the list's mktVal"
     return None
 

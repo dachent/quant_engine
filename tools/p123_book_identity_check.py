@@ -338,7 +338,23 @@ def check_book(
     # I4
     last_tx = tx_print["last_date"]
     last_perf = perf_print["last_date"]
-    if last_tx and last_perf and last_tx > last_perf:
+    # rows dated after as_of are rolled back by I5D, so only a last transaction on or before
+    # as_of that still follows the last perf date is a real unmatched trade
+    after_d = (
+        sorted(str(r.get("Date")) for r in tx if _day(r.get("Date")) and _day(r.get("Date")) > as_of)
+        if as_of is not None
+        else []
+    )
+    if last_tx and last_perf and last_tx > last_perf and after_d and _day(last_tx) > as_of:
+        checks.append(
+            _check(
+                "I4",
+                "PASS",
+                f"last transaction {last_tx} after last perf {last_perf}: {len(after_d)} rows "
+                f"after {as_of} rolled back (dates {sorted(set(after_d))})",
+            )
+        )
+    elif last_tx and last_perf and last_tx > last_perf:
         checks.append(
             _check(
                 "I4", "FAIL", f"last transaction {last_tx} after last perf {last_perf}"
