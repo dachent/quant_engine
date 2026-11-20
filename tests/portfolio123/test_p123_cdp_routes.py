@@ -63,6 +63,10 @@ def _bodies() -> dict[str, tuple[str, bytes]]:
             "text/html;charset=utf-8",
             b'<div ng-controller="InvestmentPerformanceCtrl">Loading...</div>\n',
         ),
+        "book_port_summary": (
+            "text/html;charset=utf-8",
+            b"<html><head><title>Summary - Live Book</title></head></html>\n",
+        ),
         "investment_performance": ("application/json", b'{"nav": []}'),
         "investment_holdings": ("application/json", b"[]"),
         "investment_trans_resource": ("application/json", b"{}"),
@@ -180,6 +184,7 @@ ALL_ROUTES = [
     ("investment_perfdata", INVEST),
     ("investment_resource", INVEST),
     ("investment_performance_page", INVEST),
+    ("book_port_summary", INVEST),
     ("investment_performance", INVEST),
     ("investment_holdings", INVEST),
     ("investment_perfdata_true", INVEST),
@@ -266,7 +271,7 @@ def test_each_fetch_follows_a_visit_to_its_host_page(tmp_path: Path) -> None:
         ):
             expression = message["params"]["expression"]
             assert "method:'GET'" in expression
-            assert page.startswith(BASE + "/app/")
+            assert page.startswith((BASE + "/app/", BASE + "/port_summary.jsp"))
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
@@ -768,3 +773,21 @@ def test_every_saved_name_carries_the_id() -> None:
     for route in fetcher.ROUTES:
         if route.shape != "visit":
             assert "{id}" in route.saved
+
+
+def test_designer_fetch_carries_the_page_request_headers() -> None:
+    designer = fetcher.fetch_expression(
+        "https://www.portfolio123.com/spr/strategy/model/1?dm=true"
+    )
+    other = fetcher.fetch_expression(
+        "https://www.portfolio123.com/app/investment/resource/1"
+    )
+    assert "angular_req:'1'" in designer
+    assert "angular_req" not in other
+
+
+def test_book_port_summary_route_is_a_named_html_route() -> None:
+    route = next(r for r in fetcher.ROUTES if r.name == "book_port_summary")
+    assert route.shape == "html"
+    assert route.host_page == route.target
+    assert "{id}" in route.saved

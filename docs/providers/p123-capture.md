@@ -626,6 +626,7 @@ bytes and pin.
 | `investment_holdings` | same | `/app/investment/holdings/<id>` | `raw/strategy_<id>_app_investment_holdings.json` |
 | `investment_performance` | same | `/spr/strategy/portmodel/<id>/perf` | `raw/strategy_<id>_strategy_portmodel_perf.json` |
 | `investment_performance_page` | same | `/app/investment/performance` (HTML fragment) | `raw/strategy_<id>_app_investment_performance.html` |
+| `book_port_summary` | the page itself | `/port_summary.jsp?portid=<id>` (legacy HTML summary of a live book; the settings pages `port_wiz.jsp` / `port_simul6.jsp` answer HTTP 401 for books of other owners and are not routes) | `raw/book_<id>_port_summary.html` |
 | `investment_holdings_csv` | same | `/app/investment/holdings.csv?id=<id>&v=basic` | `raw/strategy_<id>_app_investment_holdings_basic.csv` |
 | `investment_trans_csv` | same | `/app/investment/trans.csv?id=<id>&type=&tickers=&fromDt=&toDt=` | `raw/strategy_<id>_app_investment_trans.csv` |
 | `account_resource` | `/app/account/details?id=<id>` | `/app/account/resource/<id>` | `raw/account_<id>_app_account_resource.json` |
