@@ -852,6 +852,86 @@ def _daily_fx_evidence(
     }
 
 
+#: Provider conversion-rate evidence: the provider's own dated rate, not an independent one.
+PROVIDER_CONVERSION_METHOD: Final = "PROVIDER_REPORTED_CONVERSION_RATE"
+
+
+def _attach_provider_conversion_evidence(
+    projections: Mapping[str, list[dict[str, Any]]],
+    catalog: Mapping[str, Any],
+    generation_id: str,
+) -> None:
+    """Price an IBKR non-USD flow/transaction row with the statement's own rate.
+
+    The IBKR generation publishes its daily conversion rate to the account base
+    currency (USD for every account, checked) as ``fx_observations``.  A row gets
+    the rate dated its own event date, labelled as the provider's, bound to the
+    provider generation it came from.  Where the row also states the rate IBKR
+    booked it at (``fx_rate_to_base``), the USD amount at that rate is carried as
+    ``provider_usd_amount`` so the baseline can close the daily rate against it.
+    A row with no observation for its currency and date stays unpriced.
+    """
+
+    base = {
+        str(a.get("account_id")): a.get("base_currency")
+        for a in _objects(catalog.get("accounts", []), "ibkr.accounts")
+    }
+    rates: dict[tuple[str, str], tuple[str, str]] = {}
+    for obs in _objects(catalog.get("fx_observations", []), "ibkr.fx_observations"):
+        if obs.get("to_currency") != "USD":
+            continue
+        key = (str(obs.get("from_currency")), str(obs.get("as_of_date")))
+        rate = _observed_decimal(obs.get("rate"), "ibkr fx observation rate")
+        if rate is None or rate <= 0:
+            raise ProviderLedgerError("ibkr fx observation rate is invalid")
+        text = format(rate, "f")
+        prior = rates.get(key)
+        if prior is not None and prior[0] != text:
+            raise ProviderLedgerError("ibkr fx observations conflict on a day")
+        rates[key] = (text, str(obs.get("source_artifact_id") or ""))
+    for fact_type in ("flows", "transactions"):
+        for row in projections.get(fact_type, ()):
+            amount = row.get("amount")
+            if (
+                row.get("event_time_fx") is not None
+                or not isinstance(amount, Mapping)
+                or amount.get("status") != "AVAILABLE"
+                or amount.get("currency") in (None, "USD")
+                or base.get(str(row.get("account_id"))) != "USD"
+            ):
+                continue
+            found = rates.get((str(amount["currency"]), str(row.get("event_date"))))
+            if found is None:
+                continue
+            rate_text, artifact = found
+            row["event_time_fx"] = {
+                "base_currency": "USD",
+                "currency": str(amount["currency"]),
+                "date": str(row["event_date"]),
+                "field": "ConversionRate",
+                "generation_id": generation_id,
+                "method": PROVIDER_CONVERSION_METHOD,
+                "provider": "ibkr",
+                "rate": rate_text,
+                "source_artifact_id": artifact or "ibkr-catalog.json",
+                "timing": "PROVIDER_DAILY_CONVERSION_RATE",
+            }
+            booked = row.get("fx_rate_to_base")
+            booked_rate = (
+                _observed_decimal(booked, "ibkr fx_rate_to_base")
+                if booked not in (None, "")
+                else None
+            )
+            native = _observed_decimal(amount.get("value"), "ibkr native amount")
+            if booked_rate is not None and booked_rate > 0 and native is not None:
+                row["provider_usd_amount"] = {
+                    "basis": "PROVIDER_FX_RATE_TO_BASE",
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": format(native * booked_rate, "f"),
+                }
+
+
 def _excluded_source_row(
     findings: list[dict[str, Any]] | None,
     provider_id: str,
@@ -6694,6 +6774,7 @@ def _project_account_facts(
                     "mark_price",
                     "multiplier",
                     "order_reference",
+                    "fx_rate_to_base",
                     "put_call",
                     "strike",
                     "sub_category",
@@ -6904,6 +6985,8 @@ def _project_account_facts(
                     }
                 )
             projections[fact_type] = retained
+    if provider_id == "ibkr":
+        _attach_provider_conversion_evidence(projections, catalog, generation_id)
     for rows in projections.values():
         rows.sort(
             key=lambda item: (
