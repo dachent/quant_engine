@@ -852,6 +852,54 @@ def _daily_fx_evidence(
     }
 
 
+def _attach_admitted_fx_evidence(
+    rows: list[dict[str, Any]],
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ],
+) -> None:
+    """Price every non-USD flow/transaction the admitted FX generation covers.
+
+    A row gets the generation's close for its own event date (the same dated,
+    labelled evidence the Matrixport projection attaches) when it has none, its
+    amount is available, and the generation holds a positive rate for that
+    currency and day.  A row the generation does not price is left untouched: it
+    stays unconverted and the FX fact reports it, never a silent par assumption.
+
+    Only rates the loader admitted are consulted.  Today the loader admits the
+    USDC/USDT series alone, so this prices no fiat row until a governed fiat
+    generation is admitted (see the fiat FX generation plan); it does not by
+    itself close the fiat FX gap.  A fiat rate must be USD per one unit of the
+    currency; an inverse quote (CAD per USD) is a different direction, and the
+    loader must enforce that direction when fiat is admitted.
+    """
+
+    rates = fx_rates[1]
+    for index, row in enumerate(rows):
+        amount = row.get("amount")
+        if (
+            row.get("event_time_fx") is not None
+            or not isinstance(amount, Mapping)
+            or amount.get("status") != "AVAILABLE"
+            or amount.get("currency") in (None, "USD")
+            or not isinstance(row.get("event_date"), str)
+        ):
+            continue
+        try:
+            day = date.fromisoformat(row["event_date"])
+        except ValueError:
+            continue
+        rate = rates.get((str(amount["currency"]), day))
+        if rate is None or rate <= 0:
+            continue
+        rows[index] = {
+            **row,
+            "event_time_fx": _daily_fx_evidence(str(amount["currency"]), day, fx_rates),
+        }
+
+
 def _excluded_source_row(
     findings: list[dict[str, Any]] | None,
     provider_id: str,
@@ -12225,6 +12273,13 @@ def build_catalog(
                 else as_of
             ),
         )
+        if fx_rates is not None:
+            # Price the rows the admitted generation covers BEFORE the provider's
+            # facts are stored: the receipt's materialized digest is taken over the
+            # stored rows and must match the published ones.
+            for fact_type in ("flows", "transactions"):
+                if fact_type in facts:
+                    _attach_admitted_fx_evidence(facts[fact_type], fx_rates)
         provider_facts[provider_id] = facts
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
