@@ -327,6 +327,7 @@ _PATH_STAGES = {
     "tools/lifecycle_fields.py": ["report", "panel"],
     "tools/sleeve_disclosures.py": ["report", "panel"],
     # #897: the series label (layer, entity, window, basis) every report and panel series carries.
+    "tools/factor_lens_currency.py": ["panel"],
     "tools/series_label.py": ["report", "panel"],
     # R2 (registry nine -> fifteen): the economic return-source registry and its
     # schema are read by tests and pinned by digest in the product contract (whose

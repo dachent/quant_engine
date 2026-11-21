@@ -275,6 +275,7 @@ jobs:
           tools/leverage_closure.py
           tools/leverage_disclosure.py
           tools/quantbase_fund_days.py
+          tools/factor_lens_currency.py
           tools/series_label.py
           tools/published_render_check.py
           tools/check_plausibility.py
