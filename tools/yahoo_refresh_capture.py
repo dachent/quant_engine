@@ -79,10 +79,61 @@ SECTOR_GROUPS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
     ("sector-xlc", "2018-06-19", ("XLC",), "weekday"),
     ("sector-bil", "2007-05-30", ("BIL",), "weekday"),
 )
+# Held Schwab symbols not covered by base/style/sector. IBIT, the youngest, first traded 2024-01-11;
+# one common start keeps the row floor honest for every symbol.
+HELD_GROUPS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
+    (
+        "held-closes-2024",
+        "2024-01-11",
+        (
+            "BNY",
+            "BRK-B",
+            "CURE",
+            "DUK",
+            "IBIT",
+            "PEP",
+            "PG",
+            "SHY",
+            "SQQQ",
+            "TMF",
+            "TYD",
+            "UPRO",
+        ),
+        "weekday",
+    ),
+)
+# QSI refresh: the 15 QSI tickers, one group each, first bar = first row of the F1 price files
+# (qsi/inputs/prices); a common start would fail the row floor of the later listings.
+QSI_GROUPS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
+    ("qsi-bil", "2007-05-30", ("BIL",), "weekday"),
+    ("qsi-cure", "2011-06-15", ("CURE",), "weekday"),
+    ("qsi-dgp", "2008-02-28", ("DGP",), "weekday"),
+    ("qsi-efo", "2009-06-04", ("EFO",), "weekday"),
+    ("qsi-erx", "2008-11-19", ("ERX",), "weekday"),
+    ("qsi-fas", "2008-11-19", ("FAS",), "weekday"),
+    ("qsi-soxl", "2010-03-11", ("SOXL",), "weekday"),
+    ("qsi-spxl", "2008-11-05", ("SPXL",), "weekday"),
+    ("qsi-sqqq", "2010-02-11", ("SQQQ",), "weekday"),
+    ("qsi-tecl", "2008-12-30", ("TECL",), "weekday"),
+    ("qsi-tmf", "2009-04-16", ("TMF",), "weekday"),
+    ("qsi-tqqq", "2010-02-11", ("TQQQ",), "weekday"),
+    ("qsi-tyd", "2009-04-16", ("TYD",), "weekday"),
+    ("qsi-uge", "2007-02-01", ("UGE",), "weekday"),
+    ("qsi-upw", "2007-02-01", ("UPW",), "weekday"),
+)
+# Quantbase position-closes closure check: SH, GLD and TQQQ, one group each from first bar.
+QB_GROUPS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
+    ("qb-sh", "2006-06-21", ("SH",), "weekday"),
+    ("qb-gld", "2004-11-18", ("GLD",), "weekday"),
+    ("qb-tqqq", "2010-02-11", ("TQQQ",), "weekday"),
+)
 KINDS: Mapping[str, tuple[tuple[str, str, tuple[str, ...], str], ...]] = {
     "base": BASE_GROUPS,
     "style": STYLE_GROUPS,
     "sector": SECTOR_GROUPS,
+    "held": HELD_GROUPS,
+    "qsi": QSI_GROUPS,
+    "qb": QB_GROUPS,
 }
 MONTHLY_PAYERS = ("BIL", "HYG", "IEF", "LQD", "TLT")
 CRYPTO = ("BTC-USD", "ETH-USD")
@@ -383,7 +434,7 @@ def _kinds(value: str) -> list[str]:
     kinds = [k for k in value.split(",") if k]
     if not kinds or any(k not in KINDS for k in kinds):
         raise argparse.ArgumentTypeError(
-            "kinds must be a comma list of base, style, sector"
+            "kinds must be a comma list of base, style, sector, held, qsi, qb"
         )
     return kinds
 

@@ -255,3 +255,40 @@ def test_sector_kind_covers_the_sector_bundle_tickers() -> None:
     assert y.config_sha256(config) == y.config_sha256(
         y.build_config("sector", CUTOFF, "R3")
     )
+
+
+def test_held_qsi_and_qb_kinds_are_driver_valid_and_cover_their_tickers() -> None:
+    held = y.build_config("held", CUTOFF, "R4")
+    held_tickers = [s for g in held["groups"] for s in g["symbols"]]
+    # Yahoo no longer serves BK: the symbol is BNY; one common start (IBIT is the youngest)
+    assert sorted(held_tickers) == sorted(
+        [
+            "BNY",
+            "BRK-B",
+            "CURE",
+            "DUK",
+            "IBIT",
+            "PEP",
+            "PG",
+            "SHY",
+            "SQQQ",
+            "TMF",
+            "TYD",
+            "UPRO",
+        ]
+    )
+    assert "BK" not in held_tickers
+    assert [g["start"] for g in held["groups"]] == ["2024-01-11"]
+    qsi = y.build_config("qsi", CUTOFF, "R4")
+    qsi_tickers = [s for g in qsi["groups"] for s in g["symbols"]]
+    assert len(qsi_tickers) == 15 and len(set(qsi_tickers)) == 15
+    assert all(len(g["symbols"]) == 1 for g in qsi["groups"])
+    qb = y.build_config("qb", CUTOFF, "R4")
+    assert [g["symbols"] for g in qb["groups"]] == [["SH"], ["GLD"], ["TQQQ"]]
+    for kind, config in (("held", held), ("qsi", qsi), ("qb", qb)):
+        assert config == y.build_config(kind, CUTOFF, "R4")
+        assert y.config_sha256(config) != y.config_sha256(
+            y.build_config(kind, date(2026, 11, 13), "R4")
+        )
+        assert all(g["through"] == "cutoff" for g in config["groups"])
+        assert y.run_id("R4", kind, None) == f"R4-{kind.upper()}"
