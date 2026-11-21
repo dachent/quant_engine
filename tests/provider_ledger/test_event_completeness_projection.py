@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 
 HERE = Path(__file__).parent
+SCHEMA = HERE.parents[1] / "schemas/portfolio/provider-ledger.schema.json"
 _SPEC = importlib.util.spec_from_file_location(
     "tpl_admit_or_declare", HERE / "test_admit_or_declare.py"
 )
@@ -153,3 +155,31 @@ def test_a_provider_catalog_cannot_name_another_providers_account() -> None:
         )
     with pytest.raises(ledger.ProviderLedgerError, match="outside its own accounts"):
         ledger._own_account_items("schwab", catalog, ["account-other"], None)
+
+
+@pytest.mark.parametrize(
+    "closure", ["IBKR_CHANGE_IN_NAV_FLOW_TIE_OUT", "CAPTURED_NOT_ADMITTED"]
+)
+def test_a_built_catalog_with_event_completeness_validates_against_the_published_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, closure: str
+) -> None:
+    account = f"private-account-{sorted(ledger._PROVIDER_CATALOGS).index(PROVIDER) + 1}"
+    pin = _pin(tmp_path, account, closure=closure)
+    _a, _b, staged, _spec_path, _c = admit._stage_world(
+        tmp_path, monkeypatch, {"event_completeness_declaration": pin}
+    )
+    catalog = _catalog(staged, tmp_path)
+    assert catalog["event_completeness"]
+    # the synthetic world is not a full seven-provider catalog, so the published schema is applied to the
+    # key the producer adds (every other key is covered by the baseline's full-catalog validation)
+    published = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    schema = {
+        **published["properties"]["event_completeness"],
+        "$defs": published["$defs"],
+    }
+    validator = Draft202012Validator(schema)
+    validator.validate(catalog["event_completeness"])
+    # the rows are closed: a field the producer does not emit is refused
+    catalog["event_completeness"][0]["unexpected"] = 1
+    with pytest.raises(Exception, match="unexpected"):
+        validator.validate(catalog["event_completeness"])

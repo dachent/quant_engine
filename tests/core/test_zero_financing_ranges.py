@@ -912,24 +912,24 @@ RAW_BARE = "\n".join(
         "Beginning Cash* as of 01/01",
         "+ Deposits",
         "+ Expenses = Ending Cash* as of 01/31",
-        "$125.62 $7,000.00 $0.00 ($103.73) $22,527.58 $27.97 $0.00 $29,577.44",
+        "$100.00 $5,000.00 $0.00 ($100.00) $20,399.99 $25.00 $0.00 $25,424.99",
         "Transaction Details",
         "Date Category Action",
         "Interest($) Amount($)",
-        "01/02 Deposit Journaled Funds IRA REGULAR CONTRIB 7,000.00",
-        "01/05 Sale CMCSA COMCAST CORP NEW TRADES WITH",
+        "01/02 Deposit Journaled Funds IRA REGULAR CONTRIB 5,000.00",
+        "01/05 Sale AAAA SYNTHETIC ALPHA CORP TRADES WITH",
         "DUE BILLS",
-        "(1.0000) 29.8900 29.89 3.37,",
-        "Sale TIP ISHARES TIPS BOND ETF (19.0000) 110.0000 2,090.00 (5.73)",
-        "Sale BIL ST STERT SPDR BLMBG 1 3 MN T BL",
+        "(1.0000) 30.0000 30.00 3.00,",
+        "Sale TIPX SYNTHETIC BOND ETF (20.0000) 100.0000 2,000.00 (5.00)",
+        "Sale BILX SYNTHETIC SHORT BILL",
         "ETF",
-        "(34.0000) 91.3900 0.01 3,107.25 (6.77)",
+        "(30.0000) 100.0000 0.01 2,999.99 (6.00)",
         "Industry Fee $0.01",
-        "Sale UDOW PROSHARES ULTRAPRO DOW 30 (6.0000) 58.3000 349.80 13.20",
-        "Sale SWVXX SCHWAB VALUE ADVANTAGE (16,930.5300) 1.0000 16,930.53",
-        "Purchase SCHW CHARLES SCHWAB CORP 1.0000 103.7300 (103.73)",
-        "01/06 Redemption Cash-In-Lieu VSNT VERSANT MEDIA GROUP INC 20.11",
-        "01/07 Dividend Cash Dividend EPOL ISHARES MSCI POLAND ETF 27.97",
+        "Sale UPXX SYNTHETIC ULTRA FUND (7.0000) 50.0000 350.00 10.00",
+        "Sale SWVXX SCHWAB VALUE ADVANTAGE (15,000.0000) 1.0000 15,000.00",
+        "Purchase SCHW CHARLES SCHWAB CORP 1.0000 100.0000 (100.00)",
+        "01/06 Redemption Cash-In-Lieu ZZZY SYNTHETIC MEDIA GROUP INC 20.00",
+        "01/07 Dividend Cash Dividend ZZZZ SYNTHETIC EXAMPLE ETF 25.00",
         "Total Transactions $0.00",
     ]
 )
@@ -941,18 +941,18 @@ def test_a_bare_realized_gain_is_not_the_sale_amount_and_a_redemption_is_a_sale(
     ladder, begin, why = zf.parse_cash_ladder(
         RAW_BARE, date(2026, 1, 1), date(2026, 1, 31)
     )
-    assert why == "CASH_LADDER_CLOSES" and begin == Decimal("125.62")
+    assert why == "CASH_LADDER_CLOSES" and begin == Decimal("100.00")
     assert ladder is not None
-    assert ladder[date(2026, 1, 31)] == Decimal("29577.44")
+    assert ladder[date(2026, 1, 31)] == Decimal("25424.99")
 
 
 def test_the_scan_returns_the_printed_columns_and_which_of_them_tie() -> None:
     facts, why = zf.scan_cash_statement(RAW_BARE, date(2026, 1, 1), date(2026, 1, 31))
     assert why == "CASH_STATEMENT_READ" and facts is not None
-    assert facts["column_totals"][1] == facts["summary"][1] == Decimal("7000.00")
-    assert facts["column_totals"][4] == Decimal("22527.58")
+    assert facts["column_totals"][1] == facts["summary"][1] == Decimal("5000.00")
+    assert facts["column_totals"][4] == Decimal("20399.99")
     assert all(facts["tied"]) and facts["rows_ok"]
-    broken = RAW_BARE.replace("CONTRIB 7,000.00", "CONTRIB 6,999.00")
+    broken = RAW_BARE.replace("CONTRIB 5,000.00", "CONTRIB 4,999.00")
     facts, _ = zf.scan_cash_statement(broken, date(2026, 1, 1), date(2026, 1, 31))
     assert facts is not None
     assert facts["tied"][3] and not facts["tied"][0]
@@ -962,7 +962,45 @@ def test_the_scan_returns_the_printed_columns_and_which_of_them_tie() -> None:
 
 
 def test_a_sale_row_with_no_amount_near_quantity_times_price_is_refused() -> None:
-    text = RAW_BARE.replace("2,090.00 (5.73)", "9.00 (5.73)")
+    text = RAW_BARE.replace("2,000.00 (5.00)", "9.00 (5.00)")
     assert zf.parse_cash_ladder(text, date(2026, 1, 1), date(2026, 1, 31))[2] == (
         "TRANSACTION_AMOUNT_UNREADABLE"
     )
+
+
+def test_a_sale_row_with_a_printed_commission_reads_the_net_amount() -> None:
+    # quantity x price = 1,000.00; a 4.95 commission is printed before the 995.05 net amount and
+    # the realized gain after it: the amount is the token that, with the printed charge, reaches
+    # quantity x price (the category total still has to tie to the cent)
+    row = "Sale XYZZ SYNTHETIC SAMPLE CORP (10.0000) 100.0000 4.95 995.05 (6.00)"
+    assert zf._row_amount("Sale", row) == Decimal("995.05")  # noqa: SLF001
+    two = "Sale XYZZ SYNTHETIC SAMPLE CORP (10.0000) 100.0000 0.01 0.04 999.95 3.00,"
+    assert zf._row_amount("Sale", two) == Decimal("999.95")  # noqa: SLF001
+
+
+def test_a_sale_row_whose_gap_from_quantity_times_price_no_printed_charge_explains_is_refused() -> (
+    None
+):
+    unexplained = (
+        "Sale XYZZ SYNTHETIC SAMPLE CORP (10.0000) 100.0000 4.95 990.00 (6.00)"
+    )
+    with pytest.raises(zf.ZeroFinancingError, match="TRANSACTION_AMOUNT_UNREADABLE"):
+        zf._row_amount("Sale", unexplained)  # noqa: SLF001
+    gain_only = "Sale XYZZ SYNTHETIC SAMPLE CORP (10.0000) 100.0000 995.05 (6.00)"
+    # 995.05 is 4.95 below 1,000.00 and nothing printed is 4.95: refused, not guessed
+    with pytest.raises(zf.ZeroFinancingError, match="TRANSACTION_AMOUNT_UNREADABLE"):
+        zf._row_amount("Sale", gain_only)  # noqa: SLF001
+
+
+def test_a_charge_must_reduce_the_proceeds_and_precede_the_amount() -> None:
+    # the amount ABOVE quantity x price is not "explained" by a printed charge
+    above = "Sale XYZZ SYNTHETIC SAMPLE CORP (10.0000) 100.0000 4.95 1004.95 (6.00)"
+    with pytest.raises(zf.ZeroFinancingError, match="TRANSACTION_AMOUNT_UNREADABLE"):
+        zf._row_amount("Sale", above)  # noqa: SLF001
+    # a bare realized gain printed AFTER the amount is not a charge, even when it equals the gap
+    gain_equals_gap = "Sale XYZZ SYNTHETIC SAMPLE CORP (10.0000) 100.0000 995.05 4.95"
+    with pytest.raises(zf.ZeroFinancingError, match="TRANSACTION_AMOUNT_UNREADABLE"):
+        zf._row_amount("Sale", gain_equals_gap)  # noqa: SLF001
+    # the charge printed before the amount still explains a reduction
+    charged = "Sale XYZZ SYNTHETIC SAMPLE CORP (10.0000) 100.0000 4.95 995.05 4.95"
+    assert zf._row_amount("Sale", charged) == Decimal("995.05")  # noqa: SLF001
