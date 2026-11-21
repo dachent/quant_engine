@@ -48,9 +48,15 @@ GOLDEN_FACTS = {
         "positions",
         "transactions",
     ),
-    "matrixport": ("capital_anchors", "nav_observations"),
+    "matrixport": ("capital_anchors", "nav_observations", "positions"),
     "portfolio123": (),
-    "quantbase": ("capital_anchors", "flows", "nav_observations", "transactions"),
+    "quantbase": (
+        "capital_anchors",
+        "flows",
+        "nav_observations",
+        "positions",
+        "transactions",
+    ),
     "schwab": ("nav_observations", "positions", "transactions"),
 }
 GOLDEN_SEGMENTS = {
@@ -138,7 +144,13 @@ def test_an_unsupported_provider_still_reports_the_unsupported_convention(
 
 
 def test_csv_fact_builders_cover_exactly_the_declared_csv_provider_facts() -> None:
-    csv_facts = {"capital_anchors", "flows", "nav_observations", "transactions"}
+    csv_facts = {
+        "capital_anchors",
+        "flows",
+        "nav_observations",
+        "positions",
+        "transactions",
+    }
     declared = {
         (provider, fact)
         for provider in ledger._CSV_FACT_ACCOUNT  # noqa: SLF001

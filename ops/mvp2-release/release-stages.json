@@ -394,6 +394,20 @@
             "--zero-financing-observations",
             "{zero_financing_observations}"
           ]
+        },
+        {
+          "if": "event_completeness_declaration",
+          "args": [
+            "--event-completeness-declaration",
+            "{event_completeness_declaration}"
+          ]
+        },
+        {
+          "if": "quantbase_position_closes",
+          "args": [
+            "--quantbase-position-closes",
+            "{quantbase_position_closes}"
+          ]
         }
       ],
       "checks": [
@@ -1267,10 +1281,13 @@
         "{python}",
         "{tools}/validate_generation.py",
         "{run}/stages/panel/candidates/{candidate_id}",
+        "--candidate",
         "--expected",
         "{expected_baseline_arg}",
         "--cutoff",
         "{requested_as_of}",
+        "--crosswalk",
+        "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
         "--out",
         "{cycle}/preflight/g2-findings.json",
         {

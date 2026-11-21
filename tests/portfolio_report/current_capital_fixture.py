@@ -632,6 +632,12 @@ def cr2_custody_native_source(
             .read_bytes()
             .replace(b"2026-09-16", b"2026-09-15")
         )
+        # the first held day moves with the extra NAV date: the share event moves too
+        files["csv/position_events.csv"] = (
+            (rr / "csv/position_events.csv")
+            .read_bytes()
+            .replace(b"2026-09-16", b"2026-09-15")
+        )
     bind(
         "matrixport",
         {a: (rr / a, b, "synthetic-native-capture") for a, b in files.items()},
@@ -886,8 +892,8 @@ def cr2_custody_native_source(
     for provider, classes in {
         "ibkr": ["ACCOUNT_NAV"],
         "schwab": ["ACCOUNT_NAV"],
-        "matrixport": ["ACCOUNT_NAV", "CAPITAL_ANCHOR", "EXTERNAL_FLOW"],
-        "quantbase": ["ACCOUNT_NAV", "CAPITAL_ANCHOR", "EXTERNAL_FLOW"],
+        "matrixport": ["ACCOUNT_NAV", "CAPITAL_ANCHOR", "POSITION", "EXTERNAL_FLOW"],
+        "quantbase": ["ACCOUNT_NAV", "CAPITAL_ANCHOR", "POSITION", "EXTERNAL_FLOW"],
     }.items():
         source = next(
             (

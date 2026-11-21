@@ -20,6 +20,19 @@ they remain `UNAVAILABLE`, and the coverage known gap names the snapshot and the
 number of accounts without a liquidation value; it never states that account
 balances are unavailable in general, because downstream gates copy that text.
 
+The retained-capture ingest (`tools/schwab_capture_ingest.py`) derives each
+account's liquidation value as its holdings at the official closes plus its
+cash, the same figure the NAV derivation builds, and publishes it only when the
+provider's own native balance of the cutoff day agrees within the derivation tolerance
+(the value is built from the capture, so agreement proves it even where that native row
+repeats the day before; a disagreeing repeat is a possible stale carry and proves nothing). Any other account keeps
+`UNAVAILABLE` and the binding's `liquidation_value` block names the closure
+verdict; the provider-quoted total is never used (it is priced at the last
+trade, not the official close). Structure is not a gap: Investor Checking and an
+account that holds cash only (a proved liquidation value and no non-cash row)
+are listed under the catalog's `coverage.structural_boundaries`, while an account
+without a position row and without a proved liquidation value stays a known gap.
+
 ## Web capture methods and boundaries
 
 Passive CDP/HAR capture remains the discovery method for an unknown site. It

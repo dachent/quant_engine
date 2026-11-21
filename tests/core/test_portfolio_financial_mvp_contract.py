@@ -1075,7 +1075,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "f75abff29f9c1572eb234d4cd0568e3048469c8f86b427e47c3e639f7d2513f7"
+        "7b0bfc1c9357b8dc62f66ce4ebe4e1d794138de3a900044eecf5cfe6946607b3"
     )
 
 
@@ -1103,6 +1103,7 @@ def test_quantbase_generation_is_account_live_from_accepted_membership() -> None
         "EXTERNAL_FLOW",
         "CAPITAL_ANCHOR",
         "TRANSACTION",
+        "POSITION",
     ]
     assert admission["dataset_disposition_policy"]["policy_id"] == (
         "PROVIDER_ADMIT_OR_DECLARE_V1"
@@ -1122,21 +1123,21 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
                 "71ef99d46f772c0a90ff69215fba7e3977f6f64741696ce720b7341f610d709a"
             ),
             "upstream_inventory_sha256": (
-                "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8"
+                "537ab009526dd238b6f6b705219936f36cc4d5b0fd1ccef1e051e61a937abadf"
             ),
             "product_data_class_set_sha256": (
                 "9f9c5f50e9cc0c9fdbc7123197897e20a4c7ab444cca73caad37aeda88a8943f"
             ),
-            # Moved from 24 to 25 when CAPITAL_ANCHOR materialized: netting
-            # each statement account's capital events on their own recognition
-            # date cancels IBKR's deposit advance against its reversal, which
-            # a per-row rule reads as opening capital that never funded. Only
-            # the opening is an anchor, because every later IBKR capital
-            # movement is already one of the flow rows the anchor was netted
-            # from.
-            "admitted_item_count": 25,
+            # Moved from 24 to 25 when CAPITAL_ANCHOR materialized (netting each
+            # statement account's capital events on their own recognition date
+            # cancels IBKR's deposit advance against its reversal), then to 69
+            # for the B generation ab5774fb, then to 111 (+42) for F1 generation
+            # 662a0318: its manifest lists 107 artifacts against 65, the 42 added
+            # being the January-February 2026 verified statements
+            # (source-runs/r-janfeb-2026-verified-20261117/flex-*/statement.xml).
+            "admitted_item_count": 111,
             "admitted_item_set_sha256": (
-                "0b8c38b8dcfcc551ac38dae244b47fd431488cc57d220656c5223967cd6892c2"
+                "58fad56b0a28909f646ae2a4d8043a3c82269d9fe72ad35d942bfc7f823931cc"
             ),
         },
         "matrixport-account-generation": {
@@ -1147,21 +1148,21 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             # Moved from three items to six when the capital anchor started
             # resting on the owner-selected daily close instead of a
             # provider-reported USD value that no Robuxio holding carries.
-            "admitted_item_count": 6,
+            "admitted_item_count": 7,
             "admitted_item_set_sha256": (
-                "1c00617f3db60ee5b1571ef822261c39c02cf0c620604a66a35c45616f82141c"
+                "4713806990fa5a318d973b595aea860ed49def484a01d2a6a0cb430736414223"
             ),
         },
         "quantbase-account-generation": {
-            "admitted_item_count": 6,
+            "admitted_item_count": 9,
             "admitted_item_set_sha256": (
-                "c08d7a42db964d459235cf0071a843a6b3b703c03932b5c3b72b0ccab7b1843b"
+                "90008612aea6228f6b24dc0ffada33d38ddb2485e2bdc68b67b1bb76d1b72947"
             ),
         },
         "schwab-account-generation": {
-            "admitted_item_count": 22,
+            "admitted_item_count": 25,
             "admitted_item_set_sha256": (
-                "c736740e96e30517af5597c8819332d8e1020b45e0a8e35c646897f6b2bf4a26"
+                "0e714f3ebee64575bbf70c36ffdf04adb62e517becf540694892c365d4bc8576"
             ),
         },
         "portfolio123-model-generation": {
@@ -1173,9 +1174,9 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             # the Portfolio123 current pointer: its evidence is now the governed
             # designer-model curve carried by the strategy-backtests generation,
             # so Portfolio123 is no longer an authority for that layer.
-            "admitted_item_count": 2,
+            "admitted_item_count": 0,
             "admitted_item_set_sha256": (
-                "c9a66669fe0cd411dee0b2d99c79f063a3c7c026bc671ce5ec97d58de6f6aa0f"
+                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
             ),
         },
     }
@@ -1635,7 +1636,7 @@ def test_p123_admitted_set_and_hwm_bind_independently_computed_contract_hashes()
     p123 = _source(contract, "portfolio123-model-generation")
     assert (
         p123["admission"]["dataset_disposition_policy"]["admitted_item_set_sha256"]
-        == "c9a66669fe0cd411dee0b2d99c79f063a3c7c026bc671ce5ec97d58de6f6aa0f"
+        == "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
     )
 
     raw_sha256 = hashlib.sha256(contract_bytes).hexdigest()
@@ -2024,9 +2025,9 @@ def test_accepted_provider_ledger_history_identity_cannot_be_coherently_relabell
     """History lineage is a fixed receipt, not a replaceable generation label."""
 
     replacements = {
-        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34": ("a" * 64),
-        "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838": ("b" * 64),
-        "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb": ("c" * 64),
+        "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f": ("a" * 64),
+        "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799": ("b" * 64),
+        "972eb0934fff097414f7698295255cf7e981d417387c0b9342756a71508e5adf": ("c" * 64),
     }
 
     def replace_lineage(value: object) -> object:
@@ -2191,10 +2192,10 @@ def test_two_vintage_history_accepts_current_active_and_retains_07c590_echo() ->
     """Active owner history advances without relabelling deprecated Echo evidence."""
 
     active_generation = (
-        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
+        "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f"
     )
-    active_manifest = "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
-    active_catalog = "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
+    active_manifest = "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
+    active_catalog = "972eb0934fff097414f7698295255cf7e981d417387c0b9342756a71508e5adf"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -2206,7 +2207,7 @@ def test_two_vintage_history_accepts_current_active_and_retains_07c590_echo() ->
     owner_source["current_generation"] = {
         "generation_id": active_generation,
         "sha256": active_manifest,
-        "as_of": "2026-09-04",
+        "as_of": "2026-11-09",
     }
 
     active_segments = {
@@ -2271,12 +2272,12 @@ def test_two_vintage_history_accepts_current_active_and_retains_07c590_echo() ->
         if row["strategy_id"] == "volatis-strategy"
     )
     assert volatis["live_implementation_identity"]["generation_id"] == (
-        "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe"
+        "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2"
     )
     robuxio = next(
         row for row in contract["strategies"] if row["strategy_id"] == "robuxio-crypto"
     )
-    assert robuxio["live_implementation_identity"]["generation_id"].startswith("3badac")
+    assert robuxio["live_implementation_identity"]["generation_id"].startswith("de8bbd")
 
     _validate(contract)
     assert contract_tool._verify_strategy_version_history_evidence(contract) == 7
@@ -2343,15 +2344,15 @@ def test_deprecated_history_receipt_is_independent_of_current_source_as_of(
 def test_owner_account_history_rebinds_to_current_ledger_generation() -> None:
     """The active owner-history lineage follows the corrected governed ledger."""
 
-    generation_id = "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
-    manifest_sha256 = "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
-    catalog_sha256 = "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
+    generation_id = "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f"
+    manifest_sha256 = "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
+    catalog_sha256 = "972eb0934fff097414f7698295255cf7e981d417387c0b9342756a71508e5adf"
     contract = _contract()
     owner_source = _source(contract, "owner-account-live-history")
     assert owner_source["current_generation"] == {
         "generation_id": generation_id,
         "sha256": manifest_sha256,
-        "as_of": "2026-09-04",
+        "as_of": "2026-11-09",
     }
     active_segments = [
         row
@@ -2384,9 +2385,9 @@ def test_two_vintage_history_rejects_legacy_rollbacks_and_rewrites() -> None:
     """The deprecated event-only class cannot authorize active-lineage changes."""
 
     active_generation = (
-        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
+        "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f"
     )
-    active_manifest = "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+    active_manifest = "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -2889,6 +2890,7 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
         "NAV_OBSERVATION",
         "CAPITAL_ANCHOR",
         "EXTERNAL_FLOW",
+        "POSITION",
     ]
     assert admission["transform"] == "provider-ledger"
     assert admission["version"] == "1"
@@ -2918,9 +2920,9 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
         for row in matrix["rows"]
         if row["source_id"] == "matrixport-account-generation"
     ]
-    # Six rows per declared data class; matrixport declares two after the
-    # issue #396 deferral removed three.
-    assert len(rows) == 12
+    # Six rows per declared data class; matrixport declares three (the issue
+    # #396 deferral removed three, POSITION came back with the positions fact).
+    assert len(rows) == 18
     assert all(row["declared_gap_policy"] == policy for row in rows)
     assert all(
         row["declared_gap_policy"] is None
@@ -3310,9 +3312,9 @@ def test_robuxio_materialized_identity_is_daily_only_and_cannot_be_rebound() -> 
         for key in ("observed_start", "observed_end", "return_observations", "sha256")
     } == {
         "observed_start": "2025-12-07",
-        "observed_end": "2026-09-03",
-        "return_observations": 267,
-        "sha256": "1ea12119e24f31fc6820593af890f80026955d7de05676433db18a5d0025a529",
+        "observed_end": "2026-11-06",
+        "return_observations": 329,
+        "sha256": "5a5fe00509f2a32a7dc16902f2f74e7b66901350bba2fee2f630401c68febd17",
     }
     assert "epoch_holding_period_link_observations" not in identity
     _validate(contract)
@@ -3370,7 +3372,7 @@ def test_robuxio_materialized_identity_is_daily_only_and_cannot_be_rebound() -> 
 def test_volatis_account_live_materialized_authority_rejects_raw_contribution_series() -> (
     None
 ):
-    accepted_sha256 = "e8b3b66a38b6edfa027318496129a1e8f56bc6c29e3176e9d4c44215f01a66b4"
+    accepted_sha256 = "a5af85f141c19b82d277a1fc7ac26968e256fb22654ec7ca1ef7093e46a83307"
     rejected_raw_contribution_sha256 = (
         "f989eed33cd7ce8e17d63acb5065032e56d511a765b4f0684e281df043d27016"
     )
@@ -4462,7 +4464,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # source identities, including the four verified source-class bindings;
     # financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "9bae8d794d2da375e936c5037dfb9ea34f28e90018d97e000e76629d8fddfcbe"
+        "927ed67a425d98852cece96a0e6c7febdc6925d08f5dbb5d964205c0fc74daf6"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4499,7 +4501,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "9bae8d794d2da375e936c5037dfb9ea34f28e90018d97e000e76629d8fddfcbe"
+        "927ed67a425d98852cece96a0e6c7febdc6925d08f5dbb5d964205c0fc74daf6"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
@@ -4615,7 +4617,7 @@ def test_generated_views_are_deterministic_and_match_authoritative_bytes(
         first.summary_markdown
     )
     assert b"robuxio-account-live-after-funding" in first.summary_markdown
-    assert b"MATRIXPORT:output/20260903T051029.331Z/csv/subscription_details.csv" in (
+    assert b"MATRIXPORT:output/20261109T135114.510Z/csv/subscription_details.csv" in (
         first.summary_markdown
     )
     assert b"p123-eu-copy-record" in first.summary_markdown

@@ -1223,14 +1223,15 @@ def evaluate_capture(
 
 _SUMMARY_ROW_AMOUNT = re.compile(r"\(?-?\$[\d,]+\.\d\d(?!\d)\)?")
 _LADDER_CATEGORY = re.compile(
-    r"^(?:(\d{2})/(\d{2})[ \t]+)?(Purchase|Sale|Dividend|Interest|Withdrawal|Deposit|"
-    r"Expense|Other)\b(?![(/])"
+    r"^(?:(\d{2})/(\d{2})[ \t]+)?(Purchase|Sale|Redemption|Dividend|Interest|Withdrawal|"
+    r"Deposit|Expense|Other)\b(?![(/])"
 )
 _LADDER_COLUMN = {
     "Deposit": 1,
     "Withdrawal": 2,
     "Purchase": 3,
     "Sale": 4,
+    "Redemption": 4,
     "Dividend": 5,
     "Interest": 5,
     "Expense": 6,
@@ -1239,7 +1240,7 @@ _REALIZED = re.compile(r"\(?[\d,]+\.\d\d\)?,?\((?:ST|LT)\)")
 _ROW_AMOUNT = re.compile(r"(?<![\d$.,/\-])\(?-?[\d,]+\.\d\d\)?(?![\d.,%])")
 
 
-def _pdftotext_raw(path: Path) -> str:
+def pdftotext_raw(path: Path) -> str:
     """The statement text in content-stream order (one transaction per run of lines, the
     amounts beside their own rows), where the physical layout interleaves columns."""
 
@@ -1254,17 +1255,71 @@ def _pdftotext_raw(path: Path) -> str:
     return result.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
 
 
+#: The printed cash summary columns after Beginning Cash, in print order.
+CASH_SUMMARY_COLUMNS: Final = (
+    "deposits",
+    "withdrawals",
+    "purchases",
+    "sales_redemptions",
+    "dividends_interest",
+    "expenses",
+)
+
+
 def parse_cash_ladder(
     raw_text: str, start: date, end: date
 ) -> tuple[dict[date, Decimal] | None, Decimal | None, str]:
     """(end-of-day cash balance for every day of the statement period, beginning cash, reason).
 
-    The balance of a day is the printed beginning cash plus every transaction amount dated
-    on or before it.  It is returned only when the statement ties out: the eight printed
-    cash summary amounts add up, each summary column equals the sum of its category of
-    transaction rows to the cent, every row has a date inside the period and a readable
-    amount, and the ladder ends on the printed ending cash.  Anything else is None with the
-    reason (the days stay unobserved), never a guess."""
+    The ladder of ``parse_cash_ladder_totals`` without the printed column totals."""
+
+    ladder, begin, reason, _totals = parse_cash_ladder_totals(raw_text, start, end)
+    return ladder, begin, reason
+
+
+_QTY_PRICE = re.compile(r"(?<![\d.,])\(?-?[\d,]+\.\d{4}\)?(?![\d.,%])")
+
+
+def _row_amount(category: str, text: str) -> Decimal:
+    """The Amount column of one transaction row.
+
+    A row prints ``[quantity price] [charges] amount [realized gain]``.  Older statements
+    suffix the realized gain with (ST)/(LT) and the last money token is the amount; newer
+    ones print it bare, so for a Sale the amount is the money token nearest to
+    quantity x price (charges and rounding are cents) and a row that has none is refused.
+    The printed category total still has to tie to the cent, so a wrong pick cannot pass."""
+
+    amounts = _ROW_AMOUNT.findall(text)
+    if not amounts:
+        raise ZeroFinancingError("TRANSACTION_AMOUNT_ABSENT")
+    if category not in ("Sale", "Redemption"):
+        return _parse_money(amounts[-1])
+    quantity_price = _QTY_PRICE.findall(text)
+    if len(quantity_price) < 2:
+        if len(amounts) == 1:
+            return _parse_money(amounts[0])
+        raise ZeroFinancingError("TRANSACTION_AMOUNT_UNREADABLE")
+    proceeds = abs(
+        Decimal(re.sub(r"[(),-]", "", quantity_price[0]))
+        * Decimal(re.sub(r"[(),-]", "", quantity_price[1]))
+    )
+    best = min((_parse_money(x) for x in amounts), key=lambda v: abs(abs(v) - proceeds))
+    if abs(abs(best) - proceeds) > Decimal("0.10") + proceeds / 10000:
+        raise ZeroFinancingError("TRANSACTION_AMOUNT_UNREADABLE")
+    return best
+
+
+def scan_cash_statement(
+    raw_text: str, start: date, end: date
+) -> tuple[dict[str, Any] | None, str]:
+    """(facts, reason) of one statement's printed cash summary and transaction rows.
+
+    ``facts`` is None when the summary cannot be read or does not add up.  Otherwise it
+    holds ``printed`` (beginning/ending cash and the six summary columns), ``summary``
+    (the eight amounts) and, when every row was readable, ``rows_ok`` True with
+    ``column_totals`` (rows' totals per summary column, index 1..6), ``by_day`` and
+    ``tied`` (per summary column 1..6, printed == sum of its rows); ``rows_ok`` False
+    carries the reason a row or the list could not be read.  Nothing is dropped silently."""
 
     lines = raw_text.replace("\r\n", "\n").split("\n")
     try:
@@ -1274,7 +1329,7 @@ def parse_cash_ladder(
             if x.strip().startswith("Transactions - Summary")
         )
     except StopIteration:
-        return None, None, "CASH_SUMMARY_ABSENT"
+        return None, "CASH_SUMMARY_ABSENT"
     summary: list[Decimal] | None = None
     for line in lines[head + 1 : head + 16]:
         found = _SUMMARY_ROW_AMOUNT.findall(line)
@@ -1282,10 +1337,23 @@ def parse_cash_ladder(
             summary = [_parse_money(x) for x in found]
             break
     if summary is None:
-        return None, None, "CASH_SUMMARY_ROW_NOT_FOUND"
+        return None, "CASH_SUMMARY_ROW_NOT_FOUND"
     begin, end_cash = summary[0], summary[7]
     if begin + sum(summary[1:7], Decimal(0)) != end_cash:
-        return None, None, "CASH_SUMMARY_DOES_NOT_ADD_UP"
+        return None, "CASH_SUMMARY_DOES_NOT_ADD_UP"
+    facts: dict[str, Any] = {
+        "printed": {
+            "beginning_cash": begin,
+            "ending_cash": end_cash,
+            **dict(zip(CASH_SUMMARY_COLUMNS, summary[1:7], strict=True)),
+        },
+        "summary": summary,
+        "rows_ok": False,
+    }
+
+    def refuse(reason: str) -> tuple[dict[str, Any] | None, str]:
+        return facts, reason
+
     first = next(
         (n for n, x in enumerate(lines) if x.strip().startswith("Transaction Details")),
         None,
@@ -1299,14 +1367,14 @@ def parse_cash_ladder(
     categories: list[str] = []
     if first is not None:
         if last is None or last < first:
-            return None, None, "TRANSACTION_LIST_NOT_CLOSED"
+            return refuse("TRANSACTION_LIST_NOT_CLOSED")
         current: date | None = None
         for line in lines[first + 1 : last]:
             if re.fullmatch(r"\d{2}/\d{2}", line.strip()):
-                return None, None, "BARE_DATE_LINE"
+                return refuse("BARE_DATE_LINE")
             match = _LADDER_CATEGORY.match(line.strip())
             if match is None and re.match(r"\d{2}/\d{2}[ \t]+\S", line.strip()):
-                return None, None, "UNKNOWN_TRANSACTION_CATEGORY"
+                return refuse("UNKNOWN_TRANSACTION_CATEGORY")
             if match:
                 if match.group(1):
                     try:
@@ -1314,9 +1382,9 @@ def parse_cash_ladder(
                             end.year, int(match.group(1)), int(match.group(2))
                         )
                     except ValueError:
-                        return None, None, "TRANSACTION_DATE_INVALID"
+                        return refuse("TRANSACTION_DATE_INVALID")
                     if not start <= current <= end:
-                        return None, None, "TRANSACTION_DATE_OUTSIDE_PERIOD"
+                        return refuse("TRANSACTION_DATE_OUTSIDE_PERIOD")
                 records.append([line])
                 dates.append(current)
                 categories.append(match.group(3))
@@ -1328,30 +1396,67 @@ def parse_cash_ladder(
         if category == "Other":
             continue  # activity that does not move cash (transfers of securities, ...)
         if when is None:
-            return None, None, "TRANSACTION_WITHOUT_DATE"
+            return refuse("TRANSACTION_WITHOUT_DATE")
         text = _REALIZED.sub(" ", " ".join(record))
         text = re.sub(r"\$[\d,]+\.\d\d", " ", text)
-        amounts = _ROW_AMOUNT.findall(text)
-        if not amounts:
-            return None, None, "TRANSACTION_AMOUNT_ABSENT"
         try:
-            amount = _parse_money(amounts[-1])
-        except ZeroFinancingError:
-            return None, None, "TRANSACTION_AMOUNT_UNREADABLE"
+            amount = _row_amount(category, text)
+        except ZeroFinancingError as exc:
+            reason = str(exc)
+            return refuse(
+                reason
+                if reason.startswith("TRANSACTION_")
+                else "TRANSACTION_AMOUNT_UNREADABLE"
+            )
         column_totals[_LADDER_COLUMN[category]] += amount
         by_day[when] = by_day.get(when, Decimal(0)) + amount
-    if column_totals[1:] != list(summary[1:7]):
-        return None, None, "CASH_CATEGORY_TOTALS_DIFFER"
+    facts.update(
+        rows_ok=True,
+        column_totals=column_totals,
+        by_day=by_day,
+        tied=[column_totals[i] == summary[i] for i in range(1, 7)],
+    )
+    return facts, "CASH_STATEMENT_READ"
+
+
+def parse_cash_ladder_totals(
+    raw_text: str, start: date, end: date
+) -> tuple[dict[date, Decimal] | None, Decimal | None, str, dict[str, Decimal] | None]:
+    """(ladder, beginning cash, reason, printed cash summary amounts).
+
+    The fourth element carries ``beginning_cash``, ``ending_cash`` and the six summary
+    columns of ``CASH_SUMMARY_COLUMNS`` (cash only: transfers of securities are category
+    Other and are excluded).  It is returned whenever the printed summary itself was
+    read and added up, even when the ladder does not tie (the reason then says why), so
+    an untied month is still named by its printed totals; it is None when the summary
+    could not be read or does not add up.
+
+    The balance of a day is the printed beginning cash plus every transaction amount dated
+    on or before it.  It is returned only when the statement ties out: the eight printed
+    cash summary amounts add up, each summary column equals the sum of its category of
+    transaction rows to the cent, every row has a date inside the period and a readable
+    amount, and the ladder ends on the printed ending cash.  Anything else is None with the
+    reason (the days stay unobserved), never a guess."""
+
+    facts, reason = scan_cash_statement(raw_text, start, end)
+    if facts is None:
+        return None, None, reason, None
+    printed = facts["printed"]
+    if not facts["rows_ok"]:
+        return None, None, reason, printed
+    if not all(facts["tied"]):
+        return None, None, "CASH_CATEGORY_TOTALS_DIFFER", printed
+    begin, end_cash = facts["summary"][0], facts["summary"][7]
     ladder: dict[date, Decimal] = {}
     cash = begin
     day = start
     while day <= end:
-        cash += by_day.get(day, Decimal(0))
+        cash += facts["by_day"].get(day, Decimal(0))
         ladder[day] = cash
         day += timedelta(days=1)
     if ladder[end] != end_cash:
-        return None, None, "CASH_LADDER_DOES_NOT_CLOSE"
-    return ladder, begin, "CASH_LADDER_CLOSES"
+        return None, None, "CASH_LADDER_DOES_NOT_CLOSE", printed
+    return ladder, begin, "CASH_LADDER_CLOSES", printed
 
 
 def _ladder_discard_reason(
@@ -1426,7 +1531,7 @@ def build(
 ) -> dict[str, Any]:
     if provider_id != LAYOUT_PROVIDER_ID:
         raise ZeroFinancingError("the statement layout reader is bound to one provider")
-    raw_extract = extract_raw or (_pdftotext_raw if extract is None else None)
+    raw_extract = extract_raw or (pdftotext_raw if extract is None else None)
     extract = extract or _pdftotext  # resolved at call time
     names = sorted(sums)
     if not names:

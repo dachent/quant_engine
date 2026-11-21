@@ -173,6 +173,7 @@ _PATH_STAGES = {
     # Builds the style-return bundle the decomposition plan pins (calendar, return
     # columns); a change moves the plan inputs and everything downstream of them.
     "tools/portfolio_public_style_sources.py": ["analytics", "report", "panel"],
+    "tools/portfolio_public_decomposition_sources.py": ["analytics", "report", "panel"],
     # The Performance tab producer: builds one additive panel block from the weekly
     # returns, account manifest and governed HWM proof the panel already holds.
     "tools/portfolio_performance_tab.py": ["panel"],
@@ -190,6 +191,9 @@ _PATH_STAGES = {
     "tools/portfolio_cash_drag_spec.py": ["panel"],
     # Imported by the ledger builder (fill-day restatement) and the baseline (statement points).
     "tools/quantbase_fund_days.py": list(_STAGE_ORDER),
+    # Ledger-side completeness closures (declaration key, closure verdict rows) read by the baseline;
+    # same reach as the ledger code it is imported by.
+    "tools/event_completeness.py": list(_STAGE_ORDER),
     # Imported by the ledger builder (provider-observed zero-financing days).
     "tools/zero_financing_statements.py": list(_STAGE_ORDER),
     "tools/statement_reserve_nav.py": list(_STAGE_ORDER[1:]),
@@ -222,7 +226,9 @@ _PATH_STAGES = {
     "tools/release_preflight_g1b.py": [],
     "tools/release_preflight_g2.py": [],
     "tools/release_fresh_world.py": [],
+    "tools/release_world.py": [],
     "tools/release_cycle_manifest.py": [],
+    "tools/decision_refresh.py": [],
     "tools/release_cycle_seeds.py": [],
     "tools/release_ledger_spec.py": [],
     "tools/release_prepare_inputs.py": [],
@@ -298,6 +304,13 @@ _PATH_STAGES = {
     # Stages an unpublished public Yahoo price/FX fetch from a config; consumers read
     # only the artifacts and manifests they are handed, never this tool.
     "tools/yahoo_fetch_driver.py": [],
+    # Per-cycle input preparation (factor-model audit): builds the base proxy-factor file
+    # (total-return proxies, French RF splice) and assembles the per-group style capture
+    # into the style builder's single source.  Offline; the pipeline reads only the files
+    # and pinned manifests it is handed, never these tools.
+    "tools/base_proxy_factors.py": [],
+    "tools/style_capture_assemble.py": [],
+    "tools/base_bundle_builder.py": [],
     # Assembles the pinned attribution return-source CSV; the attribution stage reads
     # only the file and manifest the spec pins, never this tool.
     "tools/portfolio_attribution_returns.py": [],
@@ -339,10 +352,13 @@ _PATH_STAGES = {
         "report",
         "panel",
     ],
-    "contracts/strategy-return-sources-v1.json": [],
+    # The panel reads the governed mechanism / persistence / alternative-explanation text per strategy
+    # (Strategy concepts view); the contract's sha256 rides in the payload block.
+    "contracts/strategy-return-sources-v1.json": ["panel"],
     # #899: the pinned bounds of the missing Matrixport NAV points; the report and the
     # panel both read it to decide whether the numeric HWM can publish.
     "contracts/portfolio-hwm-gap-bounds-v1.json": ["report", "panel"],
+    "contracts/portfolio-hwm-owner-acceptance-v1.json": ["report", "panel"],
     # PORT-UNDERWRITE-1: the panel builder reads the underwriting policy (gap, regime benchmark series,
     # portfolio fit) and binds its sha256 into the candidate.
     "contracts/portfolio-strategy-underwriting-v1.json": ["panel"],
@@ -377,6 +393,9 @@ _PATH_STAGES = {
     # derives the cutoff-day Schwab NAV from the verified holdings and official closes; an operator
     # step before the ingest, it writes no delivery artifact itself
     "tools/schwab_nav_derive.py": [],
+    # operator tool: builds the hash-bound statement cash summary file the Schwab generation spec binds;
+    # it writes no delivery artifact itself
+    "tools/schwab_statement_cash_summaries.py": [],
     "tools/schwab_page_actions.py": [],
     "tools/schwab_rollback.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
@@ -427,6 +446,11 @@ _PATH_STAGES = {
     "tools/published_render_check.py": [],
     "apps/portfolio-control-panel/published_render_check.mjs": [],
     "apps/portfolio-control-panel/render_contract.json": [],
+    # Owner-eyes checks (#912, review Q1): plausibility rules and numeric rendered-panel checks
+    # over a finished panel; read-only, write only their own report; import no producer.
+    "tools/check_plausibility.py": [],
+    "tools/owner_eyes_render.py": [],
+    "apps/portfolio-control-panel/owner_eyes_render.mjs": [],
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
     "tools/capture_fidelity_intake.py": [],
@@ -439,6 +463,9 @@ _PATH_STAGES = {
     # Operator CLI that builds, stages or publishes one IBKR generation candidate; consumers
     # read only the generation they are handed, never this tool.
     "tools/ibkr_generation.py": [],
+    # Operator tool that derives the governed overlap-equivalence listing of an IBKR generation spec;
+    # consumers read only the generation they are handed, never this tool.
+    "tools/ibkr_overlap_equivalences.py": [],
     # Plans and stages the Portfolio123 generation (HAR roots and transaction captures);
     # consumers read only the generation they are handed, never this tool.
     "tools/portfolio123_generation.py": [],
@@ -573,6 +600,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "id": "current-dependence-source",
         "source_paths": (
             _DEPENDENCE,
+            "tools/portfolio_adverse_loss.py",
             _PREPARATION,
             _TARGET_SERIES,
             "contracts/portfolio-dependence-policy-v1.json",

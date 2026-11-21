@@ -769,6 +769,18 @@
         "components": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "current_value": {"$ref": "#/$defs/usd_amount"},
         "members": {"type": "array", "items": {"$ref": "#/$defs/reserve_member"}},
+        "part_dates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["as_of_date", "part"],
+            "properties": {
+              "as_of_date": {"$ref": "#/$defs/nullable_date"},
+              "part": {"type": "string", "minLength": 1}
+            }
+          }
+        },
         "reason": {"type": ["string", "null"], "minLength": 1},
         "status": {"$ref": "#/$defs/capital_status"}
       },
@@ -985,8 +997,8 @@
         "admission_effective_end": {"type": ["string", "null"], "format": "date"},
         "admission_effective_start": {"type": ["string", "null"], "format": "date"},
         "authority": {"type": "string", "minLength": 1},
-        "boundary_basis": {"enum": ["OBSERVED_RECORDS_ONLY", "EFFECTIVE_DATED_ADMISSION_NOT_COMPLETENESS", "NO_ACCEPTED_SOURCE"]},
-        "cadence": {"enum": ["DAILY", "EVENT_STREAM", "SNAPSHOT"]},
+        "boundary_basis": {"enum": ["OBSERVED_RECORDS_ONLY", "EFFECTIVE_DATED_ADMISSION_NOT_COMPLETENESS", "NO_ACCEPTED_SOURCE", "LEDGER_CLOSURE", "GOVERNED_DECLARATION"]},
+        "cadence": {"enum": ["DAILY", "EVENT_STREAM", "SNAPSHOT", "STATEMENT_PERIODIC"]},
         "declared_end": {"type": ["string", "null"], "format": "date"},
         "declared_start": {"type": ["string", "null"], "format": "date"},
         "disposition": {"type": "string", "minLength": 1},
@@ -999,7 +1011,7 @@
         "observed_start": {"type": ["string", "null"], "format": "date"},
         "provider_id": {"type": "string", "minLength": 1},
         "record_count": {"type": "integer", "minimum": 0},
-        "status": {"enum": ["OBSERVED_NOT_COMPLETENESS_PROOF", "OBSERVED_WITH_UNAVAILABLE_AMOUNTS_NOT_COMPLETENESS_PROOF", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF", "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF", "NO_ACCEPTED_FACT_PATH", "DECLARED_COMPLETE"]},
+        "status": {"enum": ["OBSERVED_NOT_COMPLETENESS_PROOF", "OBSERVED_WITH_UNAVAILABLE_AMOUNTS_NOT_COMPLETENESS_PROOF", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF", "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF", "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF", "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF", "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF", "NO_ACCEPTED_FACT_PATH", "DECLARED_COMPLETE"]},
         "unavailable_amount_count": {"type": "integer", "minimum": 0}
       }
     }

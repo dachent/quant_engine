@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -860,3 +861,108 @@ def test_an_observed_cash_debit_of_any_size_replaces_an_interest_zero(
         and r["classification"] == "ZERO_FINANCING_OBSERVED"
     ]
     zf.validate_rows(artifact, {ACCOUNT})
+
+
+def test_the_printed_cash_summary_columns_are_returned_with_the_ladder() -> None:
+    """F2: deposits/withdrawals (cash only) survive instead of being discarded."""
+
+    ladder, begin, why, totals = zf.parse_cash_ladder_totals(
+        RAW, date(2026, 3, 1), date(2026, 3, 31)
+    )
+    assert why == "CASH_LADDER_CLOSES" and ladder is not None and begin == 100
+    assert totals == {
+        "beginning_cash": 100,
+        "ending_cash": 50,
+        "deposits": 0,
+        "withdrawals": -300,
+        "purchases": 0,
+        "sales_redemptions": 250,
+        "dividends_interest": 0,
+        "expenses": 0,
+    }
+    # the compatible wrapper is unchanged
+    assert zf.parse_cash_ladder(RAW, date(2026, 3, 1), date(2026, 3, 31)) == (
+        ladder,
+        begin,
+        why,
+    )
+
+
+def test_an_untied_month_still_names_its_printed_totals() -> None:
+    """KILL: a month whose rows do not tie keeps the printed totals and the reason."""
+
+    differ = RAW.replace("(300.00)", "(299.00)")
+    ladder, begin, why, totals = zf.parse_cash_ladder_totals(
+        differ, date(2026, 3, 1), date(2026, 3, 31)
+    )
+    assert ladder is None and begin is None and why == "CASH_CATEGORY_TOTALS_DIFFER"
+    assert totals is not None and totals["withdrawals"] == -300
+    # an unreadable summary has no totals at all
+    nothing = zf.parse_cash_ladder_totals(
+        RAW.replace("$250.00 ", ""), date(2026, 3, 1), date(2026, 3, 31)
+    )
+    assert nothing[2] == "CASH_SUMMARY_ROW_NOT_FOUND" and nothing[3] is None
+
+
+# ---- statements 2025-11 on: the realized gain is printed bare, and cash-in-lieu is a redemption
+
+RAW_BARE = "\n".join(
+    [
+        "Transactions - Summary",
+        "Beginning Cash* as of 01/01",
+        "+ Deposits",
+        "+ Expenses = Ending Cash* as of 01/31",
+        "$125.62 $7,000.00 $0.00 ($103.73) $22,527.58 $27.97 $0.00 $29,577.44",
+        "Transaction Details",
+        "Date Category Action",
+        "Interest($) Amount($)",
+        "01/02 Deposit Journaled Funds IRA REGULAR CONTRIB 7,000.00",
+        "01/05 Sale CMCSA COMCAST CORP NEW TRADES WITH",
+        "DUE BILLS",
+        "(1.0000) 29.8900 29.89 3.37,",
+        "Sale TIP ISHARES TIPS BOND ETF (19.0000) 110.0000 2,090.00 (5.73)",
+        "Sale BIL ST STERT SPDR BLMBG 1 3 MN T BL",
+        "ETF",
+        "(34.0000) 91.3900 0.01 3,107.25 (6.77)",
+        "Industry Fee $0.01",
+        "Sale UDOW PROSHARES ULTRAPRO DOW 30 (6.0000) 58.3000 349.80 13.20",
+        "Sale SWVXX SCHWAB VALUE ADVANTAGE (16,930.5300) 1.0000 16,930.53",
+        "Purchase SCHW CHARLES SCHWAB CORP 1.0000 103.7300 (103.73)",
+        "01/06 Redemption Cash-In-Lieu VSNT VERSANT MEDIA GROUP INC 20.11",
+        "01/07 Dividend Cash Dividend EPOL ISHARES MSCI POLAND ETF 27.97",
+        "Total Transactions $0.00",
+    ]
+)
+
+
+def test_a_bare_realized_gain_is_not_the_sale_amount_and_a_redemption_is_a_sale() -> (
+    None
+):
+    ladder, begin, why = zf.parse_cash_ladder(
+        RAW_BARE, date(2026, 1, 1), date(2026, 1, 31)
+    )
+    assert why == "CASH_LADDER_CLOSES" and begin == Decimal("125.62")
+    assert ladder is not None
+    assert ladder[date(2026, 1, 31)] == Decimal("29577.44")
+
+
+def test_the_scan_returns_the_printed_columns_and_which_of_them_tie() -> None:
+    facts, why = zf.scan_cash_statement(RAW_BARE, date(2026, 1, 1), date(2026, 1, 31))
+    assert why == "CASH_STATEMENT_READ" and facts is not None
+    assert facts["column_totals"][1] == facts["summary"][1] == Decimal("7000.00")
+    assert facts["column_totals"][4] == Decimal("22527.58")
+    assert all(facts["tied"]) and facts["rows_ok"]
+    broken = RAW_BARE.replace("CONTRIB 7,000.00", "CONTRIB 6,999.00")
+    facts, _ = zf.scan_cash_statement(broken, date(2026, 1, 1), date(2026, 1, 31))
+    assert facts is not None
+    assert facts["tied"][3] and not facts["tied"][0]
+    assert zf.parse_cash_ladder(broken, date(2026, 1, 1), date(2026, 1, 31))[2] == (
+        "CASH_CATEGORY_TOTALS_DIFFER"
+    )
+
+
+def test_a_sale_row_with_no_amount_near_quantity_times_price_is_refused() -> None:
+    text = RAW_BARE.replace("2,090.00 (5.73)", "9.00 (5.73)")
+    assert zf.parse_cash_ladder(text, date(2026, 1, 1), date(2026, 1, 31))[2] == (
+        "TRANSACTION_AMOUNT_UNREADABLE"
+    )

@@ -65,7 +65,9 @@ CARRIED = (
     "portfolio_fx_rates",
     "account_roles",
     "quantbase_fill_closes",
+    "quantbase_position_closes",
     "zero_financing_observations",
+    "event_completeness_declaration",
 )
 REGENERATED = (
     "as_of_date",
@@ -241,9 +243,13 @@ def build(
     account_roles: Path | None = None,
     quantbase_fill_closes: Path | None = None,
     zero_financing_observations: Path | None = None,
+    quantbase_position_closes: Path | None = None,
+    event_completeness_declaration: Path | None = None,
 ) -> dict[str, Any]:
     """Return ``{"observation": bytes, "spec": bytes-builder inputs}``; writes nothing.
 
+    ``quantbase_position_closes`` (same list shape as ``quantbase_fill_closes``) pins the
+    official closes of the Quantbase share-count check.
     ``account_roles`` (the governed declaration file, #900) and ``quantbase_fill_closes``
     (a JSON list of {symbol, path, sha256, size_bytes}, #909) are optional per-cycle pins
     written into the spec; absent, the spec is what it was.  ``zero_financing_observations``
@@ -327,6 +333,10 @@ def build(
         spec["account_roles"] = predecessor_spec["account_roles"]
     if "quantbase_fill_closes" in predecessor_spec:
         spec["quantbase_fill_closes"] = predecessor_spec["quantbase_fill_closes"]
+    if "quantbase_position_closes" in predecessor_spec:
+        spec["quantbase_position_closes"] = predecessor_spec[
+            "quantbase_position_closes"
+        ]
     if account_roles is not None:
         raw = account_roles.resolve().read_bytes()
         spec["account_roles"] = {
@@ -353,6 +363,17 @@ def build(
                 + ", ".join(sorted(ZERO_FINANCING_PIN_KEYS)),
             )
         spec["zero_financing_observations"] = pin
+    if "event_completeness_declaration" in predecessor_spec:
+        spec["event_completeness_declaration"] = predecessor_spec[
+            "event_completeness_declaration"
+        ]
+    if event_completeness_declaration is not None:
+        raw = event_completeness_declaration.resolve().read_bytes()
+        spec["event_completeness_declaration"] = {
+            "path": str(event_completeness_declaration.resolve()),
+            "sha256": _sha256(raw),
+            "size_bytes": len(raw),
+        }
     if quantbase_fill_closes is not None:
         pins = json.loads(quantbase_fill_closes.read_bytes())
         if not isinstance(pins, list) or not pins:
@@ -360,6 +381,14 @@ def build(
                 "INPUT", "quantbase fill closes must be a non-empty list"
             )
         spec["quantbase_fill_closes"] = pins
+    if quantbase_position_closes is not None:
+        # official closes that only test a position's share count (never restate a NAV)
+        position_pins = json.loads(quantbase_position_closes.read_bytes())
+        if not isinstance(position_pins, list) or not position_pins:
+            raise LedgerSpecError(
+                "INPUT", "quantbase position closes must be a non-empty list"
+            )
+        spec["quantbase_position_closes"] = position_pins
     return {"observation": observation, "spec": spec, "out": out}
 
 
@@ -431,7 +460,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     command.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     command.add_argument("--account-roles", type=Path)
     command.add_argument("--quantbase-fill-closes", type=Path)
+    command.add_argument("--quantbase-position-closes", type=Path)
     command.add_argument("--zero-financing-observations", type=Path)
+    command.add_argument("--event-completeness-declaration", type=Path)
     command.add_argument(
         "--plan", action="store_true", help="build and print, write nothing"
     )
@@ -454,6 +485,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.account_roles,
             args.quantbase_fill_closes,
             args.zero_financing_observations,
+            quantbase_position_closes=args.quantbase_position_closes,
+            event_completeness_declaration=args.event_completeness_declaration,
         )
         if args.plan:
             print(

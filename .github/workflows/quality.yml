@@ -183,6 +183,7 @@ jobs:
           tools/check_release_closure.py
           tools/codex_scope_guard.py
           tools/merge_readiness.py
+          tools/portfolio_adverse_loss.py
           tools/portfolio_attribution.py
           tools/portfolio_attribution_returns.py
           tools/portfolio_current_dependence.py
@@ -229,11 +230,15 @@ jobs:
           tools/quantbase_cdp_navigator.py
           tools/schwab_capture_ingest.py
           tools/schwab_nav_derive.py
+          tools/schwab_statement_cash_summaries.py
           tools/schwab_page_actions.py
           tools/schwab_rollback.py
           tools/p123_cdp_recorder.py
           tools/p123_book_identity_check.py
           tools/p123_har_admit.py
+          tools/base_bundle_builder.py
+          tools/base_proxy_factors.py
+          tools/style_capture_assemble.py
           tools/yahoo_fetch_driver.py
           tools/tt_source_manifest_builder.py
           tools/tt_order_planner.py
@@ -251,6 +256,8 @@ jobs:
           tools/release_provenance_spec.py
           tools/release_cycle_seeds.py
           tools/release_fresh_world.py
+          tools/decision_refresh.py
+          tools/release_world.py
           tools/release_post_commit.py
           tools/post_commit_validation.py
           tools/release_spec_remap.py
@@ -267,11 +274,15 @@ jobs:
           tools/quantbase_fund_days.py
           tools/series_label.py
           tools/published_render_check.py
+          tools/check_plausibility.py
+          tools/owner_eyes_render.py
           tools/capture_governed_price.py
           tools/portfolio_model_vs_actual_derive.py
           tools/portfolio_cash_drag.py
           tools/portfolio_cash_drag_spec.py
           tools/zero_financing_statements.py
+          tools/ibkr_overlap_equivalences.py
+          tools/event_completeness.py
       - name: Resolve controller graph change range
         id: controller_graph_range
         shell: bash

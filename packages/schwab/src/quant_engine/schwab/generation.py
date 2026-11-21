@@ -11,7 +11,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
-from typing import Any
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 from quant_engine.core import (
@@ -26,6 +26,8 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.schwab import flow_classification
+from quant_engine.schwab import derived_positions
 from quant_engine.portfolio_ledger import (
     MappingStatus,
     NavObservation,
@@ -192,12 +194,362 @@ def _load_spec(path: Path) -> dict[str, Any]:
     if version not in SUPPORTED_SPEC_SCHEMA_VERSIONS:
         raise SchwabGenerationError("Schwab spec schema version is unsupported")
     keys = {"as_of_date", "baseline", "crosswalk", "roots", "schema_version", "sources"}
+    if "flow_classification" in spec:
+        keys.add("flow_classification")
+    if "statement_cash_summaries" in spec:
+        keys.add("statement_cash_summaries")
     if version == SPEC_SCHEMA_VERSION:
         keys.add("current_snapshot")
         if "transaction_history_manifest" in spec:
             keys.add("transaction_history_manifest")
+        if "declared_empty_position_accounts" in spec:
+            keys.add("declared_empty_position_accounts")
+        if "derived_position_rows" in spec:
+            keys.add("derived_position_rows")
     _strict(spec, keys, "spec")
     return spec
+
+
+_EMPTY_EVIDENCE_TOLERANCE: Final = Decimal("0.05")
+_PAGE_ACCOUNT = re.compile(r"Account ending in\s+((?:\d\s*){3,4})")
+
+
+def _check_empty_evidence(
+    account_id: str,
+    text: str,
+    suffix: str,
+    snapshot_accounts: Sequence[Mapping[str, Any]],
+) -> None:
+    """Refuse a declared empty account whose evidence page does not prove it empty."""
+
+    try:
+        account_value, market_value = derived_positions.parse_balances_values(text)
+    except derived_positions.SchwabDerivedPositionError as exc:
+        raise SchwabGenerationError(
+            f"declared empty position evidence is not a Balances page: {exc}"
+        ) from exc
+    match = _PAGE_ACCOUNT.search(text)
+    digits = re.sub(r"\D", "", match.group(1)) if match else ""
+    if not suffix or not digits or digits[-3:] != suffix:
+        raise SchwabGenerationError(
+            "declared empty position evidence is not the page of the declared account"
+        )
+    if market_value != 0:
+        raise SchwabGenerationError(
+            "declared empty position evidence shows a Market Value that is not zero"
+        )
+    row = next(
+        (item for item in snapshot_accounts if str(item["account_id"]) == account_id),
+        None,
+    )
+    liquidation = (
+        _object(row["liquidation_value"], "liquidation_value") if row else None
+    )
+    if liquidation is None or liquidation["status"] != "AVAILABLE":
+        raise SchwabGenerationError(
+            "declared empty position account has no proved liquidation value in the snapshot"
+        )
+    if (
+        abs(Decimal(str(liquidation["value"])) - account_value)
+        > _EMPTY_EVIDENCE_TOLERANCE
+    ):
+        raise SchwabGenerationError(
+            "declared empty position evidence Account Value differs from the proved "
+            "liquidation value"
+        )
+    cash = _object(row["cash_available"], "cash_available") if row else None
+    if (
+        cash is not None
+        and cash["status"] == "AVAILABLE"
+        and abs(Decimal(str(cash["value"])) - Decimal(str(liquidation["value"])))
+        > Decimal("0.01")
+    ):
+        raise SchwabGenerationError(
+            "declared empty position account holds value beyond its cash: liquidation value "
+            "differs from cash"
+        )
+
+
+def _declared_empty_accounts(
+    value: object,
+    *,
+    roots: Mapping[str, Path],
+    generation_as_of: date,
+    account_ids: set[str],
+    suffix_by_account: Mapping[str, str],
+    snapshot_accounts: Sequence[Mapping[str, Any]],
+) -> tuple[list[str], list[SourceArtifact]]:
+    """Accounts the spec declares to hold no position, each with a hash-pinned evidence file.
+
+    The evidence is OPENED and read, never taken on its hash alone: it must be a Schwab Balances
+    page of the declared account (its "Account ending in" digits match the crosswalk), whose Market
+    Value is zero (no non-cash holding), whose Account Value equals the snapshot's own proved
+    liquidation value of that account within the derivation tolerance, and, where the snapshot
+    states the account's cash, equals that cash to the cent.
+
+    The catalog lists an account as having an empty position set only on this governed evidence
+    (for example a live balances capture whose Market Value is zero), never by inferring it from
+    the absence of position rows: an account whose positions page was not captured also has none.
+    """
+
+    if value is None:
+        return [], []
+    items = _objects(value, "declared_empty_position_accounts")
+    accounts: list[str] = []
+    artifacts: list[SourceArtifact] = []
+    for item in items:
+        _strict(
+            item,
+            {
+                "account_id",
+                "artifact_id",
+                "expected_sha256",
+                "expected_size_bytes",
+                "relative_path",
+                "root_id",
+                "statement",
+            },
+            "declared_empty_position_accounts item",
+        )
+        account_id = _text(
+            item["account_id"], "declared_empty_position_accounts.account_id"
+        )
+        if account_id not in account_ids:
+            raise SchwabGenerationError(
+                "declared empty position account is not an accepted account"
+            )
+        if account_id in accounts:
+            raise SchwabGenerationError("declared empty position account is duplicated")
+        _text(item["statement"], "declared_empty_position_accounts.statement")
+        root_id = _text(item["root_id"], "declared_empty_position_accounts.root_id")
+        if root_id not in roots:
+            raise SchwabGenerationError(
+                "declared empty position evidence root is unknown"
+            )
+        path = _source_path(
+            roots[root_id],
+            _relative(
+                item["relative_path"], "declared_empty_position_accounts.relative_path"
+            ),
+        )
+        actual_hash, actual_size = hash_file(path)
+        expected_hash = _text(
+            item["expected_sha256"], "declared_empty_position_accounts.expected_sha256"
+        )
+        if _SHA256.fullmatch(expected_hash) is None or actual_hash != expected_hash:
+            raise SchwabGenerationError("declared empty position evidence hash differs")
+        if actual_size != _integer(
+            item["expected_size_bytes"],
+            "declared_empty_position_accounts.expected_size_bytes",
+        ):
+            raise SchwabGenerationError("declared empty position evidence size differs")
+        _check_empty_evidence(
+            account_id,
+            path.read_bytes().decode("utf-8", errors="replace"),
+            suffix_by_account.get(account_id, ""),
+            snapshot_accounts,
+        )
+        accounts.append(account_id)
+        artifacts.append(
+            SourceArtifact(
+                artifact_id=_relative(
+                    item["artifact_id"], "declared_empty_position_accounts.artifact_id"
+                ),
+                sha256=actual_hash,
+                size_bytes=actual_size,
+                as_of_date=generation_as_of,
+                schema_name="schwab-live-balances-evidence",
+                schema_version="1",
+            )
+        )
+    return sorted(accounts), artifacts
+
+
+def _pinned_text(
+    pin_value: object,
+    *,
+    roots: Mapping[str, Path],
+    generation_as_of: date,
+    name: str,
+    schema_name: str,
+) -> tuple[str, SourceArtifact]:
+    """A hash- and size-pinned UTF-8 evidence file bound as a source artifact."""
+
+    pin = _object(pin_value, name)
+    _strict(
+        pin,
+        {
+            "artifact_id",
+            "expected_sha256",
+            "expected_size_bytes",
+            "relative_path",
+            "root_id",
+        },
+        name,
+    )
+    root_id = _text(pin["root_id"], f"{name}.root_id")
+    if root_id not in roots:
+        raise SchwabGenerationError(f"{name} root is unknown")
+    path = _source_path(
+        roots[root_id], _relative(pin["relative_path"], f"{name}.relative_path")
+    )
+    actual_hash, actual_size = hash_file(path)
+    expected_hash = _text(pin["expected_sha256"], f"{name}.expected_sha256")
+    if _SHA256.fullmatch(expected_hash) is None or actual_hash != expected_hash:
+        raise SchwabGenerationError(f"{name} hash differs")
+    if actual_size != _integer(
+        pin["expected_size_bytes"], f"{name}.expected_size_bytes"
+    ):
+        raise SchwabGenerationError(f"{name} size differs")
+    artifact = SourceArtifact(
+        artifact_id=_relative(pin["artifact_id"], f"{name}.artifact_id"),
+        sha256=actual_hash,
+        size_bytes=actual_size,
+        as_of_date=generation_as_of,
+        schema_name=schema_name,
+        schema_version="1",
+    )
+    return path.read_text(encoding="utf-8-sig"), artifact
+
+
+def _history_bound(
+    account_id: str,
+    transactions: Sequence[Mapping[str, object]],
+    coverage: Mapping[str, object] | None,
+) -> date | None:
+    """The last day the generation's transaction bytes cover for the account."""
+
+    if coverage is not None:
+        accounts = _object(coverage["accounts"], "transaction history coverage")
+        entry = accounts.get(account_id)
+        if entry is None:
+            return None
+        return _date(
+            _object(entry, "coverage account")["effective_end"],
+            "coverage effective_end",
+        )
+    days = [date.fromisoformat(str(t["event_date"])) for t in transactions]
+    return max(days) if days else None
+
+
+def _derived_position_rows(
+    value: object,
+    *,
+    roots: Mapping[str, Path],
+    generation_as_of: date,
+    account_ids: set[str],
+    transactions: Sequence[Mapping[str, object]],
+    declared_empty: Sequence[str],
+    suffix_by_account: Mapping[str, str],
+    valuation_cutoff: date,
+    history_coverage: Mapping[str, object] | None,
+) -> tuple[list[dict[str, object]], list[SourceArtifact]]:
+    """Position rows carried back to the cutoff from a later pinned positions export.
+
+    Each item names an account, the positions export and its balances page (hash- and
+    size-pinned, bound as source artifacts), the cutoff, the capture day, the day the
+    history covers, and independent earlier balances pages whose market value must equal
+    the export's.  ``derive_positions_at_cutoff`` refuses unless nothing moved; an account
+    that is also declared empty contradicts itself and refuses.
+    """
+
+    if value is None:
+        return [], []
+    rows: list[dict[str, object]] = []
+    artifacts: list[SourceArtifact] = []
+    seen: set[str] = set()
+    for item in _objects(value, "derived_position_rows"):
+        _strict(
+            item,
+            {
+                "account_id",
+                "balances",
+                "capture_date",
+                "cutoff",
+                "earlier_balances",
+                "export",
+                "history_through",
+            },
+            "derived_position_rows item",
+        )
+        account_id = _text(item["account_id"], "derived_position_rows.account_id")
+        if account_id not in account_ids:
+            raise SchwabGenerationError(
+                "derived position account is not an accepted account"
+            )
+        if account_id in seen or account_id in declared_empty:
+            raise SchwabGenerationError(
+                "derived position account is duplicated or declared empty"
+            )
+        seen.add(account_id)
+        export_text, export_artifact = _pinned_text(
+            item["export"],
+            roots=roots,
+            generation_as_of=generation_as_of,
+            name="derived_position_rows.export",
+            schema_name="schwab-positions-export",
+        )
+        balances_text, balances_artifact = _pinned_text(
+            item["balances"],
+            roots=roots,
+            generation_as_of=generation_as_of,
+            name="derived_position_rows.balances",
+            schema_name="schwab-live-balances-evidence",
+        )
+        artifacts.extend([export_artifact, balances_artifact])
+        account_value, _market = derived_positions.parse_balances_values(balances_text)
+        earlier: dict[str, Decimal] = {}
+        for entry in _objects(
+            item["earlier_balances"], "derived_position_rows.earlier_balances"
+        ):
+            _strict(entry, {"day", "page"}, "derived_position_rows.earlier_balances[]")
+            day = _date(entry["day"], "derived_position_rows.earlier_balances.day")
+            page_text, page_artifact = _pinned_text(
+                entry["page"],
+                roots=roots,
+                generation_as_of=generation_as_of,
+                name="derived_position_rows.earlier_balances.page",
+                schema_name="schwab-live-balances-evidence",
+            )
+            artifacts.append(page_artifact)
+            earlier[day.isoformat()] = derived_positions.parse_balances_values(
+                page_text
+            )[1]
+        try:
+            derived = derived_positions.derive_positions_at_cutoff(
+                account_id=account_id,
+                export_text=export_text,
+                cutoff=_date(item["cutoff"], "derived_position_rows.cutoff"),
+                capture_date=_date(
+                    item["capture_date"], "derived_position_rows.capture_date"
+                ),
+                history_transactions=transactions,
+                history_through=_date(
+                    item["history_through"], "derived_position_rows.history_through"
+                ),
+                account_suffix=suffix_by_account.get(account_id, ""),
+                valuation_cutoff=valuation_cutoff,
+                history_bound=_history_bound(
+                    account_id, transactions, history_coverage
+                ),
+                earlier_market_value=earlier,
+                balances_account_value=account_value,
+            )
+        except derived_positions.SchwabDerivedPositionError as exc:
+            raise SchwabGenerationError(f"derived position refused: {exc}") from exc
+        for row in derived:
+            row["source_artifact_id"] = export_artifact.artifact_id
+            row["record_id"] = _record_id(
+                "position",
+                {
+                    "account_id": account_id,
+                    "as_of_date": row["as_of_date"],
+                    "security_id": row["security_id"],
+                    "basis": row["as_of_basis"],
+                },
+            )
+            rows.append(row)
+    return rows, artifacts
 
 
 def _roots(value: object) -> dict[str, Path]:
@@ -707,6 +1059,116 @@ def _current_snapshot(
         artifact,
         valuation_cutoff,
     )
+
+
+_SUMMARY_AMOUNTS = (
+    "beginning_cash",
+    "deposits",
+    "dividends_interest",
+    "ending_cash",
+    "expenses",
+    "purchases",
+    "sales_redemptions",
+    "withdrawals",
+)
+_SUMMARY_ROW_KEYS = frozenset(
+    {
+        "account_id",
+        "deposits_tied",
+        "period_end",
+        "period_start",
+        "source_artifact_id",
+        "source_sha256",
+        "tie_status",
+        "withdrawals_tied",
+    }
+)
+
+
+def _statement_cash_summaries(
+    value: object, *, roots: Mapping[str, Path], account_ids: set[str]
+) -> list[dict[str, object]]:
+    """Rows of the hash-bound statement cash summary file (``tools/schwab_statement_cash_summaries``).
+
+    The file is pinned by hash and size in the spec; each row names its own statement PDF
+    by hash.  A row either carries all eight printed amounts or none (a statement whose
+    summary page could not be read, named by its ``tie_status``); rows are sorted by
+    (account, period start) with no repeat; accounts are the crosswalk's."""
+
+    source = _object(value, "statement_cash_summaries")
+    _strict(
+        source,
+        {"expected_sha256", "expected_size_bytes", "relative_path", "root_id"},
+        "statement_cash_summaries",
+    )
+    root_id = _text(source["root_id"], "statement_cash_summaries.root_id")
+    if root_id not in roots:
+        raise SchwabGenerationError("statement cash summaries root is unknown")
+    path = _source_path(
+        roots[root_id],
+        _relative(source["relative_path"], "statement_cash_summaries.relative_path"),
+    )
+    actual_hash, actual_size = hash_file(path)
+    expected_hash = _text(
+        source["expected_sha256"], "statement_cash_summaries.expected_sha256"
+    )
+    if _SHA256.fullmatch(expected_hash) is None or actual_hash != expected_hash:
+        raise SchwabGenerationError("statement cash summaries hash differs")
+    if actual_size != _integer(
+        source["expected_size_bytes"], "statement_cash_summaries.expected_size_bytes"
+    ):
+        raise SchwabGenerationError("statement cash summaries size differs")
+    rows = _objects(_json(path), "statement_cash_summaries")
+    seen: set[tuple[str, str]] = set()
+    result: list[dict[str, object]] = []
+    for row in rows:
+        row = dict(row)
+        has_amounts = _SUMMARY_AMOUNTS[0] in row
+        _strict(
+            row,
+            set(_SUMMARY_ROW_KEYS) | (set(_SUMMARY_AMOUNTS) if has_amounts else set()),
+            "statement_cash_summaries row",
+        )
+        account = _text(row["account_id"], "statement_cash_summaries.account_id")
+        if account not in account_ids:
+            raise SchwabGenerationError("statement cash summary account is unknown")
+        start = _date(row["period_start"], "statement_cash_summaries.period_start")
+        end = _date(row["period_end"], "statement_cash_summaries.period_end")
+        if start > end:
+            raise SchwabGenerationError("statement cash summary period is reversed")
+        if _SHA256.fullmatch(_text(row["source_sha256"], "source_sha256")) is None:
+            raise SchwabGenerationError("statement cash summary source hash is invalid")
+        _text(row["source_artifact_id"], "source_artifact_id")
+        _text(row["tie_status"], "tie_status")
+        for flag in ("deposits_tied", "withdrawals_tied"):
+            if not isinstance(row[flag], bool):
+                raise SchwabGenerationError(
+                    f"statement cash summary {flag} is not a boolean"
+                )
+        if row["tie_status"] == "TIED" and not (
+            has_amounts and row["deposits_tied"] and row["withdrawals_tied"]
+        ):
+            raise SchwabGenerationError(
+                "statement cash summary is TIED without a full tie"
+            )
+        if has_amounts:
+            for name in _SUMMARY_AMOUNTS:
+                amount = _object(row[name], f"statement_cash_summaries.{name}")
+                _strict(amount, {"currency", "status", "value"}, name)
+                if amount["status"] != "AVAILABLE" or amount["currency"] != "USD":
+                    raise SchwabGenerationError("statement cash summary amount differs")
+                _decimal(amount["value"], f"statement_cash_summaries.{name}")
+        key = (account, start.isoformat())
+        if key in seen:
+            raise SchwabGenerationError("statement cash summary month repeats")
+        seen.add(key)
+        result.append(row)
+    ordered = sorted(
+        result, key=lambda r: (str(r["account_id"]), str(r["period_start"]))
+    )
+    if ordered != result:
+        raise SchwabGenerationError("statement cash summaries are not sorted")
+    return result
 
 
 def _terminal_transaction_history_coverage(
@@ -1918,6 +2380,21 @@ def build_generation(
         artifacts = tuple(
             sorted((*artifacts, current_artifact), key=lambda item: item.artifact_id)
         )
+    declared_empty_accounts, declared_empty_artifacts = _declared_empty_accounts(
+        spec.get("declared_empty_position_accounts"),
+        roots=roots,
+        generation_as_of=generation_as_of,
+        account_ids=set(crosswalk.values()),
+        suffix_by_account={internal: ext[-3:] for ext, internal in crosswalk.items()},
+        snapshot_accounts=current_accounts or [],
+    )
+    if declared_empty_artifacts:
+        artifacts = tuple(
+            sorted(
+                (*artifacts, *declared_empty_artifacts),
+                key=lambda item: item.artifact_id,
+            )
+        )
     txn_partial_gap: dict[str, object] | None = None
     expected_export_record_count: int | None = None
     if sources.get("MANUAL_TRANSACTION_JSON_ALL"):
@@ -2008,6 +2485,25 @@ def build_generation(
         current_reconciliation.append(
             _current_position_reconciliation(positions, manual_positions)
         )
+    derived_rows, derived_artifacts = _derived_position_rows(
+        spec.get("derived_position_rows"),
+        roots=roots,
+        generation_as_of=generation_as_of,
+        account_ids=set(crosswalk.values()),
+        transactions=transactions,
+        declared_empty=declared_empty_accounts,
+        suffix_by_account={internal: ext[-3:] for ext, internal in crosswalk.items()},
+        valuation_cutoff=current_valuation_cutoff or generation_as_of,
+        history_coverage=transaction_history_coverage,
+    )
+    if derived_rows:
+        positions = [*positions, *derived_rows]
+        positions.sort(
+            key=lambda item: (str(item["account_id"]), str(item["security_id"]))
+        )
+        artifacts = tuple(
+            sorted((*artifacts, *derived_artifacts), key=lambda item: item.artifact_id)
+        )
     baseline = _object(spec["baseline"], "baseline")
     expected = {
         "account_count": len(set(crosswalk.values())),
@@ -2019,6 +2515,21 @@ def build_generation(
         if _integer(baseline.get(key), f"baseline.{key}") != actual:
             raise SchwabGenerationError(f"{key} differs from accepted baseline")
     observed_dates = [_date(item["as_of_date"], "nav.as_of_date") for item in nav]
+    # An account with a proved liquidation value (its holdings at the official closes plus
+    # cash, closed against its native balance) and no non-cash position row holds cash only:
+    # that is the account's structure, not a missing observation.
+    positioned_accounts = {str(item["account_id"]) for item in positions}
+    # governed evidence only (see ``_declared_empty_accounts``); an account that also has a
+    # position row contradicts its own evidence and refuses
+    if set(declared_empty_accounts) & positioned_accounts:
+        raise SchwabGenerationError(
+            "a declared empty position account has a position row"
+        )
+    cash_only_accounts = declared_empty_accounts
+    cash_only_count = len(cash_only_accounts)
+    structure_reported = (
+        current_accounts is not None and current_balance_available_count > 0
+    )
     known_gaps = (
         *(
             ("current account and position snapshot is not present",)
@@ -2038,10 +2549,10 @@ def build_generation(
         ),
         *(
             (
-                f"{len(crosswalk) - current_position_account_count} accepted accounts have no reported non-cash position row",
+                f"{len(crosswalk) - len(positioned_accounts) - cash_only_count} accepted accounts have no reported non-cash position row",
             )
             if current_accounts is not None
-            and current_position_account_count < len(crosswalk)
+            and len(positioned_accounts) + cash_only_count < len(crosswalk)
             else ()
         ),
         *(
@@ -2050,7 +2561,11 @@ def build_generation(
             else ()
         ),
         "two account histories contain documented intraday restatements",
-        "Investor Checking is outside the accepted brokerage boundary",
+        *(
+            ()
+            if structure_reported
+            else ("Investor Checking is outside the accepted brokerage boundary",)
+        ),
         *(
             (
                 f"manual_export_partial:"
@@ -2079,6 +2594,27 @@ def build_generation(
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
         "coverage": {
             "known_gaps": list(known_gaps),
+            # a generation whose balances are proved reports structure apart from missing
+            # observations; earlier generations (no proved balance) keep their catalogs
+            # byte for byte
+            **(
+                {
+                    "structural_boundaries": [
+                        "Investor Checking is outside the accepted brokerage boundary",
+                        *(
+                            (
+                                f"{cash_only_count} accepted accounts hold cash only: "
+                                "a hash-pinned live balances capture shows no holding and no non-cash "
+                                "position row exists for them",
+                            )
+                            if cash_only_count
+                            else ()
+                        ),
+                    ]
+                }
+                if structure_reported
+                else {}
+            ),
             "status": "PARTIAL",
             **(
                 {"transaction_history": transaction_history_coverage}
@@ -2086,6 +2622,13 @@ def build_generation(
                 else {}
             ),
         },
+        # the accounts whose proved liquidation value leaves no holding: positive evidence that
+        # their position set is empty (absence of rows alone proves nothing)
+        **(
+            {"empty_position_account_ids": cash_only_accounts}
+            if structure_reported and cash_only_accounts
+            else {}
+        ),
         "journal_counterparty_crosswalk": _journal_counterparty_crosswalk(crosswalk),
         "nav_observations": nav,
         "positions": positions,
@@ -2120,6 +2663,30 @@ def build_generation(
         },
         "transactions": transactions,
     }
+    if spec.get("statement_cash_summaries") is not None:
+        summary_rows = _statement_cash_summaries(
+            spec["statement_cash_summaries"],
+            roots=roots,
+            account_ids=set(crosswalk.values()),
+        )
+        if summary_rows:
+            catalog["statement_cash_summaries"] = summary_rows
+    if "flow_classification" in spec and spec["flow_classification"] is not True:
+        raise SchwabGenerationError(
+            "spec flow_classification must be true when present"
+        )
+    classified = (
+        flow_classification.classification_table(transactions)
+        if spec.get("flow_classification") is True
+        else []
+    )
+    if classified:
+        # every transaction is exactly one of cash flow, security transfer or not a
+        # flow; the cash flows are derived from the transactions (F2)
+        catalog["transaction_flow_classification"] = classified
+        cash_flows = flow_classification.flow_rows(transactions, suffix_to_internal)
+        if cash_flows:
+            catalog["flows"] = cash_flows
     if current_accounts is not None:
         catalog.update(
             {

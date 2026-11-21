@@ -101,14 +101,25 @@
           "additionalProperties": false,
           "required": ["mode"],
           "properties": { "mode": { "const": "single" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": { "mode": { "const": "latest_at_or_before" } }
         }
       ]
     },
     "provider": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["root", "generation", "manifest_sha256", "finality_source", "qualification"],
+      "required": ["root", "generation", "finality_source", "qualification"],
       "properties": {
+        "cutoff_coverage": {
+          "enum": ["REQUIRED", "NOT_REQUIRED"],
+          "description": "REQUIRED (default): the generation's observed coverage must reach the cutoff and declared finality must not precede it. FINITE_STATIC providers are exempt; any other exemption is NOT_REQUIRED with a reason."
+        },
+        "cutoff_coverage_reason": { "type": "string", "minLength": 1 },
         "qualification": {
           "enum": ["PUBLISHED_COMPLETE", "STAGED_COMPLETE", "ACCEPTED_PARTIAL", "FINITE_STATIC"]
         },

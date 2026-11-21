@@ -192,10 +192,10 @@
      "matrixport-robuxio-01"
     ],
     "generation": {
-     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-     "manifest_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
-     "pointer_sha256": "2b76a70db6ccbc9181930d94d95bfc70af61278f8145a36a7f63dfdb76cfcc0d",
-     "as_of": "2026-09-03"
+     "generation_id": "de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63",
+     "manifest_sha256": "8763eda116221636e5da3d87c0d3749719024091eae1fb1295956fb8278141e7",
+     "pointer_sha256": "491149e4cce9b2d28e0d47c09b006060d1d6a802a737e19008ad23d709180812",
+     "as_of": "2026-11-07"
     }
    },
    {
@@ -222,10 +222,10 @@
      "quantbase-single-index-fund-01"
     ],
     "generation": {
-     "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-     "manifest_sha256": "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c",
-     "pointer_sha256": "1caffa0848f7da8659adc6c2206ae19dde23d497a56b192ee6febc24ded17d38",
-     "as_of": "2026-09-02"
+     "generation_id": "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
+     "manifest_sha256": "165f56f51fbf3a24ae74c16624ae4e979bfb810a87aa8c3cdd72333c8ca8b8b1",
+     "pointer_sha256": "e9dd519df93408fd8afb8445059f563703c5c51078978a9a0fde43ba3022772c",
+     "as_of": "2026-11-09"
     }
    },
    {
@@ -244,10 +244,10 @@
      "schwab-tt-04"
     ],
     "generation": {
-     "generation_id": "edbd2575350ce55c870f122bfa04c32a4bd42ed443fbd7fe7a55177322307174",
-     "manifest_sha256": "97f0645cdda37c7d3d86707ae3eb92616deaeb53f41a3961724190d2054590e4",
-     "pointer_sha256": "19882a50d8b64fb60276c4695fa7576fee02289306c468570a988833aea7c196",
-     "as_of": "2026-09-04"
+     "generation_id": "b273f524e9191c11f018b793684d1b3d34c4f2e9af953dd7fb4367da992f8e6f",
+     "manifest_sha256": "065cbf39145ec2010290a14642d0bbbded0615900dcda653d31d0ae877bf3d9e",
+     "pointer_sha256": "25e59e80b17efc2b11b24df333ca9d7e4af7c3c94c6cdcabfcc60dedd004bb7b",
+     "as_of": "2026-11-08"
     }
    }
   ],
@@ -720,9 +720,9 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:3475b976c4139a6b39ffb7ff0b536e9942846b0d474b1a5d97c23516e2796803",
-    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+    "version_ref": "account-live-segment:c85c6f730a69ab60368024bf213fc261860d7ba6f232ac6141e62ed0b594811a",
+    "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+    "receipt_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -761,9 +761,9 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
-    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+    "version_ref": "account-live-segment:5b2bb99dbd41a40e3eacdbf5ec3a7530e698a46c749c4e179fb2ef8089753bba",
+    "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+    "receipt_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -802,9 +802,9 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:0b0fa4a9fdd79ca2028d07e587909d21d1fab1aa1acd9e440f1eb6e85047ce64",
-    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+    "version_ref": "account-live-segment:80d2742d15a3d31809124090c4c3dc9e4ffcd7dcc89bd60e9881739e08023243",
+    "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+    "receipt_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -843,9 +843,9 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:05b87493c092a28bd819d785982921feffee72169883aae9a768bf60e7d21dc4",
-    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+    "version_ref": "account-live-segment:75b2bfd2d697cc1cb7f4c99a1c078eb791e98cb0bffba906ccd5f7948de3a5d6",
+    "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+    "receipt_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -884,9 +884,9 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:e8b3b66a38b6edfa027318496129a1e8f56bc6c29e3176e9d4c44215f01a66b4",
-    "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-    "receipt_sha256": "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c"
+    "version_ref": "account-live-segment:a5af85f141c19b82d277a1fc7ac26968e256fb22654ec7ca1ef7093e46a83307",
+    "generation_id": "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
+    "receipt_sha256": "165f56f51fbf3a24ae74c16624ae4e979bfb810a87aa8c3cdd72333c8ca8b8b1"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -925,9 +925,9 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:fa7223035eaebb6d5d00e90247eae188b90e9386b940e440a76792f3eef6b1fe",
-    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+    "version_ref": "account-live-segment:19ab7fdb894d894d3e3c8bf47010d5b3a787286ce3f907ec14ebf7dbfd70fb6a",
+    "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+    "receipt_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -966,9 +966,9 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:1ea12119e24f31fc6820593af890f80026955d7de05676433db18a5d0025a529",
-    "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-    "receipt_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
+    "version_ref": "account-live-segment:5a5fe00509f2a32a7dc16902f2f74e7b66901350bba2fee2f630401c68febd17",
+    "generation_id": "de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63",
+    "receipt_sha256": "8763eda116221636e5da3d87c0d3749719024091eae1fb1295956fb8278141e7"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -1294,15 +1294,15 @@
     "evidence_layer": "ACCOUNT_LIVE",
     "frequency": "DAILY_OR_PROVIDER_PUBLICATION",
     "mode_admission": "INCLUDE_SELECTED_LIVE",
-    "observed_end": "2026-09-02",
+    "observed_end": "2026-11-06",
     "observed_start": "2026-01-03",
     "return_basis": "NET",
-    "return_observations": 243,
+    "return_observations": 308,
     "return_type": "TOTAL",
     "segment_id": "grizzlybears-vtma:account-live",
-    "sha256": "fa7223035eaebb6d5d00e90247eae188b90e9386b940e440a76792f3eef6b1fe",
-    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+    "sha256": "19ab7fdb894d894d3e3c8bf47010d5b3a787286ce3f907ec14ebf7dbfd70fb6a",
+    "source_generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+    "source_generation_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
     "source_id": "owner-account-live-history",
     "strategy_id": "grizzlybears-vtma",
     "strategy_version": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0"
@@ -1332,15 +1332,15 @@
     "evidence_layer": "ACCOUNT_LIVE",
     "frequency": "DAILY_OR_PROVIDER_PUBLICATION",
     "mode_admission": "INCLUDE_SELECTED_LIVE",
-    "observed_end": "2026-09-02",
+    "observed_end": "2026-11-06",
     "observed_start": "2026-01-22",
     "return_basis": "NET",
-    "return_observations": 160,
+    "return_observations": 207,
     "return_type": "TOTAL",
     "segment_id": "p123-ai-factor:account-live",
-    "sha256": "3475b976c4139a6b39ffb7ff0b536e9942846b0d474b1a5d97c23516e2796803",
-    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+    "sha256": "c85c6f730a69ab60368024bf213fc261860d7ba6f232ac6141e62ed0b594811a",
+    "source_generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+    "source_generation_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
     "source_id": "owner-account-live-history",
     "strategy_id": "p123-ai-factor",
     "strategy_version": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc"
@@ -1389,15 +1389,15 @@
     "evidence_layer": "ACCOUNT_LIVE",
     "frequency": "DAILY_OR_PROVIDER_PUBLICATION",
     "mode_admission": "INCLUDE_SELECTED_LIVE",
-    "observed_end": "2026-09-02",
+    "observed_end": "2026-11-06",
     "observed_start": "2025-11-21",
     "return_basis": "NET",
-    "return_observations": 204,
+    "return_observations": 251,
     "return_type": "TOTAL",
     "segment_id": "p123-eu:account-live",
-    "sha256": "63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
-    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+    "sha256": "5b2bb99dbd41a40e3eacdbf5ec3a7530e698a46c749c4e179fb2ef8089753bba",
+    "source_generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+    "source_generation_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
     "source_id": "owner-account-live-history",
     "strategy_id": "p123-eu",
     "strategy_version": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"
@@ -1446,15 +1446,15 @@
     "evidence_layer": "ACCOUNT_LIVE",
     "frequency": "DAILY_OR_PROVIDER_PUBLICATION",
     "mode_admission": "INCLUDE_SELECTED_LIVE",
-    "observed_end": "2026-09-02",
+    "observed_end": "2026-11-06",
     "observed_start": "2026-01-05",
     "return_basis": "NET",
-    "return_observations": 241,
+    "return_observations": 306,
     "return_type": "TOTAL",
     "segment_id": "qsi:account-live",
-    "sha256": "0b0fa4a9fdd79ca2028d07e587909d21d1fab1aa1acd9e440f1eb6e85047ce64",
-    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+    "sha256": "80d2742d15a3d31809124090c4c3dc9e4ffcd7dcc89bd60e9881739e08023243",
+    "source_generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+    "source_generation_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
     "source_id": "owner-account-live-history",
     "strategy_id": "qsi",
     "strategy_version": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99"
@@ -1484,15 +1484,15 @@
     "evidence_layer": "ACCOUNT_LIVE",
     "frequency": "DAILY",
     "mode_admission": "INCLUDE_SELECTED_LIVE",
-    "observed_end": "2026-09-03",
+    "observed_end": "2026-11-06",
     "observed_start": "2025-12-07",
     "return_basis": "NET",
-    "return_observations": 267,
+    "return_observations": 329,
     "return_type": "TOTAL",
     "segment_id": "robuxio-crypto:account-live",
-    "sha256": "1ea12119e24f31fc6820593af890f80026955d7de05676433db18a5d0025a529",
-    "source_generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-    "source_generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
+    "sha256": "5a5fe00509f2a32a7dc16902f2f74e7b66901350bba2fee2f630401c68febd17",
+    "source_generation_id": "de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63",
+    "source_generation_sha256": "8763eda116221636e5da3d87c0d3749719024091eae1fb1295956fb8278141e7",
     "source_id": "matrixport-account-generation",
     "strategy_id": "robuxio-crypto",
     "strategy_version": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041"
@@ -1529,8 +1529,8 @@
     "return_type": "TOTAL",
     "segment_id": "robuxio-crypto:provider-live-before-funding",
     "sha256": "428b1b02f067bb7b0a07e0eda874d065bd876db9bcf5c30f3147967ebc218076",
-    "source_generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-    "source_generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
+    "source_generation_id": "de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63",
+    "source_generation_sha256": "8763eda116221636e5da3d87c0d3749719024091eae1fb1295956fb8278141e7",
     "source_id": "matrixport-account-generation",
     "strategy_id": "robuxio-crypto",
     "strategy_version": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041"
@@ -1541,15 +1541,15 @@
     "evidence_layer": "ACCOUNT_LIVE",
     "frequency": "DAILY_OR_PROVIDER_PUBLICATION",
     "mode_admission": "INCLUDE_SELECTED_LIVE",
-    "observed_end": "2026-09-02",
+    "observed_end": "2026-11-06",
     "observed_start": "2025-11-25",
     "return_basis": "NET",
-    "return_observations": 282,
+    "return_observations": 347,
     "return_type": "TOTAL",
     "segment_id": "tt-portfolio:account-live",
-    "sha256": "05b87493c092a28bd819d785982921feffee72169883aae9a768bf60e7d21dc4",
-    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+    "sha256": "75b2bfd2d697cc1cb7f4c99a1c078eb791e98cb0bffba906ccd5f7948de3a5d6",
+    "source_generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+    "source_generation_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
     "source_id": "owner-account-live-history",
     "strategy_id": "tt-portfolio",
     "strategy_version": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
@@ -1579,15 +1579,15 @@
     "evidence_layer": "ACCOUNT_LIVE",
     "frequency": "DAILY",
     "mode_admission": "INCLUDE_SELECTED_LIVE",
-    "observed_end": "2026-09-02",
+    "observed_end": "2026-11-06",
     "observed_start": "2024-10-16",
     "return_basis": "NET",
-    "return_observations": 687,
+    "return_observations": 752,
     "return_type": "TOTAL",
     "segment_id": "volatis-strategy:account-live",
-    "sha256": "e8b3b66a38b6edfa027318496129a1e8f56bc6c29e3176e9d4c44215f01a66b4",
-    "source_generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-    "source_generation_sha256": "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c",
+    "sha256": "a5af85f141c19b82d277a1fc7ac26968e256fb22654ec7ca1ef7093e46a83307",
+    "source_generation_id": "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
+    "source_generation_sha256": "165f56f51fbf3a24ae74c16624ae4e979bfb810a87aa8c3cdd72333c8ca8b8b1",
     "source_id": "quantbase-account-generation",
     "strategy_id": "volatis-strategy",
     "strategy_version": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7"
@@ -1668,9 +1668,9 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
-     "as_of": "2026-09-04"
+     "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+     "generation_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
+     "as_of": "2026-11-09"
     },
     "correction_id": "grizzlybears-vtma-account-live",
     "disposition_reason": "The account-live path is the selected provider-ledger generation this release admits.",
@@ -1688,7 +1688,7 @@
     "interval": {
      "assignment_date": null,
      "observed_start": "2026-01-03",
-     "observed_end": "2026-09-02",
+     "observed_end": "2026-11-06",
      "effective_start": "2026-01-02",
      "effective_end": null
     },
@@ -1701,12 +1701,12 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "artifact_selector": "generations/ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+      "sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
      },
      {
       "artifact_role": "strategy-backtests-generation-manifest",
@@ -1885,9 +1885,9 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
-     "as_of": "2026-09-04"
+     "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+     "generation_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
+     "as_of": "2026-11-09"
     },
     "correction_id": "p123-ai-factor-account-live",
     "disposition_reason": "The account-live path is the selected provider-ledger generation this release admits.",
@@ -1905,7 +1905,7 @@
     "interval": {
      "assignment_date": null,
      "observed_start": "2026-01-22",
-     "observed_end": "2026-09-02",
+     "observed_end": "2026-11-06",
      "effective_start": "2026-01-22",
      "effective_end": null
     },
@@ -1918,12 +1918,12 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "artifact_selector": "generations/ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+      "sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
      },
      {
       "artifact_role": "portfolio123-generation-manifest",
@@ -1955,9 +1955,9 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
-     "as_of": "2026-09-04"
+     "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+     "generation_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
+     "as_of": "2026-11-09"
     },
     "strategy_version": {
      "status": "EVIDENCED",
@@ -1985,12 +1985,12 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "artifact_selector": "generations/ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+      "sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
      }
     ],
     "disposition_reason": "The model book own live record from its inception. It continues the research series after the sim-twin backtest ends strictly before it, is never part of the my-live series, and is admitted at run time from the release world's own provider-ledger catalog (provider_strategy_returns rows of layer MODEL_LIVE for the model book entity, never the account rows). The generation cited here is the accepted seed pin of the owner-account-live-history source, not the carrier of these rows: the first carrier is the A5-committed provider-ledger generation ce07cc85, and the release ledger regenerates the same rows under its own id. The run refuses if the world ledger carries no MODEL_LIVE rows, or rows that leave the inception-to-cutoff window.",
@@ -2009,9 +2009,9 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
-     "as_of": "2026-09-04"
+     "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+     "generation_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
+     "as_of": "2026-11-09"
     },
     "strategy_version": {
      "status": "EVIDENCED",
@@ -2022,7 +2022,7 @@
     "interval": {
      "assignment_date": "2025-11-12",
      "observed_start": "2025-11-21",
-     "observed_end": "2026-09-02",
+     "observed_end": "2026-11-06",
      "effective_start": "2025-11-20",
      "effective_end": null
     },
@@ -2039,21 +2039,21 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "artifact_selector": "generations/ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+      "sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
      },
      {
       "artifact_role": "provider-ledger-catalog",
-      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/provider-ledger.json",
+      "artifact_selector": "generations/ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f/provider-ledger.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "normalized/provider-ledger.json",
-      "sha256": "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
+      "sha256": "972eb0934fff097414f7698295255cf7e981d417387c0b9342756a71508e5adf"
      }
     ],
     "disposition_reason": "Owner funding precedes the first measurable account return by one day. Provider-live history remains a separate comparison and never overwrites this path.",
@@ -2302,9 +2302,9 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
-     "as_of": "2026-09-04"
+     "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+     "generation_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
+     "as_of": "2026-11-09"
     },
     "correction_id": "qsi-account-live",
     "disposition_reason": "The account-live path is the selected provider-ledger generation this release admits.",
@@ -2322,7 +2322,7 @@
     "interval": {
      "assignment_date": null,
      "observed_start": "2026-01-05",
-     "observed_end": "2026-09-02",
+     "observed_end": "2026-11-06",
      "effective_start": "2026-01-05",
      "effective_end": null
     },
@@ -2335,12 +2335,12 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "artifact_selector": "generations/ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+      "sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
      },
      {
       "artifact_role": "strategy-backtests-generation-manifest",
@@ -2444,9 +2444,9 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-     "generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
-     "as_of": "2026-09-03"
+     "generation_id": "de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63",
+     "generation_sha256": "8763eda116221636e5da3d87c0d3749719024091eae1fb1295956fb8278141e7",
+     "as_of": "2026-11-07"
     },
     "strategy_version": {
      "status": "EVIDENCED",
@@ -2457,7 +2457,7 @@
     "interval": {
      "assignment_date": "2025-08-26",
      "observed_start": "2025-12-07",
-     "observed_end": "2026-09-03",
+     "observed_end": "2026-11-06",
      "effective_start": "2025-12-06",
      "effective_end": null
     },
@@ -2474,21 +2474,21 @@
     "source_receipts": [
      {
       "artifact_role": "matrixport-generation-manifest",
-      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
+      "artifact_selector": "generations/de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63/generation.json",
       "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "generation_id": "de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
+      "sha256": "8763eda116221636e5da3d87c0d3749719024091eae1fb1295956fb8278141e7"
      },
      {
       "artifact_role": "matrixport-subscription-details",
-      "artifact_selector": "output/20260903T051029.331Z/csv/subscription_details.csv",
+      "artifact_selector": "output/20261109T135114.510Z/csv/subscription_details.csv",
       "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "generation_id": "de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "csv/subscription_details.csv",
-      "sha256": "5ce7c6e3780df78a3f3b684329dbf4b382265a3411b0db9b036965e2c75db800"
+      "sha256": "86798b4d0f5a47a8e326f4ba10c8fbe85bae033c07043d07f84c3cc0b3c74f3f"
      }
     ],
     "disposition_reason": "Funding becomes effective on the first confirmed held observation. The boundary return is excluded; measurable account-live returns begin the following day.",
@@ -2579,9 +2579,9 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-     "generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
-     "as_of": "2026-09-03"
+     "generation_id": "de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63",
+     "generation_sha256": "8763eda116221636e5da3d87c0d3749719024091eae1fb1295956fb8278141e7",
+     "as_of": "2026-11-07"
     },
     "strategy_version": {
      "status": "EVIDENCED",
@@ -2611,19 +2611,19 @@
       "artifact_role": "matrixport-current-pointer",
       "artifact_selector": "CURRENT.json",
       "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "generation_id": "de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63",
       "locator_kind": "CURRENT_POINTER",
       "manifest_artifact_id": null,
-      "sha256": "2b76a70db6ccbc9181930d94d95bfc70af61278f8145a36a7f63dfdb76cfcc0d"
+      "sha256": "491149e4cce9b2d28e0d47c09b006060d1d6a802a737e19008ad23d709180812"
      },
      {
       "artifact_role": "matrixport-generation-manifest",
-      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
+      "artifact_selector": "generations/de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63/generation.json",
       "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "generation_id": "de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
+      "sha256": "8763eda116221636e5da3d87c0d3749719024091eae1fb1295956fb8278141e7"
      }
     ],
     "disposition_reason": "Product NAV before the proved held observation is provider-live comparison evidence. It is never relabeled as owner account-live.",
@@ -2719,9 +2719,9 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
-     "as_of": "2026-09-04"
+     "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+     "generation_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
+     "as_of": "2026-11-09"
     },
     "correction_id": "tt-portfolio-account-live",
     "disposition_reason": "The account-live path is the selected provider-ledger generation this release admits.",
@@ -2739,7 +2739,7 @@
     "interval": {
      "assignment_date": null,
      "observed_start": "2025-11-25",
-     "observed_end": "2026-09-02",
+     "observed_end": "2026-11-06",
      "effective_start": "2025-11-25",
      "effective_end": null
     },
@@ -2752,12 +2752,12 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "artifact_selector": "generations/ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+      "sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
      },
      {
       "artifact_role": "strategy-backtests-generation-manifest",
@@ -2861,9 +2861,9 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
-     "as_of": "2026-09-04"
+     "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+     "generation_sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
+     "as_of": "2026-11-09"
     },
     "strategy_version": {
      "status": "EVIDENCED",
@@ -2874,7 +2874,7 @@
     "interval": {
      "assignment_date": "2024-07-24",
      "observed_start": "2024-10-16",
-     "observed_end": "2026-09-02",
+     "observed_end": "2026-11-06",
      "effective_start": "2024-10-15",
      "effective_end": null
     },
@@ -2891,30 +2891,30 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "artifact_selector": "generations/ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+      "sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
      },
      {
       "artifact_role": "quantbase-account-activity",
-      "artifact_selector": "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/account_activity.csv",
+      "artifact_selector": "source-runs/legacy-20261109-e0295d24f317/artifacts/csv/account_activity.csv",
       "authority_root": "QUANTBASE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
+      "generation_id": "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "source/csv/account_activity.csv",
-      "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+      "sha256": "2666f2b5b6a3605287f87f851fe1fdd96beeb168ffb5f2c8a37c3f586eaf21f8"
      },
      {
       "artifact_role": "quantbase-dashboard-history",
-      "artifact_selector": "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+      "artifact_selector": "source-runs/legacy-20261109-e0295d24f317/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
       "authority_root": "QUANTBASE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
+      "generation_id": "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
-      "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+      "sha256": "8042108af00a76660bf4b902f689a3d89c8ac55f08d0f2ca11110f29df2f883d"
      }
     ],
     "disposition_reason": "The earlier purchase does not establish funded membership without an accepted event-time value. Membership begins with the first capital-reconciled positive NAV and cost basis; measurable account returns begin the following day.",
@@ -2965,19 +2965,19 @@
       "artifact_role": "quantbase-current-pointer",
       "artifact_selector": "CURRENT.json",
       "authority_root": "QUANTBASE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
+      "generation_id": "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
       "locator_kind": "CURRENT_POINTER",
       "manifest_artifact_id": null,
-      "sha256": "1caffa0848f7da8659adc6c2206ae19dde23d497a56b192ee6febc24ded17d38"
+      "sha256": "e9dd519df93408fd8afb8445059f563703c5c51078978a9a0fde43ba3022772c"
      },
      {
       "artifact_role": "quantbase-generation-manifest",
-      "artifact_selector": "generations/d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe/generation.json",
+      "artifact_selector": "generations/9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2/generation.json",
       "authority_root": "QUANTBASE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
+      "generation_id": "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c"
+      "sha256": "165f56f51fbf3a24ae74c16624ae4e979bfb810a87aa8c3cdd72333c8ca8b8b1"
      }
     ],
     "disposition_reason": "Volatis is model live plus funded live. Quantbase publishes the fund's own per-share track record before the owner funded it, and the owner's account path after; no simulated design history exists behind either, so there is no backtest layer to admit and none to prove. The pre-funding series is carried as PROVIDER_LIVE comparison evidence by volatis-provider-live.",
@@ -2996,9 +2996,9 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-     "generation_sha256": "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c",
-     "as_of": "2026-09-02"
+     "generation_id": "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
+     "generation_sha256": "165f56f51fbf3a24ae74c16624ae4e979bfb810a87aa8c3cdd72333c8ca8b8b1",
+     "as_of": "2026-11-09"
     },
     "strategy_version": {
      "status": "EVIDENCED",
@@ -3026,30 +3026,30 @@
     "source_receipts": [
      {
       "artifact_role": "quantbase-generation-manifest",
-      "artifact_selector": "generations/d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe/generation.json",
+      "artifact_selector": "generations/9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2/generation.json",
       "authority_root": "QUANTBASE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
+      "generation_id": "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c"
+      "sha256": "165f56f51fbf3a24ae74c16624ae4e979bfb810a87aa8c3cdd72333c8ca8b8b1"
      },
      {
       "artifact_role": "quantbase-dashboard-history",
-      "artifact_selector": "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+      "artifact_selector": "source-runs/legacy-20261109-e0295d24f317/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
       "authority_root": "QUANTBASE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
+      "generation_id": "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
-      "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+      "sha256": "8042108af00a76660bf4b902f689a3d89c8ac55f08d0f2ca11110f29df2f883d"
      },
      {
       "artifact_role": "quantbase-ssg-history",
-      "artifact_selector": "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/ssg_Volatis_Strategy_pricehistory.csv",
+      "artifact_selector": "source-runs/legacy-20261109-e0295d24f317/artifacts/csv/ssg_Volatis_Strategy_pricehistory.csv",
       "authority_root": "QUANTBASE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
+      "generation_id": "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "source/csv/ssg_Volatis_Strategy_pricehistory.csv",
-      "sha256": "83bab8b0828bee2d8abb51f26b6cbbf44fa5f4bab98e69a80097f5cba9b80fa2"
+      "sha256": "a4b1f168b18169c6c80d22c0782821bc8a774c941d9d2f13cfad3e0f8688b837"
      }
     ],
     "disposition_reason": "The two provider curves are equality evidence for one economic path. They are not duplicate return series and are not relabeled as backtest.",
@@ -4088,11 +4088,11 @@
      "authority_issue": 303,
      "effective_start": "2026-08-14",
      "effective_end": null,
-     "upstream_inventory_sha256": "9ea70645cc8f40dd38148fc115fa65ca02ef6d43eb932ece404c989fde555da1",
+     "upstream_inventory_sha256": "18cae5728801284c33e3d8e6ada5e24177224ac3fcb215465b09d4b9e1c5a517",
      "product_data_class_count": 1,
      "product_data_class_set_sha256": "bd9dc67925fb1bbed75941595a17013240853904918f97e7cee8d2ce84d01d40",
-     "admitted_item_count": 2,
-     "admitted_item_set_sha256": "c9a66669fe0cd411dee0b2d99c79f063a3c7c026bc671ce5ec97d58de6f6aa0f",
+     "admitted_item_count": 0,
+     "admitted_item_set_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER",
@@ -4218,9 +4218,9 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-    "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
-    "as_of": "2026-09-04"
+    "generation_id": "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f",
+    "sha256": "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799",
+    "as_of": "2026-11-09"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",
@@ -4507,11 +4507,11 @@
      "authority_issue": 303,
      "effective_start": "2026-08-14",
      "effective_end": null,
-     "upstream_inventory_sha256": "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8",
+     "upstream_inventory_sha256": "537ab009526dd238b6f6b705219936f36cc4d5b0fd1ccef1e051e61a937abadf",
      "product_data_class_count": 9,
      "product_data_class_set_sha256": "9f9c5f50e9cc0c9fdbc7123197897e20a4c7ab444cca73caad37aeda88a8943f",
-     "admitted_item_count": 25,
-     "admitted_item_set_sha256": "0b8c38b8dcfcc551ac38dae244b47fd431488cc57d220656c5223967cd6892c2",
+     "admitted_item_count": 111,
+     "admitted_item_set_sha256": "58fad56b0a28909f646ae2a4d8043a3c82269d9fe72ad35d942bfc7f823931cc",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -4574,7 +4574,8 @@
    },
    "data_classes": [
     "ACCOUNT_NAV",
-    "CAPITAL_ANCHOR"
+    "CAPITAL_ANCHOR",
+    "POSITION"
    ],
    "authority": "MATRIXPORT_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "catalog.json in an exact governed Matrixport generation",
@@ -4586,7 +4587,7 @@
    "evidence_layer": "ACCOUNT_LIVE",
    "interval": {
     "observed_start": "2025-12-07",
-    "observed_end": "2026-09-03",
+    "observed_end": "2026-11-06",
     "effective_start": "2025-12-06",
     "effective_end": null,
     "splice_policy": "ACCOUNT_LIVE_STARTS_AT_ACCEPTED_SUBSCRIPTION; EARLIER_PROVIDER_ROWS_RETAIN_PROVIDER_LAYER; DAILY_METRICS_ADMIT_EXACT_ADJACENT_CALENDAR_DAY_RETURNS_ONLY; EPOCH_TWR_ADMITS_ONLY_HASH_BOUND_DECLARED_TWO_DAY_NO_FLOW_SPANS_WITH_EXACT_NAV_AND_SHARE_ENDPOINTS; USD_CONVERSION_USES_OWNER_APPROVED_EXACT_EVENT_AND_NAV_DATE_FX_THROUGH_2026_09_17; NEVER_FILL_OR_INFER_CALENDAR_CLOSURE"
@@ -4615,7 +4616,8 @@
     "facts": [
      "NAV_OBSERVATION",
      "CAPITAL_ANCHOR",
-     "EXTERNAL_FLOW"
+     "EXTERNAL_FLOW",
+     "POSITION"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -4624,11 +4626,11 @@
      "authority_issue": 303,
      "effective_start": "2026-08-16",
      "effective_end": null,
-     "upstream_inventory_sha256": "24f77dcf8c81b5c4906f66013568c2ec205e46752117c9bad56aba2e65d3b98e",
-     "product_data_class_count": 2,
-     "product_data_class_set_sha256": "5e472d76e49e668e98f82eaed56eb38edb1facff4c64db7fd7b45ca6c216429e",
-     "admitted_item_count": 6,
-     "admitted_item_set_sha256": "1c00617f3db60ee5b1571ef822261c39c02cf0c620604a66a35c45616f82141c",
+     "upstream_inventory_sha256": "3c973f7280e1ec125eabc9ee102d271bc98b9a7ad77af0562c8d11fe42275b51",
+     "product_data_class_count": 3,
+     "product_data_class_set_sha256": "53df948591c113abcefcb009a735c94d5c36f91790e4acfd91e1424686a04114",
+     "admitted_item_count": 7,
+     "admitted_item_set_sha256": "4713806990fa5a318d973b595aea860ed49def484a01d2a6a0cb430736414223",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -4722,9 +4724,9 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-    "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
-    "as_of": "2026-09-03"
+    "generation_id": "de8bbdc7e4fa5bf5dabb1ead9e7f98404516226843f6c769f0948503da337e63",
+    "sha256": "8763eda116221636e5da3d87c0d3749719024091eae1fb1295956fb8278141e7",
+    "as_of": "2026-11-07"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",
@@ -4764,7 +4766,8 @@
     "ACCOUNT_NAV",
     "EXTERNAL_FLOW",
     "CAPITAL_ANCHOR",
-    "TRANSACTION"
+    "TRANSACTION",
+    "POSITION"
    ],
    "authority": "QUANTBASE_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "quantbase-generation.json in an exact governed generation",
@@ -4806,7 +4809,8 @@
      "NAV_OBSERVATION",
      "EXTERNAL_FLOW",
      "CAPITAL_ANCHOR",
-     "TRANSACTION"
+     "TRANSACTION",
+     "POSITION"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -4815,11 +4819,11 @@
      "authority_issue": 303,
      "effective_start": "2026-08-16",
      "effective_end": null,
-     "upstream_inventory_sha256": "2abcd635064683b61f71e11b07893a52029c7bb32d2a7d5ceb38e27a1aa9020f",
-     "product_data_class_count": 4,
-     "product_data_class_set_sha256": "f5eec6a60b6cdb6afae4b237382658345a51bb26631e0fc9aecc565fcf2874ca",
-     "admitted_item_count": 6,
-     "admitted_item_set_sha256": "c08d7a42db964d459235cf0071a843a6b3b703c03932b5c3b72b0ccab7b1843b",
+     "upstream_inventory_sha256": "ab38ff27f4aaad8ea0a75f24b4bfd3653d57cec5d4f6058181fb89183cd8cd96",
+     "product_data_class_count": 5,
+     "product_data_class_set_sha256": "883d19be19357aceedaa7163d055bcc84101b448ec5f5fab14b91ea36c4bc457",
+     "admitted_item_count": 9,
+     "admitted_item_set_sha256": "90008612aea6228f6b24dc0ffada33d38ddb2485e2bdc68b67b1bb76d1b72947",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -4842,9 +4846,9 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-    "sha256": "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c",
-    "as_of": "2026-09-02"
+    "generation_id": "9c495aea441f73944b2a17b5564da694c35c981e20ec435cc9a4965e2c9cc2c2",
+    "sha256": "165f56f51fbf3a24ae74c16624ae4e979bfb810a87aa8c3cdd72333c8ca8b8b1",
+    "as_of": "2026-11-09"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",
@@ -4937,11 +4941,11 @@
      "authority_issue": 303,
      "effective_start": "2026-08-14",
      "effective_end": null,
-     "upstream_inventory_sha256": "548db85021b3a735b9145934795c37d7d99f51360fba94f0548120f1828eaf33",
+     "upstream_inventory_sha256": "bf57a8928f8cf408185eb474e537d03511853d2775e925b126f6e982ec7d8648",
      "product_data_class_count": 5,
-     "product_data_class_set_sha256": "a359c2ff31769dcfd4d7cd9959f3854d30c01749ac11500e8ac56c5070a0e9a0",
-     "admitted_item_count": 22,
-     "admitted_item_set_sha256": "c736740e96e30517af5597c8819332d8e1020b45e0a8e35c646897f6b2bf4a26",
+     "product_data_class_set_sha256": "83d8e3dc217e0d466e47100fe5db16c602b1d40769e401820d5acfb1b53bffd4",
+     "admitted_item_count": 25,
+     "admitted_item_set_sha256": "0e714f3ebee64575bbf70c36ffdf04adb62e517becf540694892c365d4bc8576",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -4964,9 +4968,9 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "edbd2575350ce55c870f122bfa04c32a4bd42ed443fbd7fe7a55177322307174",
-    "sha256": "97f0645cdda37c7d3d86707ae3eb92616deaeb53f41a3961724190d2054590e4",
-    "as_of": "2026-09-04"
+    "generation_id": "b273f524e9191c11f018b793684d1b3d34c4f2e9af953dd7fb4367da992f8e6f",
+    "sha256": "065cbf39145ec2010290a14642d0bbbded0615900dcda653d31d0ae877bf3d9e",
+    "as_of": "2026-11-08"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",

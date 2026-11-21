@@ -59,7 +59,7 @@
     [
       "schwab",
       "core",
-      3
+      4
     ],
     [
       "schwab",
@@ -73,6 +73,16 @@
     ]
   ],
   "tools_edges": [
+    [
+      "base_bundle_builder",
+      "base_proxy_factors",
+      1
+    ],
+    [
+      "base_bundle_builder",
+      "portfolio_target_series",
+      1
+    ],
     [
       "build_quantbase_fund_facts",
       "nested_strategy_tag_map",
@@ -126,6 +136,21 @@
     [
       "capture_refresh",
       "capture_pipeline",
+      1
+    ],
+    [
+      "check_plausibility",
+      "validate_generation",
+      1
+    ],
+    [
+      "decision_refresh",
+      "release_cycle_manifest",
+      1
+    ],
+    [
+      "event_completeness",
+      "leverage_disclosure",
       1
     ],
     [
@@ -356,6 +381,11 @@
     [
       "portfolio_current_decomposition_plan",
       "strategy_basis_disclosure",
+      1
+    ],
+    [
+      "portfolio_current_dependence",
+      "portfolio_adverse_loss",
       1
     ],
     [
@@ -710,6 +740,11 @@
     ],
     [
       "portfolio_target_series",
+      "portfolio_attribution",
+      1
+    ],
+    [
+      "portfolio_target_series",
       "strategy_basis",
       1
     ],
@@ -721,6 +756,11 @@
     [
       "provider_ledger",
       "account_financing",
+      1
+    ],
+    [
+      "provider_ledger",
+      "event_completeness",
       1
     ],
     [
@@ -949,6 +989,11 @@
       1
     ],
     [
+      "release_world",
+      "release_cycle_manifest",
+      1
+    ],
+    [
       "schwab_capture_ingest",
       "schwab_capture_driver",
       1
@@ -971,6 +1016,11 @@
     [
       "schwab_page_actions",
       "capture_action_guard",
+      1
+    ],
+    [
+      "schwab_statement_cash_summaries",
+      "zero_financing_statements",
       1
     ],
     [
@@ -1001,6 +1051,11 @@
     [
       "strategy_basis_disclosure",
       "strategy_basis",
+      1
+    ],
+    [
+      "style_capture_assemble",
+      "base_proxy_factors",
       1
     ],
     [

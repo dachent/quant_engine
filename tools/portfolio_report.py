@@ -64,8 +64,11 @@ from quant_engine.portfolio_ledger import (
 )
 from quant_engine.portfolio_ledger import (
     assess_gap_bounds_document,
+    apply_hwm_owner_acceptance,
+    PENDING_OWNER_ACCEPTANCE,
     numerical_from_governed_proof,
     proof_covers_spans,
+    receipt_missing_points,
 )
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
@@ -200,6 +203,11 @@ HWM_GAP_BOUNDS: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
     / "portfolio-hwm-gap-bounds-v1.json"
+)
+HWM_OWNER_ACCEPTANCE: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-hwm-owner-acceptance-v1.json"
 )
 _PORTABLE_HWM_PRODUCT_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
@@ -1656,13 +1664,43 @@ COST_EVIDENCE_KEYS: Final = (
     "execution_cost",
 )
 # Present only on a percent-based cost row; equal to portfolio_attribution.COST_RATE_KEYS.
-COST_RATE_KEYS: Final = ("fee_rates",)
+COST_RATE_KEYS: Final = (
+    "cost_classification",
+    "cost_derivation",
+    "derived_annual_cost_usd",
+    "fee_rates",
+)
 
 
 def _plain_words(code: object) -> str:
     """An enum code in plain lower-case words (``PROVIDER_DECLARED`` -> provider declared)."""
 
     return str(code).replace("_", " ").lower()
+
+
+def _cash_drag_fields(
+    provider_comparison: Mapping[str, Any], benchmark_comparison: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Cash drag status and reason of both comparisons of one strategy row.
+
+    The row's ``cash_drag_*`` keys are the provider comparison's; the benchmark
+    comparison has its own status (a provider row can be unavailable where the
+    benchmark row is evidenced), so it is carried beside it, not dropped."""
+
+    return {
+        "cash_drag_status": provider_comparison.get("cash_drag_status"),
+        "cash_drag_reason": provider_comparison.get("cash_drag_reason"),
+        "benchmark_cash_drag_status": benchmark_comparison.get("cash_drag_status"),
+        "benchmark_cash_drag_reason": benchmark_comparison.get("cash_drag_reason"),
+    }
+
+
+def _retained_cost_fields(cost_row: Mapping[str, Any]) -> dict[str, Any]:
+    """A retained or history-only strategy row carries its cost classification (and
+    the ruling reference inside it) when the baseline states one, not a blank."""
+
+    classification = cost_row.get("cost_classification")
+    return {"cost_classification": classification} if classification else {}
 
 
 def cost_components(cost: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1938,6 +1976,52 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
     )
     if pages:
         sentence += f"; sources: {', '.join(pages)}"
+    derived = cost.get("derived_annual_cost_usd")
+    basis = cost.get("cost_derivation")
+    if derived is not None and isinstance(basis, Mapping):
+        unpriced = basis.get("unpriced_components") or []
+        in_nav = [
+            item
+            for item in basis.get("classified_components") or []
+            if isinstance(item, Mapping)
+            and item.get("classification") == "IN_NAV_NOT_BILLED"
+        ]
+        contingent = [
+            item
+            for item in basis.get("classified_components") or []
+            if isinstance(item, Mapping)
+            and item.get("classification") == "EVENT_FEE_NOT_ANNUAL"
+        ]
+        sentence += (
+            f"; derived annual {basis.get('rate_kind', '').replace('_', ' ')} cost "
+            f"${derived} ({basis.get('method')}): "
+            f"{_percent_text(basis.get('rate'))} of ${basis.get('base_value_usd')} "
+            f"capital value at the cutoff {basis.get('as_of')}"
+        )
+        if unpriced:
+            sentence += (
+                "; "
+                + ", ".join(str(name).replace("_", " ") for name in unpriced)
+                + " is a share of gains, not of capital value, and is not priced"
+            )
+        if basis.get("tier_settled_through"):
+            sentence += (
+                f"; fee tier settled through {basis['tier_settled_through']} "
+                "(fee journals); derived dollars valid if the tier is unchanged since"
+            )
+        for item in in_nav:
+            sentence += (
+                f"; {str(item.get('component')).replace('_', ' ')} "
+                f"{_percent_text(item.get('rate'))} is IN_NAV_NOT_BILLED "
+                "(charged inside the vehicle NAV, not a billed dollar cost)"
+            )
+        for item in contingent:
+            sentence += (
+                f"; {str(item.get('component')).replace('_', ' ')} "
+                f"{_percent_text(item.get('rate'))} is EVENT_FEE_NOT_ANNUAL "
+                "(billed when units are redeemed, not an annual cost)"
+            )
+        return f"{sentence}; billed dollar amount: not published."
     return f"{sentence}; no dollar cost is published."
 
 
@@ -2000,7 +2084,10 @@ def _cutoff_cost_rate(
     }
     if amount_text is None:
         result["cost_rate_reason"] = (
-            "the cost is a documented percent rate; no dollar amount is published"
+            "the cost is a documented percent rate; its derived annual amount is carried beside the rate"
+            if cost.get("derived_annual_cost_usd") is not None
+            and result["fees_status"] == FEES_STATUS_DOCUMENTED_RATE
+            else "the cost is a documented percent rate; no dollar amount is published"
             if result["fees_status"] == FEES_STATUS_DOCUMENTED_RATE
             else "no annual cost amount is evidenced"
         )
@@ -3150,8 +3237,7 @@ def _merge_attribution(
                 "provider_upside_capture": metrics.get("upside_capture"),
                 "provider_downside_capture": metrics.get("downside_capture"),
                 "provider_relative_drawdown": metrics.get("relative_drawdown"),
-                "cash_drag_status": comparison.get("cash_drag_status"),
-                "cash_drag_reason": comparison.get("cash_drag_reason"),
+                **_cash_drag_fields(comparison, benchmark_comparison),
                 "legacy_baseline_disposition": comparison.get(
                     "legacy_baseline_disposition"
                 ),
@@ -3670,7 +3756,13 @@ def _reconcile_multi_account_strategy_composite(
 
 
 MWR_FLOW_PATH_UNPROVEN = frozenset(
-    {"NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"}
+    {
+        "NO_ACCEPTED_FACT_PATH",
+        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF",
+        "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF",
+        "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF",
+        "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF",
+    }
 )
 
 
@@ -4998,6 +5090,7 @@ def _derived_value_basis(
 
 
 _PROVIDER_REPORTED_AUTHORITY: Final = "remain provider-reported USD authority"
+_DERIVED_POSITION_BASIS: Final = "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT"
 
 
 def _noun(count: int, singular: str, plural: str) -> str:
@@ -5180,7 +5273,13 @@ def _accounts(
             else:
                 value = reserve["value_text"]
                 as_of = reserve["as_of_date"]
-                status = "AVAILABLE_MANDATE_CLASSIFICATION"
+                # A statement-dated reserve (Decision B) is dated at its own point, not
+                # the cutoff; the row says so instead of claiming it is available at the cutoff.
+                status = (
+                    "AVAILABLE_MANDATE_CLASSIFICATION"
+                    if not isinstance(cutoff, str) or as_of == cutoff
+                    else "STATEMENT_DATED_MANDATE_CLASSIFICATION"
+                )
         elif account_id in latest:
             as_of, value = latest[account_id]
             status = "AVAILABLE_LATEST_OBSERVATION"
@@ -8378,6 +8477,7 @@ def _strategies(
                 **live_boundary_basis,
                 "cost_evidence_status": EVIDENCE_STATUS_UNAVAILABLE,
                 "benchmark_evidence_status": EVIDENCE_STATUS_UNAVAILABLE,
+                **_retained_cost_fields(cost_row),
                 "source_route_status": source_route.get("status", "UNAVAILABLE"),
                 "source_route_ids": source_route.get("source_ids", []),
                 "strategy_evidence_layers": layer_inventory,
@@ -8547,10 +8647,34 @@ def _positions(
                 },
             }
         )
+        if item.get("evidence_class") == _DERIVED_POSITION_BASIS:
+            # inferred at the cutoff from a later snapshot: the row says so and names the
+            # days whose split between holdings the retained pages do not show
+            window = item.get("residual_reallocation_window_days") or []
+            accepted[-1]["residual_reallocation_window_days"] = list(window)
+            earlier = sorted(
+                (item.get("closure") or {}).get("earlier_market_value_days") or []
+            )
+            accepted[-1]["basis_note"] = (
+                "position inferred, not observed: derived at cutoff from a later snapshot "
+                f"(captured {item.get('capture_date')}); net zero change in the account "
+                "total over the days since the cutoff, holdings/cash split inferred from "
+                + (f"the {earlier[0]} page" if earlier else "the capture")
+                + (
+                    f"; same-total reallocation cannot be excluded between {window[0]} "
+                    f"and {window[1]}; a later page equal in total does not rule it out, "
+                    "so the per-symbol split is not proven for those days"
+                    if len(window) == 2
+                    else ""
+                )
+            )
         # A value the finality evidence declares derived is not "captured": the row says
         # how it was valued and keeps the capture date and clock it was held under.
         value_basis = _derived_value_basis(derived_values, account_id, as_of_date)
-        if value_basis is not None:
+        if (
+            value_basis is not None
+            and item.get("evidence_class") != _DERIVED_POSITION_BASIS
+        ):
             accepted[-1]["value_basis"] = value_basis
             accepted[-1]["as_of_basis"] = value_basis["basis"]
     return sorted(
@@ -8826,6 +8950,29 @@ def _scoped_known_gap(
     )
 
 
+def _declared_boundaries(
+    provider_coverage: Sequence[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    """Every provider's proved structural boundaries, typed, in provider order.  Only a
+    provider that proved its structure declares ``structural_boundaries``; a provider's
+    ``out_of_boundary`` statements stay limitations (some are real missing observations)."""
+
+    out: list[dict[str, str]] = []
+    for item in sorted(provider_coverage, key=lambda row: str(row.get("provider_id"))):
+        coverage = item.get("coverage")
+        if not isinstance(coverage, Mapping):
+            continue
+        for text in coverage.get("structural_boundaries", []):
+            out.append(
+                {
+                    "as_of_date": str(item.get("generation_as_of_date")),
+                    "provider_id": str(item.get("provider_id")),
+                    "text": str(text),
+                }
+            )
+    return out
+
+
 def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     provider_coverage = _objects(
@@ -8842,6 +8989,11 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 ),
                 "status": claim.get("status"),
                 "value": claim.get("record_count"),
+                **(
+                    {"structural_boundaries": _declared_boundaries(provider_coverage)}
+                    if claim.get("fact_type") == "positions"
+                    else {}
+                ),
                 **(
                     {
                         "disposition": {
@@ -8925,6 +9077,10 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "category": "PROVIDER_COVERAGE",
                 "item": item.get("provider_id"),
                 "known_gap": "; ".join(str(gap) for gap in limitations),
+                # proved structure is typed apart: it is neither a gap nor in known_gap
+                "structural_boundaries": [
+                    str(text) for text in claim.get("structural_boundaries", [])
+                ],
                 "status": claim.get("status"),
                 "value": item.get("qualification"),
                 **(
@@ -9914,6 +10070,7 @@ def _report_governed_hwm_proof(
     input_receipt_bytes: bytes,
     *,
     product_contract_bytes: bytes | None = None,
+    missing_daily_points: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Verify a governed PORT-HWM-4 result and project it into report data.
 
@@ -9945,10 +10102,10 @@ def _report_governed_hwm_proof(
         )
     except (HwmCoverageError, CapitalValidationError) as exc:
         raise ReportValidationError(f"governed HWM result is invalid: {exc}") from exc
-    return {
+    proof = {
         "schema_version": 1,
         "status": accepted["status"],
-        "financial_acceptance": "PENDING_OWNER_ACCEPTANCE",
+        "financial_acceptance": PENDING_OWNER_ACCEPTANCE,
         "assurance_profile": accepted["assurance_profile"],
         "policy_id": accepted["policy_id"],
         "policy_sha256": accepted["policy_sha256"],
@@ -9978,6 +10135,9 @@ def _report_governed_hwm_proof(
             for row in accepted["index_path"]
         ],
     }
+    return apply_hwm_owner_acceptance(
+        proof, HWM_OWNER_ACCEPTANCE.read_bytes(), missing_daily_points
+    )
 
 
 def _governed_hwm_summary_rows(proof: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -11571,6 +11731,9 @@ def build_report_data(
             hwm_governed_calendar_bytes or b"",
             hwm_governed_receipt_bytes or b"",
             product_contract_bytes=financial_input_contract_bytes,
+            missing_daily_points=receipt_missing_points(
+                catalog.get("epoch_hpr_receipts")
+            ),
         )
         if hwm_governed_result is not None
         else None
