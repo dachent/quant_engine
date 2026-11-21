@@ -50,8 +50,15 @@ _CLOSURES: Final = {
         "positions",
     ),
 }
+_QUANTBASE_ROLLED_BACK: Final = (
+    "ROLLED_BACK_ORDER_REPLAY_SCALED_TO_STRATEGY_NAV_AT_CUTOFF"
+)
 _QUANTBASE_VALUE_BASES: Final = frozenset(
-    {"DERIVED_FROM_STRATEGY_NAV_AT_CUTOFF", "CAPTURE_TIME_SNAPSHOT_VALUE"}
+    {
+        "DERIVED_FROM_STRATEGY_NAV_AT_CUTOFF",
+        "CAPTURE_TIME_SNAPSHOT_VALUE",
+        _QUANTBASE_ROLLED_BACK,
+    }
 )
 _QUANTBASE_CENT: Final = Decimal("0.01")
 _QUANTBASE_CLOSE_TOLERANCE: Final = Decimal("0.001")
@@ -525,7 +532,9 @@ def _evaluate_quantbase_positions(
         else None
         for p in rows
     ]
-    cash = number(closure_of(rows[0]).get("usd_cash")) if rows else None
+    # the snapshot states one cash figure: every row must carry the same, readable one
+    stated = {number(closure_of(p).get("usd_cash")) for p in rows}
+    cash = next(iter(stated)) if len(stated) == 1 else None
     ledger_nav = nav_values.get(end)
     record(
         "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV",
@@ -559,6 +568,26 @@ def _evaluate_quantbase_positions(
         if rows
         else 1,
     )
+    rolled = [p for p in rows if p.get("value_basis") == _QUANTBASE_ROLLED_BACK]
+
+    def replay_failed(p: Mapping[str, Any]) -> bool:
+        evidence = closure_of(p).get("rollback")
+        if not isinstance(evidence, Mapping):
+            return True
+        residual = number(evidence.get("opening_residual_to_nav_usd"))
+        return (
+            evidence.get("replay_reproduces_snapshot") is not True
+            or residual is None
+            or abs(residual) > _QUANTBASE_CENT
+        )
+
+    if rolled:
+        # a roll-back row stands for the cutoff holdings only with its replay evidence: the
+        # order replay reproduced the snapshot and the opening holdings closed to the NAV
+        record(
+            "ROLLED_BACK_ROWS_CARRY_THEIR_REPLAY_EVIDENCE",
+            sum(1 for p in rolled if replay_failed(p)),
+        )
     # the snapshot rows are the records this closure proves (the baseline compares them as a
     # multiset of (id, as_of_date, market value))
     return checks, sorted(str(p["record_id"]) for p in rows if p.get("record_id"))
