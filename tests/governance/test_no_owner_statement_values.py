@@ -51,7 +51,7 @@ SUFFIXES = {
 }
 RULES = {
     "account-shaped string": re.compile(
-        r"(?<![\w.:/-])(?!(?:19|20)\d\d[- ](?:19|20)\d\d|0000)\d{4}[- ]\d{4,}(?![\w.-])"
+        r"(?<![\w.:/-])(?!(?:19|20)\d\d[- ](?:19|20)\d\d|0000)\d{4}[- ]\d{4,}(?![\w-])(?!\.\d)"
     ),
     "digit run of eight or more": re.compile(r"(?<![\d.])\d{8,}(?![\d.])"),
     "six or more decimal places": re.compile(r"(?<![\d.])\d+\.\d{6,}(?!\d)"),
@@ -131,6 +131,10 @@ def test_each_rule_fires_on_a_synthetic_example_of_its_shape(tmp_path: Path) -> 
     assert not RULES["account-shaped string"].search("range 2025-2026 here")
     assert not RULES["account-shaped string"].search("synthetic 0000-0620 here")
     assert RULES["account-shaped string"].search("acct 1234 5678 here")
+    # a sentence period after the account is not a continuation; a decimal point is
+    assert RULES["account-shaped string"].search("see acct 1234-5678.")
+    assert RULES["account-shaped string"].search("acct 1234-5678. Next")
+    assert not RULES["account-shaped string"].search("version 1234-5678.5")
     assert RULES["account-shaped string"].search("acct 1234-56789 here")
     assert not RULES["digit run of eight or more"].search("rate 1.23456789 here")
     assert not RULES["six or more decimal places"].search("rate 1.2345 here")
