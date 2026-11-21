@@ -104,9 +104,28 @@ def test_only_added_lines_are_read(tmp_path: Path) -> None:
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "clean change")
     assert _run(root, base) == 0
+    # whole tree on purpose: the legacy line counts as added
     assert (
-        _run(root, tool.EMPTY_TREE) == 1
-    )  # the whole tree from nothing: the legacy line is "added"
+        tool.main(
+            [
+                "--repo-root",
+                str(root),
+                "--changed-from",
+                tool.EMPTY_TREE,
+                "--whole-tree",
+            ]
+        )
+        == 1
+    )
+    # first push of a new branch (before = zeros -> EMPTY_TREE): no default branch -> skipped, not a whole-repo scan
+    assert _run(root, tool.EMPTY_TREE) == 0
+    # with a default branch the range is merge-base..head, so the legacy line is not "added"
+    _git(root, "update-ref", "refs/remotes/origin/main", base)
+    assert _run(root, tool.EMPTY_TREE) == 0
+    (root / "bad.md").write_text(f"new {ACCOUNT}\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "bad change")
+    assert _run(root, tool.EMPTY_TREE) == 1  # a new bad line is still found
 
 
 def test_preserved_scripts_and_lock_files_are_not_read(tmp_path: Path) -> None:

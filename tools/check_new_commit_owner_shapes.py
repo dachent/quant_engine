@@ -93,8 +93,32 @@ def findings(diff: str) -> list[str]:
     return scan(diff)[0]
 
 
-def _diff(repo_root: Path, base: str, head: str) -> str:
-    left = GIT_EMPTY_TREE if base == EMPTY_TREE else base
+def resolve_base(
+    repo_root: Path, base: str, head: str, whole_tree: bool = False
+) -> str | None:
+    """The commit to diff from, or None when there is no meaningful range.
+
+    ``EMPTY_TREE`` is what the workflow passes on the first push of a new branch (``before`` is all zeros).
+    Reading the whole tree as "added" would flag every existing file, so it falls back to the merge-base
+    with the default branch; with no default branch available the check is skipped (the pull-request run
+    still reads the real range).  ``whole_tree`` asks for the whole-tree scan on purpose.
+    """
+
+    if base != EMPTY_TREE or whole_tree:
+        return GIT_EMPTY_TREE if base == EMPTY_TREE else base
+    for ref in ("origin/main", "refs/remotes/origin/main", "main"):
+        found = subprocess.run(
+            ["git", "-C", str(repo_root), "merge-base", ref, head],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if found.returncode == 0 and found.stdout.strip():
+            return found.stdout.strip()
+    return None
+
+
+def _diff(repo_root: Path, left: str, head: str) -> str:
     result = subprocess.run(
         [
             "git",
@@ -121,11 +145,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", type=Path, default=Path("."))
     parser.add_argument("--changed-from", required=True)
     parser.add_argument("--changed-to", default="HEAD")
+    parser.add_argument(
+        "--whole-tree",
+        action="store_true",
+        help="with EMPTY_TREE, read the whole tree as added instead of the merge-base range",
+    )
     args = parser.parse_args(argv)
     try:
-        hits, acknowledged = scan(
-            _diff(args.repo_root, args.changed_from, args.changed_to)
+        left = resolve_base(
+            args.repo_root, args.changed_from, args.changed_to, args.whole_tree
         )
+        if left is None:
+            print(
+                "owner-shapes: SKIPPED: no base range (new branch, no default branch to compare with); "
+                "the pull-request run checks the real range"
+            )
+            return 0
+        hits, acknowledged = scan(_diff(args.repo_root, left, args.changed_to))
     except OwnerShapeError as exc:
         print(f"owner-shapes: FAIL: {exc}", file=sys.stderr)
         return 2
