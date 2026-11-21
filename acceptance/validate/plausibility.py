@@ -890,7 +890,9 @@ def pl20(panel: Panel) -> Iterator[Hit]:
 # Status tokens and the Health tab (finds 2, 6, 7)
 # ============================================================================================
 
-_COMPLETE = re.compile(r"^(COMPLETE|FINITE_COMPLETE|RECONCILED|CLOSES)")
+_COMPLETE = re.compile(
+    r"^(COMPLETE|FINITE_COMPLETE|DECLARED_COMPLETE(_BY_LEDGER_CLOSURE)?$|RECONCILED|CLOSES)"
+)
 
 
 @rule(
