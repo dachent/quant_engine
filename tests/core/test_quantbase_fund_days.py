@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import quantbase_fund_days as q
@@ -265,21 +265,54 @@ def test_a_fill_day_without_a_dashboard_row_is_a_proving_day_that_cannot_prove()
     assert out[E2].value == REAL_DASHBOARD[E2]
 
 
-def test_non_fill_days_without_closes_count_against_the_close_series() -> None:
-    """F2 item 23: a day whose held symbol has no close cannot be rebuilt; it is a failure to
-    reproduce the dashboard, not a day to leave out of the ratio."""
+def test_only_a_missing_held_close_on_a_day_the_series_covers_counts_against_it() -> (
+    None
+):
+    """F2 item 23: a non-fill day is unvalued only when the close series has a close for some symbol
+    on that day (it trades) but not for a held symbol.  Pre-window days, weekends, holidays and days
+    beyond the series' end carry no close for any symbol and must not count."""
 
-    days = [date(2025, 9, 1 + i) for i in range(30)]
-    legs = [(days[0], "TQQQ", Decimal("100"))]
-    dashboard = {day: Decimal("8800") for day in days}
+    trading = [date(2025, 9, 1) + timedelta(days=i) for i in range(40)]
+    trading = [d for d in trading if d.weekday() < 5]  # 28 weekdays
+    pre_window = [date(2025, 8, 28), date(2025, 8, 29)]
+    weekend = [d for d in (date(2025, 9, 6), date(2025, 9, 7)) if d not in trading]
+    holiday = date(
+        2025, 9, 1
+    )  # Labor Day: in the weekday list, but the series has no close
+    covered = [d for d in trading if d != holiday]
+    legs = [
+        (date(2025, 8, 1), "TQQQ", Decimal("100"))
+    ]  # held before every dashboard day
+    dashboard = {d: Decimal("8800") for d in [*pre_window, *weekend, *trading]}
 
-    def trusted(missing: int) -> bool:
-        closes = {"TQQQ": {day: Decimal("88") for day in days[missing:]}}
-        out = q.corrected_values(dashboard, legs, closes)
+    def trusted(held: dict[date, Decimal], other: dict[date, Decimal]) -> bool:
+        out = q.corrected_values(dashboard, legs, {"TQQQ": held, "SHV": other})
         return q.closes_reproduce_the_dashboard(out, legs)
 
-    assert trusted(0)
-    assert trusted(1)  # 1 of 30 (3.3 %) is inside the 5 % bound
-    assert not trusted(
-        5
-    )  # 5 of 30 missing: 25 valued days all close, but 16.7 % are unvalued
+    shv = {d: Decimal("100") for d in covered}
+    full = {d: Decimal("88") for d in covered}
+    assert trusted(full, shv)  # pre-window, weekend and holiday rows do not count
+    one_hole = {d: c for d, c in full.items() if d != covered[5]}
+    assert trusted(
+        one_hole, shv
+    )  # 1 of 27 covered days (3.7 %) is inside the 5 % bound
+    holes = {d: c for d, c in full.items() if d not in set(covered[5:9])}
+    assert not trusted(holes, shv)  # 4 genuine missing held closes (14.8 %) are refused
+
+
+def test_a_held_symbol_the_pins_do_not_cover_is_not_a_hole() -> None:
+    """Real shape: the fund also held symbols with no pinned series (e.g. a hedge); a day it held
+    only those cannot be rebuilt, but nothing was expected from the series there."""
+
+    days = [date(2025, 9, 1 + i) for i in range(30)]
+    legs = [
+        (date(2025, 8, 1), "TQQQ", Decimal("100")),
+        (date(2025, 8, 1), "QQQ", Decimal("5")),
+    ]
+    dashboard = {day: Decimal("8800") for day in days}
+    closes = {
+        "TQQQ": {day: Decimal("88") for day in days},
+        "SHV": {day: Decimal("100") for day in days},
+    }
+    out = q.corrected_values(dashboard, legs, closes)
+    assert q.non_fill_unvalued_days(out, legs) == 0

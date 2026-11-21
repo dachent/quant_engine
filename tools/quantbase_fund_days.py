@@ -47,6 +47,8 @@ UNRESTATED_NO_CLOSES: Final = "DASHBOARD_PRE_FILL_NO_CLOSES"
 UNRESTATED_NO_CLOSURE: Final = "DASHBOARD_REBUILD_DOES_NOT_CLOSE"
 UNRESTATED_IMPLAUSIBLE: Final = "DASHBOARD_RESTATEMENT_EXCEEDS_TOLERANCE"
 UNRESTATED_NEXT_DAY_UNPROVEN: Final = "DASHBOARD_NEXT_DAY_DOES_NOT_CLOSE"
+# a non-fill day on which the series trades and a held symbol has a pinned series with no close that day
+UNVALUED_HELD_CLOSE_MISSING: Final = "DASHBOARD_HELD_CLOSE_MISSING"
 # share of the valued non-fill days that may fail the rebuild before the close series itself is
 # distrusted (a split-adjusted price file fails most days the fund holds the split symbol)
 MAX_NON_FILL_CLOSURE_FAILURE: Final = Decimal("0.05")
@@ -79,6 +81,28 @@ def _value(
     return total
 
 
+def _held_close_hole(
+    holdings: Mapping[str, Decimal],
+    closes: Mapping[str, Mapping[date, Decimal]],
+    day: date,
+) -> bool:
+    """A pinned series trades on ``day`` and a held symbol's own series, which spans ``day``, lacks it.
+
+    A weekend, a holiday, a day outside the series, or a held symbol with no pinned series at all is
+    not a hole: nothing was expected there.
+    """
+
+    if not any(day in series for series in closes.values()):
+        return False
+    for symbol, quantity in holdings.items():
+        series = closes.get(symbol)
+        if symbol == CASH or quantity == 0 or not series or day in series:
+            continue
+        if min(series) <= day <= max(series):
+            return True
+    return False
+
+
 def corrected_values(
     dashboard: Mapping[date, Decimal],
     legs: Sequence[Leg],
@@ -100,7 +124,14 @@ def corrected_values(
         nav = dashboard[day]
         pre = _value(before, closes, day)
         if pre is None:
-            status = UNRESTATED_NO_CLOSES if day in by_day else DASHBOARD
+            if day in by_day:
+                status = UNRESTATED_NO_CLOSES
+            elif _held_close_hole(before, closes, day):
+                status = UNVALUED_HELD_CLOSE_MISSING
+            else:
+                # no hole in a pinned series (weekend, holiday, outside the series, or a held
+                # symbol the pins do not cover): no information
+                status = DASHBOARD
             result[day] = FundDay(nav, status, None)
             continue
         residual = nav - pre
@@ -169,13 +200,13 @@ def non_fill_closure_failures(
 
 
 def non_fill_unvalued_days(result: Mapping[date, FundDay], legs: Sequence[Leg]) -> int:
-    """Non-fill dashboard days that could not be rebuilt at all: a held symbol has no close."""
+    """Non-fill dashboard days on which the series trades but a held symbol has no close."""
 
     fill_days = {leg[0] for leg in legs}
     return sum(
         1
         for day, fund_day in result.items()
-        if day not in fill_days and fund_day.residual is None
+        if day not in fill_days and fund_day.status == UNVALUED_HELD_CLOSE_MISSING
     )
 
 
@@ -185,8 +216,9 @@ def closes_reproduce_the_dashboard(
     """False when too few non-fill days are valued, or too many fail the rebuild, to trust the closes."""
 
     valued, failed = non_fill_closure_failures(result, legs)
-    # a non-fill day without a close is a day the closes did not reproduce: it counts as a failure
-    # in the ratio, so a close file with holes cannot pass on the few days it does cover
+    # a non-fill day on which the series trades but lacks a held close is a day the closes did not
+    # reproduce: it counts as a failure in the ratio, so a close file with holes cannot pass on the
+    # few days it does cover (days no symbol has a close on carry no information and do not count)
     unvalued = non_fill_unvalued_days(result, legs)
     # too few valued non-fill days cannot show that the closes reproduce the dashboard: refused,
     # not trusted (a short history of halved days must not pass)
