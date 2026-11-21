@@ -431,7 +431,11 @@ def validate_comparisons(comparisons: Sequence[Mapping[str, Any]]) -> list[str]:
             continue
         name = cmp.get("strategy", "<unnamed>")
         threshold = cmp.get("noise_threshold")
-        has_threshold = _is_number(threshold) and threshold >= NOISE_ADJ_R2
+        has_threshold = (
+            isinstance(threshold, (int, float))
+            and _is_number(threshold)
+            and threshold >= NOISE_ADJ_R2
+        )
         if not has_threshold and not _interval_ok(cmp.get("interval")):
             failures.append(
                 f"{name}: live comparison needs a noise threshold of at least {NOISE_ADJ_R2} "
