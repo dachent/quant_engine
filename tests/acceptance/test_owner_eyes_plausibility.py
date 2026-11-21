@@ -898,3 +898,45 @@ def test_a_central_case_below_the_component_sum_is_diversification_not_an_error(
     assert "PL35" not in {h.rule for h in hits_of(payload)}
     payload["advisory"]["central_case_loss"] = "0.25"
     assert "PL35" in {h.rule for h in hits_of(payload)}
+
+
+def test_a_declared_complete_row_is_a_complete_state():
+    """F2 item 33: the event-completeness closure reports DECLARED_COMPLETE; a matrix whose only
+    reachable-green rows read that must not trip PL21, nor keep a PARTIAL fact stuck for PL22."""
+
+    p = clean_payload()
+    p["fact_coverage_matrix"] = [
+        {"fact_type": "accounts", "status": "DECLARED_COMPLETE"},
+        {"fact_type": "nav", "status": "DECLARED_COMPLETE"},
+    ]
+    assert not [h for h in hits_of(p) if h.rule == "PL21"]
+    p["fact_coverage_matrix"].append(
+        {"fact_type": "costs", "status": "DECLARED_COMPLETE"}
+    )
+    p["fact_status"] = {"accounts": COMPLETE, "nav": COMPLETE, "costs": "PARTIAL"}
+    assert not [h for h in hits_of(p) if h.rule == "PL22"]
+    # a failed closure is still not a complete state
+    p["fact_coverage_matrix"] = [
+        {"fact_type": "accounts", "status": "CLOSURE_FAILED"},
+        {"fact_type": "nav", "status": "CLOSURE_FAILED"},
+        {"fact_type": "costs", "status": "CLOSURE_FAILED"},
+    ]
+    assert [h for h in hits_of(p) if h.rule == "PL21"]
+    assert [h for h in hits_of(p) if h.rule == "PL22"]
+
+
+def test_declared_complete_is_anchored_and_pl23_accepts_a_declared_complete_cell():
+    """Validator P3 on item 33: only the exact DECLARED_COMPLETE tokens count as complete, and a
+    DECLARED_COMPLETE coverage cell needs no issue reference (PL23), while a PARTIAL one still does."""
+
+    for token in ("DECLARED_COMPLETE", "DECLARED_COMPLETE_BY_LEDGER_CLOSURE"):
+        p = clean_payload()
+        p["coverage"].append({"status": token})
+        assert not [h for h in hits_of(p) if h.rule == "PL23"], token
+    for token in ("DECLARED_COMPLETE_PENDING", "DECLARED_COMPLETELY_WRONG"):
+        p = clean_payload()
+        p["coverage"].append({"status": token})
+        assert [h for h in hits_of(p) if h.rule == "PL23"], token
+    p = clean_payload()
+    p["coverage"].append({"status": "PARTIAL"})
+    assert [h for h in hits_of(p) if h.rule == "PL23"]

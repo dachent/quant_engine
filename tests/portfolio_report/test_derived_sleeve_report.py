@@ -134,6 +134,7 @@ def _build(
     sleeve_facts: dict[str, Any] | None = None,
     facts_ledger_generation: str | None = "a" * 64,
     parent_returns: tuple[tuple[str, str], ...] | None = None,
+    retained_cost_classification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     current = _epoch(date(2026, 7, 2), "104")
     retained = _epoch(date(2026, 7, 1), "104")
@@ -204,6 +205,13 @@ def _build(
         ],
     }
     baseline = {**full._baseline_catalog(), **catalog}
+    if retained_cost_classification is not None:
+        baseline["costs"] = [
+            {**row, "cost_classification": retained_cost_classification}
+            if row["strategy_id"] == RETAINED[1]
+            else row
+            for row in baseline["costs"]
+        ]
     baseline_root = full._published_baseline(
         tmp_path,
         baseline,
@@ -299,6 +307,42 @@ def test_the_current_sleeve_replaces_its_residual_parent_in_the_report(
     assert (record["parent_strategy_id"], record["sleeve_id"]) == ("strategy-1", "s1")
     # no performance row carries the retained epoch: it is outside the product
     assert all(item["strategy_id"] != "strategy-9" for item in report["twr_mwr"])
+
+
+CLASSIFICATION = {
+    "classification": "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+    "product_interval_end": "2026-07-20",
+    "reason": "SYNTHETIC owner-approved exclusion from live costs",
+    "ruling_reference": "OWNER_1_COMMENT_2_DEPRECATED",
+    "ruling_url": "https://github.com/dachent/quant_engine/issues/1#issuecomment-2",
+    "source": "contracts/portfolio-financial-mvp-source-v1.json",
+}
+
+
+def test_a_retained_record_carries_the_cost_classification_its_baseline_row_states(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = _build(
+        full,
+        tmp_path,
+        monkeypatch,
+        tag_map=_tag_map(),
+        retained_cost_classification=CLASSIFICATION,
+    )
+
+    retained = {item["strategy_id"]: item for item in report["retained_strategies"]}
+    assert retained["strategy-9"]["cost_classification"] == CLASSIFICATION
+    # a current strategy row is not given a classification by this path
+    assert all("cost_classification" not in row for row in report["strategy_summary"])
+
+
+def test_a_retained_record_without_a_baseline_classification_gains_no_key(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = _build(full, tmp_path, monkeypatch, tag_map=_tag_map())
+
+    retained = {item["strategy_id"]: item for item in report["retained_strategies"]}
+    assert "cost_classification" not in retained["strategy-9"]
 
 
 def test_derived_epochs_need_the_tag_map_that_names_them(
