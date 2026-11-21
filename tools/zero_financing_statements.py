@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import hashlib
+from itertools import combinations
 import json
 from datetime import date, timedelta
 from decimal import Decimal
@@ -1286,7 +1287,8 @@ def _row_amount(category: str, text: str) -> Decimal:
     A row prints ``[quantity price] [charges] amount [realized gain]``.  Older statements
     suffix the realized gain with (ST)/(LT) and the last money token is the amount; newer
     ones print it bare, so for a Sale the amount is the money token nearest to
-    quantity x price (charges and rounding are cents) and a row that has none is refused.
+    quantity x price (rounding is cents; a gap larger than that must be explained by the printed
+    charges, one or several adding up) and a row that has none is refused.
     The printed category total still has to tie to the cent, so a wrong pick cannot pass."""
 
     amounts = _ROW_AMOUNT.findall(text)
@@ -1303,9 +1305,21 @@ def _row_amount(category: str, text: str) -> Decimal:
         Decimal(re.sub(r"[(),-]", "", quantity_price[0]))
         * Decimal(re.sub(r"[(),-]", "", quantity_price[1]))
     )
-    best = min((_parse_money(x) for x in amounts), key=lambda v: abs(abs(v) - proceeds))
-    if abs(abs(best) - proceeds) > Decimal("0.10") + proceeds / 10000:
-        raise ZeroFinancingError("TRANSACTION_AMOUNT_UNREADABLE")
+    values = [_parse_money(x) for x in amounts]
+    position = min(range(len(values)), key=lambda i: abs(abs(values[i]) - proceeds))
+    best = values[position]
+    gap = abs(abs(best) - proceeds)
+    if gap > Decimal("0.10") + proceeds / 10000:
+        # A commission or fee explains a larger gap only when it is printed BEFORE the amount (the
+        # realized gain follows it) and it reduces the proceeds; several charges may add up.
+        charges = [abs(v) for v in values[:position]][:6]
+        explained = abs(best) < proceeds and any(
+            abs(sum(subset, Decimal(0)) - gap) <= Decimal("0.01")
+            for size in range(1, len(charges) + 1)
+            for subset in combinations(charges, size)
+        )
+        if not explained:
+            raise ZeroFinancingError("TRANSACTION_AMOUNT_UNREADABLE")
     return best
 
 
