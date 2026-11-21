@@ -8,7 +8,8 @@ The repository is public (owner ruling 2026-11-20).  This check reads only the l
   a year range, the synthetic ``0000-`` form, and a number inside a path, line range or version.
 
 ``ops/preserved-scripts`` (byte-for-byte recovered evidence) and lock files are not read.  A reviewed synthetic
-line carries the marker ``owner-shape: synthetic`` anywhere on it.  It is a tripwire for the common accident, not
+line carries the marker ``owner-shape: synthetic``: it is not refused but it is still listed by path:line
+in the output, so the marker cannot hide a real value from a reviewer.  It is a tripwire for the common accident, not
 a privacy proof: it does not read money, tickers, split values or unchanged lines.
 
     python tools/check_new_commit_owner_shapes.py --repo-root . --changed-from BASE --changed-to HEAD
@@ -66,19 +67,30 @@ def added_lines(
     return found
 
 
-def findings(diff: str) -> list[str]:
-    """``path:line rule`` for each added line that has a forbidden shape (never the value)."""
+def scan(diff: str) -> tuple[list[str], list[str]]:
+    """(refused, acknowledged): ``path:line rule`` for each added line with a forbidden shape (never the value).
 
-    out: list[str] = []
+    A line carrying the marker is acknowledged, not refused, and is STILL NAMED so a reviewer sees every
+    marked line: the marker cannot hide a real value, it only moves the line from a failure to a review list.
+    """
+
+    refused: list[str] = []
+    acknowledged: list[str] = []
     for path, number, text in added_lines(diff):
         if path.startswith(SKIPPED_PREFIXES) or path.endswith(SKIPPED_SUFFIXES):
             continue
-        if MARKER in text:
-            continue
         for rule, pattern in RULES.items():
             if pattern.search(text):
-                out.append(f"{path}:{number} {rule}")
-    return out
+                (acknowledged if MARKER in text else refused).append(
+                    f"{path}:{number} {rule}"
+                )
+    return refused, acknowledged
+
+
+def findings(diff: str) -> list[str]:
+    """The refused lines only (see :func:`scan`)."""
+
+    return scan(diff)[0]
 
 
 def _diff(repo_root: Path, base: str, head: str) -> str:
@@ -111,7 +123,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--changed-to", default="HEAD")
     args = parser.parse_args(argv)
     try:
-        hits = findings(_diff(args.repo_root, args.changed_from, args.changed_to))
+        hits, acknowledged = scan(
+            _diff(args.repo_root, args.changed_from, args.changed_to)
+        )
     except OwnerShapeError as exc:
         print(f"owner-shapes: FAIL: {exc}", file=sys.stderr)
         return 2
@@ -122,6 +136,12 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    if acknowledged:
+        listing = "\n  ".join(acknowledged[:50])
+        print(
+            f"owner-shapes: {len(acknowledged)} marked line(s) need a reviewer: "
+            f"{MARKER}\n  {listing}"
+        )
     print("owner-shapes: PASS")
     return 0
 

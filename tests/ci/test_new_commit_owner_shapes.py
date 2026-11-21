@@ -80,7 +80,6 @@ def test_an_added_owner_shape_is_refused(tmp_path: Path, line: str) -> None:
         "see file.py:1234-5678 and ~1234-5678 and #1234-5678",
         "contact someone" + "@" + "example" + "." + "test",
         "ordinary text with 12 and 2026-11-20 and 1234.5678",
-        f"reviewed {ACCOUNT}  owner-shape: synthetic",
     ],
 )
 def test_synthetic_exempt_and_ordinary_lines_pass(tmp_path: Path, line: str) -> None:
@@ -134,3 +133,21 @@ def test_the_refusal_names_path_line_and_rule_but_not_the_value(
 def test_a_bad_range_is_an_error_not_a_pass(tmp_path: Path) -> None:
     root, _base = _repo(tmp_path, {"a.md": "x\n"})
     assert _run(root, "0" * 40) == 2
+
+
+def test_the_marker_acknowledges_but_never_hides_a_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # a real-looking shape WITH the marker passes (a reviewer vouched) but is still named by path:line
+    marked = "x\nreviewed " + ACCOUNT + "  owner-shape: synthetic\n"
+    root, base = _repo(tmp_path, {"a.md": marked})
+    assert _run(root, base) == 0
+    out = capsys.readouterr().out
+    assert "a.md:2 account-shaped string" in out
+    assert "need a reviewer" in out
+    assert ACCOUNT not in out
+    # an unmarked line next to a marked one is still refused
+    mixed = ACCOUNT + " owner-shape: synthetic\n" + MAIL + "\n"
+    (tmp_path / "two").mkdir()
+    root2, base2 = _repo(tmp_path / "two", {"a.md": mixed})
+    assert _run(root2, base2) == 1
