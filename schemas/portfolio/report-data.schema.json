@@ -171,7 +171,16 @@
           "economic_end_date": {"type": ["string", "null"], "format": "date"},
           "end_recognition_basis": {"enum": ["EXIT_FILL_DAY_IS_END_DAY", "NAV_RECOGNITION_DAY_AFTER_EXIT_FILL", "END_DAY_DIFFERS_FROM_EXIT_FILL_AND_RECOGNITION", null]},
           "parent_strategy_id": {"type": "string", "minLength": 1},
-          "sleeve_id": {"type": "string", "minLength": 1}
+          "sleeve_id": {"type": "string", "minLength": 1},
+          "cost_classification": {
+            "type": "object",
+            "required": ["classification", "reason", "ruling_reference"],
+            "properties": {
+              "classification": {"type": "string", "minLength": 1},
+              "reason": {"type": "string", "minLength": 1},
+              "ruling_reference": {"type": "string", "minLength": 1}
+            }
+          }
         }
       }
     },
