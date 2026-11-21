@@ -9,6 +9,15 @@ significance marks on live-window increments).  Emits ``factor-lens-status.json`
 Semantics follow ``FACTOR-LENS-DECISION-v6`` sections 7 to 9 and the round-5 gating list.
 Stage 2 (the labelled P123 panel) is out of scope: a panel of that kind raises
 ``NotImplementedError`` so it cannot pass unchecked.
+
+French compliance is month-level by intent, as in the release builder ("the output must contain
+the latest month whose month end plus 45 days is on or before the evaluation date"): a last
+observation anywhere in the required month counts, and age is counted from that month's end.
+
+``FRENCH_HEADLINE_LAG_DAYS`` (75) is defence in depth, not an independent tunable gate: under
+the required-month rule it never binds (month-compliant implies age <= 75; pinned by
+``test_age_ceiling_never_changes_the_outcome_of_the_required_month_rule``). Changing 75 without
+changing the 45-day allowance either does nothing or breaks that test.
 """
 
 from __future__ import annotations
@@ -63,10 +72,53 @@ DISAGREEMENT_LABEL = "informational, not validated"
 
 # Only these windows are not live. Anything else, including a missing window, is live.
 _NON_LIVE_WINDOWS = frozenset({"full", "backtest"})
-_SIGNIFICANCE_KEY = re.compile(
-    r"^p(_|$)|star|signif|^t(_|$)|wild_bootstrap|bootstrap|pvalue|t_stat", re.IGNORECASE
+# Significance keys: distinctive stems match anywhere in the lower-cased key; short ones only as
+# a whole token, so window_start / started_at / restart / benchmark / design are not flagged.
+_SIG_SUBSTRINGS = (
+    "signif", "pvalue", "pval", "tstat", "zscore", "zstat", "qvalue", "asterisk", "bootstrap",
+)  # fmt: skip
+_SIG_TOKENS = frozenset(
+    {
+        "p",
+        "t",
+        "z",
+        "q",
+        "pr",
+        "prob",
+        "tval",
+        "sig",
+        "fdr",
+        "holm",
+        "mark",
+        "star",
+        "stars",
+    }
 )
-_LOADING_KEY = re.compile(r"loading|beta|coef", re.IGNORECASE)
+_LOADING_KEY = re.compile(
+    r"loading|beta|coef|exposure|weight|tstat|t_stat|factor_t(_|$)|(^|_)t(_|$)",
+    re.IGNORECASE,
+)
+_BRIDGE_KEYS = frozenset({"region", "coverage", "never_spliced", "label"})
+
+
+def _is_significance_key(key: object) -> bool:
+    lowered = str(key).lower()
+    if any(stem in lowered for stem in _SIG_SUBSTRINGS):
+        return True
+    return bool(_SIG_TOKENS & set(re.split(r"[^a-z0-9]+", lowered)))
+
+
+def _strip_loadings(value: Any) -> Any:
+    """Drop loading-like keys at every depth (a NOT_APPLICABLE strategy shows no attribution)."""
+    if isinstance(value, Mapping):
+        return {
+            k: _strip_loadings(v)
+            for k, v in value.items()
+            if not _LOADING_KEY.search(str(k))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_strip_loadings(v) for v in value]
+    return value
 
 
 class StatusError(ValueError):
@@ -334,6 +386,10 @@ def verify_panels(
             failures += exc.failures
             continue
         failures += [
+            f"{pid}: undeclared key {key!r}"
+            for key in sorted(set(panel) - set(derived))
+        ]
+        failures += [
             f"{pid}: declared {key}={panel.get(key)!r} but derived {value!r}"
             for key, value in derived.items()
             if panel.get(key) != value
@@ -370,6 +426,32 @@ def check_weekly_windows(
                 f"window {start}: days {[d.isoformat() for d in days]} != trading days "
                 f"{[d.isoformat() for d in expected]}"
             )
+    return failures
+
+
+def check_window_coverage(
+    windows: Sequence[Mapping[str, Any]], trading_days: Sequence[date]
+) -> list[str]:
+    """Windows cover every ISO week that has a trading day in the run: none missing, none extra."""
+    expected = {d - timedelta(days=d.weekday()) for d in trading_days}
+    failures: list[str] = []
+    seen: set[date] = set()
+    for window in windows:
+        try:
+            start = _parse_date(window.get("week_start"), "week_start")
+        except StatusError:
+            continue  # reported by check_weekly_windows
+        if start in seen:
+            failures.append(f"window {start}: duplicate week")
+        seen.add(start)
+        if start not in expected:
+            failures.append(
+                f"window {start}: no trading day in the run falls in this week"
+            )
+    failures += [
+        f"window {week}: missing for a week with trading days"
+        for week in sorted(expected - seen)
+    ]
     return failures
 
 
@@ -412,7 +494,7 @@ def _significance_findings(value: object, path: str = "") -> list[str]:
     if isinstance(value, Mapping):
         for key, item in value.items():
             where = f"{path}.{key}" if path else str(key)
-            if _SIGNIFICANCE_KEY.search(str(key)):
+            if _is_significance_key(key):
                 found.append(where)
             found += _significance_findings(item, where)
     elif isinstance(value, (list, tuple)):
@@ -505,6 +587,10 @@ def validate_bridges(bridges: Sequence[Mapping[str, Any]]) -> list[str]:
     for bridge in bridges:
         region, coverage = bridge.get("region"), bridge.get("coverage")
         name = f"{region} bridge"
+        failures += [
+            f"{name}: undeclared key {key!r}"
+            for key in sorted(set(bridge) - _BRIDGE_KEYS)
+        ]
         if bridge.get("never_spliced") is not True:
             failures.append(f"{name}: never_spliced must be literal true")
         expected = BRIDGE_LABELS.get((region, coverage))  # type: ignore[arg-type]
@@ -541,6 +627,7 @@ def build_status(
         )
     else:
         failures += check_weekly_windows(windows, trading_days)
+        failures += check_window_coverage(windows, trading_days)
     failures += validate_comparisons(comparisons)
     failures += validate_bridges(bridges)
     strategy_rows: list[dict[str, Any]] = []
@@ -552,7 +639,7 @@ def build_status(
             continue
         row = {**strategy, "attribution": attribution}
         if attribution["state"] == "NOT_APPLICABLE":
-            row = {k: v for k, v in row.items() if not _LOADING_KEY.search(str(k))}
+            row = _strip_loadings(row)
         strategy_rows.append(row)
     if failures:
         raise StatusError(failures)
