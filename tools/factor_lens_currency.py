@@ -40,6 +40,8 @@ CONVERTED: Final = "CURRENCY_CONVERTED"
 FX_MAX_AGE_DAYS: Final = 7  # a day may use a close at most this many days old
 FX_CLOSE_BAND: Final = (Decimal("0.5"), Decimal("2.5"))
 FX_MAX_DAILY_MOVE: Final = Decimal("0.10")
+FX_MAX_FIVE_BAR_MOVE: Final = Decimal("0.15")  # two +9% bars are +18.8%: refused
+FX_MAX_BAR_GAP_DAYS: Final = 5  # a weekend plus a holiday; sparser series are not daily
 LAYER_ORDER: Final = ("BACKTEST", "MODEL_LIVE", "ACCOUNT_LIVE")
 _SHA256_HEX: Final = frozenset("0123456789abcdef")
 
@@ -86,6 +88,10 @@ class Layer:
     status: str
     fx_source_sha256: str | None
 
+    def __post_init__(self) -> None:
+        # immutable after construction: plain tuples of (date, Decimal)
+        object.__setattr__(self, "rows", tuple((d, v) for d, v in self.rows))
+
 
 def load_fx_levels(path: Path, *, expected_sha256: str, pair: str) -> FxLevels:
     """Read the pinned FX capture CSV; refuse any identity, ticker, date or close defect."""
@@ -116,8 +122,14 @@ def load_fx_levels(path: Path, *, expected_sha256: str, pair: str) -> FxLevels:
         raise CurrencyError("fx series is empty")
     days = tuple(sorted(closes))
     for before, after in zip(days, days[1:], strict=False):
+        if (after - before).days > FX_MAX_BAR_GAP_DAYS:
+            raise CurrencyError("fx series is not daily: a gap exceeds the bar limit")
         if abs(closes[after] / closes[before] - 1) > FX_MAX_DAILY_MOVE:
             raise CurrencyError("fx series jumps more than the daily sanity limit")
+    for index in range(5, len(days)):
+        move = closes[days[index]] / closes[days[index - 5]] - 1
+        if abs(move) > FX_MAX_FIVE_BAR_MOVE:
+            raise CurrencyError("fx series jumps more than the five-bar sanity limit")
     return FxLevels(pair=pair, closes=closes, sha256=digest, days=days)
 
 
@@ -187,7 +199,11 @@ def admit_layer(
     fx: FxLevels | None = None,
     base_date: date | None = None,
 ) -> Layer:
-    """Admit one layer under its provider currency and the label it carries."""
+    """Admit one layer under its provider currency and the label it carries.
+
+    ``rows`` must be NATIVE provider returns: rows already converted upstream must not be
+    passed here (use the ``Layer`` returned by this function; ``convert_admitted`` refuses a
+    second conversion)."""
 
     if layer != ACCOUNT_LAYER and layer not in PROVIDER_LAYERS:
         raise CurrencyError(f"unknown layer {layer!r}")
@@ -256,9 +272,12 @@ def _check_layer_for_splice(item: Layer) -> None:
         raise CurrencyError(f"{problem} is not USD or was not converted with evidence")
 
 
-def splice_rows(layers: Sequence[Layer]) -> list[tuple[date, Decimal]]:
+def splice_rows(
+    layers: Sequence[Layer], *, expected_fx_sha256: str
+) -> list[tuple[date, Decimal]]:
     """Chain admitted layers: known names in BACKTEST, MODEL_LIVE, ACCOUNT_LIVE order, every
-    layer USD with consistent conversion evidence, dates strictly increasing across seams."""
+    layer USD with consistent conversion evidence, every converted layer carrying the pinned
+    FX file's sha256, dates strictly increasing across seams."""
 
     if not layers:
         raise CurrencyError("splice needs at least one layer")
@@ -269,6 +288,10 @@ def splice_rows(layers: Sequence[Layer]) -> list[tuple[date, Decimal]]:
     chain: list[tuple[date, Decimal]] = []
     for item in layers:
         _check_layer_for_splice(item)
+        if item.status == CONVERTED and item.fx_source_sha256 != expected_fx_sha256:
+            raise CurrencyError(
+                f"splice refused: {item.layer} was converted with another fx series"
+            )
         if chain and item.rows[0][0] <= chain[-1][0]:
             raise CurrencyError(
                 f"splice refused: {item.layer} overlaps the layer before"

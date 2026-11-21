@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import date
+from typing import Any
 from decimal import Decimal
 from pathlib import Path
 
@@ -22,6 +23,8 @@ FX_CSV = (
     "EURUSD=X,2026-01-06,1.11,1.12,1.10,1.0989,1.0989,0,0.0,0.0\n"
     "EURUSD=X,2026-01-08,1.10,1.12,1.10,1.1200,1.1200,0,0.0,0.0\n"
 )
+
+SHA = hashlib.sha256(FX_CSV.encode("utf-8")).hexdigest()
 
 
 def _levels(tmp_path: Path, text: str = FX_CSV, sha: str | None = None) -> flc.FxLevels:
@@ -203,7 +206,7 @@ def test_a_splice_needs_every_layer_in_usd_and_provider_layers_converted(
         provider_currency="USD",
         label_currency="USD",
     )
-    chain = flc.splice_rows([backtest, live, account])
+    chain = flc.splice_rows([backtest, live, account], expected_fx_sha256=SHA)
     assert [d for d, _ in chain] == [
         date(2026, 1, 5),
         date(2026, 1, 6),
@@ -216,7 +219,7 @@ def test_a_splice_needs_every_layer_in_usd_and_provider_layers_converted(
         label_currency="EUR",
     )
     with pytest.raises(flc.CurrencyError, match="splice"):
-        flc.splice_rows([backtest, eur_only, account])
+        flc.splice_rows([backtest, eur_only, account], expected_fx_sha256=SHA)
     overlapping = flc.admit_layer(
         "MODEL_LIVE",
         [(date(2026, 1, 5), D("0.01"))],
@@ -225,9 +228,9 @@ def test_a_splice_needs_every_layer_in_usd_and_provider_layers_converted(
         **kw,
     )
     with pytest.raises(flc.CurrencyError, match="overlap"):
-        flc.splice_rows([backtest, overlapping])
+        flc.splice_rows([backtest, overlapping], expected_fx_sha256=SHA)
     with pytest.raises(flc.CurrencyError, match="splice"):
-        flc.splice_rows([])
+        flc.splice_rows([], expected_fx_sha256=SHA)
 
 
 def _converted(tmp_path: Path, name: str = "MODEL_LIVE") -> flc.Layer:
@@ -280,7 +283,7 @@ def test_forged_layer_objects_do_not_splice(tmp_path: Path) -> None:
     ]
     for layer in forged:
         with pytest.raises(flc.CurrencyError):
-            flc.splice_rows([layer])
+            flc.splice_rows([layer], expected_fx_sha256=SHA)
     account = flc.admit_layer(
         "ACCOUNT_LIVE",
         [(date(2026, 1, 8), D("0.01"))],
@@ -288,9 +291,9 @@ def test_forged_layer_objects_do_not_splice(tmp_path: Path) -> None:
         label_currency="USD",
     )
     with pytest.raises(flc.CurrencyError, match="order"):
-        flc.splice_rows([account, good])
+        flc.splice_rows([account, good], expected_fx_sha256=SHA)
     with pytest.raises(flc.CurrencyError, match="order"):
-        flc.splice_rows([good, good])
+        flc.splice_rows([good, good], expected_fx_sha256=SHA)
 
 
 @pytest.mark.parametrize(
@@ -357,3 +360,39 @@ def test_labels_must_match_the_provider_currency_on_every_layer() -> None:
         )
     with pytest.raises(flc.CurrencyError, match="label"):
         flc.admit_layer("BACKTEST", rows, provider_currency="USD", label_currency="EUR")
+
+
+def test_splice_pins_the_fx_file_and_the_hash_shape(tmp_path: Path) -> None:
+    good = _converted(tmp_path)
+    assert flc.splice_rows([good], expected_fx_sha256=SHA)
+    with pytest.raises(flc.CurrencyError, match="another fx series"):
+        flc.splice_rows([good], expected_fx_sha256="0" * 64)
+    rows = good.rows
+    short = flc.Layer("MODEL_LIVE", rows, "USD", "EUR", flc.CONVERTED, "a" * 63)
+    with pytest.raises(flc.CurrencyError, match="splice"):
+        flc.splice_rows([short], expected_fx_sha256="a" * 63)
+    native_usd = flc.Layer("MODEL_LIVE", rows, "USD", "USD", flc.CONVERTED, SHA)
+    with pytest.raises(flc.CurrencyError, match="splice"):
+        flc.splice_rows([native_usd], expected_fx_sha256=SHA)
+
+
+def _fx_text(bars: list[tuple[str, float]]) -> str:
+    header = "Ticker,Date,Open,High,Low,Close,Adj Close,Volume,Dividends,Stock Splits"
+    body = [f"EURUSD=X,{d},1,1,1,{c},{c},0,0,0" for d, c in bars]
+    return chr(10).join([header, *body]) + chr(10)
+
+
+def test_a_sparse_or_compounding_jump_fx_series_refuses(tmp_path: Path) -> None:
+    weekly = _fx_text([("2026-01-02", 1.10), ("2026-01-09", 1.11)])
+    with pytest.raises(flc.CurrencyError, match="not daily"):
+        _levels(tmp_path, weekly)
+    closes = [1.10, 1.10, 1.10, 1.10, 1.10, 1.199, 1.307]  # two +9% bars
+    bars = [(f"2026-01-{2 + i:02d}", c) for i, c in enumerate(closes)]
+    with pytest.raises(flc.CurrencyError, match="five-bar"):
+        _levels(tmp_path, _fx_text(bars))
+
+
+def test_layer_rows_are_immutable_after_construction() -> None:
+    rows: Any = [(date(2026, 1, 5), D("0.01"))]
+    layer = flc.Layer("BACKTEST", rows, "USD", "USD", flc.NATIVE_USD, None)
+    assert isinstance(layer.rows, tuple) and isinstance(layer.rows[0], tuple)
