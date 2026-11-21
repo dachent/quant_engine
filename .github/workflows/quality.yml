@@ -240,6 +240,7 @@ jobs:
           tools/base_proxy_factors.py
           tools/style_capture_assemble.py
           tools/yahoo_fetch_driver.py
+          tools/yahoo_refresh_capture.py
           tools/tt_source_manifest_builder.py
           tools/tt_order_planner.py
           tools/grizzlybulls_capture.py
