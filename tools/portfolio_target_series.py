@@ -4522,11 +4522,32 @@ def _strategies_without_a_backtest_layer(
 
 
 EU_MODEL_LIVE_SEGMENT_ID = "p123-eu:model-live"
+# A bundle id is a content hash, so this cannot be reached by editing a block. The one
+# release bundle built before the extension carried a tail digest is verified without it;
+# every other bundle must attest its appended rows.
+EU_EXTENSION_LEGACY_BUNDLE_IDS: Final = frozenset(
+    {"4dfa43d59a80c9fbb1eb6040f08e96c3652bbea5388dd55522939188429e3712"}
+)
+
+
+def _bundle_content_id(bundle: Mapping[str, Any]) -> str:
+    """The bundle's identity recomputed from its content, never the declared field.
+
+    The strategy-history bundle id is the sha256 of its canonical manifest without the id
+    itself, so every key, the extension block included, moves it. Recomputing it here is
+    what stops an edited block from riding the legacy allowlist under a copied id.
+    """
+
+    return hashlib.sha256(
+        canonical_json_bytes({k: v for k, v in bundle.items() if k != "bundle_id"})
+    ).hexdigest()
 
 
 def _eu_model_live_extension_identity(
     *,
     block: object,
+    bundle_id: object,
+    receipt: Mapping[str, Any],
     pinned: Mapping[str, Any] | None,
     segment_rows: Sequence[Mapping[str, str]],
     accepted_as_of: date,
@@ -4534,15 +4555,41 @@ def _eu_model_live_extension_identity(
     """The EU model-live identity a declared extension is allowed to move to.
 
     The contract pins the seed's EU model-live segment. A bundle that extends it carries an
-    `eu_model_live_refresh` block; without one the pin stays frozen. With one, the first
-    pinned-count rows of the materialized segment must reproduce the pinned identity exactly
-    (the byte-equal prefix), and only strictly later rows, up to the declared last date and
-    count, may follow. Returns the four identity fields to substitute, or None when no
-    extension is declared.
+    `eu_model_live_refresh` block; without one the pin stays frozen. With one:
+
+    * the block must agree with the QSI revision receipt that is hash-bound into the
+      staged generation: same accepted predecessor, and the designer returns it names must
+      be a recorded receipt source;
+    * the first pinned-count rows of the materialized segment reproduce the pinned
+      identity exactly (the byte-equal prefix);
+    * the tail is strictly later than the pinned end, within the cutoff, one series, the
+      MODEL_LIVE layer, one row per date, and matches the declared count, first and last
+      dates and the producer's attested tail digest.
+
+    Returns the four identity fields to substitute, or None when no extension is declared.
     """
 
     if not isinstance(block, Mapping) or pinned is None:
         return None
+    sources = {
+        str(item.get("source_id")): item
+        for item in receipt.get("sources") or []
+        if isinstance(item, Mapping)
+    }
+    designer = sources.get("p123-eu-designer-model-returns")
+    predecessor = block.get("accepted_predecessor")
+    receipt_predecessor = receipt.get("accepted_predecessor")
+    if (
+        designer is None
+        or designer.get("sha256") != block.get("designer_model_returns_sha256")
+        or not isinstance(predecessor, Mapping)
+        or not isinstance(receipt_predecessor, Mapping)
+        or any(
+            predecessor.get(key) != receipt_predecessor.get(key)
+            for key in ("bundle_id", "manifest_sha256", "returns_sha256")
+        )
+    ):
+        raise TargetSeriesError("EU model-live extension differs from its receipt")
     ordered = sorted(segment_rows, key=lambda row: row["date"])
     count = int(pinned["return_observations"])
     prefix = _row_identity(ordered[:count])
@@ -4552,18 +4599,35 @@ def _eu_model_live_extension_identity(
     ):
         raise TargetSeriesError("EU model-live extension changed the pinned prefix")
     tail = ordered[count:]
+    dates = [row["date"] for row in ordered]
+    declared_digest = block.get("model_live_tail_rows_sha256")
     if (
         not tail
+        or len(set(dates)) != len(dates)
         or tail[0]["date"] <= str(pinned["observed_end"])
         or ordered[-1]["date"] > accepted_as_of.isoformat()
+        or {row["series_id"] for row in ordered} != {ordered[0]["series_id"]}
+        or {row["evidence_layer"] for row in tail} != {"MODEL_LIVE"}
+        or len({row["strategy_version"] for row in ordered}) != 1
         or (
             block.get("model_live_observations"),
             block.get("model_live_first"),
             block.get("model_live_last"),
         )
         != (len(ordered), ordered[0]["date"], ordered[-1]["date"])
+        or (
+            declared_digest != _row_identity(tail)["sha256"]
+            if declared_digest is not None
+            else bundle_id not in EU_EXTENSION_LEGACY_BUNDLE_IDS
+        )
     ):
         raise TargetSeriesError("EU model-live extension differs from its declaration")
+    if any(
+        (date.fromisoformat(later) - date.fromisoformat(earlier)).days
+        > MODEL_LIVE_MAX_GAP_DAYS
+        for earlier, later in zip(dates[count - 1 :], dates[count:], strict=False)
+    ):
+        raise TargetSeriesError("EU model-live extension has a hole")
     identity = _row_identity(ordered)
     return {
         key: identity[key]
@@ -7753,10 +7817,11 @@ def validate_layered_history_generation(
         # row is caught downstream by the product-authority comparison, but under a
         # revision it must be refused here, naming the revision -- otherwise the failure
         # reads as a contract mismatch and the reader looks in the wrong place.
+        history_bundle = json.loads(raw_source_manifests["strategy-history"])
         eu_extension_identity = _eu_model_live_extension_identity(
-            block=json.loads(raw_source_manifests["strategy-history"]).get(
-                "eu_model_live_refresh"
-            ),
+            block=history_bundle.get("eu_model_live_refresh"),
+            bundle_id=_bundle_content_id(history_bundle),
+            receipt=history_bundle["qsi_source_revision"],
             pinned=next(
                 (
                     item

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 import hashlib
 import importlib.util
+import csv
 import io
 import json
 from pathlib import Path
@@ -1763,6 +1764,27 @@ def test_qsi_refresh_extends_eu_model_live_from_a_newer_designer_generation(
         item for item in manifest["series"] if item["series_id"] == "EU [P123]"
     )
     assert eu_definition["model_live_observations"] == 4
+    assert eu_definition["model_live_start"] == "2024-02-19"
+    assert eu_definition["model_live_end"] == "2024-02-22"
+    designer_returns = (
+        next(Path(str(result["destination"])).parent.parent.rglob("designer-ext"))
+        / ("d" * 64)
+        / "returns.csv"
+    )
+    assert (
+        eu_definition["source_artifacts"][0]["sha256"]
+        == hashlib.sha256(designer_returns.read_bytes()).hexdigest()
+    )
+    assert (
+        eu_definition["source_artifacts"][0]["sha256"]
+        != next(
+            item
+            for item in json.loads(
+                setup["retained_manifest_path"].read_text(encoding="utf-8")
+            )["series"]
+            if item["series_id"] == "EU [P123]"
+        )["source_artifacts"][0]["sha256"]
+    )
     # the replay re-derives the whole bundle, EU extension included
     assert _verify_refreshed(combined)["bundle_id"] == result["bundle_id"]
 
@@ -1876,3 +1898,60 @@ def test_qsi_eu_extension_cli_takes_the_designer_generation_and_not_a_version(
         _verify_refreshed(Path(result["destination"]))["bundle_id"]
         == result["bundle_id"]
     )
+    # the flag reached the builder: a dropped argument would build a QSI-only bundle
+    destination = Path(result["destination"])
+    manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+    block = manifest["eu_model_live_refresh"]
+    assert block["model_live_last"] == "2024-02-22"
+    assert (
+        block["designer_model_returns_sha256"]
+        == hashlib.sha256((designer / "returns.csv").read_bytes()).hexdigest()
+    )
+    new_rows = [
+        row
+        for row in csv.DictReader(
+            io.StringIO((destination / "returns.csv").read_text(encoding="utf-8"))
+        )
+        if row["series_id"] == "EU [P123]" and row["date"] > "2024-02-20"
+    ]
+    assert block["model_live_tail_rows_sha256"] == history._admitted_rows_digest(
+        new_rows
+    )
+    sidecar = json.loads((destination / "sources.local.json").read_bytes())
+    assert history.EU_DESIGNER_RETURNS_SOURCE_ID in sidecar["sources"]
+
+
+def test_qsi_eu_extension_accepts_a_last_live_row_on_the_as_of_date(
+    tmp_path: Path,
+) -> None:
+    """The real case: the designer curve ends on the cutoff itself."""
+
+    setup = _qsi_eu_setup(tmp_path)
+    setup["as_of_date"] = "2024-02-22"
+    result = _qsi_eu_refresh(tmp_path, setup, [*_EU_BACKTEST, *_EU_LIVE_NEWER])
+    manifest = json.loads(
+        (Path(str(result["destination"])) / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["eu_model_live_refresh"]["model_live_last"] == "2024-02-22"
+    assert manifest["as_of_date"] == "2024-02-22"
+
+
+def test_eu_designer_curve_refuses_a_catalog_that_differs_from_its_manifest(
+    tmp_path: Path,
+) -> None:
+    generation = _designer_generation(tmp_path, [*_EU_BACKTEST, *_EU_LIVE])
+    catalog = generation / "catalog.json"
+    manifest_path = generation / "generation.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"].append(
+        {
+            "artifact_id": "catalog.json",
+            "sha256": hashlib.sha256(catalog.read_bytes()).hexdigest(),
+            "size_bytes": catalog.stat().st_size,
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+    catalog.write_bytes(catalog.read_bytes().replace(b"2024-02-18", b"2024-02-25"))
+    with pytest.raises(history.StrategyHistoryError, match="catalog differs"):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)

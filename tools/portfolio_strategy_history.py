@@ -1178,7 +1178,18 @@ def _p123_eu_designer_curve(
         raise StrategyHistoryError(
             "EU designer-model returns differ from the generation manifest"
         )
-    catalog = json.loads(catalog_path.read_bytes())
+    catalog_bytes = catalog_path.read_bytes()
+    listed = artifacts.get("catalog.json")
+    # the catalog carries the provider launch that splits the layers, so when the
+    # generation manifest lists it, the bytes read must be the bytes it lists
+    if isinstance(listed, dict) and (
+        listed.get("sha256") != hashlib.sha256(catalog_bytes).hexdigest()
+        or listed.get("size_bytes") != len(catalog_bytes)
+    ):
+        raise StrategyHistoryError(
+            "EU designer-model catalog differs from the generation manifest"
+        )
+    catalog = json.loads(catalog_bytes)
     series = catalog.get("series")
     if not isinstance(series, dict):
         raise StrategyHistoryError("EU designer-model catalog series differs")
@@ -3225,6 +3236,9 @@ def _extend_eu_model_live(
         "model_live_observations": len(new_live),
         "model_live_first": new_live[0]["date"],
         "model_live_last": new_live[-1]["date"],
+        "model_live_tail_rows_sha256": _admitted_rows_digest(
+            new_live[len(seed_live) :]
+        ),
         "extends_model_live": {
             "observations": len(seed_live),
             "last": seed_live[-1]["date"] if seed_live else None,

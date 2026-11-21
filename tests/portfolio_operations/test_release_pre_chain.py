@@ -429,3 +429,32 @@ def test_the_tool_carries_no_real_id_or_absolute_path() -> None:
     assert not re.search(r"\b[0-9a-f]{40,64}\b", text)
     assert not re.search(r"[A-Za-z]:[\\/]", text)
     assert "qe-p2" not in text and "worktrees" not in text
+
+
+def _load_pre_chain_module() -> Any:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_release_pre_chain_under_test", TOOL)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_revised_bundle_must_be_staged_with_its_producer_sidecar(
+    tmp_path: Path,
+) -> None:
+    module = _load_pre_chain_module()
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"qsi_source_revision": {}}), encoding="utf-8")
+    with pytest.raises(module.PreChainError, match="sidecar is absent"):
+        module._require_producer_sidecar(str(manifest))
+    (tmp_path / "sources.local.json").write_text("{}", encoding="utf-8")
+    module._require_producer_sidecar(str(manifest))
+    # a bundle without a revision, or inputs that name no bundle, need no sidecar
+    plain = tmp_path / "plain" / "manifest.json"
+    plain.parent.mkdir()
+    plain.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+    module._require_producer_sidecar(str(plain))
+    module._require_producer_sidecar(None)

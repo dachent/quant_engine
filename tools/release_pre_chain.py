@@ -125,6 +125,28 @@ def _load_modules() -> tuple[Any, Any, Any]:
     return prep, dependence, attribution
 
 
+def _require_producer_sidecar(manifest_path: object) -> None:
+    """A bundle carrying a source revision is replayed from its archives in pre-chain.
+
+    The replay needs the producer's `sources.local.json` beside the bundle; without it the
+    layered-history verifier silently falls back to the portable hash chain. That fallback
+    is right for a replica, which never holds the archives, and wrong here.
+    """
+
+    if not isinstance(manifest_path, str):
+        return
+    path = Path(manifest_path)
+    try:
+        revised = "qsi_source_revision" in json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        return
+    if revised and not path.with_name("sources.local.json").is_file():
+        raise PreChainError(
+            "strategy history bundle carries a source revision but its producer "
+            "sidecar is absent; stage the bundle with sources.local.json"
+        )
+
+
 def pre_chain(
     *,
     cycle: Path,
@@ -140,6 +162,7 @@ def pre_chain(
     policy = repo / "contracts" / "portfolio-dependence-policy-v1.json"
     selection = json.loads(selected_inputs.read_text(encoding="utf-8"))
     files = selection["files"]
+    _require_producer_sidecar(files.get("strategy_history_manifest_path"))
     authorities = prep.selected_history_authorities(files)
 
     work = cycle / "pre"
