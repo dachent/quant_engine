@@ -196,6 +196,8 @@ Role of each CSV (header order is the generation tool's, pinned by a test):
 | `funds.rebalance-history` | `volatis_strategy_rebalance_history.csv`; any other title becomes `fund_rebalance_<title>.csv` |
 | `funds.invest` | `ssg_<fund>_pricehistory.csv` per fund (the 5-day public series), `ssg_all_funds_stats.csv` and `projections_all_live_funds.csv` (one fund-metadata table under both names, as the retained converter wrote it) |
 
+The Volatis fund and its holdings are required at every cutoff (Quantbase POSITION is a required class, and the holdings file exists only as the capture-time snapshot). Conversion refuses a dashboard with no fund titled exactly `Volatis Strategy` and one whose Volatis holdings list is empty. It does not inspect the rows: a list holding only zero-quantity or cash rows converts, and a Volatis that is legitimately all cash at the capture would still need its holdings file with that cash row, since an empty list is refused.
+
 `--volatis-pricehistory` is required and has no default. `public` writes the
 provider's public fund series for Volatis. `account-level` replaces only that file
 with the dashboard's daily account series, which is what the retained 2026-09-02
