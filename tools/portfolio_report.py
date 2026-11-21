@@ -10774,13 +10774,18 @@ def _lifecycle_strategy_rows(
     strategy_names: Mapping[str, str],
     derived_epochs: Sequence[tuple[str, str, str, str | None]] = (),
     manifest_rows: Sequence[Mapping[str, Any]] = (),
+    costs: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Lifecycle fields for the current strategies and the retained records.
 
     The retained records are the strategies the report does not carry as current
     but that the current-epoch crosswalk or the nested-strategy tag map names:
-    history-only, effective-dated, with no live product outcome (#592, #567).
+    history-only, effective-dated, with no live product outcome (#592, #567).  A
+    retained record carries the cost classification its baseline cost row states
+    (a structural exclusion from live costs and its ruling), never a blank.
     """
+
+    cost_rows = costs or {}
 
     epochs_by_strategy: dict[str, list[Mapping[str, Any]]] = {}
     for crosswalk_row in crosswalk_rows:
@@ -10837,6 +10842,7 @@ def _lifecycle_strategy_rows(
                 link=sleeves_by_strategy.get(strategy_id),
             ),
             **_economic_end_fields(strategy_id, manifest_rows),
+            **_retained_cost_fields(cost_rows.get(strategy_id, {})),
         }
     for strategy_id, link in sleeves_by_strategy.items():
         if strategy_id in current_ids or strategy_id in retained:
@@ -10875,6 +10881,7 @@ def _lifecycle_strategy_rows(
                 link=link,
             ),
             **_economic_end_fields(strategy_id, manifest_rows),
+            **_retained_cost_fields(cost_rows.get(strategy_id, {})),
         }
     return current, [retained[key] for key in sorted(retained)]
 
@@ -12290,6 +12297,10 @@ def build_report_data(
                         item.get("name"), "strategy.name"
                     )
                     for item in _objects(catalog.get("strategies"), "strategies")
+                },
+                costs={
+                    str(item["strategy_id"]): item
+                    for item in _objects(catalog.get("costs"), "costs")
                 },
             )
         )
