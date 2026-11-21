@@ -1,0 +1,31 @@
+{
+ "cutoff": "2026-11-19",
+ "evaluation_date": "2026-11-19",
+ "feeds": [
+  {
+   "feed_id": "F-F_Research_Data_5_Factors_2x3_daily_CSV",
+   "feed_key": "us_factors"
+  },
+  {
+   "feed_id": "F-F_Momentum_Factor_daily_CSV",
+   "feed_key": "us_momentum"
+  },
+  {
+   "feed_id": "Europe_5_Factors_Daily_CSV",
+   "feed_key": "europe_factors"
+  },
+  {
+   "feed_id": "Europe_Mom_Factor_Daily_CSV",
+   "feed_key": "europe_momentum"
+  },
+  {
+   "feed_id": "49_Industry_Portfolios_daily_CSV",
+   "feed_key": "us_industries"
+  }
+ ],
+ "limits": {
+  "max_requests": 5
+ },
+ "policy_id": "KENNETH_FRENCH_MONTHLY_DAILY_45D_V1",
+ "schema_version": 1
+}
