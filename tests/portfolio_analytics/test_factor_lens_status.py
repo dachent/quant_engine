@@ -517,3 +517,40 @@ def test_cli_writes_status_on_success(tmp_path: Path) -> None:
     assert fls.main(["--input", str(src), "--output", str(out)]) == 0
     doc = json.loads(out.read_bytes())
     assert [p["state"] for p in doc["panels"]] == ["COMPLIANT", "FRESH"]
+
+
+# --- owner ruling: French headline age ceiling of 75 days ------------------------------
+
+
+def test_headline_lag_constant_is_75() -> None:
+    assert fls.FRENCH_HEADLINE_LAG_DAYS == 75
+
+
+@pytest.mark.parametrize(
+    ("evaluation", "age", "state"),
+    [
+        (date(2026, 12, 13), 74, "COMPLIANT"),
+        (date(2026, 12, 14), 75, "COMPLIANT"),
+        (
+            date(2026, 12, 15),
+            76,
+            "HARD_STALE",
+        ),  # also: October is now the required month
+    ],
+)
+def test_french_age_ceiling_boundary_days(
+    evaluation: date, age: int, state: str
+) -> None:
+    panel = _french("2026-09-30", evaluation=evaluation)
+    assert panel["age_days"] == age
+    assert panel["state"] == state
+    assert panel["headline_lag_days"] == 75
+
+
+def test_age_ceiling_binds_even_when_required_month_is_present() -> None:
+    # Required month (Sep) is present but the last row is early in the month: age 76 > 75.
+    panel = _french("2026-09-01", evaluation=date(2026, 11, 16))
+    assert panel["required_month_end"] == "2026-09-30"
+    assert panel["age_days"] == 76
+    assert panel["state"] == "HARD_STALE"
+    assert panel["contributes_to_headline"] is False
