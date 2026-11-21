@@ -817,6 +817,7 @@ def _provider_ledger_generation(
         ],
         "transactions": [],
     }
+    catalog.update(extra_catalog or {})
     if catalog_schema_version == 2:
         catalog["capital_anchors"] = []
         schema = json.loads(
@@ -825,9 +826,6 @@ def _provider_ledger_generation(
             ).read_text(encoding="utf-8")
         )
         Draft202012Validator(schema).validate(catalog)
-    # Keys the schema does not list (portfolio_fx_generation, which the producer
-    # emits) are added after validation.
-    catalog.update(extra_catalog or {})
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_hash = hashlib.sha256(catalog_bytes).hexdigest()
     artifact = SourceArtifact(
