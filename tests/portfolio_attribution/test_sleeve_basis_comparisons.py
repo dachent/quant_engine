@@ -500,7 +500,8 @@ _CARRIED_ONCE_FIELDS = ("annualization", "comparison_window")
 _IDENTIFIER_FIELDS = (
     "id",
     "version_ref",
-)  # digit strings are identifiers here, not figures
+)  # an identifier-shaped string (letters, digits, _ and -) is an identifier here, not a figure
+_IDENTIFIER_SHAPE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")  # no leading sign
 
 
 def _holds_a_number(value: Any, *, strings: bool = True) -> bool:
@@ -532,7 +533,12 @@ def _comparison_figures(row: dict[str, Any], prefix: str) -> list[str]:
         if f"{prefix}_{name}" in row
         # an identifier may be a digit string; every other skipped field may not hold any number
         and _holds_a_number(
-            row[f"{prefix}_{name}"], strings=name not in _IDENTIFIER_FIELDS
+            row[f"{prefix}_{name}"],
+            strings=not (
+                name in _IDENTIFIER_FIELDS
+                and isinstance(row[f"{prefix}_{name}"], str)
+                and _IDENTIFIER_SHAPE.fullmatch(row[f"{prefix}_{name}"])
+            ),
         )
     ]
     assert not hidden, f"a skipped text field carries a number: {hidden}"
@@ -557,6 +563,19 @@ def test_a_numeric_value_cannot_hide_behind_a_skipped_status_name() -> None:
         _comparison_figures(
             {**row, "benchmark_assignment_status": "12345678"}, "benchmark"
         )
+    # but a decimal figure or a formatted one under an identifier field is still a figure
+    for name, text in (
+        ("benchmark_id", "0.0123"),
+        ("benchmark_id", "-4"),
+        ("benchmark_version_ref", "$12.50"),
+        ("benchmark_version_ref", "1,234.50"),
+        ("benchmark_version_ref", "1.5%"),
+    ):
+        with pytest.raises(AssertionError, match="skipped text field"):
+            _comparison_figures({**row, name: text}, "benchmark")
+    assert _comparison_figures(
+        {**row, "benchmark_version_ref": "benchmark:v1"}, "benchmark"
+    ) == ["benchmark_beta"]
     # text that merely contains a digit, or a non-finite word, is not a figure
     for text in ("UNAVAILABLE", "No cash path is admitted.", "v1", "NaN", "Infinity"):
         assert _comparison_figures(
