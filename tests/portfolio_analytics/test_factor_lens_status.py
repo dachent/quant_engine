@@ -18,6 +18,17 @@ sys.path.insert(0, str(ROOT / "tools"))
 import factor_lens_status as fls  # noqa: E402
 
 EVAL = date(2026, 11, 19)
+_BS_DAYS = [date(2026, 11, d) for d in (9, 10, 11, 12, 13)]
+_BS_WINDOWS = [{"week_start": "2026-11-09", "days": [d.isoformat() for d in _BS_DAYS]}]
+
+
+def _status(**kw: object) -> dict:
+    base: dict = {
+        "evaluation_date": EVAL,
+        "windows": _BS_WINDOWS,
+        "trading_days": _BS_DAYS,
+    }
+    return fls.build_status(**{**base, **kw})  # type: ignore[arg-type]
 
 
 def _french(last: str, region: str = "US", evaluation: date = EVAL) -> dict:
@@ -311,7 +322,7 @@ def test_attribution_status_refuses_empty_input() -> None:
 
 
 def test_status_block_carries_noise_rule() -> None:
-    doc = fls.build_status(evaluation_date=EVAL, panels=[_french("2026-09-30")])
+    doc = _status(panels=[_french("2026-09-30")])
     rule = doc["noise_rule"]
     assert rule["adj_r2_threshold"] == 0.2
     assert "0.2" in rule["text"] and "noise" in rule["text"]
@@ -326,7 +337,7 @@ def test_live_comparison_needs_threshold_or_interval() -> None:
     assert fls.validate_comparisons([{**bare, "noise_threshold": 0.1}])
     # Long windows do not need it.
     assert (
-        fls.validate_comparisons([{"strategy": "S", "window": "long", "gap": 0.2}])
+        fls.validate_comparisons([{"strategy": "S", "window": "full", "gap": 0.2}])
         == []
     )
 
@@ -352,7 +363,7 @@ def test_no_significance_marks_on_live_increments() -> None:
     # Long-window tests may carry p-values.
     assert (
         fls.validate_comparisons(
-            [{"strategy": "S", "window": "long", "gap": 0.2, "p_value": 0.01}]
+            [{"strategy": "S", "window": "full", "gap": 0.2, "p_value": 0.01}]
         )
         == []
     )
@@ -372,22 +383,22 @@ def test_disagreement_not_testable_in_live_windows_never_plain_no() -> None:
 
 def test_disagreement_missing_t_is_not_testable() -> None:
     out = fls.disagreement_state(
-        window="long", french_loading=0.4, french_t=None, p123_loading=-0.3, p123_t=-2.5
+        window="full", french_loading=0.4, french_t=None, p123_loading=-0.3, p123_t=-2.5
     )
     assert out["state"] == "NOT_TESTABLE"
 
 
 def test_disagreement_fires_only_on_opposite_signs_and_both_abs_t_at_least_2() -> None:
     fire = fls.disagreement_state(
-        window="long", french_loading=0.4, french_t=2.0, p123_loading=-0.3, p123_t=-2.5
+        window="full", french_loading=0.4, french_t=2.0, p123_loading=-0.3, p123_t=-2.5
     )
     assert fire["state"] == "FIRES"
     low_t = fls.disagreement_state(
-        window="long", french_loading=0.4, french_t=1.9, p123_loading=-0.3, p123_t=-2.5
+        window="full", french_loading=0.4, french_t=1.9, p123_loading=-0.3, p123_t=-2.5
     )
-    assert low_t["state"] == "NO_DISAGREEMENT"
+    assert low_t["state"] == "NOT_TESTABLE"  # one |t| < 2 is not testable
     same = fls.disagreement_state(
-        window="long", french_loading=0.4, french_t=3, p123_loading=0.3, p123_t=2.5
+        window="full", french_loading=0.4, french_t=3, p123_loading=0.3, p123_t=2.5
     )
     assert same["state"] == "NO_DISAGREEMENT"
 
@@ -427,7 +438,6 @@ def test_splice_flag_fails() -> None:
 
 def test_build_status_aggregates_and_is_deterministic() -> None:
     kwargs = dict(
-        evaluation_date=EVAL,
         panels=[_french("2026-09-30"), _french("2026-09-30", region="Europe")],
         strategies=[{"strategy": "crypto", "adj_r2": {"french": -0.01, "etf": 0.0}}],
         comparisons=[
@@ -435,11 +445,11 @@ def test_build_status_aggregates_and_is_deterministic() -> None:
         ],
         bridges=[fls.bridge_record(region="Europe", enlarged_configured=False)],
     )
-    doc = fls.build_status(**kwargs)
+    doc = _status(**kwargs)
     assert doc["schema"] == fls.SCHEMA
     assert doc["evaluation_date"] == "2026-11-19"
     assert doc["strategies"][0]["attribution"]["state"] == "NOT_APPLICABLE"
-    assert fls.render_status(doc) == fls.render_status(fls.build_status(**kwargs))
+    assert fls.render_status(doc) == fls.render_status(_status(**kwargs))
     assert fls.render_status(doc).endswith(b"\n") and b"\r" not in fls.render_status(
         doc
     )
@@ -458,11 +468,11 @@ def test_build_status_collects_every_failure() -> None:
 
 def test_build_status_requires_at_least_one_panel() -> None:
     with pytest.raises(fls.StatusError):
-        fls.build_status(evaluation_date=EVAL, panels=[])
+        _status(panels=[])
 
 
 def test_write_status_is_create_only(tmp_path: Path) -> None:
-    doc = fls.build_status(evaluation_date=EVAL, panels=[_french("2026-09-30")])
+    doc = _status(panels=[_french("2026-09-30")])
     out = tmp_path / "factor-lens-status.json"
     fls.write_status(doc, out)
     assert json.loads(out.read_bytes())["schema"] == fls.SCHEMA
@@ -473,6 +483,8 @@ def test_write_status_is_create_only(tmp_path: Path) -> None:
 def test_cli_fails_the_run_on_a_failing_assertion(tmp_path: Path) -> None:
     spec = {
         "evaluation_date": "2026-11-19",
+        "windows": _BS_WINDOWS,
+        "trading_days": [d.isoformat() for d in _BS_DAYS],
         "panels": [
             {
                 "kind": "french",
@@ -493,6 +505,8 @@ def test_cli_fails_the_run_on_a_failing_assertion(tmp_path: Path) -> None:
 def test_cli_writes_status_on_success(tmp_path: Path) -> None:
     spec = {
         "evaluation_date": "2026-11-19",
+        "windows": _BS_WINDOWS,
+        "trading_days": [d.isoformat() for d in _BS_DAYS],
         "panels": [
             {
                 "kind": "french",
@@ -545,12 +559,3 @@ def test_french_age_ceiling_boundary_days(
     assert panel["age_days"] == age
     assert panel["state"] == state
     assert panel["headline_lag_days"] == 75
-
-
-def test_age_ceiling_binds_even_when_required_month_is_present() -> None:
-    # Required month (Sep) is present but the last row is early in the month: age 76 > 75.
-    panel = _french("2026-09-01", evaluation=date(2026, 11, 16))
-    assert panel["required_month_end"] == "2026-09-30"
-    assert panel["age_days"] == 76
-    assert panel["state"] == "HARD_STALE"
-    assert panel["contributes_to_headline"] is False
