@@ -478,6 +478,72 @@ def _merged(
     return next(row for row in rows if row["strategy_id"] == STRATEGY)
 
 
+# Text/status fields of a comparison row are skipped by name in the non-diminish check below.  A skip by
+# name must never hide a figure: a skipped name that carries a number (a future numeric ``*_cash_drag_*``
+# value filed under a status name) fails instead of being skipped.  ``annualization`` and ``comparison_window``
+# are carried once by the annualization block and legitimately hold numbers.
+_TEXT_ONLY_FIELDS = (
+    "assignment_authority",
+    "assignment_status",
+    "cash_drag_reason",
+    "cash_drag_status",
+    "comparison_reason",
+    "effective_end",
+    "effective_start",
+    "evidence_status",
+    "id",
+    "rationale",
+    "version_ref",
+)
+_CARRIED_ONCE_FIELDS = ("annualization", "comparison_window")
+
+
+def _holds_a_number(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int | float | Decimal):
+        return True
+    if isinstance(value, dict):
+        return any(_holds_a_number(item) for item in value.values())
+    if isinstance(value, list | tuple):
+        return any(_holds_a_number(item) for item in value)
+    return False
+
+
+def _comparison_figures(row: dict[str, Any], prefix: str) -> list[str]:
+    skipped = {f"{prefix}_{name}" for name in _TEXT_ONLY_FIELDS + _CARRIED_ONCE_FIELDS}
+    hidden = [
+        name
+        for name in _TEXT_ONLY_FIELDS
+        if f"{prefix}_{name}" in row and _holds_a_number(row[f"{prefix}_{name}"])
+    ]
+    assert not hidden, f"a skipped text field carries a number: {hidden}"
+    return [
+        name for name in row if name.startswith(f"{prefix}_") and name not in skipped
+    ]
+
+
+def test_a_numeric_value_cannot_hide_behind_a_skipped_status_name() -> None:
+    row = {
+        "benchmark_beta": 1.0,
+        "benchmark_cash_drag_status": "UNAVAILABLE",
+        "benchmark_cash_drag_reason": "No cash path is admitted.",
+        "benchmark_effective_end": None,
+    }
+    assert _comparison_figures(row, "benchmark") == ["benchmark_beta"]
+    for field, value in (
+        ("benchmark_cash_drag_status", 0.0123),
+        ("benchmark_cash_drag_reason", {"drag": Decimal("0.5")}),
+        ("benchmark_evidence_status", [1, 2]),
+    ):
+        with pytest.raises(AssertionError, match="skipped text field"):
+            _comparison_figures({**row, field: value}, "benchmark")
+    # a new numeric cash-drag field under its own name is a figure, compared by value
+    assert "benchmark_cash_drag_pct" in _comparison_figures(
+        {**row, "benchmark_cash_drag_pct": 0.01}, "benchmark"
+    )
+
+
 def test_report_row_is_sleeve_primary_with_a_labelled_account_block(
     tmp_path: Path,
 ) -> None:
@@ -510,28 +576,7 @@ def test_report_row_is_sleeve_primary_with_a_labelled_account_block(
     ):
         assert block["basis"] == "PARENT_ACCOUNT_LIVE_SERIES"
         assert PARENT in block["label"]
-        figures = [
-            name
-            for name in off
-            if name.startswith(f"{prefix}_")
-            and name
-            not in {
-                f"{prefix}_annualization",
-                f"{prefix}_assignment_authority",
-                f"{prefix}_assignment_status",
-                f"{prefix}_cash_drag_reason",  # status/text, not comparison figures
-                f"{prefix}_cash_drag_status",
-                f"{prefix}_comparison_reason",
-                f"{prefix}_comparison_window",  # carried once, by the annualization
-                f"{prefix}_effective_end",
-                f"{prefix}_effective_start",
-                f"{prefix}_evidence_status",
-                f"{prefix}_id",
-                f"{prefix}_rationale",
-                f"{prefix}_version_ref",
-                f"{prefix}_assignment_status",
-            }
-        ]
+        figures = _comparison_figures(off, prefix)
         assert figures
         for name in figures:
             assert block[name] == off[name], name
