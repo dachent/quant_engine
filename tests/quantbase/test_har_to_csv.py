@@ -1327,3 +1327,19 @@ def test_a_volatis_dashboard_without_holdings_is_refused(tmp_path: Path) -> None
     case = Case(tmp_path, empty_volatis_holdings)
     with pytest.raises(ERROR, match="Volatis dashboard has no holdings"):
         case.convert()
+
+
+@pytest.mark.parametrize("renamed", [None, "Volatis Strategy ", "volatis strategy"])
+def test_a_dashboard_without_the_exact_volatis_fund_is_refused(
+    tmp_path: Path, renamed: str | None
+) -> None:
+    """The holdings guard is per fund, so it must not be skippable by dropping or renaming it."""
+
+    def drop_or_rename(bodies: dict[str, Any]) -> None:
+        funds = bodies["portfolio.dashboard"]["data"]["funds_data"]
+        fund = funds.pop(VOLATIS)
+        if renamed is not None:
+            funds[renamed] = fund
+
+    with pytest.raises(ERROR, match="dashboard has no 'Volatis Strategy' fund"):
+        Case(tmp_path, drop_or_rename).convert()

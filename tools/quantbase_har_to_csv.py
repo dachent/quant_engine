@@ -749,6 +749,13 @@ def _dashboard(
         document["data"], frozenset({"funds_data", "top_wins"}), "dashboard.data"
     )
     funds = _object(data["funds_data"], "dashboard.funds_data")
+    if VOLATIS_TITLE not in funds:
+        # The guard below runs per fund, so a missing or renamed Volatis fund would skip it.
+        raise QuantbaseCsvError(
+            f"the dashboard has no {VOLATIS_TITLE!r} fund (titles: {sorted(funds)}): a refresh "
+            "capture must include its holdings at every cutoff (Quantbase POSITION is a "
+            "required class)"
+        )
     files: dict[str, bytes] = {}
     holdings_keys = frozenset(HEADERS["dashboard_holdings"])
     for title, value in funds.items():
