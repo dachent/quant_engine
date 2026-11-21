@@ -1221,7 +1221,7 @@ def _schwab_selected_point_positions(
                     accepted_accounts=accounts,
                     transactions=source["transactions"],
                     valuation_cutoff=valuation_cutoff,
-                    snapshot_day=day,
+                    snapshot_day=schwab.derived_positions.snapshot_business_day(clock),
                     artifact_schemas={
                         a["artifact_id"]: a["schema"]["name"]
                         for a in source["source_artifacts"]

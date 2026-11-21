@@ -816,6 +816,27 @@ def test_rows_plus_cash_must_equal_the_ledger_nav_not_the_stored_figure() -> Non
     assert "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV" in _qb_failed(_qb_run(nav=None))
 
 
+def test_every_row_of_the_snapshot_must_state_the_same_cash() -> None:
+    """KILL: cash was read from the first row only; a later row stating other cash passed unseen."""
+
+    second = _qb_row(
+        symbol="TQQQ",
+        market_value={"currency": "USD", "status": "AVAILABLE", "value": "10.00"},
+    )
+    nav = Decimal("48067.62")  # 48037.62 + 10.00 + the first row's cash 20.00
+    agreeing = _qb_run([_qb_row(), second], nav=nav)
+    assert "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV" not in _qb_failed(agreeing)
+    disagreeing = _qb_run(
+        [_qb_row(), {**second, "closure": {**second["closure"], "usd_cash": "35.00"}}],
+        nav=nav,
+    )
+    assert "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV" in _qb_failed(disagreeing)
+    absent = {**second["closure"]}
+    del absent["usd_cash"]
+    missing = _qb_run([_qb_row(), {**second, "closure": absent}], nav=nav)
+    assert "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV" in _qb_failed(missing)
+
+
 def test_the_interval_must_be_the_cutoff_day() -> None:
     row = _qb_run(declared_start="2026-11-05")
     assert "INTERVAL_IS_THE_CUTOFF_DAY" in _qb_failed(row)
