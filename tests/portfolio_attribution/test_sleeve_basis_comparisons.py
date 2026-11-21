@@ -20,6 +20,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import statistics
 import sys
 from typing import Any
@@ -496,23 +497,30 @@ _TEXT_ONLY_FIELDS = (
     "version_ref",
 )
 _CARRIED_ONCE_FIELDS = ("annualization", "comparison_window")
+_IDENTIFIER_FIELDS = (
+    "id",
+    "version_ref",
+)  # digit strings are identifiers here, not figures
 
 
-def _holds_a_number(value: Any) -> bool:
+def _holds_a_number(value: Any, *, strings: bool = True) -> bool:
     if isinstance(value, bool):
         return False
     if isinstance(value, int | float | Decimal):
         return True
     if isinstance(value, str):
-        # providers and the report carry figures as decimal strings ("0.0123")
+        if not strings:
+            return False
+        # providers and the report carry figures as decimal strings, formatted or not
+        # ("0.0123", "1,234.50", "1.5%", "$12.50")
         try:
-            return Decimal(value.strip()).is_finite()
+            return Decimal(re.sub(r"[,%$\s]", "", value)).is_finite()
         except InvalidOperation:
             return False
     if isinstance(value, dict):
-        return any(_holds_a_number(item) for item in value.values())
+        return any(_holds_a_number(item, strings=strings) for item in value.values())
     if isinstance(value, list | tuple):
-        return any(_holds_a_number(item) for item in value)
+        return any(_holds_a_number(item, strings=strings) for item in value)
     return False
 
 
@@ -521,7 +529,11 @@ def _comparison_figures(row: dict[str, Any], prefix: str) -> list[str]:
     hidden = [
         name
         for name in _TEXT_ONLY_FIELDS
-        if f"{prefix}_{name}" in row and _holds_a_number(row[f"{prefix}_{name}"])
+        if f"{prefix}_{name}" in row
+        # an identifier may be a digit string; every other skipped field may not hold any number
+        and _holds_a_number(
+            row[f"{prefix}_{name}"], strings=name not in _IDENTIFIER_FIELDS
+        )
     ]
     assert not hidden, f"a skipped text field carries a number: {hidden}"
     return [
@@ -537,6 +549,14 @@ def test_a_numeric_value_cannot_hide_behind_a_skipped_status_name() -> None:
         "benchmark_effective_end": None,
     }
     assert _comparison_figures(row, "benchmark") == ["benchmark_beta"]
+    # a digit-string identifier is not a figure; the same string in a status field is
+    assert _comparison_figures({**row, "benchmark_id": "12345678"}, "benchmark") == [
+        "benchmark_beta"
+    ]
+    with pytest.raises(AssertionError, match="skipped text field"):
+        _comparison_figures(
+            {**row, "benchmark_assignment_status": "12345678"}, "benchmark"
+        )
     # text that merely contains a digit, or a non-finite word, is not a figure
     for text in ("UNAVAILABLE", "No cash path is admitted.", "v1", "NaN", "Infinity"):
         assert _comparison_figures(
@@ -545,6 +565,9 @@ def test_a_numeric_value_cannot_hide_behind_a_skipped_status_name() -> None:
     for field, value in (
         ("benchmark_cash_drag_status", 0.0123),
         ("benchmark_cash_drag_status", "0.0123"),
+        ("benchmark_cash_drag_status", "1,234.50"),
+        ("benchmark_cash_drag_reason", "1.5%"),
+        ("benchmark_evidence_status", "$12.50"),
         ("benchmark_cash_drag_reason", " -4 "),
         ("benchmark_cash_drag_reason", {"drag": Decimal("0.5")}),
         ("benchmark_evidence_status", [1, 2]),
