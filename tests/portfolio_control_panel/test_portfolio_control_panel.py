@@ -15790,6 +15790,48 @@ def test_panel_appends_retained_strategy_records_after_the_current_rows(
     assert all("lifecycle_state" in row for row in data["performance"])
 
 
+def test_panel_carries_the_cost_classification_of_a_retained_record(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """F2 item 36: a retained record's classification reaches the panel strategy row."""
+
+    classification = {
+        "classification": "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+        "product_interval_end": "2024-12-12",
+        "reason": "SYNTHETIC owner-approved exclusion from live costs",
+        "ruling_reference": "OWNER_1_COMMENT_2_DEPRECATED",
+        "ruling_url": "https://github.com/dachent/quant_engine/issues/1#issuecomment-2",
+        "source": "contracts/portfolio-financial-mvp-source-v1.json",
+    }
+    report = _report_with_baseline(inputs)
+    report["lifecycle_schema_version"] = 1
+    report["strategy_summary"] = [
+        {**row, **_LIFECYCLE_ACTIVE} for row in report["strategy_summary"]
+    ]
+    report["twr_mwr"] = [{**row, **_LIFECYCLE_ACTIVE} for row in report["twr_mwr"]]
+    report["retained_strategies"] = [
+        _retained_record("fund-retired", cost_classification=classification),
+        _retained_record("sleeve-plain"),
+    ]
+    root = tmp_path / "classified-report"
+    _publish_report(
+        root,
+        tmp_path / "classified-report.json",
+        _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog()),
+    )
+    built = panel.build_candidate(
+        root,
+        inputs["legacy"],
+        tmp_path / "classified-output",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    rows = {row["strategy_id"]: row for row in _candidate_data(built)["strategies"]}
+    assert rows["fund-retired"]["cost_classification"] == classification
+    assert "cost_classification" not in rows["sleeve-plain"]
+
+
 def test_panel_without_the_lifecycle_marker_keeps_the_previous_shape(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
