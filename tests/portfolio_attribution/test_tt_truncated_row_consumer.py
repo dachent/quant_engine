@@ -424,6 +424,12 @@ def test_post_bound_override_capture_is_refused_when_the_marker_is_after_the_as_
     [
         {"fallback": {"kind": "LIVE_HOLDINGS_OVERRIDE"}},
         {"fallback": {"kind": "LIVE_HOLDINGS_OVERRIDE", "sources": {}}},
+        {
+            "fallback": {
+                "kind": "LIVE_HOLDINGS_OVERRIDE",
+                "sources": {"last_rebalance_marker": "2026-09-01"},
+            }
+        },
         _override("not-a-date"),
         {"fallback": {"kind": "LIVE_PORTFOLIO_HOLDINGS"}},
     ],
