@@ -47,19 +47,25 @@ def rewrite_text(text: str, old: Path, new: Path) -> str:
     pairs = list(zip(spellings(old), spellings(new), strict=True))
     for before, after in sorted(pairs, key=lambda pair: -len(pair[0])):
         # a path-segment boundary: ``world-B`` must not match inside the sibling ``world-B2``
-        pattern = re.compile(re.escape(before) + _NOT_NAME_CHAR)
+        # Windows paths are case-insensitive, so a root spelled in other letter case is still this root
+        pattern = re.compile(re.escape(before) + _NOT_NAME_CHAR, re.IGNORECASE)
         text = pattern.sub(lambda _match: after, text)
     return text
 
 
-_NOT_NAME_CHAR = r"(?![A-Za-z0-9._-])"
+# a '.' only continues a name when a name character follows it: "world-B." ends a sentence, "world-B.bak" is another name
+_NOT_NAME_CHAR = r"(?![A-Za-z0-9_-])(?!\.[A-Za-z0-9_-])"
 
 
 def names_leaf(text: str, leaf: str) -> bool:
     """True when ``text`` still names the directory ``leaf`` as a whole path segment (not a longer sibling name)."""
 
     return (
-        re.search(r"(?<![A-Za-z0-9._-])" + re.escape(leaf) + _NOT_NAME_CHAR, text)
+        re.search(
+            r"(?<![A-Za-z0-9._-])" + re.escape(leaf) + _NOT_NAME_CHAR,
+            text,
+            re.IGNORECASE,
+        )
         is not None
     )
 
