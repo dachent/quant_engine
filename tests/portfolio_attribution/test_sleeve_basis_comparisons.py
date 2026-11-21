@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import copy
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import re
 import statistics
 import sys
 from typing import Any
@@ -478,6 +479,126 @@ def _merged(
     return next(row for row in rows if row["strategy_id"] == STRATEGY)
 
 
+# Text/status fields of a comparison row are skipped by name in the non-diminish check below.  A skip by
+# name must never hide a figure: a skipped name that carries a number (a future numeric ``*_cash_drag_*``
+# value filed under a status name) fails instead of being skipped.  ``annualization`` and ``comparison_window``
+# are carried once by the annualization block and legitimately hold numbers.
+_TEXT_ONLY_FIELDS = (
+    "assignment_authority",
+    "assignment_status",
+    "cash_drag_reason",
+    "cash_drag_status",
+    "comparison_reason",
+    "effective_end",
+    "effective_start",
+    "evidence_status",
+    "id",
+    "rationale",
+    "version_ref",
+)
+_CARRIED_ONCE_FIELDS = ("annualization", "comparison_window")
+_IDENTIFIER_FIELDS = (
+    "id",
+    "version_ref",
+)  # an identifier-shaped string (letters, digits, _ and -) is an identifier here, not a figure
+_IDENTIFIER_SHAPE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")  # no leading sign
+
+
+def _holds_a_number(value: Any, *, strings: bool = True) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int | float | Decimal):
+        return True
+    if isinstance(value, str):
+        if not strings:
+            return False
+        # providers and the report carry figures as decimal strings, formatted or not
+        # ("0.0123", "1,234.50", "1.5%", "$12.50")
+        try:
+            return Decimal(re.sub(r"[,%$\s]", "", value)).is_finite()
+        except InvalidOperation:
+            return False
+    if isinstance(value, dict):
+        return any(_holds_a_number(item, strings=strings) for item in value.values())
+    if isinstance(value, list | tuple):
+        return any(_holds_a_number(item, strings=strings) for item in value)
+    return False
+
+
+def _comparison_figures(row: dict[str, Any], prefix: str) -> list[str]:
+    skipped = {f"{prefix}_{name}" for name in _TEXT_ONLY_FIELDS + _CARRIED_ONCE_FIELDS}
+    hidden = [
+        name
+        for name in _TEXT_ONLY_FIELDS
+        if f"{prefix}_{name}" in row
+        # an identifier may be a digit string; every other skipped field may not hold any number
+        and _holds_a_number(
+            row[f"{prefix}_{name}"],
+            strings=not (
+                name in _IDENTIFIER_FIELDS
+                and isinstance(row[f"{prefix}_{name}"], str)
+                and _IDENTIFIER_SHAPE.fullmatch(row[f"{prefix}_{name}"])
+            ),
+        )
+    ]
+    assert not hidden, f"a skipped text field carries a number: {hidden}"
+    return [
+        name for name in row if name.startswith(f"{prefix}_") and name not in skipped
+    ]
+
+
+def test_a_numeric_value_cannot_hide_behind_a_skipped_status_name() -> None:
+    row = {
+        "benchmark_beta": 1.0,
+        "benchmark_cash_drag_status": "UNAVAILABLE",
+        "benchmark_cash_drag_reason": "No cash path is admitted.",
+        "benchmark_effective_end": None,
+    }
+    assert _comparison_figures(row, "benchmark") == ["benchmark_beta"]
+    # a digit-string identifier is not a figure; the same string in a status field is
+    assert _comparison_figures({**row, "benchmark_id": "12345678"}, "benchmark") == [
+        "benchmark_beta"
+    ]
+    with pytest.raises(AssertionError, match="skipped text field"):
+        _comparison_figures(
+            {**row, "benchmark_assignment_status": "12345678"}, "benchmark"
+        )
+    # but a decimal figure or a formatted one under an identifier field is still a figure
+    for name, text in (
+        ("benchmark_id", "0.0123"),
+        ("benchmark_id", "-4"),
+        ("benchmark_version_ref", "$12.50"),
+        ("benchmark_version_ref", "1,234.50"),
+        ("benchmark_version_ref", "1.5%"),
+    ):
+        with pytest.raises(AssertionError, match="skipped text field"):
+            _comparison_figures({**row, name: text}, "benchmark")
+    assert _comparison_figures(
+        {**row, "benchmark_version_ref": "benchmark:v1"}, "benchmark"
+    ) == ["benchmark_beta"]
+    # text that merely contains a digit, or a non-finite word, is not a figure
+    for text in ("UNAVAILABLE", "No cash path is admitted.", "v1", "NaN", "Infinity"):
+        assert _comparison_figures(
+            {**row, "benchmark_cash_drag_reason": text}, "benchmark"
+        ) == ["benchmark_beta"]
+    for field, value in (
+        ("benchmark_cash_drag_status", 0.0123),
+        ("benchmark_cash_drag_status", "0.0123"),
+        ("benchmark_cash_drag_status", "1,234.50"),
+        ("benchmark_cash_drag_reason", "1.5%"),
+        ("benchmark_evidence_status", "$12.50"),
+        ("benchmark_cash_drag_reason", " -4 "),
+        ("benchmark_cash_drag_reason", {"drag": Decimal("0.5")}),
+        ("benchmark_evidence_status", [1, 2]),
+    ):
+        with pytest.raises(AssertionError, match="skipped text field"):
+            _comparison_figures({**row, field: value}, "benchmark")
+    # a new numeric cash-drag field under its own name is a figure, compared by value
+    assert "benchmark_cash_drag_pct" in _comparison_figures(
+        {**row, "benchmark_cash_drag_pct": 0.01}, "benchmark"
+    )
+
+
 def test_report_row_is_sleeve_primary_with_a_labelled_account_block(
     tmp_path: Path,
 ) -> None:
@@ -510,28 +631,7 @@ def test_report_row_is_sleeve_primary_with_a_labelled_account_block(
     ):
         assert block["basis"] == "PARENT_ACCOUNT_LIVE_SERIES"
         assert PARENT in block["label"]
-        figures = [
-            name
-            for name in off
-            if name.startswith(f"{prefix}_")
-            and name
-            not in {
-                f"{prefix}_annualization",
-                f"{prefix}_assignment_authority",
-                f"{prefix}_assignment_status",
-                f"{prefix}_cash_drag_reason",  # status/text, not comparison figures
-                f"{prefix}_cash_drag_status",
-                f"{prefix}_comparison_reason",
-                f"{prefix}_comparison_window",  # carried once, by the annualization
-                f"{prefix}_effective_end",
-                f"{prefix}_effective_start",
-                f"{prefix}_evidence_status",
-                f"{prefix}_id",
-                f"{prefix}_rationale",
-                f"{prefix}_version_ref",
-                f"{prefix}_assignment_status",
-            }
-        ]
+        figures = _comparison_figures(off, prefix)
         assert figures
         for name in figures:
             assert block[name] == off[name], name
