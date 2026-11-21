@@ -56,7 +56,11 @@ state from those declarations. Duplicate rows, column changes and truncation are
 `max_requests` in the evidence is declarative: the driver makes one adapter call per feed and only
 checks that the cap covers the feeds and does not exceed the config cap. The evaluation date must not
 be after the evidence window end, the cutoff must not be after the evaluation date, and each feed's
-`Last-Modified` must lie between the data month end and the evidence window end.
+`Last-Modified` must carry a time zone, lie between the NEWEST section's month end and the evidence
+window end, and not be after the manifest's own `captured_at_utc`. The evaluation date must equal the
+cutoff or lie no more than 3 days before the evidence window start. `verify` also checks the
+manifest's `evidence_sha256` against the staged evidence file, and refuses a non-UTF-8 or duplicated
+`SHA256SUMS.txt`.
 
 ## Staleness is advisory at this layer
 
