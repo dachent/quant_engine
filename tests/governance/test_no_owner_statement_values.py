@@ -1,17 +1,22 @@
-"""Fixtures that mimic an owner statement stay synthetic (F2 item 22).
+"""Four named fixture files stay synthetic: a shape guard, not a privacy proof (F2 item 22).
 
 Structural rules only: no list of the replaced figures is kept anywhere in the repository (a digest of a short
-numeric token is brute-forceable, and this repository is public).  A rule names a SHAPE a real statement or
-fill-day record has and a synthetic fixture does not:
+numeric token is brute-forceable, and this repository is public).
 
-In the three statement/fill-day fixtures and the fund-days tool: an account string shaped ``dddd-dddd`` (not a
-year range; ``0000-`` is the synthetic form), a bare 8-digit identifier, a quantity or price with seven or more
-decimal places (the precision of a real fill record), and a real-looking fill-day date.  The same shapes also occur
-legitimately across the repository (hashes, ids, timestamps), so a repository-wide scan would be noise; the
-repository-wide inventory is a one-off, in the history-scrub proposal.
+Scope, exactly: the guard reads the FOUR files in ``SCRUBBED`` (the statement cash-summary test, the zero-financing
+ranges test, the fund-days test and ``tools/quantbase_fund_days.py``) and nothing else: not docs, contracts, ops or
+any other test.  It applies three shapes and one fill-day pattern: an account string shaped ``dddd-dddd`` (also with a
+space or a longer tail; a year range and the synthetic ``0000-`` form are exempt), a digit run of eight or more, a
+number with six or more decimal places, and a 2025-08 date in the fund-days test.  It checks NO money amount (synthetic
+figures such as 12,345.67 are legitimate there) and NO ticker.
 
-Scrubbed files are scanned by suffix over the committed text of tests, tools, packages, apps, acceptance, docs,
-contracts and ops (not ``ops/preserved-scripts``, byte-for-byte recovered evidence)."""
+Known misses, by design or cost: a value split across two source lines or string literals; money amounts; tickers;
+a real fill day in another month; a short account id; any owner value in a file outside ``SCRUBBED``.  Two of the four
+files (``test_zero_financing_ranges.py`` and ``tools/quantbase_fund_days.py``) have no hit for these rules even on the
+pre-scrub content, so the guard does not protect them; only the other two would have fired.  The same shapes occur
+legitimately across the repository (hashes, ids, timestamps), so a repository-wide scan would be noise.
+``ops/preserved-scripts`` is byte-for-byte recovered evidence and out of scope.
+"""
 
 from __future__ import annotations
 
@@ -46,10 +51,10 @@ SUFFIXES = {
 }
 RULES = {
     "account-shaped string": re.compile(
-        r"(?<![\d-])(?!(?:19|20)\d\d-(?:19|20)\d\d|0000-)\d{4}-\d{4}(?![\d-])"
+        r"(?<![\w.:/-])(?!(?:19|20)\d\d[- ](?:19|20)\d\d|0000)\d{4}[- ]\d{4,}(?![\w.-])"
     ),
-    "bare 8-digit identifier": re.compile(r"(?<![\d.])\d{8}(?![\d.])"),
-    "seven or more decimal places": re.compile(r"(?<![\d.])\d+\.\d{7,}(?!\d)"),
+    "digit run of eight or more": re.compile(r"(?<![\d.])\d{8,}(?![\d.])"),
+    "six or more decimal places": re.compile(r"(?<![\d.])\d+\.\d{6,}(?!\d)"),
 }
 # the fixtures that were scrubbed: every rule applies to them
 SCRUBBED = frozenset(
@@ -118,12 +123,14 @@ def test_no_statement_shaped_owner_value_is_in_a_committed_file() -> None:
 def test_each_rule_fires_on_a_synthetic_example_of_its_shape(tmp_path: Path) -> None:
     samples = {
         "account-shaped string": "acct 1234-5678 here",
-        "bare 8-digit identifier": "id 00000000 here",
-        "seven or more decimal places": "qty 1.2345678 here",
+        "digit run of eight or more": "id 000000000 here",
+        "six or more decimal places": "qty 1.234567 here",
     }
     for rule, line in samples.items():
         assert RULES[rule].search(line), rule
     assert not RULES["account-shaped string"].search("range 2025-2026 here")
     assert not RULES["account-shaped string"].search("synthetic 0000-0620 here")
-    assert not RULES["bare 8-digit identifier"].search("sha 12345678901234567890")
-    assert not RULES["seven or more decimal places"].search("rate 1.2345 here")
+    assert RULES["account-shaped string"].search("acct 1234 5678 here")
+    assert RULES["account-shaped string"].search("acct 1234-56789 here")
+    assert not RULES["digit run of eight or more"].search("rate 1.23456789 here")
+    assert not RULES["six or more decimal places"].search("rate 1.2345 here")
