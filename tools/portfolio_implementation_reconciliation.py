@@ -1324,7 +1324,9 @@ def with_truncated_row_fallbacks(
     capture's own last-rebalance marker is dated on or before ``accepted_as_of`` and was read no
     earlier than the holdings (``_marker_excludes_later_rebalance``): no rebalance can then have
     happened after the as-of date, so the live holdings are the as-of state.  The applied record
-    carries ``post_bound_capture_accepted_by``; a later or unreadable marker, a missing role or a
+    carries ``post_bound_capture_accepted_by``, the instant the live holdings were read and the
+    largest absolute weight gap to the dated row it replaces (the live weights are market weights at
+    that instant, not target proportions); a later or unreadable marker, a missing role or a
     marker read before the holdings keeps the strict refusal.
     The dated fallbacks and rows that are complete are not affected.
     """
@@ -1367,7 +1369,7 @@ def with_truncated_row_fallbacks(
             f"before {capture_bound.isoformat()} (the next open after the as-of date)"
         )
 
-    applied: list[dict[str, str]] = []
+    applied: list[dict[str, Any]] = []
     for flag in flags:
         if not isinstance(flag, dict) or flag.get("flag") != "TRUNCATED_ROW":
             continue
@@ -1454,6 +1456,7 @@ def with_truncated_row_fallbacks(
                 weights = dict(source["weights"])
         if not weights:
             raise refuse()
+        dated_weights = dict(target["weights"])
         target["weights"] = dict(sorted(weights.items()))
         applied.append(
             {
@@ -1466,7 +1469,26 @@ def with_truncated_row_fallbacks(
                     else {}
                 ),
                 **(
-                    {"post_bound_capture_accepted_by": marker_proof}
+                    {
+                        "post_bound_capture_accepted_by": marker_proof,
+                        # the live weights are market weights at the capture instant, not
+                        # target proportions: state when they were read and how far they sit
+                        # from the dated row they replace (shared symbols only)
+                        "live_holdings_read_at_utc": max(
+                            capture_instants["json"]
+                        ).isoformat(),
+                        "max_abs_weight_drift_vs_dated_row": max(
+                            (
+                                abs(
+                                    float(weights[symbol])
+                                    - float(dated_weights[symbol])
+                                )
+                                for symbol in dated_weights
+                                if symbol in weights
+                            ),
+                            default=None,
+                        ),
+                    }
                     if marker_proof is not None
                     else {}
                 ),

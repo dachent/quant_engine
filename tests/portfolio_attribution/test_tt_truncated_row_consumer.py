@@ -392,6 +392,8 @@ def test_post_bound_override_capture_is_accepted_when_the_marker_is_not_after_th
         "LAST_REBALANCE_MARKER_2026-09-01_NOT_AFTER_AS_OF"
     )
     assert applied["capture_bound_utc"] == "2026-09-02T13:30:00+00:00"
+    assert applied["live_holdings_read_at_utc"] == "2026-09-02T17:38:36+00:00"
+    assert applied["max_abs_weight_drift_vs_dated_row"] == pytest.approx(0.2)
     assert attribution._tt_target_snapshots(manifest, COMPONENTS, accepted_as_of=SECOND)
     # an in-bound capture is not labelled
     early = _manifest(tmp_path, _override("2026-09-01"), weights={"SPY": 0.3})
@@ -464,6 +466,59 @@ def test_post_bound_override_capture_needs_both_roles_recorded(
     tmp_path: Path, captures: list[dict[str, str]]
 ) -> None:
     manifest = _manifest(tmp_path, _override("2026-09-01"), captures=captures)
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="supplying capture before",
+    ):
+        reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+
+
+def test_post_bound_override_capture_needs_every_marker_read_after_every_holdings_read(
+    tmp_path: Path,
+) -> None:
+    """Every supplying txt (marker) read must be >= every json (holdings) read."""
+
+    early_txt = {"captured_at_utc": "2026-09-02T17:30:00Z", "role": "txt"}
+    late_json = {"captured_at_utc": "2026-09-02T17:50:00Z", "role": "json"}
+    cases = {
+        # one marker read precedes the holdings read, another follows it (min, not max, of the txt reads)
+        "one_txt_before": [POST_JSON, early_txt, POST_TXT],
+        # one holdings read follows the only marker read (max, not min, of the json reads)
+        "one_json_after": [POST_JSON, late_json, POST_TXT],
+    }
+    for captures in cases.values():
+        manifest = _manifest(tmp_path, _override("2026-09-01"), captures=captures)
+        with pytest.raises(
+            reconciliation.ImplementationReconciliationError,
+            match="supplying capture before",
+        ):
+            reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+    both_ok = _manifest(
+        tmp_path,
+        _override("2026-09-01"),
+        captures=[
+            POST_JSON,
+            late_json,
+            {"captured_at_utc": "2026-09-02T17:51:00Z", "role": "txt"},
+            {"captured_at_utc": "2026-09-02T17:52:00Z", "role": "txt"},
+        ],
+    )
+    applied = reconciliation.with_truncated_row_fallbacks(both_ok, SECOND)[
+        "applied_truncated_row_fallbacks"
+    ][0]
+    assert applied["live_holdings_read_at_utc"] == "2026-09-02T17:50:00+00:00"
+
+
+def test_post_bound_live_portfolio_holdings_is_refused_even_with_a_valid_marker(
+    tmp_path: Path,
+) -> None:
+    flag = {
+        "fallback": {
+            "kind": "LIVE_PORTFOLIO_HOLDINGS",
+            "sources": {"last_rebalance_marker": {"value": "2026-09-01"}},
+        }
+    }
+    manifest = _manifest(tmp_path, flag, captures=[POST_JSON, POST_TXT])
     with pytest.raises(
         reconciliation.ImplementationReconciliationError,
         match="supplying capture before",
