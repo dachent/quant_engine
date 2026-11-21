@@ -284,6 +284,7 @@ def test_schwab_package_is_private_and_read_side_only() -> None:
     assert project["dependencies"] == [
         "quant-engine-core",
         "quant-engine-portfolio-ledger",
+        "tzdata>=2025.2",  # ZoneInfo("America/New_York") on Windows
     ]
     assert project["classifiers"] == ["Private :: Do Not Upload"]
     assert member["tool"]["uv"]["build-backend"]["module-name"] == (  # type: ignore[index]
