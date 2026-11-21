@@ -705,7 +705,12 @@ def test_i4_passes_a_transaction_after_the_cutoff_as_rolled_back_but_fails_one_b
 ) -> None:
     trades = [
         ("2025-05-12", "A101", "BUY", "100"),
-        ("2026-09-12", "A101", "BUY", "10"),  # one day after the last perf date 2026-09-11
+        (
+            "2026-09-12",
+            "A101",
+            "BUY",
+            "10",
+        ),  # one day after the last perf date 2026-09-11
     ]
     capture, raw = _capture(tmp_path)
     _book(raw, "101", trades=trades, held={"A101": "100.0"})
@@ -713,10 +718,36 @@ def test_i4_passes_a_transaction_after_the_cutoff_as_rolled_back_but_fails_one_b
     # D = 2026-09-11: the 09-12 row is after D, rolled back by I5D, so I4 passes with a note
     after = ic.check_capture(capture, as_of=date(2026, 9, 11))
     assert _status(after, "101", "I4") == "PASS"
-    detail = next(c["detail"] for c in after["books"]["101"]["checks"] if c["check"] == "I4")
+    detail = next(
+        c["detail"] for c in after["books"]["101"]["checks"] if c["check"] == "I4"
+    )
     assert "rolled back" in detail and "2026-09-12" in detail
     # D = 2026-09-13: the 09-12 row is a real transaction after the last perf date: still FAIL
     before = ic.check_capture(capture, as_of=date(2026, 9, 13))
     assert _status(before, "101", "I4") == "FAIL"
     # without an as-of date the rule is the old one
     assert _status(ic.check_capture(capture), "101", "I4") == "FAIL"
+
+
+def test_i4_fails_when_a_transaction_on_or_before_the_cutoff_still_follows_the_last_perf(
+    tmp_path: Path,
+) -> None:
+    trades = [
+        ("2025-05-12", "A101", "BUY", "100"),
+        (
+            "2026-09-12",
+            "A101",
+            "BUY",
+            "10",
+        ),  # after the last perf date 2026-09-11, before D
+        ("2026-09-14", "A101", "BUY", "5"),  # after D: rolled back
+    ]
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101", trades=trades, held={"A101": "100.0"})
+    _manifest(capture)
+    report = ic.check_capture(capture, as_of=date(2026, 9, 13))
+    assert _status(report, "101", "I4") == "FAIL"
+    detail = next(
+        c["detail"] for c in report["books"]["101"]["checks"] if c["check"] == "I4"
+    )
+    assert "2026-09-12" in detail

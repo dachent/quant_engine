@@ -338,28 +338,35 @@ def check_book(
     # I4
     last_tx = tx_print["last_date"]
     last_perf = perf_print["last_date"]
-    # rows dated after as_of are rolled back by I5D, so only a last transaction on or before
-    # as_of that still follows the last perf date is a real unmatched trade
-    after_d = (
-        sorted(str(r.get("Date")) for r in tx if _day(r.get("Date")) and _day(r.get("Date")) > as_of)
-        if as_of is not None
-        else []
+    # rows dated after as_of are rolled back by I5D: only a row on or before as_of that still
+    # follows the last perf date is a real unmatched trade
+    dated = [(str(r.get("Date")), _day(r.get("Date"))) for r in tx]
+    after_d = sorted(
+        d for d, day in dated if as_of is not None and day is not None and day > as_of
     )
-    if last_tx and last_perf and last_tx > last_perf and after_d and _day(last_tx) > as_of:
-        checks.append(
-            _check(
-                "I4",
-                "PASS",
-                f"last transaction {last_tx} after last perf {last_perf}: {len(after_d)} rows "
-                f"after {as_of} rolled back (dates {sorted(set(after_d))})",
+    on_or_before = max(
+        (d for d, day in dated if day is not None and (as_of is None or day <= as_of)),
+        default=None,
+    )
+    if last_tx and last_perf and last_tx > last_perf:
+        if as_of is not None and not (on_or_before and on_or_before > last_perf):
+            checks.append(
+                _check(
+                    "I4",
+                    "PASS",
+                    f"last transaction {last_tx} after last perf {last_perf}: {len(after_d)} "
+                    f"rows after {as_of} rolled back (dates {sorted(set(after_d))})",
+                )
             )
-        )
-    elif last_tx and last_perf and last_tx > last_perf:
-        checks.append(
-            _check(
-                "I4", "FAIL", f"last transaction {last_tx} after last perf {last_perf}"
+        else:
+            checks.append(
+                _check(
+                    "I4",
+                    "FAIL",
+                    f"last transaction {on_or_before if as_of is not None else last_tx} "
+                    f"after last perf {last_perf}",
+                )
             )
-        )
     else:
         checks.append(
             _check("I4", "PASS", f"last transaction {last_tx}, last perf {last_perf}")
