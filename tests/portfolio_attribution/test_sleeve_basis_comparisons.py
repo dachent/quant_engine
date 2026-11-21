@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import copy
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
@@ -503,6 +503,12 @@ def _holds_a_number(value: Any) -> bool:
         return False
     if isinstance(value, int | float | Decimal):
         return True
+    if isinstance(value, str):
+        # providers and the report carry figures as decimal strings ("0.0123")
+        try:
+            return Decimal(value.strip()).is_finite()
+        except InvalidOperation:
+            return False
     if isinstance(value, dict):
         return any(_holds_a_number(item) for item in value.values())
     if isinstance(value, list | tuple):
@@ -531,8 +537,15 @@ def test_a_numeric_value_cannot_hide_behind_a_skipped_status_name() -> None:
         "benchmark_effective_end": None,
     }
     assert _comparison_figures(row, "benchmark") == ["benchmark_beta"]
+    # text that merely contains a digit, or a non-finite word, is not a figure
+    for text in ("UNAVAILABLE", "No cash path is admitted.", "v1", "NaN", "Infinity"):
+        assert _comparison_figures(
+            {**row, "benchmark_cash_drag_reason": text}, "benchmark"
+        ) == ["benchmark_beta"]
     for field, value in (
         ("benchmark_cash_drag_status", 0.0123),
+        ("benchmark_cash_drag_status", "0.0123"),
+        ("benchmark_cash_drag_reason", " -4 "),
         ("benchmark_cash_drag_reason", {"drag": Decimal("0.5")}),
         ("benchmark_evidence_status", [1, 2]),
     ):
