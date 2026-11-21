@@ -309,6 +309,7 @@ _PATH_STAGES = {
     "tools/yahoo_fetch_driver.py": [],
     # operator capture tool, writes no delivery artifact
     "tools/yahoo_refresh_capture.py": [],
+    "tools/french_fetch_driver.py": [],
     # Per-cycle input preparation (factor-model audit): builds the base proxy-factor file
     # (total-return proxies, French RF splice) and assembles the per-group style capture
     # into the style builder's single source.  Offline; the pipeline reads only the files
