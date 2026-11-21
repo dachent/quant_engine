@@ -46,11 +46,31 @@ request or `final_url` that is not the configured feed on `mba.tuck.dartmouth.ed
 status other than 200; a missing or unreadable `Last-Modified`; any section whose last row is after
 the cutoff.
 
+## What `verify` checks, and what it does not
+
+`verify` (stdlib only) re-derives file hashes, the `SHA256SUMS.txt` inventory (it must list exactly the
+run files), the zip members, the manifest-declared coverage (the last period per section as the
+adapter's manifest states it; it does not re-parse the parsed JSON or csv) and every publication
+state from those declarations. Duplicate rows, column changes and truncation are caught downstream by
+`portfolio_public_decomposition_sources._load_source` and `_admit_publication_boundary`.
+`max_requests` in the evidence is declarative: the driver makes one adapter call per feed and only
+checks that the cap covers the feeds and does not exceed the config cap. The evaluation date must not
+be after the evidence window end, the cutoff must not be after the evaluation date, and each feed's
+`Last-Modified` must lie between the data month end and the evidence window end.
+
+## Staleness is advisory at this layer
+
+A stale feed is a valid capture and a panel state, not a capture failure. `fetch` and `verify`
+print the non-COMPLIANT feed keys (JSON `non_compliant`, and a line on stderr), and
+`--require-compliant` (on both) exits 3 when there are any. No age ceiling is hardcoded here: the
+75-day ceiling lives in WP2 (`factor_lens_status`).
+
 ## Publication rule (45 days)
 
 A month is required at the evaluation date when its month end plus 45 calendar days is on or before
 that date (the same boundary as `portfolio_public_decomposition_sources`, pinned by a parity test over
-two years). A feed whose last row is in an earlier month is `HARD_STALE`, otherwise `COMPLIANT`.
+two years). A feed whose OLDEST section's last row (the minimum over the sections, e.g. the several sections of
+the 49-industry file) is in an earlier month is `HARD_STALE`, otherwise `COMPLIANT`.
 `publication-log.json` records, per feed, `Last-Modified`, the last row, the lag in days after that
 month end, the required month and the state; `verify` re-derives all of it from the staged bytes.
 The log is the evidence for the "typical publication lag" claim: keep each cycle's log.

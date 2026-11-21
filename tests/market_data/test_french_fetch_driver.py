@@ -60,6 +60,7 @@ def _write_feed(
     last_modified: str | None = "Mon, 26 Oct 2026 20:51:50 GMT",
     zip_tamper: bool = False,
     status: int = 200,
+    sections: tuple[str, ...] | None = None,
 ) -> None:
     csv = f"period,F\n20260101,0.1\n{last_period},0.2\n".encode()
     buffer = io.BytesIO()
@@ -81,10 +82,11 @@ def _write_feed(
                 {
                     "columns": ["period", "F"],
                     "first_period": "20260101",
-                    "last_period": last_period,
+                    "last_period": period,
                     "row_count": 2,
-                    "title": "Daily",
+                    "title": f"Daily{index}",
                 }
+                for index, period in enumerate(sections or (last_period,))
             ],
         },
         "raw_artifact": {
@@ -484,3 +486,130 @@ def test_the_shipped_cycle_config_parses_and_names_the_five_builder_feeds() -> N
     config = ffd.parse_config(path.read_bytes())
     assert config.cutoff == date(2026, 11, 19)
     assert {feed.feed_key: feed.feed_id for feed in config.feeds} == FEEDS
+
+
+# --------------------------------------------- review round 1 (P2/P3 fixes)
+
+
+def _industries(*periods: str) -> Callable[[str, Path], None]:
+    return _runner(**{FEEDS["us_industries"]: {"sections": periods}})
+
+
+def test_freshness_uses_the_oldest_section_not_the_newest(tmp_path: Path) -> None:
+    run = _fetch(tmp_path, _industries("20260930", "20260831"))
+    row = next(
+        r
+        for r in json.loads((run / "publication-log.json").read_text())["feeds"]
+        if r["feed_key"] == "us_industries"
+    )
+    assert row["last_period"] == "2026-08-31" and row["state"] == "HARD_STALE"
+    assert ffd.verify(run)["non_compliant"] == ["us_industries"]
+
+
+def test_staleness_is_loud_but_advisory_unless_require_compliant(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_bytes(_bytes(_config()))
+    evidence = tmp_path / "evidence.json"
+    base = ["--config", str(config_path)]
+    assert (
+        ffd.main(
+            [
+                "make-evidence",
+                *base,
+                "--run-id",
+                "R4-FRENCH",
+                "--review",
+                REVIEW,
+                "--valid-from-utc",
+                "2026-11-21T03:58:00Z",
+                "--valid-until-utc",
+                "2026-11-21T08:00:00Z",
+                "--max-requests",
+                "5",
+                "--out",
+                str(evidence),
+            ]
+        )
+        == 0
+    )
+    fetch = [
+        "fetch",
+        *base,
+        "--stage-root",
+        str(tmp_path / "stage"),
+        "--run-id",
+        "R4-FRENCH",
+        "--governance",
+        str(evidence),
+    ]
+    assert ffd.main(fetch, runner=_industries("20260831"), clock=lambda: NOW) == 0
+    out = capsys.readouterr()
+    assert "us_industries" in out.out and "NON_COMPLIANT" in out.err
+    run = str(tmp_path / "stage" / "R4-FRENCH")
+    assert ffd.main(["verify", run]) == 0
+    assert ffd.main(["verify", run, "--require-compliant"]) == 3
+    # a compliant run passes the flag
+    good = _fetch(tmp_path / "ok")
+    assert ffd.main(["verify", str(good), "--require-compliant"]) == 0
+
+
+def test_cutoff_must_not_be_after_the_evaluation_date_and_evaluation_not_after_the_window() -> (
+    None
+):
+    with pytest.raises(ffd.FrenchDriverError, match="cutoff"):
+        ffd.parse_config(_bytes(_config(cutoff="2026-11-20")))
+    config = ffd.parse_config(_bytes(_config()))
+    late = _evidence(config, start=NOW + timedelta(days=-30), hours=24)
+    with pytest.raises(ffd.FrenchDriverError, match="evaluation"):
+        ffd.check_evidence(
+            late, config, "R4-FRENCH", NOW - timedelta(days=29, hours=23)
+        )
+    early = ffd.parse_config(_bytes(_config(evaluation_date="2026-11-25")))
+    with pytest.raises(ffd.FrenchDriverError, match="evaluation"):
+        ffd.check_evidence(_evidence(early), early, "R4-FRENCH", NOW)
+
+
+@pytest.mark.parametrize(
+    "last_modified",
+    ["Tue, 29 Sep 2026 12:00:00 GMT", "Sun, 22 Nov 2026 12:00:00 GMT"],
+)
+def test_last_modified_before_the_month_end_or_after_the_window_is_refused(
+    tmp_path: Path, last_modified: str
+) -> None:
+    runner = _runner(**{FEEDS["us_factors"]: {"last_modified": last_modified}})
+    with pytest.raises(ffd.FrenchDriverError, match="Last-Modified"):
+        _fetch(tmp_path, runner)
+
+
+def test_verify_refuses_a_missing_empty_or_short_sha256sums(tmp_path: Path) -> None:
+    run = _fetch(tmp_path)
+    sums = run / "SHA256SUMS.txt"
+    original = sums.read_text()
+    sums.unlink()
+    with pytest.raises(ffd.FrenchDriverError, match="SHA256SUMS"):
+        ffd.verify(run)
+    sums.write_text("")
+    with pytest.raises(ffd.FrenchDriverError, match="SHA256SUMS"):
+        ffd.verify(run)
+    sums.write_text("".join(original.splitlines(keepends=True)[1:]))
+    with pytest.raises(ffd.FrenchDriverError, match="SHA256SUMS"):
+        ffd.verify(run)
+    sums.write_text(original)
+    assert ffd.verify(run)["status"] == "VERIFIED"
+
+
+def test_the_docs_state_what_verify_checks_and_that_staleness_is_advisory() -> None:
+    doc = (
+        Path(__file__).resolve().parents[2] / "docs" / "providers" / "french-fetch.md"
+    ).read_text()
+    for phrase in (
+        "advisory",
+        "WP2",
+        "--require-compliant",
+        "manifest-declared",
+        "declarative",
+    ):
+        assert phrase in doc, phrase
+    assert "manifest-declared" in str(ffd.__doc__)
