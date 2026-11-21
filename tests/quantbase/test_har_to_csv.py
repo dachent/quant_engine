@@ -1314,3 +1314,16 @@ def test_an_unknown_activity_type_and_a_missing_stats_column_refuse_under_drift(
     # the 21 explicit optional columns and extra keys are still tolerated
     Case(tmp_path / "ok", _drift).convert("account-level", allow_provider_drift=True)
     assert len(converter._STATS_OPTIONAL) == 21
+
+
+def test_a_volatis_dashboard_without_holdings_is_refused(tmp_path: Path) -> None:
+    """F2 item 20: Quantbase POSITION is a required class, so a capture whose Volatis fund carries
+    no holdings must fail at conversion, not later as a NOT READY release."""
+
+    def empty_volatis_holdings(bodies: dict[str, Any]) -> None:
+        funds = bodies["portfolio.dashboard"]["data"]["funds_data"]
+        funds[VOLATIS]["holdings"] = []
+
+    case = Case(tmp_path, empty_volatis_holdings)
+    with pytest.raises(ERROR, match="Volatis dashboard has no holdings"):
+        case.convert()

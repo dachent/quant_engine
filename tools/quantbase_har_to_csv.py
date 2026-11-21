@@ -773,6 +773,14 @@ def _dashboard(
                 )
         files[name] = _csv_bytes(HEADERS["dashboard_pricehistory"], price_rows)
         holdings = _array(fund["holdings"], "dashboard.holdings")
+        if title == VOLATIS_TITLE and not holdings:
+            # Quantbase POSITION is a required class: the holdings file exists only as this
+            # capture-time snapshot, so a capture without it cannot be completed later.
+            raise QuantbaseCsvError(
+                "the Volatis dashboard has no holdings: a refresh capture must include "
+                "dashboard_Volatis_Strategy_holdings.csv at every cutoff (Quantbase "
+                "POSITION is a required class)"
+            )
         if holdings:
             files[f"dashboard_{stem}_holdings.csv"] = _csv_bytes(
                 HEADERS["dashboard_holdings"],
