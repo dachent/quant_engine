@@ -59,9 +59,11 @@ Refusals to expect and what they mean: `COVERAGE_BEFORE_CUTOFF` / `FINALITY_BEFO
 
 ## 7. Cache base (fits are reused, not recomputed)
 ```bash
-python tools/release_cache_base.py seed --base <last sealed base> --target <cycle>/cachebase
-# set run config retained_cache_base to <cycle>/cachebase (it must lie in the cycle)
+python tools/release_cache_base.py verify --base <last sealed base>      # proves the base is what promote recorded
+# pass the sealed base to the attended run as --retained-cache-base <last sealed base>; there is no copy or seed step:
+# the run's own retained cache root is the overlay (hard links to the base plus new files)
 ```
+The base is a read-only input: the attended launch refuses a missing, symlinked or modified promoted base, a synced root, and a base that overlaps the output root or the run's retained cache root.
 Read the date of the last full fit from the base provenance (`created_at`); it is shown on every surface that reuses fits.
 
 ## 8. Ledger, prep and the run (replica-only, through attended)

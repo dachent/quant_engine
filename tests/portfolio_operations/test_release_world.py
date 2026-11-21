@@ -222,3 +222,43 @@ def test_rewrite_text_matches_whole_path_segments_only() -> None:
     )
     assert tool.names_leaf("/w/world-B/a", "world-B")
     assert not tool.names_leaf("/w/world-B2/a", "world-B")
+
+
+def test_rewrite_text_repoints_the_old_root_in_another_letter_case() -> None:
+    # Windows paths are case-insensitive: a doc that spells the root in other case still names the old world
+    old, new = Path("C:/w/world-B"), Path("C:/w/world-X")
+    text = "C:/W/WORLD-b/a and c:/w/World-B and C:\\W\\world-b\\in"
+    assert tool.rewrite_text(text, old, new) == (
+        "C:/w/world-X/a and C:/w/world-X and C:\\w\\world-X\\in"
+    )
+    assert tool.names_leaf("see C:/w/WORLD-B/a", "world-B")
+    assert not tool.names_leaf("see C:/w/WORLD-B2/a", "world-B")
+
+
+def test_rewrite_text_repoints_a_root_followed_by_sentence_punctuation() -> None:
+    old, new = Path("/w/world-B"), Path("/w/world-X")
+    # a '.' that ends a sentence is not part of a longer name; '.json' and '.bak' are
+    assert tool.rewrite_text("copied from /w/world-B. Then /w/world-B.", old, new) == (
+        "copied from /w/world-X. Then /w/world-X."
+    )
+    assert tool.rewrite_text("/w/world-B.bak /w/world-B.json", old, new) == (
+        "/w/world-B.bak /w/world-B.json"
+    )
+    assert tool.names_leaf("see world-B.", "world-B")
+    assert not tool.names_leaf("see world-B.bak", "world-B")
+
+
+def test_copy_rewrites_case_and_sentence_dot_spellings(
+    tmp_path: Path,
+) -> None:
+    old, new = _world(tmp_path, "world-old"), tmp_path / "world-new"
+    spelled = str(old).replace("\\", "/")
+    drive_swapped = spelled[0].swapcase() + spelled[1:]
+    (old / "cm" / "doc.json").write_text(
+        json.dumps({"note": f"see {drive_swapped.upper()}/in. And {spelled}."}),
+        encoding="utf-8",
+    )
+    tool.copy_world(old, new, ["cm"])
+    assert (
+        "world-old" not in (new / "cm" / "doc.json").read_text(encoding="utf-8").lower()
+    )

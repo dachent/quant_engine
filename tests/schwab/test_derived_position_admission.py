@@ -381,3 +381,31 @@ def test_the_export_folder_must_name_the_account_tag_and_the_capture_day() -> No
     schemas = {**SCHEMAS, row["source_artifact_id"]: "schwab-positions-export"}
     with pytest.raises(SchwabDerivedPositionError, match="export folder"):
         _admit([row], artifact_schemas=schemas)
+
+
+def test_the_snapshot_business_day_is_the_new_york_day_of_the_observation_clock() -> (
+    None
+):
+    from quant_engine.schwab.derived_positions import snapshot_business_day
+
+    # 20:30 New York on 2026-11-06 is already 2026-11-07 in UTC: the capture day the rows carry is the
+    # New York business day, so the clock's own date (the UTC one) would refuse a same-day capture
+    assert snapshot_business_day("2026-11-07T01:30:00+00:00") == date(2026, 11, 6)
+    assert snapshot_business_day("2026-11-06T20:30:00-05:00") == date(2026, 11, 6)
+    assert snapshot_business_day("2026-11-08T12:00:00-05:00") == date(2026, 11, 8)
+    with pytest.raises(SchwabDerivedPositionError, match="timezone"):
+        snapshot_business_day("2026-11-08T12:00:00")
+    with pytest.raises(SchwabDerivedPositionError, match="clock"):
+        snapshot_business_day("not a clock")
+
+
+def test_a_capture_taken_after_utc_midnight_is_not_refused_as_earlier_than_the_snapshot() -> (
+    None
+):
+    from quant_engine.schwab.derived_positions import snapshot_business_day
+
+    row = _row()
+    capture = date.fromisoformat(row["capture_date"])
+    snapshot = snapshot_business_day(f"{capture.isoformat()}T23:30:00-05:00")
+    assert snapshot == capture  # the UTC date of this clock is capture + 1
+    assert list(_admit([row], snapshot_day=snapshot)) == [row["record_id"]]

@@ -1876,9 +1876,9 @@ def _matrixport_positions(
             )
     for day in sorted(nav_days):
         # The position value and the independent published-NAV value must both close
-        # to the account NAV; a day with no published unit NAV only gets the first test.
-        checks = [totals[day]] + ([] if day in unclosed else [independent[day]])
-        for amount in checks:
+        # to the account NAV.  A valued day with no published unit NAV was refused above
+        # (MATRIXPORT_POSITIONS_NAV_DAILY_ABSENT), so every day here has both.
+        for amount in (totals[day], independent[day]):
             if abs(amount - nav_days[day]) > MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD:
                 raise ProviderLedgerError(
                     "MATRIXPORT_POSITIONS_NAV_CLOSURE: position rows differ from the "
@@ -2393,6 +2393,210 @@ def _quantbase_snapshot_day(catalog: Mapping[str, Any]) -> date:
     )
 
 
+_QUANTBASE_CASH_SYMBOL: Final = "$USD"
+# the vendor's NAV of a day values the holdings it opened the day with at that day's official
+# close; the replayed opening holdings must reproduce it within a hundredth of a percent
+_QUANTBASE_OPENING_TOLERANCE: Final = Decimal("0.0001")
+_QUANTBASE_ROLLBACK_SCALE_TOLERANCE: Final = Decimal("0.001")
+# holdings snapshots print shares to two places, replayed orders carry nine
+_QUANTBASE_REPLAY_QUANTITY_TOLERANCE: Final = Decimal("0.005")
+
+
+def _quantbase_rollback_decimal(value: object) -> Decimal:
+    """A quantity or proportion cell: blank is zero, anything else a finite decimal."""
+
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return Decimal(0)
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation as exc:
+        raise ProviderLedgerError("quantbase roll-back amount is not a number") from exc
+    if not parsed.is_finite():
+        raise ProviderLedgerError("quantbase roll-back amount is not finite")
+    return parsed
+
+
+def _quantbase_rollback(value: object) -> dict[str, Any]:
+    """The declared roll-back set (spec key ``quantbase_rollback``): the cutoff, the
+    snapshot day, the strategy fund's title and EXACTLY the rebalance rows and account
+    activity rows the snapshot holds after the cutoff."""
+
+    top = _object(value, "quantbase_rollback")
+    if set(top) != {"cutoff", "snapshot_day", "fund_title", "rebalances", "activity"}:
+        raise ProviderLedgerError("quantbase_rollback keys differ")
+    rebalances: list[tuple[date, str, Decimal]] = []
+    for item in _objects(top["rebalances"], "quantbase_rollback.rebalances"):
+        if set(item) != {"date", "symbol", "proportion"}:
+            raise ProviderLedgerError("quantbase_rollback rebalance keys differ")
+        rebalances.append(
+            (
+                _day(item["date"], "quantbase_rollback rebalance date"),
+                _text(item["symbol"], "quantbase_rollback rebalance symbol"),
+                _quantbase_rollback_decimal(item["proportion"]),
+            )
+        )
+    activity: list[tuple[str, str, str, Decimal]] = []
+    for item in _objects(top["activity"], "quantbase_rollback.activity"):
+        if set(item) != {"id", "activity_type", "symbol", "quantity"}:
+            raise ProviderLedgerError("quantbase_rollback activity keys differ")
+        activity.append(
+            (
+                _text(item["id"], "quantbase_rollback activity id"),
+                _text(item["activity_type"], "quantbase_rollback activity type"),
+                str(item["symbol"]).strip(),
+                _quantbase_rollback_decimal(item["quantity"]),
+            )
+        )
+    if not rebalances and not activity:
+        raise ProviderLedgerError("quantbase_rollback declares nothing to roll back")
+    return {
+        "cutoff": _day(top["cutoff"], "quantbase_rollback.cutoff"),
+        "snapshot_day": _day(top["snapshot_day"], "quantbase_rollback.snapshot_day"),
+        "fund_title": _text(top["fund_title"], "quantbase_rollback.fund_title"),
+        "rebalances": sorted(rebalances),
+        "activity": sorted(activity),
+    }
+
+
+def _quantbase_check_rollback_set(
+    rollback: Mapping[str, Any],
+    cutoff_day: date,
+    snapshot_day: date,
+    later_rebalances: list[tuple[date, str, Decimal]],
+    later_activity: list[tuple[str, str, str, Decimal]],
+) -> None:
+    """The rows after the cutoff must be exactly the declared set: no extra row, no
+    missing row, no changed amount (multiset equality)."""
+
+    if rollback["cutoff"] != cutoff_day or rollback["snapshot_day"] != snapshot_day:
+        raise ProviderLedgerError(
+            "quantbase roll-back is declared for another cutoff or snapshot day"
+        )
+    if sorted(later_rebalances) != rollback["rebalances"]:
+        raise ProviderLedgerError(
+            "quantbase rebalance rows after the cutoff differ from the declared "
+            "roll-back set"
+        )
+    if sorted(later_activity) != rollback["activity"]:
+        raise ProviderLedgerError(
+            "quantbase account activity after the cutoff differs from the declared "
+            "roll-back set"
+        )
+
+
+def _quantbase_roll_back(
+    rollback: Mapping[str, Any],
+    *,
+    orders: Sequence[tuple[str, date, str, Decimal]],
+    fund_ids: set[str],
+    snapshot_holdings: Sequence[tuple[str, Decimal]],
+    snapshot_cash: Decimal,
+    cutoff_day: date,
+    cutoff_nav: Decimal | None,
+    closes: Mapping[str, Mapping[date, Decimal]],
+) -> tuple[
+    Decimal,
+    list[tuple[str, Decimal, Decimal, Decimal]],
+    dict[str, Decimal],
+    dict[str, Any],
+]:
+    """The holdings at the cutoff by replaying the strategy fund's filled orders.
+
+    Returns the cash, the risky holdings as (symbol, shares, value, official close of the
+    cutoff), their values and the evidence.  Refuses unless the replay of ALL orders
+    reproduces the snapshot, the holdings before the cutoff day close to the vendor NAV at
+    the official closes, and every held symbol has an official close of the cutoff."""
+
+    del rollback  # the declared set was already matched against the rows
+    if len(fund_ids) != 1 or "" in fund_ids:
+        raise ProviderLedgerError(
+            "quantbase roll-back needs exactly one fund id for the strategy title"
+        )
+    (fund_id,) = fund_ids
+    mine = [(day, sym, qty) for fund, day, sym, qty in orders if fund == fund_id]
+    everything: dict[str, Decimal] = defaultdict(Decimal)
+    opening: dict[str, Decimal] = defaultdict(Decimal)
+    at_cutoff: dict[str, Decimal] = defaultdict(Decimal)
+    for day, sym, qty in mine:
+        everything[sym] += qty
+        if day < cutoff_day:
+            opening[sym] += qty
+        if day <= cutoff_day:
+            at_cutoff[sym] += qty
+    snapshot = dict(snapshot_holdings)
+    snapshot[_QUANTBASE_CASH_SYMBOL] = (
+        snapshot.get(_QUANTBASE_CASH_SYMBOL, Decimal(0)) + snapshot_cash
+    )
+    for sym in set(everything) | set(snapshot):
+        if (
+            abs(everything.get(sym, Decimal(0)) - snapshot.get(sym, Decimal(0)))
+            > _QUANTBASE_REPLAY_QUANTITY_TOLERANCE
+        ):
+            raise ProviderLedgerError(
+                f"quantbase order replay does not reproduce the snapshot for {sym}"
+            )
+    if cutoff_nav is None or cutoff_nav <= 0:
+        raise ProviderLedgerError("quantbase holdings cannot be valued at the cutoff")
+    opening_value = opening.get(_QUANTBASE_CASH_SYMBOL, Decimal(0))
+    for sym, qty in opening.items():
+        if sym == _QUANTBASE_CASH_SYMBOL or qty == 0:
+            continue
+        close = closes.get(sym, {}).get(cutoff_day)
+        if close is None:
+            raise ProviderLedgerError(
+                f"quantbase roll-back needs the official close of {sym} on the cutoff"
+            )
+        opening_value += qty * close
+    opening_residual = opening_value - cutoff_nav
+    if abs(opening_residual) > _QUANTBASE_OPENING_TOLERANCE * cutoff_nav:
+        raise ProviderLedgerError(
+            "quantbase holdings before the cutoff day do not close to the strategy NAV "
+            "of the cutoff at the official closes"
+        )
+    cash = at_cutoff.get(_QUANTBASE_CASH_SYMBOL, Decimal(0))
+    held = sorted(
+        (sym, qty)
+        for sym, qty in at_cutoff.items()
+        if sym != _QUANTBASE_CASH_SYMBOL and qty != 0
+    )
+    if not held or cash < 0 or cutoff_nav <= cash:
+        raise ProviderLedgerError("quantbase holdings cannot be valued at the cutoff")
+    raw: dict[str, Decimal] = {}
+    for sym, qty in held:
+        close = closes.get(sym, {}).get(cutoff_day)
+        if close is None or qty < 0:
+            raise ProviderLedgerError(
+                "quantbase roll-back needs a long holding and the official close of "
+                f"{sym} on the cutoff"
+            )
+        raw[sym] = qty * close
+    total = cutoff_nav - cash
+    scale = total / sum(raw.values(), Decimal(0))
+    if abs(scale - 1) > _QUANTBASE_ROLLBACK_SCALE_TOLERANCE:
+        raise ProviderLedgerError(
+            "quantbase rolled-back holdings at the official closes differ from the "
+            "strategy NAV by more than the tolerance"
+        )
+    values: dict[str, Decimal] = {}
+    for sym, _qty in held[:-1]:
+        values[sym] = (raw[sym] * scale).quantize(Decimal("0.000001"))
+    values[held[-1][0]] = total - sum(values.values(), Decimal(0))
+    risky = [(sym, qty, values[sym], closes[sym][cutoff_day]) for sym, qty in held]
+    evidence = {
+        "fund_id": fund_id,
+        "replay_order_rows": len(mine),
+        "replay_reproduces_snapshot": True,
+        "opening_value_at_official_closes_usd": format(opening_value, "f"),
+        "opening_residual_to_nav_usd": format(opening_residual, "f"),
+        "official_close_value_usd": format(sum(raw.values(), Decimal(0)), "f"),
+        "value_scale_to_nav": format(scale, "f"),
+        "opening_tolerance": str(_QUANTBASE_OPENING_TOLERANCE),
+        "scale_tolerance": str(_QUANTBASE_ROLLBACK_SCALE_TOLERANCE),
+    }
+    return cash, risky, values, evidence
+
+
 def _quantbase_positions(
     generation_id: str,
     manifest: GenerationManifest,
@@ -2403,6 +2607,7 @@ def _quantbase_positions(
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
     financial_cutoff: date | None = None,
     fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None,
+    rollback: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """The Volatis strategy's holdings at the cutoff, from the capture-time snapshot.
 
@@ -2423,6 +2628,18 @@ def _quantbase_positions(
     shares times that close must match the value within 0.1 percent, else the build
     refuses.  Without such a close the row says ``independent_price_check`` is
     ``UNAVAILABLE``, so a closure that declares completeness can require ``PASSED``.
+
+    With a declared ``rollback`` (spec key ``quantbase_rollback``) the snapshot may postdate
+    the cutoff by exactly the declared rows: the rebalance rows and account-activity rows
+    dated after the cutoff must EQUAL the declared set (multiset equality: no extra, no
+    missing, no changed amount), else the build refuses as above.  The holdings at the
+    cutoff are then the replay of the strategy fund's filled orders up to the cutoff; the
+    replay of ALL orders must reproduce the snapshot quantities (so it is complete), the
+    holdings before the cutoff day valued at the official closes of the cutoff must close
+    to the vendor NAV of the cutoff (the vendor's own start-of-day convention), and every
+    held symbol needs an official close of the cutoff (the independent check is required).
+    Any number of risky holdings is allowed; their values are the official-close values
+    scaled pro rata to the vendor NAV less the cash.
     """
 
     if not any(
@@ -2481,15 +2698,27 @@ def _quantbase_positions(
         )
     }
     last_rebalance: date | None = None
+    later_rebalances: list[tuple[date, str, Decimal]] = []
     for row in rebalances:
         day = _day(row["date"], "quantbase rebalance date")
         if cutoff_day < day <= snapshot_day:
-            raise ProviderLedgerError(
-                "quantbase holdings snapshot postdates a rebalance after the cutoff"
+            if rollback is None:
+                raise ProviderLedgerError(
+                    "quantbase holdings snapshot postdates a rebalance after the cutoff"
+                )
+            later_rebalances.append(
+                (
+                    day,
+                    str(row["symbol"]).strip(),
+                    _quantbase_rollback_decimal(row["proportion"]),
+                )
             )
         if day <= cutoff_day and (last_rebalance is None or day > last_rebalance):
             last_rebalance = day
     last_activity: date | None = None
+    later_activity: list[tuple[str, str, str, Decimal]] = []
+    orders: list[tuple[str, date, str, Decimal]] = []
+    fund_ids: set[str] = set()
     for row in activity:
         # An activity's effective day is the latest of the dates it carries: an order is
         # filled_at, a dividend date, a journal completed_at, anything else created_at.
@@ -2507,15 +2736,46 @@ def _quantbase_positions(
         if not days:
             raise ProviderLedgerError("quantbase account activity row has no date")
         activity_day = max(days)
+        if rollback is not None:
+            title = str(row.get("fund_title") or "").strip()
+            if title == rollback["fund_title"]:
+                fund_ids.add(str(row.get("fund") or "").strip())
         if cutoff_day < activity_day <= snapshot_day:
-            raise ProviderLedgerError(
-                "quantbase account has activity after the cutoff "
-                f"({row.get('activity_type')}): the snapshot is not the cutoff holdings"
+            if rollback is None:
+                raise ProviderLedgerError(
+                    "quantbase account has activity after the cutoff "
+                    f"({row.get('activity_type')}): the snapshot is not the cutoff "
+                    "holdings"
+                )
+            later_activity.append(
+                (
+                    str(row.get("id") or "").strip(),
+                    str(row.get("activity_type") or "").strip(),
+                    str(row.get("symbol") or "").strip(),
+                    _quantbase_rollback_decimal(row.get("quantity")),
+                )
+            )
+        if (
+            rollback is not None
+            and str(row.get("activity_type") or "").strip() == "order"
+            and str(row.get("executed") or "").strip() == "Y"
+        ):
+            orders.append(
+                (
+                    str(row.get("fund") or "").strip(),
+                    activity_day,
+                    str(row.get("symbol") or "").strip(),
+                    _quantbase_rollback_decimal(row.get("quantity")),
+                )
             )
         if activity_day <= cutoff_day and (
             last_activity is None or activity_day > last_activity
         ):
             last_activity = activity_day
+    if rollback is not None:
+        _quantbase_check_rollback_set(
+            rollback, cutoff_day, snapshot_day, later_rebalances, later_activity
+        )
     cash = Decimal(0)
     risky: list[tuple[str, Decimal, Decimal, Decimal]] = []
     for row in holdings:
@@ -2540,13 +2800,35 @@ def _quantbase_positions(
             "quantbase holdings do not close against the strategy NAV"
         )
     for symbol, quantity, value, price in risky:
-        if abs(quantity * price - value) > _QUANTBASE_SNAPSHOT_CENT * 2:
+        # a price printed to the cent is rounded by up to half a cent a share: allow that
+        # rounding, never more (a share count that is wrong stays far outside it)
+        rounding = (
+            abs(quantity) * Decimal("0.005")
+            if price == price.quantize(Decimal("0.01"))
+            else Decimal(0)
+        )
+        if abs(quantity * price - value) > _QUANTBASE_SNAPSHOT_CENT * 2 + rounding:
             raise ProviderLedgerError(
                 f"quantbase holding {symbol} quantity times price differs from its value"
             )
     derived = cutoff_day != snapshot_day
     cutoff_nav = navs.get(cutoff_day)
-    if derived:
+    rolled_evidence: dict[str, Any] | None = None
+    if derived and rollback is not None:
+        # The snapshot is rolled back to the cutoff by replaying the fund's orders.
+        cash, risky, values, rolled_evidence = _quantbase_roll_back(
+            rollback,
+            orders=orders,
+            fund_ids=fund_ids,
+            snapshot_holdings=[(sym, q) for sym, q, _v, _p in risky],
+            snapshot_cash=cash,
+            cutoff_day=cutoff_day,
+            cutoff_nav=cutoff_nav,
+            closes=fill_closes or {},
+        )
+        rolled_evidence["rollback_rebalance_count"] = len(later_rebalances)
+        rolled_evidence["rollback_activity_count"] = len(later_activity)
+    elif derived:
         if len(risky) != 1 or cutoff_nav is None or cutoff_nav <= cash:
             raise ProviderLedgerError(
                 "quantbase holdings cannot be valued at the cutoff"
@@ -2606,6 +2888,7 @@ def _quantbase_positions(
         "activity_after_cutoff_count": 0,
         "cent_tolerance": str(_QUANTBASE_SNAPSHOT_CENT),
         "implied_price_tolerance": str(_QUANTBASE_IMPLIED_PRICE_TOLERANCE),
+        **({"rollback": rolled_evidence} if rolled_evidence is not None else {}),
     }
     rows: list[dict[str, Any]] = []
     for symbol, quantity, _value, price in risky:
@@ -2614,7 +2897,11 @@ def _quantbase_positions(
             {
                 "account_id": account_id,
                 "as_of_date": cutoff_day.isoformat(),
-                "as_of_basis": "CAPTURE_TIME_SNAPSHOT_NO_ACTIVITY_SINCE_CUTOFF",
+                "as_of_basis": (
+                    "CAPTURE_TIME_SNAPSHOT_ROLLED_BACK_TO_CUTOFF"
+                    if rolled_evidence is not None
+                    else "CAPTURE_TIME_SNAPSHOT_NO_ACTIVITY_SINCE_CUTOFF"
+                ),
                 "capture_date": snapshot_day.isoformat(),
                 "closure": {
                     **closure,
@@ -2643,13 +2930,17 @@ def _quantbase_positions(
                 "record_id": f"quantbase:position:{source_id}",
                 "security_id": "security-quantbase-"
                 + hashlib.sha256(f"quantbase:{symbol}".encode()).hexdigest()[:24],
-                "snapshot_price": format(price, "f"),
+                "snapshot_price": (
+                    None if rolled_evidence is not None else format(price, "f")
+                ),
                 "source_artifact_id": artifact_id,
                 "source_record_id": source_id,
                 "strategy_id": strategy_id,
                 "symbol": symbol,
                 "value_basis": (
-                    "DERIVED_FROM_STRATEGY_NAV_AT_CUTOFF"
+                    "ROLLED_BACK_ORDER_REPLAY_SCALED_TO_STRATEGY_NAV_AT_CUTOFF"
+                    if rolled_evidence is not None
+                    else "DERIVED_FROM_STRATEGY_NAV_AT_CUTOFF"
                     if derived
                     else "CAPTURE_TIME_SNAPSHOT_VALUE"
                 ),
@@ -3383,6 +3674,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "account_roles",
             "quantbase_fill_closes",
             "quantbase_position_closes",
+            "quantbase_rollback",
             "zero_financing_observations",
             "event_completeness_declaration",
         )
@@ -6254,6 +6546,7 @@ class _CsvFactContext(NamedTuple):
     exceptions: list[dict[str, Any]]
     fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None
     position_closes: Mapping[str, Mapping[date, Decimal]] | None = None
+    rollback: Mapping[str, Any] | None = None
 
 
 def _csv_matrixport_capital_anchors(ctx: _CsvFactContext) -> list[dict[str, Any]]:
@@ -6355,6 +6648,7 @@ def _csv_quantbase_positions(ctx: _CsvFactContext) -> list[dict[str, Any]]:
         ctx.assignments,
         financial_cutoff=ctx.financial_cutoff,
         fill_closes=ctx.position_closes,
+        rollback=ctx.rollback,
     )
 
 
@@ -6405,6 +6699,7 @@ def _project_account_facts(
     requested_as_of: date | None = None,
     fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None,
     position_closes: Mapping[str, Mapping[date, Decimal]] | None = None,
+    rollback: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     projections: dict[str, list[dict[str, Any]]] = defaultdict(list)
     exceptions: list[dict[str, Any]] = []
@@ -6504,6 +6799,7 @@ def _project_account_facts(
                     exceptions,
                     fill_closes,
                     position_closes,
+                    rollback,
                 )
             )
             projections[target_fact].extend(rows)
@@ -12154,6 +12450,11 @@ def build_catalog(
         if "quantbase_position_closes" in spec
         else None
     )
+    rollback = (
+        _quantbase_rollback(spec["quantbase_rollback"])
+        if "quantbase_rollback" in spec
+        else None
+    )
     provenance, provenance_artifact = _provenance(spec)
     accounts, strategies, assignments = _assignment_index(
         provenance, _object(authority.get("contract"), "financial MVP contract")
@@ -12209,6 +12510,7 @@ def build_catalog(
             fx_rates=fx_rates if provider_id == "matrixport" else None,
             fill_closes=fill_closes,
             position_closes=position_closes,
+            rollback=rollback,
             requested_as_of=as_of if run_observation is not None else None,
             financial_cutoff=(
                 min(
