@@ -398,6 +398,8 @@ _PATH_STAGES = {
     "tools/schwab_statement_cash_summaries.py": [],
     "tools/schwab_page_actions.py": [],
     "tools/schwab_rollback.py": [],
+    # operator capture tool, writes no delivery artifact
+    "tools/schwab_zf_capture.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     # #894: owner account financing declaration; read by the leverage disclosure
     "schemas/portfolio/account-financing-declaration.schema.json": ["report", "panel"],
