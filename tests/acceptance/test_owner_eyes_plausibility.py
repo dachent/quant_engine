@@ -923,3 +923,20 @@ def test_a_declared_complete_row_is_a_complete_state():
     ]
     assert [h for h in hits_of(p) if h.rule == "PL21"]
     assert [h for h in hits_of(p) if h.rule == "PL22"]
+
+
+def test_declared_complete_is_anchored_and_pl23_accepts_a_declared_complete_cell():
+    """Validator P3 on item 33: only the exact DECLARED_COMPLETE tokens count as complete, and a
+    DECLARED_COMPLETE coverage cell needs no issue reference (PL23), while a PARTIAL one still does."""
+
+    for token in ("DECLARED_COMPLETE", "DECLARED_COMPLETE_BY_LEDGER_CLOSURE"):
+        p = clean_payload()
+        p["coverage"].append({"status": token})
+        assert not [h for h in hits_of(p) if h.rule == "PL23"], token
+    for token in ("DECLARED_COMPLETE_PENDING", "DECLARED_COMPLETELY_WRONG"):
+        p = clean_payload()
+        p["coverage"].append({"status": token})
+        assert [h for h in hits_of(p) if h.rule == "PL23"], token
+    p = clean_payload()
+    p["coverage"].append({"status": "PARTIAL"})
+    assert [h for h in hits_of(p) if h.rule == "PL23"]

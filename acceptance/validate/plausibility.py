@@ -891,7 +891,7 @@ def pl20(panel: Panel) -> Iterator[Hit]:
 # ============================================================================================
 
 _COMPLETE = re.compile(
-    r"^(COMPLETE|FINITE_COMPLETE|DECLARED_COMPLETE|RECONCILED|CLOSES)"
+    r"^(COMPLETE|FINITE_COMPLETE|DECLARED_COMPLETE(_BY_LEDGER_CLOSURE)?$|RECONCILED|CLOSES)"
 )
 
 
