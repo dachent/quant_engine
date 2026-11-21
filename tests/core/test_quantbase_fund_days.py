@@ -57,34 +57,34 @@ def test_a_fill_day_without_closes_keeps_the_dashboard_and_says_so() -> None:
     assert out[D2].value == Decimal("1000")
 
 
-# --- real 2025-08-06 Volatis fill day (B blocker): split-adjusted closes against as-traded legs ----
-# The fund held 197.4573 SHV + 20.0592 cash before the fill (dashboard 21,771.95) and sold all SHV
-# for 245.0800 TQQQ (as-traded, pre 2025-11-20 split units) at 88.76.  A close series that is
-# split-adjusted (TQQQ 2025-08-06 = 44.42, the as-traded close being 88.84) values the post-fill
-# holdings at about half the fund: the restatement must be refused, never published.
+# --- synthetic fill day (B blocker): split-adjusted closes against as-traded legs ----
+# The fund holds 200 SHV + 20 cash before the fill (dashboard 22,020.00) and sells all SHV for
+# 250 TQQQ (as-traded, pre-split units) at 87.96.  A close series that is split-adjusted (the
+# fill-day TQQQ close 44.00, the as-traded close being 88.00) values the post-fill holdings at about
+# half the fund: the restatement must be refused, never published.  All figures are synthetic.
 
-E0, E1, E2, E3 = date(2025, 8, 4), date(2025, 8, 5), date(2025, 8, 6), date(2025, 8, 7)
-REAL_LEGS = [
-    (E0, "SHV", Decimal("197.4572805340")),
-    (E0, "$USD", Decimal("20.0592372037")),
-    (E2, "SHV", Decimal("-197.4572805340")),
-    (E2, "TQQQ", Decimal("245.0799626930")),
-    (E2, "$USD", Decimal("-20.0592372037")),
-    (E2, "$USD", Decimal("17.2060885064")),
+E0, E1, E2, E3 = date(2025, 3, 3), date(2025, 3, 4), date(2025, 3, 5), date(2025, 3, 6)
+FILL_LEGS = [
+    (E0, "SHV", Decimal("200")),
+    (E0, "$USD", Decimal("20")),
+    (E2, "SHV", Decimal("-200")),
+    (E2, "TQQQ", Decimal("250")),
+    (E2, "$USD", Decimal("-20")),
+    (E2, "$USD", Decimal("30")),
 ]
-REAL_DASHBOARD = {
-    E1: Decimal("21766.45"),
-    E2: Decimal("21771.95"),
-    E3: Decimal("22010.68"),
+FILL_DASHBOARD = {
+    E1: Decimal("22020.00"),
+    E2: Decimal("22020.00"),
+    E3: Decimal("22280.00"),
 }
 
 
-def _real_closes(tqqq: tuple[str, str, str]) -> dict[str, dict[date, Decimal]]:
+def _fill_closes(tqqq: tuple[str, str, str]) -> dict[str, dict[date, Decimal]]:
     return {
         "SHV": {
-            E1: Decimal("110.13"),
-            E2: Decimal("110.16"),
-            E3: Decimal("110.17"),
+            E1: Decimal("110.00"),
+            E2: Decimal("110.00"),
+            E3: Decimal("110.00"),
         },
         "TQQQ": {
             E1: Decimal(tqqq[0]),
@@ -98,37 +98,33 @@ def test_split_adjusted_closes_halve_the_fill_day_so_the_restatement_is_refused(
     None
 ):
     out = q.corrected_values(
-        REAL_DASHBOARD, REAL_LEGS, _real_closes(("42.82", "44.42", "44.87"))
+        FILL_DASHBOARD, FILL_LEGS, _fill_closes(("43.00", "44.00", "44.50"))
     )
     assert out[E2].status == q.UNRESTATED_IMPLAUSIBLE
-    assert out[E2].value == REAL_DASHBOARD[E2]  # the dashboard value is kept
+    assert out[E2].value == FILL_DASHBOARD[E2]  # the dashboard value is kept
     assert out[E2].residual is not None
 
 
 def test_the_same_day_with_as_traded_closes_restates_within_the_tolerance() -> None:
     out = q.corrected_values(
-        REAL_DASHBOARD, REAL_LEGS, _real_closes(("85.64", "88.84", "89.74"))
+        FILL_DASHBOARD, FILL_LEGS, _fill_closes(("86.00", "88.00", "89.00"))
     )
     assert out[E2].status == q.RESTATED
-    assert abs(out[E2].value - REAL_DASHBOARD[E2]) / REAL_DASHBOARD[E2] < Decimal(
+    assert abs(out[E2].value - FILL_DASHBOARD[E2]) / FILL_DASHBOARD[E2] < Decimal(
         "0.03"
     )
 
 
 def test_a_restatement_just_inside_and_just_outside_the_five_percent_gate() -> None:
-    # post-fill value = 17.2061 + 245.0800 x close: inside at 2.9% above, outside at 3.1%
-    base = REAL_DASHBOARD[E2]
-    inside = (base * Decimal("1.029") - Decimal("17.2060885064")) / Decimal(
-        "245.0799626930"
-    )
-    outside = (base * Decimal("1.031") - Decimal("17.2060885064")) / Decimal(
-        "245.0799626930"
-    )
+    # post-fill value = 30 + 250 x close: inside at 2.9% above, outside at 3.1%
+    base = FILL_DASHBOARD[E2]
+    inside = (base * Decimal("1.029") - Decimal("30")) / Decimal("250")
+    outside = (base * Decimal("1.031") - Decimal("30")) / Decimal("250")
     for close, status in ((inside, q.RESTATED), (outside, q.UNRESTATED_IMPLAUSIBLE)):
         out = q.corrected_values(
-            REAL_DASHBOARD,
-            REAL_LEGS,
-            _real_closes(("85.64", str(close), "89.74")),
+            FILL_DASHBOARD,
+            FILL_LEGS,
+            _fill_closes(("86.00", str(close), "89.00")),
         )
         assert out[E2].status == status
 
@@ -147,10 +143,10 @@ def test_a_fill_to_close_move_beyond_the_gate_is_refused_even_when_the_rebuild_c
 def test_a_fill_day_whose_next_day_does_not_reproduce_is_refused() -> None:
     # value that entered outside the order legs (a deposit the night of the fill): the restated
     # day is inside 3 % but the next dashboard day is 5,000 above the rebuilt holdings
-    dashboard = dict(REAL_DASHBOARD)
-    dashboard[E3] = REAL_DASHBOARD[E3] + Decimal("5000")
+    dashboard = dict(FILL_DASHBOARD)
+    dashboard[E3] = FILL_DASHBOARD[E3] + Decimal("5000")
     out = q.corrected_values(
-        dashboard, REAL_LEGS, _real_closes(("85.64", "88.84", "89.74"))
+        dashboard, FILL_LEGS, _fill_closes(("86.00", "88.00", "89.00"))
     )
     assert out[E2].status == q.UNRESTATED_NEXT_DAY_UNPROVEN
     assert out[E2].value == dashboard[E2]
@@ -162,15 +158,15 @@ def test_the_next_day_proof_catches_a_scale_error_the_five_percent_gate_misses()
     # closes 3 % low (a mis-scaled series): the fill day moves 3 % (inside the gate) and the
     # following day's rebuild is off by 3 % (outside the 0.05 % tolerance)
     out = q.corrected_values(
-        REAL_DASHBOARD, REAL_LEGS, _real_closes(("83.0", "86.2", "87.1"))
+        FILL_DASHBOARD, FILL_LEGS, _fill_closes(("83.4", "85.4", "86.3"))
     )
     assert out[E2].status == q.UNRESTATED_NEXT_DAY_UNPROVEN
 
 
 def test_a_fill_day_with_no_following_dashboard_day_is_unproven() -> None:
-    dashboard = {E1: REAL_DASHBOARD[E1], E2: REAL_DASHBOARD[E2]}
+    dashboard = {E1: FILL_DASHBOARD[E1], E2: FILL_DASHBOARD[E2]}
     out = q.corrected_values(
-        dashboard, REAL_LEGS, _real_closes(("85.64", "88.84", "89.74"))
+        dashboard, FILL_LEGS, _fill_closes(("86.00", "88.00", "89.00"))
     )
     assert out[E2].status == q.UNRESTATED_NEXT_DAY_UNPROVEN
 
@@ -197,19 +193,19 @@ def test_a_next_day_without_closes_that_trades_the_position_away_does_not_prove_
     E3 and let E4 (SHV only) prove E2 (the series is 3 % low: a scale error the proof catches
     whenever E3's close is present)."""
 
-    e4 = date(2025, 8, 8)
+    e4 = date(2025, 3, 7)
     legs = [
-        *REAL_LEGS,
-        (E3, "TQQQ", Decimal("-245.0799626930")),
+        *FILL_LEGS,
+        (E3, "TQQQ", Decimal("-250")),
         (E3, "SHV", Decimal("199.0")),
     ]
-    low = _real_closes(("83.0", "86.2", "87.1"))
-    shv = {**low["SHV"], e4: Decimal("110.18")}
+    low = _fill_closes(("83.4", "85.4", "86.3"))
+    shv = {**low["SHV"], e4: Decimal("110.01")}
     dashboard = {
-        E1: REAL_DASHBOARD[E1],
-        E2: REAL_DASHBOARD[E2],
-        E3: REAL_DASHBOARD[E3],
-        e4: Decimal("17.2060885064") + Decimal("199.0") * Decimal("110.18"),
+        E1: FILL_DASHBOARD[E1],
+        E2: FILL_DASHBOARD[E2],
+        E3: FILL_DASHBOARD[E3],
+        e4: Decimal("30") + Decimal("199.0") * Decimal("110.01"),
     }
     # E3's TQQQ close is present: the 3 % scale error is caught on E3's pre-fill rebuild
     present = q.corrected_values(dashboard, legs, {"SHV": shv, "TQQQ": low["TQQQ"]})
@@ -218,7 +214,7 @@ def test_a_next_day_without_closes_that_trades_the_position_away_does_not_prove_
     missing = {"SHV": shv, "TQQQ": {E1: low["TQQQ"][E1], E2: low["TQQQ"][E2]}}
     out = q.corrected_values(dashboard, legs, missing)
     assert out[E2].status == q.UNRESTATED_NEXT_DAY_UNPROVEN
-    assert out[E2].value == REAL_DASHBOARD[E2]
+    assert out[E2].value == FILL_DASHBOARD[E2]
 
 
 def test_too_few_valued_non_fill_days_do_not_show_that_the_closes_reproduce() -> None:
@@ -247,25 +243,25 @@ def test_a_fill_day_without_a_dashboard_row_is_a_proving_day_that_cannot_prove()
     row for E3 (the ledger drops rows with a missing or zero value): the fill day itself is the
     proving day, there is no dashboard value on it, so E2 stays unproven and unrestated."""
 
-    e4 = date(2025, 8, 8)
+    e4 = date(2025, 3, 7)
     legs = [
-        *REAL_LEGS,
-        (E3, "TQQQ", Decimal("-245.0799626930")),
+        *FILL_LEGS,
+        (E3, "TQQQ", Decimal("-250")),
         (E3, "SHV", Decimal("199.0")),
     ]
-    low = _real_closes(("83.0", "86.2", "87.1"))
+    low = _fill_closes(("83.4", "85.4", "86.3"))
     closes = {
-        "SHV": {**low["SHV"], e4: Decimal("110.18")},
+        "SHV": {**low["SHV"], e4: Decimal("110.01")},
         "TQQQ": low["TQQQ"],
     }
     dashboard = {
-        E1: REAL_DASHBOARD[E1],
-        E2: REAL_DASHBOARD[E2],
-        e4: Decimal("17.2060885064") + Decimal("199.0") * Decimal("110.18"),
+        E1: FILL_DASHBOARD[E1],
+        E2: FILL_DASHBOARD[E2],
+        e4: Decimal("30") + Decimal("199.0") * Decimal("110.01"),
     }
     out = q.corrected_values(dashboard, legs, closes)
     assert out[E2].status == q.UNRESTATED_NEXT_DAY_UNPROVEN
-    assert out[E2].value == REAL_DASHBOARD[E2]
+    assert out[E2].value == FILL_DASHBOARD[E2]
 
 
 def test_only_a_missing_held_close_on_a_day_the_series_covers_counts_against_it() -> (

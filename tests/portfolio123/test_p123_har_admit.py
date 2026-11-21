@@ -967,3 +967,45 @@ def test_a_dry_run_or_non_evidence_input_is_refused(tmp_path: Path) -> None:
             fetcher=None,
             dry_run=True,
         )
+
+
+def test_holdings_market_value_tolerance_scales_with_the_rounded_legs() -> None:
+    row = {"posCnt": 13, "mktVal": 26.02}
+    thirteen = {"positions": [{"shares": 1.0, "value": 2.0} for _ in range(13)]}
+    # 13 values each rounded to 0.01 may differ from the book total by 0.065: 0.02 passes
+    assert admit._corroboration_error("holdings", thirteen, row) is None
+    one = {"positions": [{"shares": 1.0, "value": 2.0}]}
+    # one position 0.02 off is not rounding: still refused
+    assert "market value differs" in str(
+        admit._corroboration_error("holdings", one, {"posCnt": 1, "mktVal": 2.02})
+    )
+    # far off stays refused whatever the leg count
+    assert "market value differs" in str(
+        admit._corroboration_error("holdings", thirteen, {"posCnt": 13, "mktVal": 27.0})
+    )
+
+
+def test_holdings_market_value_tolerance_boundaries_are_0_005_per_leg_plus_the_total() -> (
+    None
+):
+    # bound = 0.005 * (N + 1) + 0.001: N=1 -> 0.011, N=13 -> 0.071
+    one = {"positions": [{"shares": 1.0, "value": 2.0}]}
+    assert (
+        admit._corroboration_error("holdings", one, {"posCnt": 1, "mktVal": 2.0105})
+        is None
+    )
+    assert "market value differs" in str(
+        admit._corroboration_error("holdings", one, {"posCnt": 1, "mktVal": 2.0115})
+    )
+    thirteen = {"positions": [{"shares": 1.0, "value": 2.0} for _ in range(13)]}
+    assert (
+        admit._corroboration_error(
+            "holdings", thirteen, {"posCnt": 13, "mktVal": 26.0705}
+        )
+        is None
+    )
+    assert "market value differs" in str(
+        admit._corroboration_error(
+            "holdings", thirteen, {"posCnt": 13, "mktVal": 26.0715}
+        )
+    )

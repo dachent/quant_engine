@@ -15,7 +15,7 @@ A fill moves holdings, not value: the restated value of a fill day must lie with
 ``MAX_RESTATEMENT_CHANGE`` (3 %) of the dashboard value, else the restatement is refused and the
 dashboard value kept (a close series in other units than the legs, for example split-adjusted
 closes against as-traded quantities, values the post-fill holdings at a fraction of the fund:
-TQQQ 2025-08-06, 245.08 shares x 44.42 adjusted instead of 88.84 as traded).
+250 shares x a 44.00 adjusted close instead of 88.00 as traded).
 A restatement also needs the NEXT dashboard day to reproduce: that day's pre-fill value is this
 day's post-fill holdings at its close, so a unit or scale error in the closes (split-adjusted
 closes against as-traded quantities), or value that entered outside the order legs (a deposit),

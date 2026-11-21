@@ -9,8 +9,10 @@ that no release tool does; every other step is an existing repo tool (see ``docs
 ``stamp``              write ``PROVISIONAL.json`` into the refresh cycle root: tier, cutoff, frozen commit, the
                        resolved cycle's sha256, and one staleness line per provider (the date its data ends and its
                        age at ``evaluated_on``), plus the date of the last full model fit when fits are reused.
-``check-not-release``  exit 1 when a root carries ``PROVISIONAL.json``: the guard the commit path uses so that a
-                       provisional root can never be promoted to a release.
+``check-not-release``  exit 1 when a root carries ``PROVISIONAL.json``: the guard a commit path must call so that a
+                       provisional root can never be promoted to a release.  The release driver's ``commit`` does
+                       NOT call it yet (``docs/decision-refresh-runbook.md`` section 9, open R0): until it does,
+                       never point a release config at a refresh root.
 
     python tools/decision_refresh.py late-cm --from PREV_CM --out CM --cutoff D --evaluated-on E \\
         --captured-at-utc T --refresh-started-at-utc T --cycle-id ID --predecessor RELEASE_ID
