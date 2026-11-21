@@ -105,16 +105,27 @@ def test_etf_bridge_states(last: str, state: str) -> None:
 
 @pytest.mark.parametrize(
     ("capture", "state"),
-    [("2026-10-05", "FRESH"), ("2026-10-04", "STALE"), ("2026-08-21", "STALE"), ("2026-08-20", "HARD_STALE")],
+    [
+        ("2026-10-05", "FRESH"),
+        ("2026-10-04", "STALE"),
+        ("2026-08-21", "STALE"),
+        ("2026-08-20", "HARD_STALE"),
+    ],
 )
 def test_p123_states_and_unhashed_label(capture: str, state: str) -> None:
     panel = fls.p123_panel(
-        panel_id="p123-us", last_observation=capture, evaluation_date=EVAL, definition_hashes_present=False
+        panel_id="p123-us",
+        last_observation=capture,
+        evaluation_date=EVAL,
+        definition_hashes_present=False,
     )
     assert panel["state"] == state
     assert panel["labels"] == ["UNHASHED"]
     hashed = fls.p123_panel(
-        panel_id="p123-us", last_observation=capture, evaluation_date=EVAL, definition_hashes_present=True
+        panel_id="p123-us",
+        last_observation=capture,
+        evaluation_date=EVAL,
+        definition_hashes_present=True,
     )
     assert "UNHASHED" not in hashed["labels"]
 
@@ -122,7 +133,9 @@ def test_p123_states_and_unhashed_label(capture: str, state: str) -> None:
 # --- last observation date and age are required --------------------------------------
 
 
-@pytest.mark.parametrize("bad", [None, "", "not-a-date", "2026-11-20", "2026-11-19T00:00:00"])
+@pytest.mark.parametrize(
+    "bad", [None, "", "not-a-date", "2026-11-20", "2026-11-19T00:00:00"]
+)
 def test_panel_without_valid_last_observation_fails(bad: object) -> None:
     with pytest.raises(fls.StatusError):
         fls.french_panel(
@@ -149,23 +162,41 @@ def test_validate_rejects_panel_record_missing_age_or_date() -> None:
 def test_french_factor_sets_are_exactly_six_per_region() -> None:
     assert fls.FRENCH_FACTORS["US"] == ("Mkt-RF", "SMB", "HML", "RMW", "CMA", "Mom")
     assert fls.FRENCH_FACTORS["Europe"] == ("Mkt-RF", "SMB", "HML", "RMW", "CMA", "WML")
-    assert _french("2026-09-30", region="Europe")["factors"] == list(fls.FRENCH_FACTORS["Europe"])
+    assert _french("2026-09-30", region="Europe")["factors"] == list(
+        fls.FRENCH_FACTORS["Europe"]
+    )
 
 
 def test_identity_fails_on_swapped_extra_or_missing_factor() -> None:
     with pytest.raises(fls.StatusError, match="lens identity"):
         fls.french_panel(
-            panel_id="french-us", region="US", last_observation="2026-09-30", evaluation_date=EVAL,
-            factors=["Mkt-RF", "SMB", "HML", "RMW", "CMA", "WML"],  # Europe's momentum name in US
+            panel_id="french-us",
+            region="US",
+            last_observation="2026-09-30",
+            evaluation_date=EVAL,
+            factors=[
+                "Mkt-RF",
+                "SMB",
+                "HML",
+                "RMW",
+                "CMA",
+                "WML",
+            ],  # Europe's momentum name in US
         )
     with pytest.raises(fls.StatusError, match="lens identity"):
         fls.french_panel(
-            panel_id="french-us", region="US", last_observation="2026-09-30", evaluation_date=EVAL,
+            panel_id="french-us",
+            region="US",
+            last_observation="2026-09-30",
+            evaluation_date=EVAL,
             factors=[*fls.FRENCH_FACTORS["US"], "LowVol"],
         )
     with pytest.raises(fls.StatusError, match="lens identity"):
         fls.french_panel(
-            panel_id="french-us", region="US", last_observation="2026-09-30", evaluation_date=EVAL,
+            panel_id="french-us",
+            region="US",
+            last_observation="2026-09-30",
+            evaluation_date=EVAL,
             factors=list(fls.FRENCH_FACTORS["US"][:-1]),
         )
 
@@ -173,13 +204,21 @@ def test_identity_fails_on_swapped_extra_or_missing_factor() -> None:
 def test_etf_bridge_ids_must_equal_configured_list() -> None:
     with pytest.raises(fls.StatusError, match="lens identity"):
         fls.etf_bridge_panel(
-            panel_id="etf-us", region="US", last_observation="2026-11-19", evaluation_date=EVAL,
-            bridge_ids=["SPY-RF", "IWM-IWB", "XYZ"], configured_ids=["SPY-RF", "IWM-IWB"],
+            panel_id="etf-us",
+            region="US",
+            last_observation="2026-11-19",
+            evaluation_date=EVAL,
+            bridge_ids=["SPY-RF", "IWM-IWB", "XYZ"],
+            configured_ids=["SPY-RF", "IWM-IWB"],
         )
     with pytest.raises(fls.StatusError, match="lens identity"):
         fls.etf_bridge_panel(
-            panel_id="etf-us", region="US", last_observation="2026-11-19", evaluation_date=EVAL,
-            bridge_ids=["IWM-IWB", "SPY-RF"], configured_ids=["SPY-RF", "IWM-IWB"],  # order is identity too
+            panel_id="etf-us",
+            region="US",
+            last_observation="2026-11-19",
+            evaluation_date=EVAL,
+            bridge_ids=["IWM-IWB", "SPY-RF"],
+            configured_ids=["SPY-RF", "IWM-IWB"],  # order is identity too
         )
 
 
@@ -191,34 +230,64 @@ _TRADING = [date(2026, 1, d) for d in (6, 7, 8, 9, 12, 13, 14, 15, 16)]
 
 def test_windows_equal_trading_days_of_the_iso_week_including_holiday_monday() -> None:
     windows = [
-        {"week_start": "2026-01-05", "days": ["2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09"]},
-        {"week_start": "2026-01-12", "days": ["2026-01-12", "2026-01-13", "2026-01-14", "2026-01-15", "2026-01-16"]},
+        {
+            "week_start": "2026-01-05",
+            "days": ["2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09"],
+        },
+        {
+            "week_start": "2026-01-12",
+            "days": [
+                "2026-01-12",
+                "2026-01-13",
+                "2026-01-14",
+                "2026-01-15",
+                "2026-01-16",
+            ],
+        },
     ]
     assert fls.check_weekly_windows(windows, _TRADING) == []
 
 
 def test_shifted_window_fails() -> None:
     shifted = [
-        {"week_start": "2026-01-05", "days": ["2026-01-07", "2026-01-08", "2026-01-09", "2026-01-12"]},
+        {
+            "week_start": "2026-01-05",
+            "days": ["2026-01-07", "2026-01-08", "2026-01-09", "2026-01-12"],
+        },
     ]
     failures = fls.check_weekly_windows(shifted, _TRADING)
     assert failures and "2026-01-05" in failures[0]
     # A window that pretends the holiday Monday traded also fails.
     assert fls.check_weekly_windows(
-        [{"week_start": "2026-01-05", "days": ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09"]}],
+        [
+            {
+                "week_start": "2026-01-05",
+                "days": [
+                    "2026-01-05",
+                    "2026-01-06",
+                    "2026-01-07",
+                    "2026-01-08",
+                    "2026-01-09",
+                ],
+            }
+        ],
         _TRADING,
     )
 
 
 def test_window_week_start_must_be_a_monday() -> None:
-    failures = fls.check_weekly_windows([{"week_start": "2026-01-06", "days": ["2026-01-06"]}], _TRADING)
+    failures = fls.check_weekly_windows(
+        [{"week_start": "2026-01-06", "days": ["2026-01-06"]}], _TRADING
+    )
     assert failures
 
 
 # --- crypto NOT_APPLICABLE -----------------------------------------------------------
 
 
-def test_strategy_with_no_explanatory_power_under_every_lens_is_not_applicable() -> None:
+def test_strategy_with_no_explanatory_power_under_every_lens_is_not_applicable() -> (
+    None
+):
     crypto = fls.attribution_status({"french": -0.01, "etf": 0.00, "p123": 0.02})
     assert crypto["state"] == "NOT_APPLICABLE"
     assert crypto["reason"]
@@ -227,7 +296,9 @@ def test_strategy_with_no_explanatory_power_under_every_lens_is_not_applicable()
 
 
 def test_one_lens_above_threshold_keeps_attribution_applicable() -> None:
-    assert fls.attribution_status({"french": 0.03, "etf": -0.03})["state"] == "APPLICABLE"
+    assert (
+        fls.attribution_status({"french": 0.03, "etf": -0.03})["state"] == "APPLICABLE"
+    )
     assert fls.attribution_status({"french": 0.62})["state"] == "APPLICABLE"
 
 
@@ -254,7 +325,10 @@ def test_live_comparison_needs_threshold_or_interval() -> None:
     # An old, too-small threshold does not satisfy the rule.
     assert fls.validate_comparisons([{**bare, "noise_threshold": 0.1}])
     # Long windows do not need it.
-    assert fls.validate_comparisons([{"strategy": "S", "window": "long", "gap": 0.2}]) == []
+    assert (
+        fls.validate_comparisons([{"strategy": "S", "window": "long", "gap": 0.2}])
+        == []
+    )
 
 
 def test_interval_must_bracket_two_ordered_numbers() -> None:
@@ -266,34 +340,55 @@ def test_interval_must_bracket_two_ordered_numbers() -> None:
 def test_no_significance_marks_on_live_increments() -> None:
     ok = {"strategy": "S", "window": "live", "gap": 0.08, "noise_threshold": 0.2}
     assert fls.validate_comparisons([ok]) == []
-    for extra in ({"p_value": 0.01}, {"stars": "**"}, {"significant": True}, {"mark": "*"}, {"p_nw": 0.04}):
+    for extra in (
+        {"p_value": 0.01},
+        {"stars": "**"},
+        {"significant": True},
+        {"mark": "*"},
+        {"p_nw": 0.04},
+    ):
         failures = fls.validate_comparisons([{**ok, **extra}])
         assert any("significance" in f for f in failures), (extra, failures)
     # Long-window tests may carry p-values.
-    assert fls.validate_comparisons([{"strategy": "S", "window": "long", "gap": 0.2, "p_value": 0.01}]) == []
+    assert (
+        fls.validate_comparisons(
+            [{"strategy": "S", "window": "long", "gap": 0.2, "p_value": 0.01}]
+        )
+        == []
+    )
 
 
 # --- disagreement rule ---------------------------------------------------------------
 
 
 def test_disagreement_not_testable_in_live_windows_never_plain_no() -> None:
-    out = fls.disagreement_state(window="live", french_loading=0.4, french_t=3.0, p123_loading=-0.3, p123_t=-2.5)
+    out = fls.disagreement_state(
+        window="live", french_loading=0.4, french_t=3.0, p123_loading=-0.3, p123_t=-2.5
+    )
     assert out["state"] == "NOT_TESTABLE"
     assert out["state"] != "NO"
     assert out["label"] == "informational, not validated"
 
 
 def test_disagreement_missing_t_is_not_testable() -> None:
-    out = fls.disagreement_state(window="long", french_loading=0.4, french_t=None, p123_loading=-0.3, p123_t=-2.5)
+    out = fls.disagreement_state(
+        window="long", french_loading=0.4, french_t=None, p123_loading=-0.3, p123_t=-2.5
+    )
     assert out["state"] == "NOT_TESTABLE"
 
 
 def test_disagreement_fires_only_on_opposite_signs_and_both_abs_t_at_least_2() -> None:
-    fire = fls.disagreement_state(window="long", french_loading=0.4, french_t=2.0, p123_loading=-0.3, p123_t=-2.5)
+    fire = fls.disagreement_state(
+        window="long", french_loading=0.4, french_t=2.0, p123_loading=-0.3, p123_t=-2.5
+    )
     assert fire["state"] == "FIRES"
-    low_t = fls.disagreement_state(window="long", french_loading=0.4, french_t=1.9, p123_loading=-0.3, p123_t=-2.5)
+    low_t = fls.disagreement_state(
+        window="long", french_loading=0.4, french_t=1.9, p123_loading=-0.3, p123_t=-2.5
+    )
     assert low_t["state"] == "NO_DISAGREEMENT"
-    same = fls.disagreement_state(window="long", french_loading=0.4, french_t=3, p123_loading=0.3, p123_t=2.5)
+    same = fls.disagreement_state(
+        window="long", french_loading=0.4, french_t=3, p123_loading=0.3, p123_t=2.5
+    )
     assert same["state"] == "NO_DISAGREEMENT"
 
 
@@ -335,7 +430,9 @@ def test_build_status_aggregates_and_is_deterministic() -> None:
         evaluation_date=EVAL,
         panels=[_french("2026-09-30"), _french("2026-09-30", region="Europe")],
         strategies=[{"strategy": "crypto", "adj_r2": {"french": -0.01, "etf": 0.0}}],
-        comparisons=[{"strategy": "S", "window": "live", "gap": 0.1, "interval": [-0.2, 0.3]}],
+        comparisons=[
+            {"strategy": "S", "window": "live", "gap": 0.1, "interval": [-0.2, 0.3]}
+        ],
         bridges=[fls.bridge_record(region="Europe", enlarged_configured=False)],
     )
     doc = fls.build_status(**kwargs)
@@ -343,7 +440,9 @@ def test_build_status_aggregates_and_is_deterministic() -> None:
     assert doc["evaluation_date"] == "2026-11-19"
     assert doc["strategies"][0]["attribution"]["state"] == "NOT_APPLICABLE"
     assert fls.render_status(doc) == fls.render_status(fls.build_status(**kwargs))
-    assert fls.render_status(doc).endswith(b"\n") and b"\r" not in fls.render_status(doc)
+    assert fls.render_status(doc).endswith(b"\n") and b"\r" not in fls.render_status(
+        doc
+    )
 
 
 def test_build_status_collects_every_failure() -> None:
@@ -376,8 +475,11 @@ def test_cli_fails_the_run_on_a_failing_assertion(tmp_path: Path) -> None:
         "evaluation_date": "2026-11-19",
         "panels": [
             {
-                "kind": "french", "panel_id": "french-us", "region": "US",
-                "last_observation": None, "factors": list(fls.FRENCH_FACTORS["US"]),
+                "kind": "french",
+                "panel_id": "french-us",
+                "region": "US",
+                "last_observation": None,
+                "factors": list(fls.FRENCH_FACTORS["US"]),
             }
         ],
     }
@@ -393,12 +495,19 @@ def test_cli_writes_status_on_success(tmp_path: Path) -> None:
         "evaluation_date": "2026-11-19",
         "panels": [
             {
-                "kind": "french", "panel_id": "french-us", "region": "US",
-                "last_observation": "2026-09-30", "factors": list(fls.FRENCH_FACTORS["US"]),
+                "kind": "french",
+                "panel_id": "french-us",
+                "region": "US",
+                "last_observation": "2026-09-30",
+                "factors": list(fls.FRENCH_FACTORS["US"]),
             },
             {
-                "kind": "etf_bridge", "panel_id": "etf-eu", "region": "Europe",
-                "last_observation": "2026-11-18", "bridge_ids": ["VGK-RF"], "configured_ids": ["VGK-RF"],
+                "kind": "etf_bridge",
+                "panel_id": "etf-eu",
+                "region": "Europe",
+                "last_observation": "2026-11-18",
+                "bridge_ids": ["VGK-RF"],
+                "configured_ids": ["VGK-RF"],
             },
         ],
     }
