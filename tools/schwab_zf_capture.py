@@ -29,11 +29,55 @@ _KINDS = {"balances": BALANCES_XHR, "history": HISTORY_XHR}
 _STAMP = re.compile(r"\d\d:\d\d:\d\d [AP]M ET, (\d\d)/(\d\d)/(\d{4})")
 _SELECTED = re.compile(r"Account Selector:.*?ending in ((?:\d ){2}\d) Selected")
 _ACCOUNT = re.compile(r"\d{3}")
-_BLOCK = ("unable to authorize", "SWAF")
+_BLOCK = ("unable to authorize", "swaf")  # compared against the casefolded page text
+NO_XHR = "NO_XHR_SEEN_IN_WINDOW"
 
 
 class CaptureRefused(RuntimeError):
     """The page is not in a state that may be saved."""
+
+
+def xhr_binding(kind: str, body: bytes, account: str, expected_et_date: str) -> str:
+    """Prove the saved XHR body belongs to the selected account (or day) or refuse.
+
+    A balances body names its account (``brokerageAccountList[0].accountId`` ends with the selected
+    suffix); a history body carries only its date range, so it is bound to the declared date
+    (``toDate``) and recorded as ``DATE_RANGE_ONLY``: it cannot identify the account.
+    """
+
+    try:
+        doc = json.loads(body)
+    except ValueError as exc:
+        raise CaptureRefused(f"{kind} XHR body is not JSON") from exc
+    if not isinstance(doc, dict):
+        raise CaptureRefused(f"{kind} XHR body is not a JSON object")
+    if kind == "balances":
+        rows = doc.get("brokerageAccountList")
+        if (
+            not isinstance(rows, list)
+            or len(rows) != 1
+            or not isinstance(rows[0], dict)
+        ):
+            raise CaptureRefused("balances XHR body does not hold exactly one account")
+        number = rows[0].get("accountId")
+        if not isinstance(number, str) or not number.endswith(account):
+            raise CaptureRefused(
+                f"balances XHR body is not account {account}: the page and the body disagree"
+            )
+        return "ACCOUNT_ID"
+    to_date, from_date = doc.get("toDate"), doc.get("fromDate")
+    match = (
+        re.fullmatch(r"(\d\d)/(\d\d)/(\d{4})", to_date)
+        if isinstance(to_date, str)
+        else None
+    )
+    if match is None or not isinstance(from_date, str):
+        raise CaptureRefused("history XHR body lacks its fromDate/toDate")
+    if f"{match[3]}-{match[1]}-{match[2]}" != expected_et_date:
+        raise CaptureRefused(
+            f"history XHR toDate {to_date} is not the declared date {expected_et_date}"
+        )
+    return "DATE_RANGE_ONLY"
 
 
 def et_date(text: str) -> str | None:
@@ -121,7 +165,7 @@ def capture_accounts(
         page.pick_option(account)
         pause(seconds)
         text = page.text()
-        if any(word in text for word in _BLOCK):
+        if any(word in text.casefold() for word in _BLOCK):
             raise CaptureRefused("the page shows an authorization block: stop")
         if selected_suffix(text) != account:
             raise CaptureRefused(
@@ -132,18 +176,34 @@ def capture_accounts(
                 f"page stamp {et_date(text)} is not {expected_et_date}"
             )
         body = xhr.latest(kind) if xhr.count(kind) > before else None
+        # refuse before anything of this account is written: a body of another account is never stored
+        binding = (
+            xhr_binding(kind, body, account, expected_et_date)
+            if body is not None
+            else NO_XHR
+        )
         header = f"CAPTURED_LOCAL: {int(time.time())}\n-----\n"
         record = {"account": account, "kind": kind, "stamp_date": expected_et_date}
         record["text_sha256"] = _write_new(
             out / f"schwab-{kind}-{account}.txt", (header + text).encode()
         )
+        record["xhr_binding"] = binding
         record["xhr_sha256"] = (
             _write_new(out / f"schwab-{kind}-{account}.json", body)
             if body is not None
-            else "NONE_SENT_BY_PAGE"
+            else NO_XHR
         )
         records.append(record)
     return records
+
+
+def finalize(out: Path, xhr: XhrLog) -> str:
+    """Write the XHR index and the hash list of whatever was saved (also after a refusal)."""
+
+    index = out / "xhr-index.json"
+    if not index.exists():
+        _write_new(index, json.dumps(xhr.entries, indent=1).encode())
+    return write_sums(out)
 
 
 def write_sums(out: Path) -> str:
@@ -220,17 +280,18 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - live o
             def pick_option(self, suffix: str) -> None:
                 page.get_by_text(f"\u2026{suffix}", exact=True).first.click()
 
-        for kind, url in (
-            ("balances", "https://client.schwab.com/app/accounts/balances/#/"),
-            ("history", "https://client.schwab.com/app/accounts/history/#/"),
-        ):
-            page.goto(url, wait_until="domcontentloaded")
-            time.sleep(8)
-            capture_accounts(
-                Live(), xhr, kind, accounts, args.out, expected_et_date=args.et_date
-            )
-    (args.out / "xhr-index.json").write_text(json.dumps(xhr.entries, indent=1))
-    print(write_sums(args.out))
+        try:
+            for kind, url in (
+                ("balances", "https://client.schwab.com/app/accounts/balances/#/"),
+                ("history", "https://client.schwab.com/app/accounts/history/#/"),
+            ):
+                page.goto(url, wait_until="domcontentloaded")
+                time.sleep(8)
+                capture_accounts(
+                    Live(), xhr, kind, accounts, args.out, expected_et_date=args.et_date
+                )
+        finally:  # a refusal mid-run still leaves an index and hashes for what was saved
+            print(finalize(args.out, xhr))
     return 0
 
 
