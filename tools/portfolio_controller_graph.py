@@ -170,6 +170,8 @@ _PATH_STAGES = {
     "tools/portfolio_totals_verify.py": ["report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
+    # Pure panel-state and assertion library for the factor lens; feeds only the panel block.
+    "tools/factor_lens_status.py": ["panel"],
     # Builds the style-return bundle the decomposition plan pins (calendar, return
     # columns); a change moves the plan inputs and everything downstream of them.
     "tools/portfolio_public_style_sources.py": ["analytics", "report", "panel"],
