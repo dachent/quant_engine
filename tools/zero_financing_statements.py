@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import hashlib
+from itertools import combinations
 import json
 from datetime import date, timedelta
 from decimal import Decimal
@@ -1286,7 +1287,8 @@ def _row_amount(category: str, text: str) -> Decimal:
     A row prints ``[quantity price] [charges] amount [realized gain]``.  Older statements
     suffix the realized gain with (ST)/(LT) and the last money token is the amount; newer
     ones print it bare, so for a Sale the amount is the money token nearest to
-    quantity x price (charges and rounding are cents) and a row that has none is refused.
+    quantity x price (rounding is cents; a gap larger than that must be explained by the printed
+    charges, one or several adding up) and a row that has none is refused.
     The printed category total still has to tie to the cent, so a wrong pick cannot pass."""
 
     amounts = _ROW_AMOUNT.findall(text)
@@ -1303,9 +1305,19 @@ def _row_amount(category: str, text: str) -> Decimal:
         Decimal(re.sub(r"[(),-]", "", quantity_price[0]))
         * Decimal(re.sub(r"[(),-]", "", quantity_price[1]))
     )
-    best = min((_parse_money(x) for x in amounts), key=lambda v: abs(abs(v) - proceeds))
-    if abs(abs(best) - proceeds) > Decimal("0.10") + proceeds / 10000:
-        raise ZeroFinancingError("TRANSACTION_AMOUNT_UNREADABLE")
+    values = [_parse_money(x) for x in amounts]
+    best = min(values, key=lambda v: abs(abs(v) - proceeds))
+    gap = abs(abs(best) - proceeds)
+    if gap > Decimal("0.10") + proceeds / 10000:
+        # a commission or fee printed in the row (one, or several adding up) explains a larger gap
+        others = [abs(v) for v in values if v is not best][:6]
+        explained = any(
+            abs(sum(subset, Decimal(0)) - gap) <= Decimal("0.01")
+            for size in range(1, len(others) + 1)
+            for subset in combinations(others, size)
+        )
+        if not explained:
+            raise ZeroFinancingError("TRANSACTION_AMOUNT_UNREADABLE")
     return best
 
 

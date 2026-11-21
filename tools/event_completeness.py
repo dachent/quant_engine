@@ -525,7 +525,9 @@ def _evaluate_quantbase_positions(
         else None
         for p in rows
     ]
-    cash = number(closure_of(rows[0]).get("usd_cash")) if rows else None
+    # the snapshot states one cash figure: every row must carry the same, readable one
+    stated = {number(closure_of(p).get("usd_cash")) for p in rows}
+    cash = next(iter(stated)) if len(stated) == 1 else None
     ledger_nav = nav_values.get(end)
     record(
         "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV",

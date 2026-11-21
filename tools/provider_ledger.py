@@ -1876,9 +1876,9 @@ def _matrixport_positions(
             )
     for day in sorted(nav_days):
         # The position value and the independent published-NAV value must both close
-        # to the account NAV; a day with no published unit NAV only gets the first test.
-        checks = [totals[day]] + ([] if day in unclosed else [independent[day]])
-        for amount in checks:
+        # to the account NAV.  A valued day with no published unit NAV was refused above
+        # (MATRIXPORT_POSITIONS_NAV_DAILY_ABSENT), so every day here has both.
+        for amount in (totals[day], independent[day]):
             if abs(amount - nav_days[day]) > MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD:
                 raise ProviderLedgerError(
                     "MATRIXPORT_POSITIONS_NAV_CLOSURE: position rows differ from the "
