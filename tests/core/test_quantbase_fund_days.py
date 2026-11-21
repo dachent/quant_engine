@@ -273,14 +273,14 @@ def test_only_a_missing_held_close_on_a_day_the_series_covers_counts_against_it(
 
     trading = [date(2025, 9, 1) + timedelta(days=i) for i in range(40)]
     trading = [d for d in trading if d.weekday() < 5]  # 28 weekdays
-    pre_window = [date(2025, 8, 28), date(2025, 8, 29)]
+    pre_window = [date(2024, 8, 28), date(2024, 8, 29)]
     weekend = [d for d in (date(2025, 9, 6), date(2025, 9, 7)) if d not in trading]
     holiday = date(
         2025, 9, 1
     )  # Labor Day: in the weekday list, but the series has no close
     covered = [d for d in trading if d != holiday]
     legs = [
-        (date(2025, 8, 1), "TQQQ", Decimal("100"))
+        (date(2024, 8, 1), "TQQQ", Decimal("100"))
     ]  # held before every dashboard day
     dashboard = {d: Decimal("8800") for d in [*pre_window, *weekend, *trading]}
 
@@ -305,8 +305,8 @@ def test_a_held_symbol_the_pins_do_not_cover_is_not_a_hole() -> None:
 
     days = [date(2025, 9, 1 + i) for i in range(30)]
     legs = [
-        (date(2025, 8, 1), "TQQQ", Decimal("100")),
-        (date(2025, 8, 1), "QQQ", Decimal("5")),
+        (date(2024, 8, 1), "TQQQ", Decimal("100")),
+        (date(2024, 8, 1), "QQQ", Decimal("5")),
     ]
     dashboard = {day: Decimal("8800") for day in days}
     closes = {
@@ -319,7 +319,7 @@ def test_a_held_symbol_the_pins_do_not_cover_is_not_a_hole() -> None:
 
 def _truncated(first: int, last: int) -> tuple[list[date], list[Leg], Closes, dict]:
     days = [date(2025, 9, 1) + timedelta(days=i) for i in range(30)]
-    legs = [(date(2025, 8, 1), "TQQQ", Decimal("100"))]
+    legs = [(date(2024, 8, 1), "TQQQ", Decimal("100"))]
     dashboard = {d: Decimal("8800") for d in days}
     closes = {
         "TQQQ": {d: Decimal("88") for d in days[first : 30 - last]},
@@ -341,7 +341,7 @@ def test_a_pin_truncated_at_either_end_counts_the_missing_days() -> None:
 def test_coverage_counts_valued_unpinned_and_no_information_days() -> None:
     days = [date(2025, 9, 1) + timedelta(days=i) for i in range(30)]
     legs = [
-        (date(2025, 8, 1), "TQQQ", Decimal("100")),
+        (date(2024, 8, 1), "TQQQ", Decimal("100")),
         (days[20], "QQQ", Decimal("5")),  # an unpinned symbol held on day 21 only
         (days[22], "QQQ", Decimal("-5")),
     ]
@@ -367,7 +367,7 @@ def test_known_limit_a_co_held_unpinned_symbol_does_not_mask_a_pinned_hole() -> 
     the pinned symbol lacks its close, whatever else is held."""
 
     days, legs, closes, dashboard = _truncated(0, 8)
-    legs = [*legs, (date(2025, 8, 2), "QQQ", Decimal("5"))]
+    legs = [*legs, (date(2024, 8, 2), "QQQ", Decimal("5"))]
     out = q.corrected_values(dashboard, legs, closes)
     assert q.non_fill_unvalued_days(out, legs) == 8
 
@@ -377,7 +377,7 @@ def test_known_limit_a_sole_pinned_series_that_ends_early_is_not_seen() -> None:
     days, so they read as no information rather than as holes.  The coverage ratio shows it."""
 
     days = [date(2025, 9, 1) + timedelta(days=i) for i in range(30)]
-    legs = [(date(2025, 8, 1), "TQQQ", Decimal("100"))]
+    legs = [(date(2024, 8, 1), "TQQQ", Decimal("100"))]
     dashboard = {d: Decimal("8800") for d in days}
     out = q.corrected_values(
         dashboard, legs, {"TQQQ": {d: Decimal("88") for d in days[:22]}}
