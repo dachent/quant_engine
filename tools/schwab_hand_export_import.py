@@ -9,8 +9,8 @@ What it does, per account:
 
 * transactions: the CSV rows are merged onto the retained rows. Every retained row must still be in
   the CSV (multiset equality on the same eight fields the generation keys on), the new rows must not
-  be older than the retained history, rows after the capture day are dropped, and retained bytes are
-  never rewritten. New rows are flagged ``csvDerivedRow`` (they carry no effective/settle dates).
+  be older than the retained history, rows after the capture day are dropped, and retained row values are
+  never changed (the file is re-serialised: indent 1, ASCII-escaped, so its bytes can differ). New rows are flagged ``csvDerivedRow`` (they carry no effective/settle dates).
 * NAV: new days up to the cutoff are added; a day where the export disagrees with the retained value
   is reported as a conflict and kept as retained unless the caller applies conflicts explicitly.
 * positions: the live page is parsed; positions at the page's prior close plus the sweep value must
@@ -80,6 +80,16 @@ def _number(value: object) -> Decimal | None:
     return -number if negative else number
 
 
+def _skippable(record: Mapping[str, Any], total_prefix: str) -> bool:
+    """A blank line or a totals line; anything else without a valid date is an error."""
+
+    first = (record.get("Date") or "").strip()
+    others = [v for k, v in record.items() if k != "Date" and isinstance(v, str)]
+    return (not first and not any(v.strip() for v in others)) or first.startswith(
+        total_prefix
+    )
+
+
 def _number_text(value: object) -> str:
     number = _number(value)
     return "" if number is None else format(number.normalize(), "f")
@@ -115,7 +125,9 @@ def parse_transactions_csv(text: str) -> list[dict[str, Any]]:
     for record in csv.DictReader(lines[header:]):
         when = (record.get("Date") or "")[:10]
         if not _DATE.fullmatch(when):
-            continue  # totals and blank lines
+            if _skippable(record, "Transactions Total"):
+                continue
+            raise HandExportError(f"transaction row without a valid date: {record!r}")
         rows.append(
             {
                 "action": record["Action"],
@@ -177,7 +189,9 @@ def parse_balances_csv(text: str) -> dict[date, Decimal]:
     for record in csv.DictReader(text.splitlines()):
         when = (record.get("Date") or "").strip()
         if not _DATE.fullmatch(when):
-            continue
+            if _skippable(record, "Total"):
+                continue
+            raise HandExportError(f"balances row without a valid date: {record!r}")
         amount = _number(record.get("Amount"))
         if amount is None:
             raise HandExportError(f"empty value on {when}")
@@ -236,9 +250,12 @@ def parse_positions_page(text: str) -> tuple[str, list[dict[str, Any]], Decimal]
     if start is None:
         raise HandExportError("positions page has no position section")
     end = next(
-        (j for j in range(start, len(lines)) if lines[j] == "Positions Total"),
-        len(lines),
+        (j for j in range(start, len(lines)) if lines[j] == "Positions Total"), None
     )
+    if end is None:
+        raise HandExportError(
+            "positions page has no 'Positions Total' line (truncated page)"
+        )
     rows: list[dict[str, Any]] = []
     sweep = Decimal(0)
     i = start
@@ -295,6 +312,13 @@ def check_closure(
     return difference
 
 
+def _read(path: Path) -> str:
+    try:
+        return path.read_bytes().decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HandExportError(f"{path} is not valid UTF-8: {exc}") from exc
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -329,11 +353,17 @@ def import_exports(
 ) -> dict[str, Any]:
     """Import the exports of ``accounts`` (their 3-character suffixes) create-only into ``out_dir``."""
 
-    if (out_dir / "HAND_EXPORT.json").exists():
+    if capture_day < cutoff:
         raise HandExportError(
-            f"{out_dir / 'HAND_EXPORT.json'} already exists (create-only)"
+            f"capture day {capture_day} is before the cutoff {cutoff}"
         )
+    for suffix in accounts:
+        if not re.fullmatch(r"[A-Za-z0-9]{3}", suffix):
+            raise HandExportError(
+                f"account suffix {suffix!r} is not 3 letters or digits"
+            )
     inputs: dict[str, str] = {}
+    retained_inputs: dict[str, str] = {}
     result: dict[str, Any] = {"accounts": {}}
     planned: list[tuple[Path, bytes]] = []
     for suffix in accounts:
@@ -342,23 +372,23 @@ def import_exports(
         page_file = _one(exports_dir, f"schwab-positions-{suffix}.txt")
         for path in (tx_file, nav_file, page_file):
             inputs[path.name] = _sha256(path)
-        retained_rows = json.loads(
-            (retained_dir / "transactions" / f"{suffix}.json").read_text()
-        )
+        retained_tx = retained_dir / "transactions" / f"{suffix}.json"
+        retained_nav_file = retained_dir / "nav" / f"{suffix}.csv"
+        for path in (retained_tx, retained_nav_file):
+            if not path.is_file():
+                raise HandExportError(f"retained file {path} is missing")
+            retained_inputs[f"{path.parent.name}/{path.name}"] = _sha256(path)
+        retained_rows = json.loads(_read(retained_tx))
         merged, delta = merge_transactions(
             retained_rows,
-            parse_transactions_csv(
-                tx_file.read_text(encoding="utf-8-sig", errors="replace")
-            ),
+            parse_transactions_csv(_read(tx_file)),
             capture_day=capture_day,
         )
         retained_nav = {
             row["date"]: row["account_value"]
-            for row in csv.DictReader(
-                (retained_dir / "nav" / f"{suffix}.csv").read_text().splitlines()
-            )
+            for row in csv.DictReader(_read(retained_nav_file).splitlines())
         }
-        avh = parse_balances_csv(nav_file.read_text(encoding="utf-8-sig"))
+        avh = parse_balances_csv(_read(nav_file))
         series, conflicts = merge_nav(
             retained_nav, avh, cutoff=cutoff, apply_conflicts=apply_nav_conflicts
         )
@@ -366,9 +396,7 @@ def import_exports(
             raise HandExportError(
                 f"account {suffix}: the balances export has no value on {cutoff}"
             )
-        _, rows, sweep = parse_positions_page(
-            page_file.read_text(encoding="utf-8", errors="replace")
-        )
+        _, rows, sweep = parse_positions_page(_read(page_file))
         difference = check_closure(suffix, rows, sweep, avh[cutoff])
         planned.append(
             (
@@ -389,6 +417,12 @@ def import_exports(
             "nav_conflicts_applied": apply_nav_conflicts,
             "closure_difference": format(difference, "f"),
         }
+    targets = [path for path, _ in planned] + [out_dir / "HAND_EXPORT.json"]
+    taken = [str(path) for path in targets if path.exists()]
+    if (
+        taken
+    ):  # check every target before writing any, so no unlabelled rows are left behind
+        raise HandExportError(f"{', '.join(taken)} already exists (create-only)")
     for path, data in planned:
         _write_new(path, data)
     label = {
@@ -396,6 +430,7 @@ def import_exports(
         "cutoff": cutoff.isoformat(),
         "capture_day": capture_day.isoformat(),
         "inputs": inputs,
+        "retained_inputs": retained_inputs,
         "result": result,
     }
     _write_new(

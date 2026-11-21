@@ -197,3 +197,93 @@ def test_import_writes_create_only_outputs_and_the_hand_export_label(
             cutoff=date(2026, 11, 19),
             capture_day=date(2026, 11, 20),
         )
+
+
+def _world(tmp_path: Path, *, avh: str = AVH_CSV, tx: str = TX_CSV) -> dict[str, Path]:
+    exports = tmp_path / "exports"
+    exports.mkdir()
+    (exports / "acct_XXX123_Transactions_20261120-090000.csv").write_text(tx)
+    (exports / "acct_XXXX123_Balances_20261120-090000.CSV").write_text(avh)
+    (exports / "schwab-positions-123.txt").write_text(POSITIONS)
+    retained = tmp_path / "retained"
+    (retained / "transactions").mkdir(parents=True)
+    (retained / "transactions" / "123.json").write_text(json.dumps(_retained()))
+    (retained / "nav").mkdir()
+    (retained / "nav" / "123.csv").write_text(
+        "account_id,account_name,date,account_value\n123,123,2026-11-18,1200.00\n"
+    )
+    return {"exports": exports, "retained": retained, "out": tmp_path / "out"}
+
+
+def _run(w: dict[str, Path], **over: object) -> dict[str, object]:
+    args: dict[str, object] = {
+        "exports_dir": w["exports"],
+        "retained_dir": w["retained"],
+        "out_dir": w["out"],
+        "accounts": ["123"],
+        "cutoff": date(2026, 11, 19),
+        "capture_day": date(2026, 11, 20),
+    }
+    args.update(over)
+    return imp.import_exports(**args)  # type: ignore[arg-type]
+
+
+def test_a_balances_export_without_the_cutoff_day_refuses_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    w = _world(tmp_path, avh='"Date","Amount"\n"11/18/2026","$1,200.00"\n')
+    with pytest.raises(imp.HandExportError, match="no value on 2026-11-19"):
+        _run(w)
+    assert not w["out"].exists()
+
+
+def test_an_existing_output_file_refuses_before_any_output_is_written(
+    tmp_path: Path,
+) -> None:
+    w = _world(tmp_path)
+    (w["out"] / "nav").mkdir(parents=True)
+    (w["out"] / "nav" / "123.csv").write_text("occupied")
+    with pytest.raises(imp.HandExportError, match="already exists"):
+        _run(w)
+    assert not (w["out"] / "transactions" / "123.json").exists()
+    assert not (w["out"] / "HAND_EXPORT.json").exists()
+
+
+def test_the_label_hashes_the_retained_inputs_too(tmp_path: Path) -> None:
+    w = _world(tmp_path)
+    _run(w)
+    label = json.loads((w["out"] / "HAND_EXPORT.json").read_text())
+    assert set(label["retained_inputs"]) == {"transactions/123.json", "nav/123.csv"}
+
+
+def test_a_csv_that_is_not_utf8_refuses(tmp_path: Path) -> None:
+    w = _world(tmp_path)
+    (w["exports"] / "acct_XXX123_Transactions_20261120-090000.csv").write_bytes(
+        TX_CSV.replace("ALPHA FUND", "ALPH\xc4 FUND").encode("latin-1")
+    )
+    with pytest.raises(imp.HandExportError, match="not valid UTF-8"):
+        _run(w)
+
+
+def test_a_dated_looking_row_that_does_not_parse_refuses_instead_of_dropping() -> None:
+    bad = TX_CSV.replace('"11/16/2026","Qualified', '"1/16/2026","Qualified')
+    with pytest.raises(imp.HandExportError, match="without a valid date"):
+        imp.parse_transactions_csv(bad)
+    with pytest.raises(imp.HandExportError, match="without a valid date"):
+        imp.parse_balances_csv(AVH_CSV + '"1/5/2026","$1.00"\n')
+
+
+def test_a_capture_day_before_the_cutoff_refuses(tmp_path: Path) -> None:
+    with pytest.raises(imp.HandExportError, match="before the cutoff"):
+        _run(_world(tmp_path), capture_day=date(2026, 11, 18))
+
+
+def test_a_positions_page_without_the_total_line_refuses() -> None:
+    with pytest.raises(imp.HandExportError, match="Positions Total"):
+        imp.parse_positions_page(POSITIONS.replace("Positions Total\n", ""))
+
+
+@pytest.mark.parametrize("suffix", ["12", "1234", "../1", "a b"])
+def test_a_bad_account_suffix_refuses_cleanly(tmp_path: Path, suffix: str) -> None:
+    with pytest.raises(imp.HandExportError, match="not 3 letters or digits"):
+        _run(_world(tmp_path), accounts=[suffix])
