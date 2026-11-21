@@ -17,8 +17,17 @@ create-only run folder::
     <stage-root>/<run-id>/MANIFEST.json            hash-bound, written after the files
     <stage-root>/<run-id>/SHA256SUMS.txt           written last
 
-A failure removes the partial run. ``verify`` is stdlib only and re-derives the hashes, the
-zip members, the last row per section and every publication state from the staged bytes.
+A failure removes the partial run. ``verify`` is stdlib only and re-derives the file hashes, the zip
+members, the manifest-declared coverage (the last period per section as the adapter's manifest
+states it, not re-parsed from the parsed JSON or csv) and every publication state from those
+declarations. Duplicate rows, column changes and truncation are caught downstream by the
+builder (``portfolio_public_decomposition_sources._load_source`` and
+``_admit_publication_boundary``). ``max_requests`` in the evidence is declarative: the driver makes
+one adapter call per feed and checks only that the cap covers the feeds.
+
+Staleness is advisory at this layer: a stale feed is a valid capture and a panel state. ``fetch`` and
+``verify`` print the non-COMPLIANT feed keys, and ``--require-compliant`` exits 3 when there are
+any; the age ceiling lives in the panel-state module (WP2), not here.
 
 Publication rule ``KENNETH_FRENCH_MONTHLY_DAILY_45D_V1``: a month is required at the evaluation date
 when its month end plus 45 days is on or before that date; a feed whose last row is in an earlier
@@ -133,6 +142,8 @@ def parse_config(data: bytes, cutoff_override: str | None = None) -> Config:
         raise FrenchDriverError(f"policy_id must be {POLICY_ID}")
     cutoff = _date(cutoff_override or document["cutoff"], "cutoff")
     evaluation = _date(document["evaluation_date"], "evaluation_date")
+    if cutoff > evaluation:
+        raise FrenchDriverError("cutoff must not be after the evaluation_date")
     rows = document["feeds"]
     feeds: list[Feed] = []
     if isinstance(rows, list):
@@ -247,6 +258,8 @@ def check_evidence(
         raise FrenchDriverError("evidence is not yet valid")
     if now > end:
         raise FrenchDriverError("evidence has expired")
+    if config.evaluation_date > end.date():
+        raise FrenchDriverError("the evaluation date is after the evidence window")
     cap = evidence["max_requests"]
     if not isinstance(cap, int) or cap < len(config.feeds) or cap > config.max_requests:
         raise FrenchDriverError(
@@ -264,7 +277,9 @@ def _json_file(path: Path, what: str) -> Any:
         raise FrenchDriverError(f"{what} is missing or not JSON") from exc
 
 
-def _check_feed(raw: Path, feed: Feed, cutoff: date) -> dict[str, Any]:
+def _check_feed(
+    raw: Path, feed: Feed, cutoff: date, window_end: datetime | None = None
+) -> dict[str, Any]:
     """Re-derive one feed from its three files; returns the facts the publication log needs."""
 
     name = feed.feed_id
@@ -339,10 +354,20 @@ def _check_feed(raw: Path, feed: Feed, cutoff: date) -> dict[str, Any]:
         if date(int(period[:4]), int(period[4:6]), int(period[6:])) > cutoff:
             raise FrenchDriverError(f"{name}: a last row is after the cutoff {cutoff}")
         lasts.append(period)
+    oldest = min(lasts)
+    modified_utc = modified.astimezone(timezone.utc)
+    if modified_utc.date() < _month_end(int(oldest[:4]), int(oldest[4:6])):
+        raise FrenchDriverError(
+            f"{name}: Last-Modified {response['last_modified']} is before the data month end"
+        )
+    if window_end is not None and modified_utc > window_end:
+        raise FrenchDriverError(
+            f"{name}: Last-Modified is after the evidence window end"
+        )
     return {
         "last_modified": str(response["last_modified"]),
-        "last_modified_date": modified.astimezone(timezone.utc).date(),
-        "last_period": max(lasts),
+        "last_modified_date": modified_utc.date(),
+        "last_period": oldest,
         "captured_at_utc": str(response.get("captured_at_utc")),
     }
 
@@ -444,6 +469,9 @@ def fetch(
 ) -> Path:
     now = clock or (lambda: datetime.now(timezone.utc))
     check_evidence(evidence, config, run_id, now())
+    window_end = datetime.strptime(str(evidence["valid_until_utc"]), _TIME).replace(
+        tzinfo=timezone.utc
+    )
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id):
         raise FrenchDriverError("run id is not a safe name")
     run = stage_root / run_id
@@ -474,7 +502,7 @@ def fetch(
                 raise FrenchDriverError(
                     f"unexpected file in staging: {sorted(present - expected)}"
                 )
-            facts[feed.feed_key] = _check_feed(raw, feed, config.cutoff)
+            facts[feed.feed_key] = _check_feed(raw, feed, config.cutoff, window_end)
         ended = now().strftime(_TIME)
         (run / "config.json").write_bytes(_canonical(config.document))
         (run / "governance-evidence.json").write_bytes(_canonical(evidence))
@@ -535,8 +563,12 @@ def verify(run: Path) -> dict[str, Any]:
     config = parse_config((run / "config.json").read_bytes())
     if config.sha256 != manifest["config_sha256"]:
         raise FrenchDriverError("config differs from the manifest")
+    window = _json_file(run / "governance-evidence.json", "evidence")
+    window_end = datetime.strptime(str(window["valid_until_utc"]), _TIME).replace(
+        tzinfo=timezone.utc
+    )
     facts = {
-        feed.feed_key: _check_feed(run / "raw", feed, config.cutoff)
+        feed.feed_key: _check_feed(run / "raw", feed, config.cutoff, window_end)
         for feed in config.feeds
     }
     log = json.loads((run / "publication-log.json").read_bytes())
@@ -548,9 +580,21 @@ def verify(run: Path) -> dict[str, Any]:
             path = run / "raw" / row[part]["path"]
             if _sha(path.read_bytes()) != row[part]["sha256"]:
                 raise FrenchDriverError(f"builder block pin differs: {key}.{part}")
-    sums = (run / "SHA256SUMS.txt").read_text(encoding="utf-8")
-    for line in sums.splitlines():
+    sums_path = run / "SHA256SUMS.txt"
+    if not sums_path.is_file():
+        raise FrenchDriverError("SHA256SUMS.txt is missing")
+    listed: dict[str, str] = {}
+    for line in sums_path.read_text(encoding="utf-8").splitlines():
         digest, _, relative = line.partition("  ")
+        listed[relative] = digest
+    everything = {
+        p.relative_to(run).as_posix()
+        for p in run.rglob("*")
+        if p.is_file() and p.name != "SHA256SUMS.txt"
+    }
+    if set(listed) != everything:
+        raise FrenchDriverError("SHA256SUMS.txt does not list exactly the run files")
+    for relative, digest in listed.items():
         if _sha((run / relative).read_bytes()) != digest:
             raise FrenchDriverError(f"SHA256SUMS differs: {relative}")
     return {
@@ -558,6 +602,9 @@ def verify(run: Path) -> dict[str, Any]:
         "run_id": manifest["run_id"],
         "feeds": len(config.feeds),
         "states": {row["feed_key"]: row["state"] for row in log["feeds"]},
+        "non_compliant": [
+            row["feed_key"] for row in log["feeds"] if row["state"] != "COMPLIANT"
+        ],
     }
 
 
@@ -588,9 +635,24 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--run-id", required=True)
     run.add_argument("--governance", required=True, type=Path)
     run.add_argument("--cutoff")
+    run.add_argument("--require-compliant", action="store_true")
     verify_parser = sub.add_parser("verify")
     verify_parser.add_argument("run", type=Path)
+    verify_parser.add_argument("--require-compliant", action="store_true")
     return parser
+
+
+def _report(result: Mapping[str, Any], require_compliant: bool) -> int:
+    print(json.dumps(result, sort_keys=True))
+    stale = result["non_compliant"]
+    if stale:
+        print(
+            f"NON_COMPLIANT feeds (advisory unless --require-compliant): {stale}",
+            file=sys.stderr,
+        )
+        if require_compliant:
+            return 3
+    return 0
 
 
 def main(
@@ -602,8 +664,7 @@ def main(
     args = _parser().parse_args(argv)
     try:
         if args.command == "verify":
-            print(json.dumps(verify(args.run), sort_keys=True))
-            return 0
+            return _report(verify(args.run), args.require_compliant)
         config = parse_config(args.config.read_bytes(), getattr(args, "cutoff", None))
         if args.command == "config-check":
             print(
@@ -641,7 +702,7 @@ def main(
                 runner=runner,
                 clock=clock,
             )
-            print(json.dumps(verify(run), sort_keys=True))
+            return _report(verify(run), args.require_compliant)
     except (FrenchDriverError, OSError, ValueError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
