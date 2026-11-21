@@ -55,7 +55,18 @@ BRIDGE_LABELS = {
 DISAGREEMENT_LABEL = "informational, not validated"
 
 _SIGNIFICANCE_KEYS = frozenset(
-    {"p", "p_value", "p_classical", "p_nw", "p_wild", "stars", "star", "significant", "significance", "mark"}
+    {
+        "p",
+        "p_value",
+        "p_classical",
+        "p_nw",
+        "p_wild",
+        "stars",
+        "star",
+        "significant",
+        "significance",
+        "mark",
+    }
 )
 
 
@@ -107,7 +118,9 @@ def required_french_month(evaluation_date: date) -> date:
 def _age(last: date, evaluation_date: date, what: str) -> int:
     age = (evaluation_date - last).days
     if age < 0:
-        raise StatusError(f"{what} {last} is after the evaluation date {evaluation_date}")
+        raise StatusError(
+            f"{what} {last} is after the evaluation date {evaluation_date}"
+        )
     return age
 
 
@@ -171,7 +184,9 @@ def french_panel(
         factors=list(factors),
         required_month_end=required.isoformat(),
         next_required_month_end=next_required.isoformat(),
-        next_due_date=(next_required + timedelta(days=FRENCH_ALLOWANCE_DAYS)).isoformat(),
+        next_due_date=(
+            next_required + timedelta(days=FRENCH_ALLOWANCE_DAYS)
+        ).isoformat(),
     )
 
 
@@ -219,7 +234,7 @@ def p123_panel(
     age = _age(last, evaluation_date, f"{panel_id} last_observation")
     return _panel(
         panel_id=panel_id,
-        kind="p123",
+        kind="labelled_panel",
         state=_age_band_state(age, P123_FRESH_DAYS, P123_STALE_DAYS),
         last=last,
         age=age,
@@ -263,7 +278,11 @@ def check_weekly_windows(
         if start.weekday() != 0:
             failures.append(f"window {start}: week_start is not a Monday")
             continue
-        expected = [start + timedelta(days=i) for i in range(5) if start + timedelta(days=i) in tdays]
+        expected = [
+            start + timedelta(days=i)
+            for i in range(5)
+            if start + timedelta(days=i) in tdays
+        ]
         if days != expected:
             failures.append(
                 f"window {start}: days {[d.isoformat() for d in days]} != trading days "
@@ -277,7 +296,9 @@ def check_weekly_windows(
 
 def attribution_status(adj_r2_by_lens: Mapping[str, float]) -> dict[str, Any]:
     if not adj_r2_by_lens:
-        raise StatusError("attribution_status needs at least one lens adjusted R-squared")
+        raise StatusError(
+            "attribution_status needs at least one lens adjusted R-squared"
+        )
     if all(v <= NOT_APPLICABLE_ADJ_R2 for v in adj_r2_by_lens.values()):
         return {
             "state": "NOT_APPLICABLE",
@@ -316,7 +337,9 @@ def validate_comparisons(comparisons: Sequence[Mapping[str, Any]]) -> list[str]:
             )
         marks = sorted(k for k in cmp if k in _SIGNIFICANCE_KEYS)
         if marks:
-            failures.append(f"{name}: significance marks {marks} are not allowed on live-window increments")
+            failures.append(
+                f"{name}: significance marks {marks} are not allowed on live-window increments"
+            )
         for value in cmp.values():
             if isinstance(value, str) and re.fullmatch(r"\*+", value.strip()):
                 failures.append(f"{name}: significance star on a live-window increment")
@@ -350,14 +373,21 @@ def disagreement_state(
 # --- bridge labels -------------------------------------------------------------------
 
 
-def bridge_record(*, region: str, enlarged_configured: bool, spliced: bool = False) -> dict[str, Any]:
+def bridge_record(
+    *, region: str, enlarged_configured: bool, spliced: bool = False
+) -> dict[str, Any]:
     if spliced:
         raise StatusError(f"{region} bridge: splice onto French levels is not allowed")
     coverage = "enlarged" if enlarged_configured else "market_only"
     label = BRIDGE_LABELS.get((region, coverage))
     if label is None:
         raise StatusError(f"unknown bridge region {region!r}")
-    return {"region": region, "coverage": coverage, "never_spliced": True, "label": label}
+    return {
+        "region": region,
+        "coverage": coverage,
+        "never_spliced": True,
+        "label": label,
+    }
 
 
 # --- document ------------------------------------------------------------------------
@@ -379,7 +409,9 @@ def build_status(
     failures += validate_comparisons(comparisons)
     for bridge in bridges:
         if bridge.get("never_spliced") is not True:
-            failures.append(f"{bridge.get('region', '<unnamed>')} bridge: never_spliced must be true")
+            failures.append(
+                f"{bridge.get('region', '<unnamed>')} bridge: never_spliced must be true"
+            )
     strategy_rows: list[dict[str, Any]] = []
     for strategy in strategies:
         try:
@@ -404,7 +436,9 @@ def build_status(
 
 def render_status(doc: Mapping[str, Any]) -> bytes:
     """Deterministic UTF-8 JSON with LF line endings (bytes, so no platform newline rewrite)."""
-    return (json.dumps(doc, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+    return (
+        json.dumps(doc, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
 
 
 def write_status(doc: Mapping[str, Any], path: Path) -> None:
@@ -417,7 +451,10 @@ def write_status(doc: Mapping[str, Any], path: Path) -> None:
 
 def _build_panel(spec: Mapping[str, Any], evaluation_date: date) -> dict[str, Any]:
     kind = spec.get("kind")
-    common = {"panel_id": spec.get("panel_id", "<unnamed>"), "evaluation_date": evaluation_date}
+    common = {
+        "panel_id": spec.get("panel_id", "<unnamed>"),
+        "evaluation_date": evaluation_date,
+    }
     if kind == "french":
         return french_panel(
             region=spec.get("region", ""),
@@ -433,7 +470,7 @@ def _build_panel(spec: Mapping[str, Any], evaluation_date: date) -> dict[str, An
             configured_ids=spec.get("configured_ids", []),
             **common,
         )
-    if kind == "p123":
+    if kind == "labelled_panel":
         return p123_panel(
             last_observation=spec.get("last_observation"),  # type: ignore[arg-type]
             definition_hashes_present=bool(spec.get("definition_hashes_present")),
@@ -443,7 +480,9 @@ def _build_panel(spec: Mapping[str, Any], evaluation_date: date) -> dict[str, An
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Emit factor-lens-status.json from a panel spec.")
+    parser = argparse.ArgumentParser(
+        description="Emit factor-lens-status.json from a panel spec."
+    )
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
