@@ -586,6 +586,55 @@ def test_position_closes_are_introduced_by_the_flag_not_only_carried(
         )
 
 
+def test_the_quantbase_rollback_declaration_enters_by_flag_and_is_carried(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """The roll-back declaration is written into the spec as its content (the provider
+    ledger validates it; it reads no path), carried from a predecessor spec, absent
+    otherwise, and a malformed file (not an object, empty) is refused."""
+
+    assert "quantbase_rollback" not in _build(world)["spec"]
+    declaration = {"cutoff": "2026-11-19", "snapshot_day": "2026-11-20", "activity": []}
+    path = tmp_path / "rollback.json"
+    path.write_text(json.dumps(declaration), encoding="utf-8")
+    spec = tool.build(
+        world["resolved"],
+        world["predecessor"],
+        world["out"],
+        world["provenance"],
+        quantbase_rollback=path,
+    )["spec"]
+    assert spec["quantbase_rollback"] == declaration
+    carried = tool.build(
+        world["resolved"],
+        {**world["predecessor"], "quantbase_rollback": declaration},
+        world["out"],
+        world["provenance"],
+    )["spec"]
+    assert carried["quantbase_rollback"] == declaration
+    # the flag overrides a carried value
+    other = {"cutoff": "2026-12-31"}
+    path.write_text(json.dumps(other), encoding="utf-8")
+    replaced = tool.build(
+        world["resolved"],
+        {**world["predecessor"], "quantbase_rollback": declaration},
+        world["out"],
+        world["provenance"],
+        quantbase_rollback=path,
+    )["spec"]
+    assert replaced["quantbase_rollback"] == other
+    for bad in ("[]", "{}", '"text"', "null"):
+        path.write_text(bad, encoding="utf-8")
+        with pytest.raises(tool.LedgerSpecError):
+            tool.build(
+                world["resolved"],
+                world["predecessor"],
+                world["out"],
+                world["provenance"],
+                quantbase_rollback=path,
+            )
+
+
 def test_the_event_completeness_declaration_is_pinned_and_carried(
     world: dict[str, Any], tmp_path: Path
 ) -> None:

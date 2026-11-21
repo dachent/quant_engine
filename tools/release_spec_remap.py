@@ -66,6 +66,7 @@ CARRIED_KEYS = (
     "quantbase_position_closes",
     "zero_financing_observations",
     "event_completeness_declaration",
+    "quantbase_rollback",
 )
 REGENERATED_KEYS = (
     "as_of_date",

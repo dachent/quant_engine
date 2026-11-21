@@ -408,6 +408,13 @@
             "--quantbase-position-closes",
             "{quantbase_position_closes}"
           ]
+        },
+        {
+          "if": "quantbase_rollback",
+          "args": [
+            "--quantbase-rollback",
+            "{quantbase_rollback}"
+          ]
         }
       ],
       "checks": [

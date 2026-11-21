@@ -68,6 +68,7 @@ CARRIED = (
     "quantbase_position_closes",
     "zero_financing_observations",
     "event_completeness_declaration",
+    "quantbase_rollback",
 )
 REGENERATED = (
     "as_of_date",
@@ -245,11 +246,15 @@ def build(
     zero_financing_observations: Path | None = None,
     quantbase_position_closes: Path | None = None,
     event_completeness_declaration: Path | None = None,
+    quantbase_rollback: Path | None = None,
 ) -> dict[str, Any]:
     """Return ``{"observation": bytes, "spec": bytes-builder inputs}``; writes nothing.
 
     ``quantbase_position_closes`` (same list shape as ``quantbase_fill_closes``) pins the
     official closes of the Quantbase share-count check.
+    ``quantbase_rollback`` is the governed roll-back declaration file (a non-empty JSON object);
+    its content is written into the spec as the ``quantbase_rollback`` key, which the provider
+    ledger validates (it never reads a path).
     ``account_roles`` (the governed declaration file, #900) and ``quantbase_fill_closes``
     (a JSON list of {symbol, path, sha256, size_bytes}, #909) are optional per-cycle pins
     written into the spec; absent, the spec is what it was.  ``zero_financing_observations``
@@ -337,6 +342,8 @@ def build(
         spec["quantbase_position_closes"] = predecessor_spec[
             "quantbase_position_closes"
         ]
+    if "quantbase_rollback" in predecessor_spec:
+        spec["quantbase_rollback"] = predecessor_spec["quantbase_rollback"]
     if account_roles is not None:
         raw = account_roles.resolve().read_bytes()
         spec["account_roles"] = {
@@ -389,6 +396,13 @@ def build(
                 "INPUT", "quantbase position closes must be a non-empty list"
             )
         spec["quantbase_position_closes"] = position_pins
+    if quantbase_rollback is not None:
+        rollback = json.loads(quantbase_rollback.read_bytes())
+        if not isinstance(rollback, dict) or not rollback:
+            raise LedgerSpecError(
+                "INPUT", "quantbase rollback declaration must be a non-empty object"
+            )
+        spec["quantbase_rollback"] = rollback
     return {"observation": observation, "spec": spec, "out": out}
 
 
@@ -463,6 +477,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     command.add_argument("--quantbase-position-closes", type=Path)
     command.add_argument("--zero-financing-observations", type=Path)
     command.add_argument("--event-completeness-declaration", type=Path)
+    command.add_argument("--quantbase-rollback", type=Path)
     command.add_argument(
         "--plan", action="store_true", help="build and print, write nothing"
     )
@@ -487,6 +502,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.zero_financing_observations,
             quantbase_position_closes=args.quantbase_position_closes,
             event_completeness_declaration=args.event_completeness_declaration,
+            quantbase_rollback=args.quantbase_rollback,
         )
         if args.plan:
             print(

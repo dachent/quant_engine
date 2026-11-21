@@ -810,6 +810,7 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "zero_financing_observations",
         "event_completeness_declaration",
         "quantbase_position_closes",
+        "quantbase_rollback",
         "implementation_model_book_perf",
         "prep_pins",
         "prep_pin_root_key",
