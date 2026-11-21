@@ -368,3 +368,98 @@ def test_the_builder_and_the_consumer_share_the_bound() -> None:
         assert builder.capture_bound_utc(day) == reconciliation.tt_capture_bound_utc(
             day
         )
+
+
+# --- post-bound capture accepted only when its own last-rebalance marker is not after the as-of date ---
+
+POST_JSON = {"captured_at_utc": "2026-09-02T17:38:36Z", "role": "json"}
+POST_TXT = {"captured_at_utc": "2026-09-02T17:38:44Z", "role": "txt"}
+
+
+def test_post_bound_override_capture_is_accepted_when_the_marker_is_not_after_the_as_of_date(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(
+        tmp_path,
+        _override("2026-09-01"),
+        weights={"SPY": 0.3},
+        captures=[POST_JSON, POST_TXT],
+    )
+    repaired = reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+    assert _weights(repaired) == {"BIL": 0.5, "SPY": 0.5}
+    applied = repaired["applied_truncated_row_fallbacks"][0]
+    assert applied["post_bound_capture_accepted_by"] == (
+        "LAST_REBALANCE_MARKER_2026-09-01_NOT_AFTER_AS_OF"
+    )
+    assert applied["capture_bound_utc"] == "2026-09-02T13:30:00+00:00"
+    assert attribution._tt_target_snapshots(manifest, COMPONENTS, accepted_as_of=SECOND)
+    # an in-bound capture is not labelled
+    early = _manifest(tmp_path, _override("2026-09-01"), weights={"SPY": 0.3})
+    plain = reconciliation.with_truncated_row_fallbacks(early, SECOND)
+    assert (
+        "post_bound_capture_accepted_by"
+        not in plain["applied_truncated_row_fallbacks"][0]
+    )
+
+
+def test_post_bound_override_capture_is_refused_when_the_marker_is_after_the_as_of_date(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(
+        tmp_path, _override("2026-09-02"), captures=[POST_JSON, POST_TXT]
+    )
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="supplying capture before",
+    ):
+        reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+    with pytest.raises(
+        attribution.ReturnAttributionError, match="supplying capture before"
+    ):
+        attribution._tt_target_snapshots(manifest, COMPONENTS, accepted_as_of=SECOND)
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        {"fallback": {"kind": "LIVE_HOLDINGS_OVERRIDE"}},
+        {"fallback": {"kind": "LIVE_HOLDINGS_OVERRIDE", "sources": {}}},
+        _override("not-a-date"),
+        {"fallback": {"kind": "LIVE_PORTFOLIO_HOLDINGS"}},
+    ],
+)
+def test_post_bound_capture_is_refused_without_a_readable_marker_or_for_the_other_fallback(
+    tmp_path: Path, flag: dict[str, Any]
+) -> None:
+    manifest = _manifest(tmp_path, flag, captures=[POST_JSON, POST_TXT])
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="supplying capture before",
+    ):
+        reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+
+
+def test_post_bound_override_capture_needs_the_marker_read_after_the_holdings(
+    tmp_path: Path,
+) -> None:
+    marker_first = {"captured_at_utc": "2026-09-02T17:30:00Z", "role": "txt"}
+    manifest = _manifest(
+        tmp_path, _override("2026-09-01"), captures=[POST_JSON, marker_first]
+    )
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="supplying capture before",
+    ):
+        reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+
+
+@pytest.mark.parametrize("captures", [[POST_JSON], [POST_TXT], []])
+def test_post_bound_override_capture_needs_both_roles_recorded(
+    tmp_path: Path, captures: list[dict[str, str]]
+) -> None:
+    manifest = _manifest(tmp_path, _override("2026-09-01"), captures=captures)
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="supplying capture before",
+    ):
+        reconciliation.with_truncated_row_fallbacks(manifest, SECOND)

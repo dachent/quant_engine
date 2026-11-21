@@ -1256,6 +1256,37 @@ def tt_capture_bound_utc(cutoff: date) -> datetime:
     return datetime.combine(day, time(13, 30), tzinfo=timezone.utc)
 
 
+def _marker_excludes_later_rebalance(
+    fallback: Mapping[str, Any],
+    capture_instants: Mapping[str, Sequence[datetime]],
+    accepted_as_of: date,
+) -> str | None:
+    """Label when the capture's own last-rebalance marker proves the live holdings are the as-of state.
+
+    Only the override fallback carries a marker.  The marker is the date of the strategy's last
+    rebalance; a marker dated on or before ``accepted_as_of`` means no rebalance happened after the
+    as-of date up to the instant the marker was read.  The holdings capture is then the as-of state
+    only if the marker was read no earlier than the holdings (a rebalance between the two reads
+    would otherwise be invisible).  Anything else (a later or unreadable marker, a missing capture
+    role, a marker read before the holdings) returns ``None`` and the strict bound applies.
+    """
+
+    if fallback.get("kind") != "LIVE_HOLDINGS_OVERRIDE":
+        return None
+    json_at, txt_at = capture_instants.get("json"), capture_instants.get("txt")
+    if not json_at or not txt_at or min(txt_at) < max(json_at):
+        return None
+    sources = fallback.get("sources")
+    marker = sources.get("last_rebalance_marker") if isinstance(sources, dict) else None
+    try:
+        marker_day = date.fromisoformat(str(marker.get("value")))
+    except (ValueError, AttributeError):
+        return None
+    if marker_day > accepted_as_of:
+        return None
+    return f"LAST_REBALANCE_MARKER_{marker_day.isoformat()}_NOT_AFTER_AS_OF"
+
+
 def with_truncated_row_fallbacks(
     manifest: Mapping[str, Any], accepted_as_of: date
 ) -> Mapping[str, Any]:
@@ -1287,6 +1318,12 @@ def with_truncated_row_fallbacks(
     no instant for it, refuses them, because a rebalance after the next open
     would otherwise be read as the cutoff state.  The bound applied is recorded
     on each applied live fallback.  A later market-vane capture does not matter.
+    One exception, for the override only: a capture at or after the bound is accepted when the
+    capture's own last-rebalance marker is dated on or before ``accepted_as_of`` and was read no
+    earlier than the holdings (``_marker_excludes_later_rebalance``): no rebalance can then have
+    happened after the as-of date, so the live holdings are the as-of state.  The applied record
+    carries ``post_bound_capture_accepted_by``; a later or unreadable marker, a missing role or a
+    marker read before the holdings keeps the strict refusal.
     The dated fallbacks and rows that are complete are not affected.
     """
     provenance = manifest.get("capture_provenance")
@@ -1339,6 +1376,7 @@ def with_truncated_row_fallbacks(
         fallback = flag.get("fallback")
         if component is None or not isinstance(fallback, dict):
             raise refuse()
+        marker_proof: str | None = None
         if fallback.get("kind") in _LIVE_FALLBACK_CAPTURE_ROLES:
             roles = _LIVE_FALLBACK_CAPTURE_ROLES[str(fallback.get("kind"))]
             instants = [
@@ -1348,7 +1386,11 @@ def with_truncated_row_fallbacks(
                 not all(role in capture_instants for role in roles)
                 or max(instants) >= capture_bound
             ):
-                raise live_capture_after_cutoff()
+                marker_proof = _marker_excludes_later_rebalance(
+                    fallback, capture_instants, accepted_as_of
+                )
+                if marker_proof is None:
+                    raise live_capture_after_cutoff()
         snapshots = component["dated_holdings"]["snapshots"]
         target = next(
             (s for s in snapshots if s.get("observed_date") == observed), None
@@ -1419,6 +1461,11 @@ def with_truncated_row_fallbacks(
                 **(
                     {"capture_bound_utc": capture_bound.isoformat()}
                     if kind in _LIVE_FALLBACK_CAPTURE_ROLES
+                    else {}
+                ),
+                **(
+                    {"post_bound_capture_accepted_by": marker_proof}
+                    if marker_proof is not None
                     else {}
                 ),
             }
