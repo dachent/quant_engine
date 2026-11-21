@@ -1278,9 +1278,11 @@ def _marker_excludes_later_rebalance(
         return None
     sources = fallback.get("sources")
     marker = sources.get("last_rebalance_marker") if isinstance(sources, dict) else None
+    if not isinstance(marker, dict):
+        return None
     try:
         marker_day = date.fromisoformat(str(marker.get("value")))
-    except (ValueError, AttributeError):
+    except ValueError:
         return None
     if marker_day > accepted_as_of:
         return None
