@@ -1661,9 +1661,9 @@ def _schwab_facts(
                     valuation_cutoff=_date(
                         snapshot.get("valuation_cutoff"), "Schwab valuation cutoff"
                     ),
-                    snapshot_day=datetime.fromisoformat(
+                    snapshot_day=schwab.derived_positions.snapshot_business_day(
                         _text(snapshot.get("observed_at"), "Schwab snapshot clock")
-                    ).date(),
+                    ),
                     artifact_schemas={
                         str(a["artifact_id"]): str(
                             _object(a.get("schema"), "Schwab artifact schema").get(
