@@ -392,6 +392,8 @@ _PATH_STAGES = {
     "tools/verify_sleeve_ledger.py": [],
     "tools/schwab_capture_driver.py": [],
     "tools/schwab_capture_ingest.py": [],
+    # operator fallback: imports the owner's hand exports, labelled not release-eligible; writes no delivery artifact
+    "tools/schwab_hand_export_import.py": [],
     # derives the cutoff-day Schwab NAV from the verified holdings and official closes; an operator
     # step before the ingest, it writes no delivery artifact itself
     "tools/schwab_nav_derive.py": [],
