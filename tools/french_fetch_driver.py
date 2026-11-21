@@ -260,6 +260,13 @@ def check_evidence(
         raise FrenchDriverError("evidence has expired")
     if config.evaluation_date > end.date():
         raise FrenchDriverError("the evaluation date is after the evidence window")
+    if (
+        config.evaluation_date != config.cutoff
+        and config.evaluation_date < start.date() - timedelta(days=3)
+    ):
+        raise FrenchDriverError(
+            "the evaluation date must equal the cutoff or be within 3 days before the evidence window"
+        )
     cap = evidence["max_requests"]
     if not isinstance(cap, int) or cap < len(config.feeds) or cap > config.max_requests:
         raise FrenchDriverError(
@@ -343,6 +350,8 @@ def _check_feed(
         raise FrenchDriverError(
             f"{name}: Last-Modified is missing or unreadable"
         ) from exc
+    if modified.tzinfo is None:
+        raise FrenchDriverError(f"{name}: Last-Modified has no time zone")
     sections = coverage.get("sections")
     if not isinstance(sections, list) or not sections:
         raise FrenchDriverError(f"{name}: no sections in coverage")
@@ -354,11 +363,21 @@ def _check_feed(
         if date(int(period[:4]), int(period[4:6]), int(period[6:])) > cutoff:
             raise FrenchDriverError(f"{name}: a last row is after the cutoff {cutoff}")
         lasts.append(period)
-    oldest = min(lasts)
+    oldest, newest = min(lasts), max(lasts)
     modified_utc = modified.astimezone(timezone.utc)
-    if modified_utc.date() < _month_end(int(oldest[:4]), int(oldest[4:6])):
+    if modified_utc.date() < _month_end(int(newest[:4]), int(newest[4:6])):
         raise FrenchDriverError(
-            f"{name}: Last-Modified {response['last_modified']} is before the data month end"
+            f"{name}: Last-Modified {response['last_modified']} is before the newest data month end"
+        )
+    try:
+        captured = datetime.fromisoformat(
+            str(response.get("captured_at_utc")).replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise FrenchDriverError(f"{name}: captured_at_utc is unreadable") from exc
+    if captured.tzinfo is None or modified_utc > captured.astimezone(timezone.utc):
+        raise FrenchDriverError(
+            f"{name}: Last-Modified is after the manifest captured_at_utc"
         )
     if window_end is not None and modified_utc > window_end:
         raise FrenchDriverError(
@@ -564,6 +583,10 @@ def verify(run: Path) -> dict[str, Any]:
     if config.sha256 != manifest["config_sha256"]:
         raise FrenchDriverError("config differs from the manifest")
     window = _json_file(run / "governance-evidence.json", "evidence")
+    if _sha(_canonical(window)) != manifest.get("evidence_sha256"):
+        raise FrenchDriverError(
+            "evidence hash differs from the manifest's evidence_sha256"
+        )
     window_end = datetime.strptime(str(window["valid_until_utc"]), _TIME).replace(
         tzinfo=timezone.utc
     )
@@ -583,9 +606,17 @@ def verify(run: Path) -> dict[str, Any]:
     sums_path = run / "SHA256SUMS.txt"
     if not sums_path.is_file():
         raise FrenchDriverError("SHA256SUMS.txt is missing")
+    try:
+        sums_text = sums_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise FrenchDriverError("SHA256SUMS.txt is not UTF-8") from exc
     listed: dict[str, str] = {}
-    for line in sums_path.read_text(encoding="utf-8").splitlines():
+    for line in sums_text.splitlines():
         digest, _, relative = line.partition("  ")
+        if relative in listed:
+            raise FrenchDriverError(
+                f"SHA256SUMS.txt has a duplicate line for {relative}"
+            )
         listed[relative] = digest
     everything = {
         p.relative_to(run).as_posix()

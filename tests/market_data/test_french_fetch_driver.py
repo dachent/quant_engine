@@ -613,3 +613,97 @@ def test_the_docs_state_what_verify_checks_and_that_staleness_is_advisory() -> N
     ):
         assert phrase in doc, phrase
     assert "manifest-declared" in str(ffd.__doc__)
+
+
+# ------------------------------------------- review round 2 (P3 fixes)
+
+
+def test_evaluation_date_must_equal_the_cutoff_or_sit_near_the_window_start() -> None:
+    far = ffd.parse_config(
+        _bytes(_config(cutoff="2026-11-05", evaluation_date="2026-11-10"))
+    )
+    with pytest.raises(ffd.FrenchDriverError, match="evaluation"):
+        ffd.check_evidence(_evidence(far), far, "R4-FRENCH", NOW)
+    same = ffd.parse_config(
+        _bytes(_config(cutoff="2026-11-10", evaluation_date="2026-11-10"))
+    )
+    ffd.check_evidence(_evidence(same), same, "R4-FRENCH", NOW)
+    near = ffd.parse_config(
+        _bytes(_config(cutoff="2026-11-05", evaluation_date="2026-11-18"))
+    )
+    ffd.check_evidence(_evidence(near), near, "R4-FRENCH", NOW)
+
+
+def test_last_modified_lower_bound_uses_the_newest_sections_month_end(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(
+        **{
+            FEEDS["us_industries"]: {
+                "sections": ("20260930", "20260831"),
+                "last_modified": "Tue, 15 Sep 2026 12:00:00 GMT",
+            }
+        }
+    )
+    with pytest.raises(ffd.FrenchDriverError, match="Last-Modified"):
+        _fetch(tmp_path, runner)
+
+
+def test_last_modified_after_the_manifests_own_capture_time_is_refused(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(
+        **{FEEDS["us_factors"]: {"last_modified": "Sat, 21 Nov 2026 05:00:00 GMT"}}
+    )
+    with pytest.raises(ffd.FrenchDriverError, match="captured_at"):
+        _fetch(tmp_path, runner)
+
+
+def test_a_last_modified_without_a_time_zone_is_refused(tmp_path: Path) -> None:
+    runner = _runner(
+        **{FEEDS["us_factors"]: {"last_modified": "Mon, 26 Oct 2026 20:51:50 -0000"}}
+    )
+    with pytest.raises(ffd.FrenchDriverError, match="time zone"):
+        _fetch(tmp_path, runner)
+
+
+def test_verify_rejects_an_altered_evidence_window(tmp_path: Path) -> None:
+    run = _fetch(tmp_path)
+    path = run / "governance-evidence.json"
+    document = json.loads(path.read_text())
+    document["valid_until_utc"] = "2099-01-01T00:00:00Z"
+    path.write_text(json.dumps(document, indent=1, sort_keys=True) + "\n")
+    with pytest.raises(ffd.FrenchDriverError, match="differs"):
+        ffd.verify(run)
+    # even with the file inventory regenerated, the manifest's evidence hash still binds it
+    manifest_path = run / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    relative = "governance-evidence.json"
+    manifest["files"][relative] = {
+        "sha256": _sha(path.read_bytes()),
+        "size_bytes": path.stat().st_size,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
+    (run / "SHA256SUMS.txt").write_text(
+        "".join(
+            f"{_sha(p.read_bytes())}  {p.relative_to(run).as_posix()}\n"
+            for p in sorted(run.rglob("*"))
+            if p.is_file() and p.name != "SHA256SUMS.txt"
+        )
+    )
+    with pytest.raises(ffd.FrenchDriverError, match="evidence hash"):
+        ffd.verify(run)
+
+
+def test_verify_refuses_a_non_utf8_or_duplicated_sha256sums(tmp_path: Path) -> None:
+    run = _fetch(tmp_path)
+    sums = run / "SHA256SUMS.txt"
+    original = sums.read_text()
+    sums.write_bytes(b"\xff\xfe\x00bad")
+    with pytest.raises(ffd.FrenchDriverError, match="not UTF-8"):
+        ffd.verify(run)
+    sums.write_text(original + original.splitlines()[0] + "\n")
+    with pytest.raises(ffd.FrenchDriverError, match="duplicate"):
+        ffd.verify(run)
+    sums.write_text(original)
+    assert ffd.verify(run)["status"] == "VERIFIED"
