@@ -4,7 +4,7 @@ Wraps ``yahoo_fetch_driver`` (config-check, make-evidence, fetch, verify) so a r
 or re-capture needs no hand-built config, evidence or acceptance script:
 
   prepare  --cutoff D --label R4 --out DIR
-      writes DIR/<kind>/config.json for each kind (base, style) and DIR/comment.txt, a
+      writes DIR/<kind>-config.json for each kind (base, style, sector, held, qsi, qb) and DIR/comment.txt, a
       value-free governance comment naming the run ids and bound config shas. Post that
       comment on the governance issue (e.g. ``ghx -Method POST
       repos/<owner>/<repo>/issues/283/comments -Body '{"body": ...}'``); the posting and
