@@ -168,14 +168,28 @@ def non_fill_closure_failures(
     return len(valued), len(failed)
 
 
+def non_fill_unvalued_days(result: Mapping[date, FundDay], legs: Sequence[Leg]) -> int:
+    """Non-fill dashboard days that could not be rebuilt at all: a held symbol has no close."""
+
+    fill_days = {leg[0] for leg in legs}
+    return sum(
+        1
+        for day, fund_day in result.items()
+        if day not in fill_days and fund_day.residual is None
+    )
+
+
 def closes_reproduce_the_dashboard(
     result: Mapping[date, FundDay], legs: Sequence[Leg]
 ) -> bool:
     """False when too few non-fill days are valued, or too many fail the rebuild, to trust the closes."""
 
     valued, failed = non_fill_closure_failures(result, legs)
+    # a non-fill day without a close is a day the closes did not reproduce: it counts as a failure
+    # in the ratio, so a close file with holes cannot pass on the few days it does cover
+    unvalued = non_fill_unvalued_days(result, legs)
     # too few valued non-fill days cannot show that the closes reproduce the dashboard: refused,
     # not trusted (a short history of halved days must not pass)
-    return valued >= MIN_NON_FILL_DAYS and Decimal(failed) <= Decimal(valued) * (
-        MAX_NON_FILL_CLOSURE_FAILURE
-    )
+    return valued >= MIN_NON_FILL_DAYS and Decimal(failed + unvalued) <= Decimal(
+        valued + unvalued
+    ) * (MAX_NON_FILL_CLOSURE_FAILURE)

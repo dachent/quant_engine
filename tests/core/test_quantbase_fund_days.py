@@ -263,3 +263,23 @@ def test_a_fill_day_without_a_dashboard_row_is_a_proving_day_that_cannot_prove()
     out = q.corrected_values(dashboard, legs, closes)
     assert out[E2].status == q.UNRESTATED_NEXT_DAY_UNPROVEN
     assert out[E2].value == REAL_DASHBOARD[E2]
+
+
+def test_non_fill_days_without_closes_count_against_the_close_series() -> None:
+    """F2 item 23: a day whose held symbol has no close cannot be rebuilt; it is a failure to
+    reproduce the dashboard, not a day to leave out of the ratio."""
+
+    days = [date(2025, 9, 1 + i) for i in range(30)]
+    legs = [(days[0], "TQQQ", Decimal("100"))]
+    dashboard = {day: Decimal("8800") for day in days}
+
+    def trusted(missing: int) -> bool:
+        closes = {"TQQQ": {day: Decimal("88") for day in days[missing:]}}
+        out = q.corrected_values(dashboard, legs, closes)
+        return q.closes_reproduce_the_dashboard(out, legs)
+
+    assert trusted(0)
+    assert trusted(1)  # 1 of 30 (3.3 %) is inside the 5 % bound
+    assert not trusted(
+        5
+    )  # 5 of 30 missing: 25 valued days all close, but 16.7 % are unvalued
