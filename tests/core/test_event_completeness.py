@@ -816,6 +816,27 @@ def test_rows_plus_cash_must_equal_the_ledger_nav_not_the_stored_figure() -> Non
     assert "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV" in _qb_failed(_qb_run(nav=None))
 
 
+def test_every_row_of_the_snapshot_must_state_the_same_cash() -> None:
+    """KILL: cash was read from the first row only; a later row stating other cash passed unseen."""
+
+    second = _qb_row(
+        symbol="TQQQ",
+        market_value={"currency": "USD", "status": "AVAILABLE", "value": "10.00"},
+    )
+    nav = Decimal("48067.62")  # 48037.62 + 10.00 + the first row's cash 20.00
+    agreeing = _qb_run([_qb_row(), second], nav=nav)
+    assert "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV" not in _qb_failed(agreeing)
+    disagreeing = _qb_run(
+        [_qb_row(), {**second, "closure": {**second["closure"], "usd_cash": "35.00"}}],
+        nav=nav,
+    )
+    assert "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV" in _qb_failed(disagreeing)
+    absent = {**second["closure"]}
+    del absent["usd_cash"]
+    missing = _qb_run([_qb_row(), {**second, "closure": absent}], nav=nav)
+    assert "ROWS_PLUS_CASH_EQUAL_THE_LEDGER_NAV" in _qb_failed(missing)
+
+
 def test_the_interval_must_be_the_cutoff_day() -> None:
     row = _qb_run(declared_start="2026-11-05")
     assert "INTERVAL_IS_THE_CUTOFF_DAY" in _qb_failed(row)
@@ -902,3 +923,29 @@ def test_a_closure_object_without_the_independent_check_key_does_not_declare_com
     no_closure = _qb_row()
     del no_closure["closure"]
     assert _qb_run(rows=[no_closure])["status"] == ec.CLOSURE_FAILED
+
+
+_ROLLED = "ROLLED_BACK_ORDER_REPLAY_SCALED_TO_STRATEGY_NAV_AT_CUTOFF"
+
+
+def test_a_rolled_back_quantbase_row_needs_its_replay_evidence() -> None:
+    """A roll-back row is declared complete only with the replay evidence on its closure."""
+
+    proof = {
+        "replay_reproduces_snapshot": True,
+        "opening_residual_to_nav_usd": "0.0012",
+    }
+    ok = _qb_run(rows=[_qb_row(value_basis=_ROLLED, closure={"rollback": proof})])
+    assert ok["status"] == ec.DECLARED_COMPLETE, ok["checks"]
+    names = {c["check"] for c in ok["checks"]}
+    assert "ROLLED_BACK_ROWS_CARRY_THEIR_REPLAY_EVIDENCE" in names
+    for rollback in (
+        None,
+        {**proof, "replay_reproduces_snapshot": False},
+        {**proof, "opening_residual_to_nav_usd": "0.50"},
+        {**proof, "opening_residual_to_nav_usd": None},
+    ):
+        closure = {} if rollback is None else {"rollback": rollback}
+        bad = _qb_run(rows=[_qb_row(value_basis=_ROLLED, closure=closure)])
+        assert bad["status"] == ec.CLOSURE_FAILED
+        assert "ROLLED_BACK_ROWS_CARRY_THEIR_REPLAY_EVIDENCE" in _qb_failed(bad)
