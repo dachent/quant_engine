@@ -1256,19 +1256,36 @@ def tt_capture_bound_utc(cutoff: date) -> datetime:
     return datetime.combine(day, time(13, 30), tzinfo=timezone.utc)
 
 
+# a post-bound override capture is accepted only this long after the bound: the marker proof
+# (no rebalance after the as-of date) does not weaken with time, but the live weights are
+# marked to market at the read instant and their gap to the dated row grows with it (measured
+# up to 2 pp within one day); three days covers a weekend or a one-day holiday and no more
+POST_BOUND_MAX_LATENESS: Final = timedelta(days=3)
+_STRICT_MARKER_DAY: Final = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
 def _marker_excludes_later_rebalance(
     fallback: Mapping[str, Any],
     capture_instants: Mapping[str, Sequence[datetime]],
     accepted_as_of: date,
+    observed: date,
+    capture_bound: datetime,
 ) -> str | None:
     """Label when the capture's own last-rebalance marker proves the live holdings are the as-of state.
 
     Only the override fallback carries a marker.  The marker is the date of the strategy's last
-    rebalance; a marker dated on or before ``accepted_as_of`` means no rebalance happened after the
-    as-of date up to the instant the marker was read.  The holdings capture is then the as-of state
-    only if the marker was read no earlier than the holdings (a rebalance between the two reads
-    would otherwise be invisible).  Anything else (a later or unreadable marker, a missing capture
-    role, a marker read before the holdings) returns ``None`` and the strict bound applies.
+    rebalance.  Read on or after the flagged row's date (``observed``) and on or before
+    ``accepted_as_of``, it says the last rebalance was the one that produced the flagged row or a
+    later one not after the as-of date, so no rebalance happened after the as-of date up to the
+    instant the marker was read.  The holdings are then the as-of book only if the marker was read
+    no earlier than the holdings (a rebalance between the two reads would otherwise be invisible):
+    every marker read must be at or after every holdings read.  The marker must be a string in
+    strict YYYY-MM-DD.  The live weights are market weights at the holdings read, not target
+    proportions; the caller records that instant and the gap to the dated row.  A capture later
+    than ``POST_BOUND_MAX_LATENESS`` after the bound is not accepted: the rebalance exclusion does
+    not weaken with time, the mark-to-market gap does.  Anything else (a later, earlier-than-row,
+    unreadable or non-strict marker, a missing capture role, a marker read before the holdings, a
+    capture too late) returns ``None`` and the strict bound applies.
     """
 
     if fallback.get("kind") != "LIVE_HOLDINGS_OVERRIDE":
@@ -1276,15 +1293,20 @@ def _marker_excludes_later_rebalance(
     json_at, txt_at = capture_instants.get("json"), capture_instants.get("txt")
     if not json_at or not txt_at or min(txt_at) < max(json_at):
         return None
+    if max(max(json_at), max(txt_at)) > capture_bound + POST_BOUND_MAX_LATENESS:
+        return None
     sources = fallback.get("sources")
     marker = sources.get("last_rebalance_marker") if isinstance(sources, dict) else None
     if not isinstance(marker, dict):
         return None
+    value = marker.get("value")
+    if not isinstance(value, str) or not _STRICT_MARKER_DAY.fullmatch(value):
+        return None
     try:
-        marker_day = date.fromisoformat(str(marker.get("value")))
+        marker_day = date.fromisoformat(value)
     except ValueError:
         return None
-    if marker_day > accepted_as_of:
+    if marker_day > accepted_as_of or marker_day < observed:
         return None
     return f"LAST_REBALANCE_MARKER_{marker_day.isoformat()}_NOT_AFTER_AS_OF"
 
@@ -1321,13 +1343,16 @@ def with_truncated_row_fallbacks(
     would otherwise be read as the cutoff state.  The bound applied is recorded
     on each applied live fallback.  A later market-vane capture does not matter.
     One exception, for the override only: a capture at or after the bound is accepted when the
-    capture's own last-rebalance marker is dated on or before ``accepted_as_of`` and was read no
-    earlier than the holdings (``_marker_excludes_later_rebalance``): no rebalance can then have
-    happened after the as-of date, so the live holdings are the as-of state.  The applied record
-    carries ``post_bound_capture_accepted_by``, the instant the live holdings were read and the
-    largest absolute weight gap to the dated row it replaces (the live weights are market weights at
-    that instant, not target proportions); a later or unreadable marker, a missing role or a
-    marker read before the holdings keeps the strict refusal.
+    capture's own last-rebalance marker is a strict YYYY-MM-DD string dated from the flagged row's
+    date to ``accepted_as_of`` and every marker read was at or after every holdings read
+    (``_marker_excludes_later_rebalance``): no rebalance can then have happened after the as-of
+    date, so the live holdings are the as-of book.  The live weights are market weights at the read
+    instant, not target proportions: the applied record carries ``post_bound_capture_accepted_by``,
+    ``live_holdings_read_at_utc`` and the largest absolute weight gap to the dated row it replaces.
+    LIMIT: a capture more than ``POST_BOUND_MAX_LATENESS`` (three days) after the bound is refused,
+    because the mark-to-market gap grows with time even though the rebalance exclusion does not
+    weaken.  A later, earlier-than-row, unreadable or non-strict marker, a missing role, a marker
+    read before the holdings, or a capture past the limit keeps the strict refusal.
     The dated fallbacks and rows that are complete are not affected.
     """
     provenance = manifest.get("capture_provenance")
@@ -1391,7 +1416,11 @@ def with_truncated_row_fallbacks(
                 or max(instants) >= capture_bound
             ):
                 marker_proof = _marker_excludes_later_rebalance(
-                    fallback, capture_instants, accepted_as_of
+                    fallback,
+                    capture_instants,
+                    accepted_as_of,
+                    date.fromisoformat(observed),
+                    capture_bound,
                 )
                 if marker_proof is None:
                     raise live_capture_after_cutoff()

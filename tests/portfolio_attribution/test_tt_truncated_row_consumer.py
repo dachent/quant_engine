@@ -524,3 +524,82 @@ def test_post_bound_live_portfolio_holdings_is_refused_even_with_a_valid_marker(
         match="supplying capture before",
     ):
         reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+
+
+# --- marker must belong to the flagged row, be strict, and the capture must not be too late ---
+
+
+def _override_raw(value: Any) -> dict[str, Any]:
+    return {
+        "class": "LIVE_HOLDINGS_OVERRIDE",
+        "fallback": {
+            "kind": "LIVE_HOLDINGS_OVERRIDE",
+            "sources": {"last_rebalance_marker": {"value": value}},
+        },
+    }
+
+
+def test_post_bound_override_capture_is_refused_when_the_marker_predates_the_flagged_row(
+    tmp_path: Path,
+) -> None:
+    # flagged row 2026-09-01, marker 2026-08-31 (and an absurd old one): not the row's rebalance
+    for marker in ("2026-08-31", "2000-01-01"):
+        manifest = _manifest(
+            tmp_path, _override(marker), captures=[POST_JSON, POST_TXT]
+        )
+        with pytest.raises(
+            reconciliation.ImplementationReconciliationError,
+            match="supplying capture before",
+        ):
+            reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "20260901",
+        20260901,
+        " 2026-09-01",
+        "2026-09-01 ",
+        "2026-9-1",
+        "2026-09-01T00:00:00",
+        "2026-W36-2",
+        None,
+    ],
+)
+def test_post_bound_override_capture_needs_a_strict_iso_date_string_marker(
+    tmp_path: Path, value: Any
+) -> None:
+    manifest = _manifest(tmp_path, _override_raw(value), captures=[POST_JSON, POST_TXT])
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="supplying capture before",
+    ):
+        reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+
+
+def test_post_bound_override_capture_lateness_is_capped(tmp_path: Path) -> None:
+    bound = reconciliation.tt_capture_bound_utc(SECOND)
+    limit = bound + reconciliation.POST_BOUND_MAX_LATENESS
+
+    def captures(json_at: Any, txt_at: Any) -> list[dict[str, str]]:
+        return [
+            {"captured_at_utc": json_at.isoformat(), "role": "json"},
+            {"captured_at_utc": txt_at.isoformat(), "role": "txt"},
+        ]
+
+    one = reconciliation.timedelta(seconds=1)
+    ok = _manifest(
+        tmp_path, _override("2026-09-01"), captures=captures(limit - one, limit)
+    )
+    assert reconciliation.with_truncated_row_fallbacks(ok, SECOND)
+    for late in (
+        captures(limit - one, limit + one),
+        captures(limit + one, limit + one),
+    ):
+        manifest = _manifest(tmp_path, _override("2026-09-01"), captures=late)
+        with pytest.raises(
+            reconciliation.ImplementationReconciliationError,
+            match="supplying capture before",
+        ):
+            reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
