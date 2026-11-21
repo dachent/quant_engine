@@ -5670,6 +5670,34 @@ def _unattributed_provider_records(
     return dict(counts)
 
 
+def _unattributed_provider_record_keys(
+    provider_catalog: Mapping[str, Any] | None,
+) -> dict[tuple[str, str], list[tuple[str, str, str]]]:
+    """The (record_id, event_date, canonical amount) of each provider-ledger flow or
+    transaction that is not MAPPED to a strategy, per (account, fact): the keys a ledger
+    closure's proven records are compared with."""
+
+    keys: dict[tuple[str, str], list[tuple[str, str, str]]] = defaultdict(list)
+    for fact_type in ("flows", "transactions"):
+        rows = (provider_catalog or {}).get(fact_type)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if (
+                isinstance(row, Mapping)
+                and row.get("account_id") is not None
+                and row.get("mapping_status") != "MAPPED"
+            ):
+                keys[(str(row["account_id"]), fact_type)].append(
+                    (
+                        str(row.get("record_id")),
+                        str(row.get("event_date")),
+                        _canonical_amount(row.get("amount")),
+                    )
+                )
+    return dict(keys)
+
+
 def _canonical_amount(amount: Any) -> str:
     """An AVAILABLE amount as canonical decimal text, so 1.0, 1.00 and 1E0 compare equal."""
 
@@ -5695,6 +5723,9 @@ def _coverage_evidence(
     statement_accounts: Collection[str] = frozenset(),
     unattributed: Mapping[tuple[str, str], int] | None = None,
     completeness: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
+    unattributed_records: (
+        Mapping[tuple[str, str], Sequence[tuple[str, str, str]]] | None
+    ) = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Build value-free account/fact evidence without inventing completeness.
 
@@ -5867,6 +5898,10 @@ def _coverage_evidence(
             declared_end: str | None = None
             proof = (completeness or {}).get((account_id, fact_type))
             proof_gap: str | None = None
+            # unattributed records the closure proved inside its declared interval: declared,
+            # but not strategy capital (they never enter the accepted records)
+            declared_unmapped: Counter[tuple[str, ...]] = Counter()
+            credited_unmapped = 0
             if proof is not None and proof.get("status") == "DECLARED_COMPLETE":
                 # the closure proved the ledger's rows: the accepted records of this interval must
                 # be exactly those rows, and none may have been excluded
@@ -5919,14 +5954,30 @@ def _coverage_evidence(
                         f"; {before_start} accepted records dated before the declared start "
                         f"{proof['declared_start']} lie in the statement history outside the declaration"
                     )
-                elif excluded or undated or accepted_keys != proven_keys:
-                    proof_gap = (
-                        f"; ledger closure {proof['closure']} proved the provider event stream "
-                        f"but the accepted records differ: "
-                        f"{sum((proven_keys - accepted_keys).values())} proven records are not "
-                        f"accepted, {sum((accepted_keys - proven_keys).values())} accepted "
-                        f"records are not proven, {undated} accepted records lack a date"
+                else:
+                    unmapped_keys: Counter[tuple[str, ...]] = Counter(
+                        (unattributed_records or {}).get((account_id, fact_type), ())
                     )
+                    declared_unmapped = Counter(
+                        {
+                            key: count
+                            for key, count in (unmapped_keys & proven_keys).items()
+                            if lo <= key[1] <= hi
+                        }
+                    )
+                    proven_attributed = proven_keys - declared_unmapped
+                    if (
+                        excluded - sum(declared_unmapped.values())
+                        or undated
+                        or accepted_keys != proven_attributed
+                    ):
+                        proof_gap = (
+                            f"; ledger closure {proof['closure']} proved the provider event stream "
+                            f"but the accepted records differ: "
+                            f"{sum((proven_attributed - accepted_keys).values())} proven records are not "
+                            f"accepted, {sum((accepted_keys - proven_attributed).values())} accepted "
+                            f"records are not proven, {undated} accepted records lack a date"
+                        )
             if (
                 proof is not None
                 and proof.get("status") == "DECLARED_COMPLETE"
@@ -5942,6 +5993,13 @@ def _coverage_evidence(
                 missing_reason = (
                     f"completeness proved by ledger closure {proof['closure']}"
                 )
+                credited_unmapped = sum(declared_unmapped.values())
+                if credited_unmapped:
+                    missing_reason += (
+                        f"; {credited_unmapped} provider {fact_type} records without a "
+                        "strategy attribution lie inside the tie-out-closed interval and "
+                        "are proved by the closure: pre-epoch or unmapped, not strategy capital"
+                    )
                 before = sum(
                     1
                     for item in accepted
@@ -5968,9 +6026,10 @@ def _coverage_evidence(
                     if check.get("status") != "PASS"
                 )
                 missing_reason += f"; completeness declaration not proved by ledger closure; failed: {failed}"
-            if excluded:
+            if excluded - credited_unmapped:
                 missing_reason += (
-                    f"; provider ledger {fact_type} for this account: {excluded} "
+                    f"; provider ledger {fact_type} for this account: "
+                    f"{excluded - credited_unmapped} "
                     "lack a strategy attribution and are left out of the accepted records"
                 )
             matrix.append(
@@ -7308,6 +7367,7 @@ def build_catalog(
             {str(item["account_id"]) for item in statement_nav},
             unattributed=_unattributed_provider_records(ledger_catalog),
             completeness=_ledger_completeness(ledger_catalog),
+            unattributed_records=_unattributed_provider_record_keys(ledger_catalog),
         )
     )
     fact_coverage, exceptions = _fact_coverage(
