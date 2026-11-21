@@ -36,6 +36,13 @@ NATIVE_USD: Final = "NATIVE_USD"
 NATIVE_NOT_CONVERTED: Final = "NATIVE_NOT_CONVERTED"
 CONVERTED: Final = "CURRENCY_CONVERTED"
 
+# Bounds for the governed EURUSD series (the only pair this module converts with).
+FX_MAX_AGE_DAYS: Final = 7  # a day may use a close at most this many days old
+FX_CLOSE_BAND: Final = (Decimal("0.5"), Decimal("2.5"))
+FX_MAX_DAILY_MOVE: Final = Decimal("0.10")
+LAYER_ORDER: Final = ("BACKTEST", "MODEL_LIVE", "ACCOUNT_LIVE")
+_SHA256_HEX: Final = frozenset("0123456789abcdef")
+
 Rows = Sequence[tuple[date, Decimal]]
 
 
@@ -50,15 +57,22 @@ class FxLevels:
     pair: str
     closes: Mapping[date, Decimal]
     sha256: str
+    days: tuple[date, ...]
 
     def level(self, day: date) -> Decimal:
-        """The close on ``day``, or the last close before it when there is no bar."""
+        """The close on ``day``, or the last close before it when there is no bar and that
+        close is at most ``FX_MAX_AGE_DAYS`` old (a stale tail refuses)."""
 
-        days = sorted(self.closes)
-        index = bisect.bisect_right(days, day) - 1
+        index = bisect.bisect_right(self.days, day) - 1
         if index < 0:
             raise CurrencyError(f"no {self.pair} close on or before {day.isoformat()}")
-        return self.closes[days[index]]
+        last = self.days[index]
+        if (day - last).days > FX_MAX_AGE_DAYS:
+            raise CurrencyError(
+                f"{self.pair} close is stale for {day.isoformat()}: last bar "
+                f"{last.isoformat()} is more than {FX_MAX_AGE_DAYS} days old"
+            )
+        return self.closes[last]
 
 
 @dataclass(frozen=True)
@@ -93,21 +107,27 @@ def load_fx_levels(path: Path, *, expected_sha256: str, pair: str) -> FxLevels:
             raise CurrencyError("fx series row is unreadable") from exc
         if not close.is_finite() or close <= 0:
             raise CurrencyError("fx series close is not positive")
+        if not FX_CLOSE_BAND[0] <= close <= FX_CLOSE_BAND[1]:
+            raise CurrencyError("fx series close is outside the sanity band")
         if day in closes:
             raise CurrencyError("fx series date is duplicated")
         closes[day] = close
     if not closes:
         raise CurrencyError("fx series is empty")
-    return FxLevels(pair=pair, closes=closes, sha256=digest)
+    days = tuple(sorted(closes))
+    for before, after in zip(days, days[1:], strict=False):
+        if abs(closes[after] / closes[before] - 1) > FX_MAX_DAILY_MOVE:
+            raise CurrencyError("fx series jumps more than the daily sanity limit")
+    return FxLevels(pair=pair, closes=closes, sha256=digest, days=days)
 
 
-def _check_rows(rows: Rows, base_date: date) -> None:
+def _check_rows(rows: Rows, base_date: date | None) -> None:
     if not rows:
         raise CurrencyError("layer has no returns")
     days = [day for day, _ in rows]
     if days != sorted(set(days)):
         raise CurrencyError("layer returns are not strictly ordered by date")
-    if base_date >= days[0]:
+    if base_date is not None and base_date >= days[0]:
         raise CurrencyError("fx base date must precede the first return")
     for _, value in rows:
         if not value.is_finite() or value <= -1:
@@ -175,6 +195,7 @@ def admit_layer(
         if value not in SUPPORTED_CURRENCIES:
             raise CurrencyError(f"{name} currency {value!r} is not supported")
     frozen = tuple(rows)
+    _check_rows(frozen, None)
     if layer == ACCOUNT_LAYER:
         if provider_currency != "USD" or label_currency != "USD":
             raise CurrencyError("the account layer is USD and is never converted")
@@ -195,21 +216,60 @@ def admit_layer(
     return Layer(layer, converted, "USD", "EUR", CONVERTED, fx.sha256)
 
 
+def convert_admitted(layer: Layer, fx: FxLevels, *, base_date: date) -> Layer:
+    """Convert an already admitted native EUR layer; a second conversion refuses."""
+
+    if layer.status == CONVERTED:
+        raise CurrencyError(f"{layer.layer} is already converted: double conversion")
+    if layer.status != NATIVE_NOT_CONVERTED or layer.native_currency != "EUR":
+        raise CurrencyError(f"{layer.layer} is not a native EUR layer")
+    converted = tuple(convert_returns(layer.rows, fx, base_date=base_date))
+    return Layer(layer.layer, converted, "USD", "EUR", CONVERTED, fx.sha256)
+
+
+def _check_layer_for_splice(item: Layer) -> None:
+    """A Layer object is not trusted: its fields must agree with how it was admitted."""
+
+    problem = f"splice refused: {item.layer}"
+    _check_rows(item.rows, None)
+    sha = item.fx_source_sha256
+    if item.layer == ACCOUNT_LAYER:
+        ok = (item.currency, item.native_currency, item.status, sha) == (
+            "USD",
+            "USD",
+            NATIVE_USD,
+            None,
+        )
+    elif item.status == NATIVE_USD:
+        ok = (item.currency, item.native_currency, sha) == ("USD", "USD", None)
+    elif item.status == CONVERTED:
+        ok = (
+            item.currency == "USD"
+            and item.native_currency == "EUR"
+            and isinstance(sha, str)
+            and len(sha) == 64
+            and set(sha) <= _SHA256_HEX
+        )
+    else:
+        ok = False
+    if not ok:
+        raise CurrencyError(f"{problem} is not USD or was not converted with evidence")
+
+
 def splice_rows(layers: Sequence[Layer]) -> list[tuple[date, Decimal]]:
-    """Chain admitted layers in the order given: every layer USD, every provider layer
-    converted, dates strictly increasing across the seams."""
+    """Chain admitted layers: known names in BACKTEST, MODEL_LIVE, ACCOUNT_LIVE order, every
+    layer USD with consistent conversion evidence, dates strictly increasing across seams."""
 
     if not layers:
         raise CurrencyError("splice needs at least one layer")
+    names = [item.layer for item in layers]
+    positions = [LAYER_ORDER.index(name) for name in names if name in LAYER_ORDER]
+    if len(positions) != len(names) or positions != sorted(set(positions)):
+        raise CurrencyError("splice refused: layer names or order are not valid")
     chain: list[tuple[date, Decimal]] = []
     for item in layers:
-        if item.currency != "USD" or (
-            item.native_currency != "USD" and item.status != CONVERTED
-        ):
-            raise CurrencyError(
-                f"splice refused: {item.layer} is not USD or was not converted"
-            )
-        if chain and item.rows and item.rows[0][0] <= chain[-1][0]:
+        _check_layer_for_splice(item)
+        if chain and item.rows[0][0] <= chain[-1][0]:
             raise CurrencyError(
                 f"splice refused: {item.layer} overlaps the layer before"
             )

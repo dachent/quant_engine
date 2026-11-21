@@ -217,7 +217,143 @@ def test_a_splice_needs_every_layer_in_usd_and_provider_layers_converted(
     )
     with pytest.raises(flc.CurrencyError, match="splice"):
         flc.splice_rows([backtest, eur_only, account])
+    overlapping = flc.admit_layer(
+        "MODEL_LIVE",
+        [(date(2026, 1, 5), D("0.01"))],
+        provider_currency="EUR",
+        label_currency="USD",
+        **kw,
+    )
     with pytest.raises(flc.CurrencyError, match="overlap"):
-        flc.splice_rows([backtest, backtest])
+        flc.splice_rows([backtest, overlapping])
     with pytest.raises(flc.CurrencyError, match="splice"):
         flc.splice_rows([])
+
+
+def _converted(tmp_path: Path, name: str = "MODEL_LIVE") -> flc.Layer:
+    return flc.admit_layer(
+        name,
+        [(date(2026, 1, 6), D("0.01"))],
+        provider_currency="EUR",
+        label_currency="USD",
+        fx=_levels(tmp_path),
+        base_date=date(2026, 1, 2),
+    )
+
+
+@pytest.mark.parametrize("days_after", [8, 30, 60, 400])
+def test_a_return_past_the_end_of_the_fx_series_refuses(
+    tmp_path: Path, days_after: int
+) -> None:
+    """P2-1: a stale tail used to convert at fx_return 0 and be accepted."""
+
+    levels = _levels(tmp_path)
+    late = date(2026, 1, 8).toordinal() + days_after
+    with pytest.raises(flc.CurrencyError, match="stale"):
+        flc.convert_returns(
+            [(date.fromordinal(late), D("0.01"))], levels, base_date=date(2026, 1, 2)
+        )
+    # within the named maximum age the last close is carried
+    near = date.fromordinal(date(2026, 1, 8).toordinal() + flc.FX_MAX_AGE_DAYS)
+    flc.convert_returns([(near, D("0.01"))], levels, base_date=date(2026, 1, 2))
+
+
+def test_forged_layer_objects_do_not_splice(tmp_path: Path) -> None:
+    """P2-2: converted without evidence, account marked converted, unknown names/order."""
+
+    good = _converted(tmp_path)
+    rows = good.rows
+    forged = [
+        flc.Layer("MODEL_LIVE", rows, "USD", "EUR", flc.CONVERTED, None),
+        flc.Layer("MODEL_LIVE", rows, "USD", "EUR", flc.CONVERTED, "zz" * 32),
+        flc.Layer(
+            "ACCOUNT_LIVE", rows, "USD", "EUR", flc.CONVERTED, good.fx_source_sha256
+        ),
+        flc.Layer("PAPER", rows, "USD", "USD", flc.NATIVE_USD, None),
+        # the CONVERTED status clause: EUR native, USD currency, but not converted
+        flc.Layer("MODEL_LIVE", rows, "USD", "EUR", flc.NATIVE_NOT_CONVERTED, None),
+        flc.Layer("MODEL_LIVE", rows, "EUR", "EUR", flc.NATIVE_NOT_CONVERTED, None),
+        flc.Layer(
+            "MODEL_LIVE", rows, "USD", "USD", flc.NATIVE_USD, good.fx_source_sha256
+        ),
+        flc.Layer("MODEL_LIVE", (), "USD", "USD", flc.NATIVE_USD, None),
+    ]
+    for layer in forged:
+        with pytest.raises(flc.CurrencyError):
+            flc.splice_rows([layer])
+    account = flc.admit_layer(
+        "ACCOUNT_LIVE",
+        [(date(2026, 1, 8), D("0.01"))],
+        provider_currency="USD",
+        label_currency="USD",
+    )
+    with pytest.raises(flc.CurrencyError, match="order"):
+        flc.splice_rows([account, good])
+    with pytest.raises(flc.CurrencyError, match="order"):
+        flc.splice_rows([good, good])
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [],
+        [(date(2026, 1, 6), D("0.01")), (date(2026, 1, 5), D("0.01"))],
+        [(date(2026, 1, 5), D("0.01")), (date(2026, 1, 5), D("0.02"))],
+        [(date(2026, 1, 5), D("NaN"))],
+        [(date(2026, 1, 5), D("-2"))],
+    ],
+)
+@pytest.mark.parametrize(
+    "provider,label",
+    [("USD", "USD"), ("EUR", "EUR")],
+)
+def test_native_layers_are_validated_like_converted_ones(
+    rows: list[tuple[date, Decimal]], provider: str, label: str
+) -> None:
+    with pytest.raises(flc.CurrencyError):
+        flc.admit_layer(
+            "BACKTEST", rows, provider_currency=provider, label_currency=label
+        )
+    with pytest.raises(flc.CurrencyError):
+        flc.admit_layer(
+            "ACCOUNT_LIVE", rows, provider_currency="USD", label_currency="USD"
+        )
+
+
+def test_a_second_conversion_refuses(tmp_path: Path) -> None:
+    levels = _levels(tmp_path)
+    native = flc.admit_layer(
+        "MODEL_LIVE",
+        [(date(2026, 1, 6), D("0.01"))],
+        provider_currency="EUR",
+        label_currency="EUR",
+    )
+    once = flc.convert_admitted(native, levels, base_date=date(2026, 1, 2))
+    assert once.status == flc.CONVERTED and once.rows != native.rows
+    with pytest.raises(flc.CurrencyError, match="double conversion"):
+        flc.convert_admitted(once, levels, base_date=date(2026, 1, 2))
+    usd = flc.admit_layer(
+        "BACKTEST",
+        [(date(2026, 1, 5), D("0.01"))],
+        provider_currency="USD",
+        label_currency="USD",
+    )
+    with pytest.raises(flc.CurrencyError, match="native EUR"):
+        flc.convert_admitted(usd, levels, base_date=date(2026, 1, 2))
+
+
+def test_the_fx_series_has_a_sanity_band_and_a_jump_limit(tmp_path: Path) -> None:
+    with pytest.raises(flc.CurrencyError, match="band"):
+        _levels(tmp_path, FX_CSV.replace("1.0989,1.0989", "110.0,110.0"))
+    with pytest.raises(flc.CurrencyError, match="jump"):
+        _levels(tmp_path, FX_CSV.replace("1.1100,1.1100", "1.3000,1.3000"))
+
+
+def test_labels_must_match_the_provider_currency_on_every_layer() -> None:
+    rows = [(date(2026, 1, 5), D("0.02"))]
+    with pytest.raises(flc.CurrencyError, match="account"):
+        flc.admit_layer(
+            "ACCOUNT_LIVE", rows, provider_currency="USD", label_currency="EUR"
+        )
+    with pytest.raises(flc.CurrencyError, match="label"):
+        flc.admit_layer("BACKTEST", rows, provider_currency="USD", label_currency="EUR")
