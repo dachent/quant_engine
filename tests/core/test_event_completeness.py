@@ -923,3 +923,29 @@ def test_a_closure_object_without_the_independent_check_key_does_not_declare_com
     no_closure = _qb_row()
     del no_closure["closure"]
     assert _qb_run(rows=[no_closure])["status"] == ec.CLOSURE_FAILED
+
+
+_ROLLED = "ROLLED_BACK_ORDER_REPLAY_SCALED_TO_STRATEGY_NAV_AT_CUTOFF"
+
+
+def test_a_rolled_back_quantbase_row_needs_its_replay_evidence() -> None:
+    """A roll-back row is declared complete only with the replay evidence on its closure."""
+
+    proof = {
+        "replay_reproduces_snapshot": True,
+        "opening_residual_to_nav_usd": "0.0012",
+    }
+    ok = _qb_run(rows=[_qb_row(value_basis=_ROLLED, closure={"rollback": proof})])
+    assert ok["status"] == ec.DECLARED_COMPLETE, ok["checks"]
+    names = {c["check"] for c in ok["checks"]}
+    assert "ROLLED_BACK_ROWS_CARRY_THEIR_REPLAY_EVIDENCE" in names
+    for rollback in (
+        None,
+        {**proof, "replay_reproduces_snapshot": False},
+        {**proof, "opening_residual_to_nav_usd": "0.50"},
+        {**proof, "opening_residual_to_nav_usd": None},
+    ):
+        closure = {} if rollback is None else {"rollback": rollback}
+        bad = _qb_run(rows=[_qb_row(value_basis=_ROLLED, closure=closure)])
+        assert bad["status"] == ec.CLOSURE_FAILED
+        assert "ROLLED_BACK_ROWS_CARRY_THEIR_REPLAY_EVIDENCE" in _qb_failed(bad)
