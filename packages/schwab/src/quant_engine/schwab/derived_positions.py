@@ -314,7 +314,9 @@ def residual_window_days(row: Mapping[str, Any]) -> list[str]:
 
 
 def snapshot_business_day(observed_at: str) -> date:
-    """The New York business day of a snapshot clock: the day the rows' ``capture_date`` is on.
+    """The New York calendar date of a snapshot clock: the day the rows' ``capture_date`` is on.
+
+    A calendar date only: there is no holiday or weekend logic (the snapshot is a capture, not a trading day).
 
     The clock's own date is in its own offset (UTC for the captured snapshots), which is the next
     day for an evening capture in New York; comparing that to ``capture_date`` would refuse a

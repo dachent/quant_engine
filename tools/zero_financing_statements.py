@@ -1306,15 +1306,17 @@ def _row_amount(category: str, text: str) -> Decimal:
         * Decimal(re.sub(r"[(),-]", "", quantity_price[1]))
     )
     values = [_parse_money(x) for x in amounts]
-    best = min(values, key=lambda v: abs(abs(v) - proceeds))
+    position = min(range(len(values)), key=lambda i: abs(abs(values[i]) - proceeds))
+    best = values[position]
     gap = abs(abs(best) - proceeds)
     if gap > Decimal("0.10") + proceeds / 10000:
-        # a commission or fee printed in the row (one, or several adding up) explains a larger gap
-        others = [abs(v) for v in values if v is not best][:6]
-        explained = any(
+        # A commission or fee explains a larger gap only when it is printed BEFORE the amount (the
+        # realized gain follows it) and it reduces the proceeds; several charges may add up.
+        charges = [abs(v) for v in values[:position]][:6]
+        explained = abs(best) < proceeds and any(
             abs(sum(subset, Decimal(0)) - gap) <= Decimal("0.01")
-            for size in range(1, len(others) + 1)
-            for subset in combinations(others, size)
+            for size in range(1, len(charges) + 1)
+            for subset in combinations(charges, size)
         )
         if not explained:
             raise ZeroFinancingError("TRANSACTION_AMOUNT_UNREADABLE")

@@ -990,3 +990,17 @@ def test_a_sale_row_whose_gap_from_quantity_times_price_no_printed_charge_explai
     # 995.05 is 4.95 below 1,000.00 and nothing printed is 4.95: refused, not guessed
     with pytest.raises(zf.ZeroFinancingError, match="TRANSACTION_AMOUNT_UNREADABLE"):
         zf._row_amount("Sale", gain_only)  # noqa: SLF001
+
+
+def test_a_charge_must_reduce_the_proceeds_and_precede_the_amount() -> None:
+    # the amount ABOVE quantity x price is not "explained" by a printed charge
+    above = "Sale XYZZ SYNTHETIC SAMPLE CORP (10.0000) 100.0000 4.95 1004.95 (6.00)"
+    with pytest.raises(zf.ZeroFinancingError, match="TRANSACTION_AMOUNT_UNREADABLE"):
+        zf._row_amount("Sale", above)  # noqa: SLF001
+    # a bare realized gain printed AFTER the amount is not a charge, even when it equals the gap
+    gain_equals_gap = "Sale XYZZ SYNTHETIC SAMPLE CORP (10.0000) 100.0000 995.05 4.95"
+    with pytest.raises(zf.ZeroFinancingError, match="TRANSACTION_AMOUNT_UNREADABLE"):
+        zf._row_amount("Sale", gain_equals_gap)  # noqa: SLF001
+    # the charge printed before the amount still explains a reduction
+    charged = "Sale XYZZ SYNTHETIC SAMPLE CORP (10.0000) 100.0000 4.95 995.05 4.95"
+    assert zf._row_amount("Sale", charged) == Decimal("995.05")  # noqa: SLF001
