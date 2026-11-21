@@ -23,6 +23,10 @@ from typing import Any, Mapping, Sequence
 SCHEMA = "qe-factor-lens-status/1"
 
 FRENCH_ALLOWANCE_DAYS = 45
+# Owner ruling: single source for the French headline age ceiling (days from the last observation
+# to the evaluation date). Independent of acceptance.validate.plausibility.FACTOR_STALE_DAYS (10),
+# a different staleness check that stays untouched.
+FRENCH_HEADLINE_LAG_DAYS = 75
 ETF_FRESH_DAYS = 7
 ETF_STALE_DAYS = 14
 P123_FRESH_DAYS = 45
@@ -167,7 +171,10 @@ def french_panel(
         )
     required = required_french_month(evaluation_date)
     next_required = _next_month_end(required)
-    compliant = (last.year, last.month) >= (required.year, required.month)
+    compliant = (last.year, last.month) >= (
+        required.year,
+        required.month,
+    ) and age <= FRENCH_HEADLINE_LAG_DAYS
     return _panel(
         panel_id=panel_id,
         kind="french",
@@ -183,6 +190,7 @@ def french_panel(
         region=region,
         factors=list(factors),
         required_month_end=required.isoformat(),
+        headline_lag_days=FRENCH_HEADLINE_LAG_DAYS,
         next_required_month_end=next_required.isoformat(),
         next_due_date=(
             next_required + timedelta(days=FRENCH_ALLOWANCE_DAYS)
