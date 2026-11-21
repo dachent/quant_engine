@@ -510,27 +510,31 @@ def test_report_row_is_sleeve_primary_with_a_labelled_account_block(
     ):
         assert block["basis"] == "PARENT_ACCOUNT_LIVE_SERIES"
         assert PARENT in block["label"]
+        not_figures = {
+            f"{prefix}_annualization",
+            f"{prefix}_assignment_authority",
+            f"{prefix}_assignment_status",
+            f"{prefix}_cash_drag_reason",  # status/text, not comparison figures
+            f"{prefix}_cash_drag_status",
+            f"{prefix}_comparison_reason",
+            f"{prefix}_comparison_window",  # carried once, by the annualization
+            f"{prefix}_effective_end",
+            f"{prefix}_effective_start",
+            f"{prefix}_evidence_status",
+            f"{prefix}_id",
+            f"{prefix}_rationale",
+            f"{prefix}_version_ref",
+        }
+        # the skip is by name, so a skipped name must never carry a number: a future numeric
+        # figure under one of these names would otherwise escape the non-diminish check
+        for name in not_figures & set(off):
+            assert not isinstance(off[name], (int, float, Decimal)) or isinstance(
+                off[name], bool
+            ), f"{name} is skipped by name but numeric"
         figures = [
             name
             for name in off
-            if name.startswith(f"{prefix}_")
-            and name
-            not in {
-                f"{prefix}_annualization",
-                f"{prefix}_assignment_authority",
-                f"{prefix}_assignment_status",
-                f"{prefix}_cash_drag_reason",  # status/text, not comparison figures
-                f"{prefix}_cash_drag_status",
-                f"{prefix}_comparison_reason",
-                f"{prefix}_comparison_window",  # carried once, by the annualization
-                f"{prefix}_effective_end",
-                f"{prefix}_effective_start",
-                f"{prefix}_evidence_status",
-                f"{prefix}_id",
-                f"{prefix}_rationale",
-                f"{prefix}_version_ref",
-                f"{prefix}_assignment_status",
-            }
+            if name.startswith(f"{prefix}_") and name not in not_figures
         ]
         assert figures
         for name in figures:
