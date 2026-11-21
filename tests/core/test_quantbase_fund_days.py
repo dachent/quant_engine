@@ -5,6 +5,9 @@ from decimal import Decimal
 
 import quantbase_fund_days as q
 
+Leg = q.Leg
+Closes = dict[str, dict[date, Decimal]]
+
 D0, D1, D2, D3 = date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)
 CLOSES = {
     "SHV": {D1: Decimal("100"), D2: Decimal("100"), D3: Decimal("100")},
@@ -316,3 +319,72 @@ def test_a_held_symbol_the_pins_do_not_cover_is_not_a_hole() -> None:
     }
     out = q.corrected_values(dashboard, legs, closes)
     assert q.non_fill_unvalued_days(out, legs) == 0
+
+
+def _truncated(first: int, last: int) -> tuple[list[date], list[Leg], Closes, dict]:
+    days = [date(2025, 9, 1) + timedelta(days=i) for i in range(30)]
+    legs = [(date(2025, 8, 1), "TQQQ", Decimal("100"))]
+    dashboard = {d: Decimal("8800") for d in days}
+    closes = {
+        "TQQQ": {d: Decimal("88") for d in days[first : 30 - last]},
+        "SHV": {d: Decimal("100") for d in days},
+    }
+    return days, legs, closes, dashboard
+
+
+def test_a_pin_truncated_at_either_end_counts_the_missing_days() -> None:
+    """Validator tightening: the hole test has no own-span clause, so a held symbol's pinned series
+    that stops early (tail) or starts late (head) cannot hide behind its own date range."""
+
+    for first, last in ((0, 8), (8, 0)):
+        _, legs, closes, dashboard = _truncated(first, last)
+        out = q.corrected_values(dashboard, legs, closes)
+        assert q.non_fill_unvalued_days(out, legs) == 8
+
+
+def test_coverage_counts_valued_unpinned_and_no_information_days() -> None:
+    days = [date(2025, 9, 1) + timedelta(days=i) for i in range(30)]
+    legs = [
+        (date(2025, 8, 1), "TQQQ", Decimal("100")),
+        (days[20], "QQQ", Decimal("5")),  # an unpinned symbol held on day 21 only
+        (days[22], "QQQ", Decimal("-5")),
+    ]
+    dashboard = {d: Decimal("8800") for d in days}
+    closes = {
+        "TQQQ": {d: Decimal("88") for d in days[:25]},
+        "SHV": {d: Decimal("100") for d in days[:25]},
+    }
+    out = q.corrected_values(dashboard, legs, closes)
+    cov = q.closes_coverage(out, legs)
+    assert cov == {
+        "non_fill_days": 28,
+        "valued_days": 22,
+        "coverage_ratio": Decimal(22) / Decimal(28),
+        "unvalued_held_close_missing_days": 0,
+        "unpinned_held_symbol_days": 1,
+        "no_information_days": 5,
+    }
+
+
+def test_known_limit_a_co_held_unpinned_symbol_does_not_mask_a_pinned_hole() -> None:
+    """Documented limit (zero such days in the real data): the day is counted as a hole because
+    the pinned symbol lacks its close, whatever else is held."""
+
+    days, legs, closes, dashboard = _truncated(0, 8)
+    legs = [*legs, (date(2025, 8, 2), "QQQ", Decimal("5"))]
+    out = q.corrected_values(dashboard, legs, closes)
+    assert q.non_fill_unvalued_days(out, legs) == 8
+
+
+def test_known_limit_a_sole_pinned_series_that_ends_early_is_not_seen() -> None:
+    """Documented blind spot: when the only pinned series ends, no pinned series trades on the later
+    days, so they read as no information rather than as holes.  The coverage ratio shows it."""
+
+    days = [date(2025, 9, 1) + timedelta(days=i) for i in range(30)]
+    legs = [(date(2025, 8, 1), "TQQQ", Decimal("100"))]
+    dashboard = {d: Decimal("8800") for d in days}
+    out = q.corrected_values(
+        dashboard, legs, {"TQQQ": {d: Decimal("88") for d in days[:22]}}
+    )
+    assert q.non_fill_unvalued_days(out, legs) == 0
+    assert q.closes_coverage(out, legs)["coverage_ratio"] == Decimal(22) / Decimal(30)
