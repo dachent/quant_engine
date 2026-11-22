@@ -1202,6 +1202,13 @@
           },
           "--output-root",
           "{run}",
+          {
+            "if": "retained_cache_base",
+            "args": [
+              "--retained-cache-base",
+              "{retained_cache_base}"
+            ]
+          },
           "--retained-cache-root",
           "{retained_cache_root}",
           "--requested-as-of",
@@ -1415,6 +1422,13 @@
         },
         "--output-root",
         "{run}",
+        {
+          "if": "retained_cache_base",
+          "args": [
+            "--retained-cache-base",
+            "{retained_cache_base}"
+          ]
+        },
         "--retained-cache-root",
         "{retained_cache_root}",
         "--requested-as-of",
