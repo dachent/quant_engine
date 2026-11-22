@@ -1055,12 +1055,14 @@ def test_the_ledger_spec_stage_argv_carries_the_f1_pins_only_when_configured() -
     bare = driver.stage_argv(driver.Run(config, graph, offline=True), stage)
     assert "--event-completeness-declaration" not in bare
     assert "--quantbase-position-closes" not in bare
+    assert "--quantbase-rollback" not in bare
     full = driver.stage_argv(
         driver.Run(
             {
                 **config,
                 "event_completeness_declaration": "D/declaration-v5.json",
                 "quantbase_position_closes": "D/SHV-closes.csv",
+                "quantbase_rollback": "D/rollback.json",
             },
             graph,
             offline=True,
@@ -1072,6 +1074,7 @@ def test_the_ledger_spec_stage_argv_carries_the_f1_pins_only_when_configured() -
         == "D/declaration-v5.json"
     )
     assert full[full.index("--quantbase-position-closes") + 1] == "D/SHV-closes.csv"
+    assert full[full.index("--quantbase-rollback") + 1] == "D/rollback.json"
     # nothing else moves: the F1 keys only append their own flags
     assert full[: len(bare)] == bare
 
