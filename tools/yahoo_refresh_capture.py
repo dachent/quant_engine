@@ -4,7 +4,7 @@ Wraps ``yahoo_fetch_driver`` (config-check, make-evidence, fetch, verify) so a r
 or re-capture needs no hand-built config, evidence or acceptance script:
 
   prepare  --cutoff D --label R4 --out DIR
-      writes DIR/<kind>-config.json for each kind (base, style, sector, held, qsi, qb) and DIR/comment.txt, a
+      writes DIR/<kind>-config.json for each kind (base, style, sector, held, qsi, qb, fx) and DIR/comment.txt, a
       value-free governance comment naming the run ids and bound config shas. Post that
       comment on the governance issue (e.g. ``ghx -Method POST
       repos/<owner>/<repo>/issues/283/comments -Body '{"body": ...}'``); the posting and
@@ -127,6 +127,11 @@ QB_GROUPS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
     ("qb-gld", "2004-11-18", ("GLD",), "weekday"),
     ("qb-tqqq", "2010-02-11", ("TQQQ",), "weekday"),
 )
+# FX authority for the Matrixport series: Yahoo daily USDC-USD and USDT-USD closes, every UTC day
+# from the FX generation's observed start (portfolio_fx_rates --observed-start 2025-01-01).
+FX_GROUPS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
+    ("fx-usd-stables", "2025-01-01", ("USDC-USD", "USDT-USD"), "every_day"),
+)
 KINDS: Mapping[str, tuple[tuple[str, str, tuple[str, ...], str], ...]] = {
     "base": BASE_GROUPS,
     "style": STYLE_GROUPS,
@@ -134,9 +139,13 @@ KINDS: Mapping[str, tuple[tuple[str, str, tuple[str, ...], str], ...]] = {
     "held": HELD_GROUPS,
     "qsi": QSI_GROUPS,
     "qb": QB_GROUPS,
+    "fx": FX_GROUPS,
 }
 MONTHLY_PAYERS = ("BIL", "HYG", "IEF", "LQD", "TLT")
-CRYPTO = ("BTC-USD", "ETH-USD")
+CRYPTO = ("BTC-USD", "ETH-USD", "USDC-USD", "USDT-USD")
+# Stablecoin FX series: no missing UTC day and a close near 1 (a depeg or a bad bar is a finding).
+STABLECOINS = ("USDC-USD", "USDT-USD")
+STABLECOIN_CLOSE_BAND = (0.9, 1.1)
 MONTH_WINDOW_DAYS = 1095
 MAX_DISTRIBUTION_GAP_DAYS = 52
 LATEST_DISTRIBUTION_MAX_AGE_DAYS = 35
@@ -323,6 +332,24 @@ def acceptance(artifacts: Path, kind: str, cutoff: date) -> dict[str, Any]:
                 findings.append(f"{symbol}: duplicate dates")
             if any(not r["Close"] or r["Close"] <= 0 for r in mine):
                 findings.append(f"{symbol}: non-positive close")
+            if symbol in STABLECOINS:
+                expected = {
+                    (date.fromisoformat(first_bar) + timedelta(days=n)).isoformat()
+                    for n in range((cutoff - date.fromisoformat(first_bar)).days + 1)
+                }
+                missing = sorted(expected - set(dates))
+                if missing:
+                    findings.append(
+                        f"{symbol}: {len(missing)} missing UTC days, first {missing[0]}"
+                    )
+                low, high = STABLECOIN_CLOSE_BAND
+                off = [
+                    r["Date"][:10]
+                    for r in mine
+                    if r["Close"] and not low <= r["Close"] <= high
+                ]
+                if off:
+                    findings.append(f"{symbol}: close outside {low}-{high} on {off[0]}")
             paid = [r["Date"][:10] for r in mine if (r.get("Dividends") or 0) > 0]
             entry: dict[str, Any] = {
                 "first": dates[0],
@@ -434,7 +461,7 @@ def _kinds(value: str) -> list[str]:
     kinds = [k for k in value.split(",") if k]
     if not kinds or any(k not in KINDS for k in kinds):
         raise argparse.ArgumentTypeError(
-            "kinds must be a comma list of base, style, sector, held, qsi, qb"
+            "kinds must be a comma list of base, style, sector, held, qsi, qb, fx"
         )
     return kinds
 

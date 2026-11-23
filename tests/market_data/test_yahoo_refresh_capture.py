@@ -292,3 +292,80 @@ def test_held_qsi_and_qb_kinds_are_driver_valid_and_cover_their_tickers() -> Non
         )
         assert all(g["through"] == "cutoff" for g in config["groups"])
         assert y.run_id("R4", kind, None) == f"R4-{kind.upper()}"
+
+
+FX_FIRST = date(2025, 1, 1)
+
+
+def _write_fx(
+    folder: Path,
+    *,
+    drop: dict[str, str] | None = None,
+    stop: dict[str, str] | None = None,
+    close: dict[str, float] | None = None,
+) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for symbol in ("USDC-USD", "USDT-USD"):
+        day = FX_FIRST
+        while day <= CUTOFF:
+            iso = day.isoformat()
+            skip = (drop or {}).get(symbol) == iso or iso > (stop or {}).get(
+                symbol, "9999"
+            )
+            if not skip:
+                rows.append(
+                    {
+                        "Ticker": symbol,
+                        "Date": f"{iso}T00:00:00",
+                        "Close": (close or {}).get(symbol, 1.0),
+                        "Dividends": 0.0,
+                    }
+                )
+            day += timedelta(days=1)
+    for name in ("history", "history_adjusted"):
+        (folder / f"yahoo-fx-usd-stables-{name}.json").write_text(
+            json.dumps({"rows": rows}), encoding="utf-8"
+        )
+
+
+def test_fx_kind_is_driver_valid_every_day_from_the_fx_observed_start() -> None:
+    config = y.build_config("fx", CUTOFF, "R5")
+    assert [g["symbols"] for g in config["groups"]] == [["USDC-USD", "USDT-USD"]]
+    assert [g["start"] for g in config["groups"]] == ["2025-01-01"]
+    assert [g["calendar"] for g in config["groups"]] == ["every_day"]
+    assert config == y.build_config("fx", CUTOFF, "R5")
+    assert y.config_sha256(config) != y.config_sha256(
+        y.build_config("fx", date(2026, 11, 13), "R5")
+    )
+    assert y.run_id("R5", "fx", None) == "R5-FX"
+    assert "R5-FX config_sha256" in y.comment_body(CUTOFF, "R5", ["fx"], None)
+
+
+def test_fx_acceptance_passes_a_complete_series(tmp_path: Path) -> None:
+    _write_fx(tmp_path)
+    result = y.acceptance(tmp_path, "fx", CUTOFF)
+    assert result["passed"], result["findings"]
+    assert result["tickers"]["USDC-USD"]["first"] == "2025-01-01"
+    assert result["tickers"]["USDT-USD"]["last"] == "2026-11-06"
+
+
+def test_fx_acceptance_refuses_a_missing_day(tmp_path: Path) -> None:
+    _write_fx(tmp_path, drop={"USDT-USD": "2026-03-14"})
+    findings = y.acceptance(tmp_path, "fx", CUTOFF)["findings"]
+    assert any(
+        f.startswith("USDT-USD: 1 missing UTC days, first 2026-03-14") for f in findings
+    )
+    assert not any(f.startswith("USDC-USD") for f in findings)
+
+
+def test_fx_acceptance_refuses_a_stale_series(tmp_path: Path) -> None:
+    _write_fx(tmp_path, stop={"USDC-USD": "2026-11-05"})
+    findings = y.acceptance(tmp_path, "fx", CUTOFF)["findings"]
+    assert any(f.startswith("USDC-USD: last bar") for f in findings)
+
+
+def test_fx_acceptance_refuses_a_bad_close(tmp_path: Path) -> None:
+    _write_fx(tmp_path, close={"USDC-USD": 0.5})
+    findings = y.acceptance(tmp_path, "fx", CUTOFF)["findings"]
+    assert any(f.startswith("USDC-USD: close outside") for f in findings)
