@@ -229,10 +229,12 @@ jobs:
           tools/capture_dry_run.py
           tools/quantbase_cdp_navigator.py
           tools/schwab_capture_ingest.py
+          tools/schwab_hand_export_import.py
           tools/schwab_nav_derive.py
           tools/schwab_statement_cash_summaries.py
           tools/schwab_page_actions.py
           tools/schwab_rollback.py
+          tools/schwab_zf_capture.py
           tools/p123_cdp_recorder.py
           tools/p123_book_identity_check.py
           tools/p123_har_admit.py
@@ -241,6 +243,7 @@ jobs:
           tools/style_capture_assemble.py
           tools/yahoo_fetch_driver.py
           tools/french_fetch_driver.py
+          tools/yahoo_refresh_capture.py
           tools/tt_source_manifest_builder.py
           tools/tt_order_planner.py
           tools/grizzlybulls_capture.py

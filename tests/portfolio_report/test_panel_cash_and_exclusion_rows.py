@@ -61,3 +61,14 @@ def test_the_panel_renders_the_benchmark_cash_status_in_the_benchmark_cell() -> 
     ).read_text(encoding="utf-8")
     assert "cash drag ${statusText(row.benchmark_cash_drag_status)}" in app
     assert "row.benchmark_cash_drag_reason" in app
+
+
+def test_the_data_health_summary_names_a_classified_excluded_strategy() -> None:
+    from pathlib import Path
+
+    app = (
+        Path(__file__).resolve().parents[2] / "apps/portfolio-control-panel/app.js"
+    ).read_text(encoding="utf-8")
+    assert "row.cost_classification && row.cost_classification.classification" in app
+    assert "Excluded from live costs, history kept:" in app
+    assert "${safe(outsideNote)}${safe(classifiedNote)}" in app

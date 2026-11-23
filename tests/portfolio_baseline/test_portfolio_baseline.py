@@ -817,6 +817,7 @@ def _provider_ledger_generation(
         ],
         "transactions": [],
     }
+    catalog.update(extra_catalog or {})
     if catalog_schema_version == 2:
         catalog["capital_anchors"] = []
         schema = json.loads(
@@ -825,9 +826,6 @@ def _provider_ledger_generation(
             ).read_text(encoding="utf-8")
         )
         Draft202012Validator(schema).validate(catalog)
-    # Keys the schema does not list (portfolio_fx_generation, which the producer
-    # emits) are added after validation.
-    catalog.update(extra_catalog or {})
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_hash = hashlib.sha256(catalog_bytes).hexdigest()
     artifact = SourceArtifact(
@@ -5242,7 +5240,7 @@ def test_n56_catalog_version_two_only_when_custody_cash_is_present() -> None:
 # repository's real contract bytes; only the custody admission gate, which needs a
 # published admission receipt, is replaced by a gate that returns the real contract.
 
-_FX_GENERATION = "ff77af45a7ab5d29bb5a619e810dd52a5ef15ce24d6901333b7432ebe7d6667c"
+_FX_GENERATION = "1add4dec409918e16d75c9fa7806ed4f9d215b828dc9743450a55d859be00aa9"
 
 
 def _e3_real_contract() -> dict[str, Any]:
@@ -5346,7 +5344,7 @@ def test_e3_an_admitted_fx_generation_with_unconverted_rows_is_partial_not_faile
     assert disposition["fx_affected_record_count"] == 3
     assert disposition["generation_id"] == _FX_GENERATION
     assert disposition["admitted_start"] == "2025-01-01"
-    assert disposition["admitted_end"] == "2026-11-06"
+    assert disposition["admitted_end"] == "2026-11-19"
     assert disposition["currencies"] == ["EUR"]
 
 
@@ -6022,6 +6020,7 @@ def _matrix_row(
     unattributed: Any,
     accepted: list[dict[str, Any]],
     completeness: Any = None,
+    unattributed_records: Any = None,
 ) -> dict[str, Any]:
     account = {
         "account_id": "account-reserve",
@@ -6048,6 +6047,11 @@ def _matrix_row(
         as_of_date=date(2026, 7, 30),
         **({} if unattributed is None else {"unattributed": unattributed}),
         **({} if completeness is None else {"completeness": completeness}),
+        **(
+            {}
+            if unattributed_records is None
+            else {"unattributed_records": unattributed_records}
+        ),
     )
     return next(row for row in matrix if row["fact_type"] == "transactions")
 
@@ -6392,6 +6396,114 @@ def test_the_proven_and_accepted_flows_compare_as_a_multiset_of_id_date_amount()
         _matrix_row(None, [_accepted("t-1"), spelled], proof)["status"]
         == "DECLARED_COMPLETE"
     )
+
+
+_ACCOUNT_FACT = ("account-reserve", "transactions")
+
+
+def test_unattributed_provider_record_keys_carry_id_date_and_canonical_amount() -> None:
+    catalog = {
+        "transactions": [
+            {
+                "account_id": "a",
+                "mapping_status": "UNMAPPED",
+                "record_id": "t-1",
+                "event_date": "2025-01-02",
+                "amount": {"status": "AVAILABLE", "value": "5.00"},
+            },
+            {"account_id": "a", "mapping_status": "MAPPED", "record_id": "t-2"},
+        ],
+        "flows": [
+            {
+                "account_id": "a",
+                "mapping_status": "UNMAPPED",
+                "record_id": "f-1",
+                "event_date": "2025-01-03",
+                "amount": {"status": "AVAILABLE", "value": "1E1"},
+            }
+        ],
+    }
+    assert baseline._unattributed_provider_record_keys(catalog) == {
+        ("a", "transactions"): [("t-1", "2025-01-02", "5")],
+        ("a", "flows"): [("f-1", "2025-01-03", "10")],
+    }
+    assert baseline._unattributed_provider_record_keys(None) == {}
+
+
+def test_unmapped_records_the_closure_proved_inside_its_interval_are_declared() -> None:
+    proof = _proof_with_records(("t-1", "2026-02-01", "1"), ("u-1", "2026-02-02", "5"))
+    row = _matrix_row(
+        {_ACCOUNT_FACT: 1},
+        [_accepted("t-1")],
+        proof,
+        {_ACCOUNT_FACT: [("u-1", "2026-02-02", "5")]},
+    )
+    assert row["status"] == "DECLARED_COMPLETE"
+    assert (
+        "1 provider transactions records without a strategy attribution lie inside "
+        "the tie-out-closed interval and are proved by the closure: pre-epoch or "
+        "unmapped, not strategy capital"
+    ) in row["missing_interval_reason"]
+    # they stay out of the accepted records, and nothing is called left out
+    assert "left out of the accepted records" not in row["missing_interval_reason"]
+    # without the keys the same row is refused exactly as before
+    refused = _matrix_row({_ACCOUNT_FACT: 1}, [_accepted("t-1")], proof)
+    assert refused["status"] != "DECLARED_COMPLETE"
+
+
+def test_an_unattributed_record_the_closure_did_not_prove_still_refuses() -> None:
+    proof = _proof_with_records(("t-1", "2026-02-01", "1"), ("u-1", "2026-02-02", "5"))
+    row = _matrix_row(
+        {_ACCOUNT_FACT: 2},
+        [_accepted("t-1")],
+        proof,
+        {
+            _ACCOUNT_FACT: [
+                ("u-1", "2026-02-02", "5"),
+                ("u-2", "2026-02-03", "7"),  # not in the proven set
+            ]
+        },
+    )
+    assert row["status"] != "DECLARED_COMPLETE"
+    assert "accepted records differ" in row["missing_interval_reason"]
+    # a changed amount or a moved date is a different record, not the proven one
+    for moved in (("u-1", "2026-02-02", "6"), ("u-1", "2026-02-03", "5")):
+        changed = _matrix_row(
+            {_ACCOUNT_FACT: 1},
+            [_accepted("t-1")],
+            proof,
+            {_ACCOUNT_FACT: [moved]},
+        )
+        assert changed["status"] != "DECLARED_COMPLETE"
+
+
+def test_an_unattributed_record_outside_the_declared_interval_still_refuses() -> None:
+    # declared 2026-01-02..2026-07-30: a proven-looking record dated outside it is not credited
+    proof = _proof_with_records(("t-1", "2026-02-01", "1"), ("u-1", "2025-12-01", "5"))
+    row = _matrix_row(
+        {_ACCOUNT_FACT: 1},
+        [_accepted("t-1")],
+        proof,
+        {_ACCOUNT_FACT: [("u-1", "2025-12-01", "5")]},
+    )
+    assert row["status"] != "DECLARED_COMPLETE"
+    assert "accepted records differ" in row["missing_interval_reason"]
+
+
+def test_an_extra_unattributed_record_beside_a_declared_one_still_refuses() -> None:
+    proof = _proof_with_records(("u-1", "2026-02-02", "5"))
+    row = _matrix_row(
+        {_ACCOUNT_FACT: 2},
+        [],
+        proof,
+        {
+            _ACCOUNT_FACT: [
+                ("u-1", "2026-02-02", "5"),
+                ("u-1", "2026-02-02", "5"),  # a duplicate: only one was proven
+            ]
+        },
+    )
+    assert row["status"] != "DECLARED_COMPLETE"
 
 
 def test_an_accepted_record_without_a_date_cannot_sit_inside_a_complete_row() -> None:
