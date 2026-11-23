@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 from typing import Any, Callable, Final, Mapping, Sequence, cast
@@ -6407,18 +6408,130 @@ def _attended_completed_stages(
             raise MaterializationError(
                 f"attended completed {role} stage root is invalid"
             )
-        if role == "ledger":
-            _attended_completed_ledger(result, stage_root)
-        elif role == "baseline":
-            _attended_completed_baseline(result, stage_root)
-        elif role == "attribution":
-            _attended_completed_attribution(result, stage_root)
-        elif role == "panel-candidate":
-            _attended_completed_panel_candidate(result, stage_root)
-        else:
-            _attended_completed_stage_root(result, stage_root, role)
+        _attended_verify_completed_role(result, stage_root, role)
         completed.append(role)
     return completed
+
+
+def _attended_verify_completed_role(
+    result: Mapping[str, Any], stage_root: Path, role: str
+) -> None:
+    """The native, content-reading verification of ONE completed stage."""
+
+    if role == "ledger":
+        _attended_completed_ledger(result, stage_root)
+    elif role == "baseline":
+        _attended_completed_baseline(result, stage_root)
+    elif role == "attribution":
+        _attended_completed_attribution(result, stage_root)
+    elif role == "panel-candidate":
+        _attended_completed_panel_candidate(result, stage_root)
+    else:
+        _attended_completed_stage_root(result, stage_root, role)
+
+
+def _attended_verify_new_role(output_root: Path, role: str) -> None:
+    """Verify the one stage a child just wrote, with the same checks a resume applies to it."""
+
+    receipt = output_root / "stage-results" / f"{role}.json"
+    stage_root = _attended_stage_root(output_root, role)
+    if not receipt.exists() or not stage_root.exists():
+        raise MaterializationError(
+            f"attended {role} child returned success without completed artifacts"
+        )
+    result = _load(receipt, f"attended {role} stage result")
+    if stage_root.is_symlink() or not stage_root.is_dir():
+        raise MaterializationError(f"attended completed {role} stage root is invalid")
+    _attended_verify_completed_role(result, stage_root, role)
+
+
+class _StageFingerprints:
+    """Immutability tripwires for stages this run has already verified (G1 and G2).
+
+    A stage is verified natively once (the resume pass, or right after its own child). From then on
+    the run does not re-read its content after every later child; it instead proves the stage did not
+    change: G1 re-stats every verified stage root (relative path, size, mtime_ns) after each child
+    and re-hashes the small stage receipts; G2 re-hashes the receipts before a child starts, because
+    the children read their predecessors' receipts (baseline <- ledger; attribution <- ledger,
+    baseline; analytics <- attribution; report <- ledger, baseline, attribution, analytics; panel
+    stages <- all of those and report) without hashing them. Any difference refuses and names the
+    child. This is a tripwire, not a proof: a change that preserves path, size and mtime_ns is only
+    caught by the mandatory full re-verification that every passing run still ends with.
+    """
+
+    def __init__(self) -> None:
+        self._rows: dict[str, tuple[str, tuple[tuple[str, int, int], ...]]] = {}
+
+    @staticmethod
+    def _receipt_sha256(output_root: Path, role: str) -> str:
+        receipt = output_root / "stage-results" / f"{role}.json"
+        return hashlib.sha256(receipt.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _inventory(output_root: Path, role: str) -> tuple[tuple[str, int, int], ...]:
+        root = _attended_stage_root(output_root, role)
+        # `panel-candidate` owns only `candidates`: the `panel` child legitimately writes the
+        # rest of the shared root.
+        top = root / "candidates" if role == "panel-candidate" else root
+        rows: list[tuple[str, int, int]] = []
+        for directory, directories, files in os.walk(top):
+            directories.sort()
+            for name in sorted([*directories, *files]):
+                path = Path(directory) / name
+                info = path.lstat()
+                size = -1 if stat.S_ISDIR(info.st_mode) else info.st_size
+                rows.append((path.relative_to(top).as_posix(), size, info.st_mtime_ns))
+        return tuple(rows)
+
+    def record(self, output_root: Path, role: str) -> None:
+        self._rows[role] = (
+            self._receipt_sha256(output_root, role),
+            self._inventory(output_root, role),
+        )
+
+    def reset(self) -> None:
+        self._rows.clear()
+
+    def roles(self) -> list[str]:
+        return list(self._rows)
+
+    def require_receipts_unchanged(
+        self, output_root: Path, *, before_child: str
+    ) -> None:
+        """G2: the receipts the next child reads still are the ones that were verified."""
+
+        for role, (receipt_sha256, _inventory) in self._rows.items():
+            try:
+                current = self._receipt_sha256(output_root, role)
+            except OSError as exc:
+                raise MaterializationError(
+                    f"attended {role} stage receipt vanished before child "
+                    f"{before_child} started"
+                ) from exc
+            if current != receipt_sha256:
+                raise MaterializationError(
+                    f"attended {role} stage receipt changed before child "
+                    f"{before_child} started"
+                )
+
+    def require_roots_unchanged(self, output_root: Path, *, after_child: str) -> None:
+        """G1: no verified stage root changed while this child ran."""
+
+        shared = set(_attended_shared_stage_roles(output_root, after_child))
+        for role, (receipt_sha256, inventory) in self._rows.items():
+            if role in shared:
+                continue  # the child's own root: the final full pass covers it
+            try:
+                changed = (
+                    self._inventory(output_root, role) != inventory
+                    or self._receipt_sha256(output_root, role) != receipt_sha256
+                )
+            except OSError:
+                changed = True
+            if changed:
+                raise MaterializationError(
+                    f"attended child {after_child} modified completed stage {role}"
+                )
 
 
 class _VerifiedStages:
@@ -8109,12 +8222,15 @@ def _attended_execute(
         if failed_stage is not None:
             _attended_preserve_failed_stage(output_root, failed_stage)
             verified.invalidate()  # the failed stage's root was just moved aside
-        completed = verified.completed(
+        verified_roles = verified.completed(
             output_root,
             preflight["required_stages"],
             label="execute_start",
             failed_stage=failed_stage,
         )
+        fingerprints = _StageFingerprints()
+        for role in verified_roles:
+            fingerprints.record(output_root, role)
         # An interruption that killed a child before it returned leaves partial bytes with no
         # receipt and no failed_stage, and the create-only producer refuses its own partial
         # directory on the retry.  Three conditions keep this to exactly that case:
@@ -8129,10 +8245,10 @@ def _attended_execute(
         preserved_partial = False
         if attempt > 1:
             for role in preflight["required_stages"]:
-                if role in completed:
+                if role in verified_roles:
                     continue
                 if any(
-                    other in completed
+                    other in verified_roles
                     for other in _attended_shared_stage_roles(output_root, role)
                 ):
                     continue
@@ -8142,16 +8258,21 @@ def _attended_execute(
                     preserved_partial = True
         if preserved_partial:
             verified.invalidate()
-            completed = verified.completed(
+            verified_roles = verified.completed(
                 output_root,
                 preflight["required_stages"],
                 label="execute_after_preserve",
                 failed_stage=failed_stage,
             )
+            fingerprints.reset()
+            for role in verified_roles:
+                fingerprints.record(output_root, role)
         for role in preflight["required_stages"]:
-            if role in completed:
+            if role in verified_roles:
                 continue
             command = _attended_stage_command(preflight, output_root, role)
+            with timed_stage("attended_tripwire_receipts", role=role):
+                fingerprints.require_receipts_unchanged(output_root, before_child=role)
             # The child inherits this process's stdout/stderr, so its output reaches the
             # driver log as it is written instead of in one block after the child ends
             # (a captured child made the driver see minutes of silence).
@@ -8179,23 +8300,22 @@ def _attended_execute(
                     "FAILED",
                     reason=f"stage {role} exited {result.returncode}",
                 )
+                # The failed-child view claims no verified stage: nothing was re-verified after
+                # this child ran, and re-reading here could replace its exit code with a refusal.
                 return result.returncode, _attended_view(
                     output_root,
                     preflight["required_stages"],
                     preflight["request_identity"],
-                    completed,
+                    [],
                 )
             record_stage_bytes(role)
-            verified.invalidate()  # this child just wrote a stage: verify afresh
-            completed = verified.completed(
-                output_root,
-                preflight["required_stages"],
-                label=f"after_{role}",
-            )
-            if role not in completed:
-                raise MaterializationError(
-                    f"attended {role} child returned success without completed artifacts"
-                )
+            verified.invalidate()
+            with timed_stage("attended_tripwire_roots", role=role):
+                fingerprints.require_roots_unchanged(output_root, after_child=role)
+            with timed_stage("attended_verify_new_role", role=role):
+                _attended_verify_new_role(output_root, role)
+            verified_roles.append(role)
+            fingerprints.record(output_root, role)
             if failed_stage == role:
                 _attended_clear_failed_stage(output_root, preflight["request_identity"])
                 failed_stage = None
@@ -8207,10 +8327,13 @@ def _attended_execute(
             )
             if breach is not None:
                 raise breach
-        _attended_finish_execution_attempt(output_root, attempt, "PASSED")
-        return 0, _attended_view(
+        # The one mandatory full re-verification of every stage, content included, that a passing
+        # run ends with: it runs BEFORE the attempt is recorded PASSED, and is never skipped.
+        final_view = _attended_view(
             output_root, preflight["required_stages"], preflight["request_identity"]
         )
+        _attended_finish_execution_attempt(output_root, attempt, "PASSED")
+        return 0, final_view
     except KeyboardInterrupt:
         # The attempt stays open, as for any interruption: its successor records it
         # CANCELLED without inventing an ending instant. The run state says so now.
