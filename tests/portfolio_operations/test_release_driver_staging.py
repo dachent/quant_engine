@@ -21,6 +21,7 @@ import sys
 from typing import Any
 
 import pytest
+from quant_engine.core import render_reuse_authorized
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tools"))
@@ -1156,3 +1157,114 @@ def test_the_ledger_spec_stage_passes_the_f2_schwab_pins_only_when_configured() 
     )
     assert full[full.index("--schwab-gross-exposure") + 1] == "D/gross.json"
     assert full[full.index("--schwab-margin-interest") + 1] == "D/margin.json"
+
+
+def _stamp(cycle: Path, tier: str = "PROVISIONAL", not_a_release: bool = True) -> str:
+    cycle.mkdir(parents=True, exist_ok=True)
+    (cycle / "resolved-cycle.json").write_bytes(b'{"cycle_manifest_sha256": "m1"}')
+    raw = json.dumps(
+        {
+            "tier": tier,
+            "not_a_release": not_a_release,
+            "schema_version": "qe-provisional-refresh/1",
+            "cycle_manifest_sha256": "m1",
+        }
+    ).encode("utf-8")
+    (cycle / "PROVISIONAL.json").write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def test_a_release_cycle_never_gets_render_reuse_even_when_exported(
+    tmp_path: Path,
+) -> None:
+    env = {
+        "QE_RENDER_REUSE": "provisional",
+        "QE_RENDER_STATE_ROOT": "C:/somewhere",
+        "QE_RENDER_RUN_TOKEN": "abc",
+        "KEEP": "1",
+    }
+    driver.stage_render_env(env, tmp_path)  # no stamp: a release cycle
+    assert env == {"KEEP": "1"}
+    assert not (tmp_path / "render-cache").exists()
+    for tier, flag in (("RELEASE", True), ("PROVISIONAL", False)):  # forged stamps
+        _stamp(tmp_path, tier, flag)
+        env = {"QE_RENDER_REUSE": "provisional"}
+        driver.stage_render_env(env, tmp_path)
+        assert env == {}
+    (tmp_path / "PROVISIONAL.json").write_bytes(b"not json")
+    env = {}
+    driver.stage_render_env(env, tmp_path)
+    assert env == {}
+    source = Path(driver.__file__).read_text(encoding="utf-8")
+    assert source.index("stage_render_env(env, run.cycle)") < source.index(
+        'rc = _launch(run, stage["id"], record, argv, log, log, env)'
+    )
+
+
+def test_a_provisional_cycle_gets_a_cache_and_a_token_bound_to_its_stamp(
+    tmp_path: Path,
+) -> None:
+    stamp_sha = _stamp(tmp_path)
+    env = {"QE_RENDER_RUN_TOKEN": "x"}
+    driver.stage_render_env(env, tmp_path)
+    assert env["QE_RENDER_REUSE"] == "provisional"
+    assert env["QE_RENDER_RUN_TOKEN"] == stamp_sha
+    assert Path(env["QE_RENDER_STATE_ROOT"]) == tmp_path / "render-cache"
+    assert (tmp_path / "render-cache").is_dir()
+    assert render_reuse_authorized(env)
+    # another cycle's token, a missing token and a changed stamp are all refused
+    assert not render_reuse_authorized({**env, "QE_RENDER_RUN_TOKEN": "0" * 64})
+    assert not render_reuse_authorized(
+        {k: v for k, v in env.items() if k != "QE_RENDER_RUN_TOKEN"}
+    )
+    _stamp(tmp_path, "PROVISIONAL", True)
+    (tmp_path / "PROVISIONAL.json").write_bytes(
+        b'{"tier": "PROVISIONAL", "not_a_release": true, "x": 1}'
+    )
+    assert not render_reuse_authorized(env)
+    assert render_reuse_authorized({})
+
+
+def test_a_provisional_cycle_is_refused_by_commit_and_preflight_before_any_write(
+    world: dict[str, Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import release_preflight as pf
+
+    config = json.loads(world["config"].read_text(encoding="utf-8"))
+    _stamp(world["cycle"])
+    before = sorted(p.name for p in world["cycle"].iterdir())
+    run = driver.Run(config, {"paths": {}, "derive": {}, "stages": []})
+    stage = {"id": "commit", "commit_gate": {"spec": "unused"}}
+    with pytest.raises(driver.Refusal, match="provisional refresh root"):
+        driver.check_commit_gate(run, stage)
+    monkeypatch.setattr(driver, "check_config_paths", lambda _run: None)
+    with pytest.raises(driver.Refusal, match="provisional refresh root"):
+        pf.row_config_paths(run, pf.Env.__new__(pf.Env))
+    assert sorted(p.name for p in world["cycle"].iterdir()) == before
+    # an unstamped cycle is not touched by the guard
+    (world["cycle"] / "PROVISIONAL.json").unlink()
+    driver.refuse_provisional_cycle(run)
+
+
+def test_deleting_the_stamp_after_a_reuse_stage_does_not_open_the_commit_gate(
+    world: dict[str, Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import release_preflight as pf
+    from test_release_driver import CHAIN, _drive, _graph
+
+    config = json.loads(world["config"].read_text(encoding="utf-8"))
+    _stamp(world["cycle"])
+    graph = _graph(world, [CHAIN[0]])
+    assert _drive(world, graph) == 0  # the stage ran with the reuse env
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    assert state["stages"]["one"]["render_reuse"] is True
+    (world["cycle"] / "PROVISIONAL.json").unlink()  # the stamp is gone
+    run = driver.Run(config, json.loads(graph.read_text(encoding="utf-8")))
+    stage = {"id": "commit", "commit_gate": {"spec": "unused"}}
+    with pytest.raises(driver.Refusal, match="provisional render reuse"):
+        driver.check_commit_gate(run, stage)
+    monkeypatch.setattr(driver, "check_config_paths", lambda _run: None)
+    with pytest.raises(driver.Refusal, match="provisional render reuse"):
+        pf.row_config_paths(run, pf.Env.__new__(pf.Env))

@@ -34,14 +34,17 @@ always runs live.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import contextvars
 import hashlib
+import hmac
+import io
 import json
 import os
 from pathlib import Path
+import pickle
 import platform
 import subprocess
 import re
@@ -49,7 +52,7 @@ import shlex
 import stat as stat_module
 import sys
 import threading
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from quant_engine.core import stage_timing
 
@@ -714,6 +717,43 @@ def _store(
         _memory[key] = document
 
 
+def _blob_path(state_root: Path | None, name: str, key: str) -> Path | None:
+    path = _receipt_path(state_root, name, key)
+    return None if path is None else path.with_suffix(".blob")
+
+
+def _write_blob(state_root: Path | None, name: str, key: str, data: bytes) -> bool:
+    path = _blob_path(state_root, name, key)
+    if path is None:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():
+            return False
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
+        return True
+    except OSError:
+        return False
+
+
+def _read_blob(
+    state_root: Path | None, name: str, key: str, result_json: str
+) -> bytes | None:
+    """The sidecar bytes iff their sha256 equals the digest the receipt recorded."""
+
+    path = _blob_path(state_root, name, key)
+    if path is None or path.is_symlink() or not path.is_file():
+        return None
+    try:
+        data = path.read_bytes()
+        recorded = json.loads(result_json)["blob_sha256"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return data if hashlib.sha256(data).hexdigest() == recorded else None
+
+
 def clear_memory_receipts() -> None:
     with _memory_lock:
         _memory.clear()
@@ -728,8 +768,14 @@ def run_with_receipt(
     compute: Callable[[], T],
     on_reuse: Callable[[str], None] | None = None,
     exclude_roots: tuple[Path, ...] = (),
+    blob_codec: tuple[Callable[[T], bytes], Callable[[bytes], T]] | None = None,
 ) -> T:
     """Run ``compute`` once per key; later calls re-hash the read-set and reuse it.
+
+    ``blob_codec`` (dumps, loads) is for results that are not JSON-native (large byte
+    payloads): the result is stored in a sidecar file whose sha256 is the receipt's
+    result, so it is loaded only after that digest matches. Blob results are stored
+    only when persistence is on (a sidecar needs a directory).
 
     ``compute`` must return JSON-native data (checked: anything that does not
     round-trip unchanged is returned but never stored). ``identity`` is the
@@ -775,12 +821,41 @@ def run_with_receipt(
                 extra["reason"] = reason[:200]
         still_valid = reason is None
         if still_valid and mode != "refresh":
-            if on_reuse is not None:
-                on_reuse(str(stored["receipt_sha256"]))
-            return json.loads(str(body["result"]))  # type: ignore[no-any-return]
+            blob = (
+                None
+                if blob_codec is None
+                else _read_blob(state_root, name, key, str(body["result"]))
+            )
+            if blob_codec is None or blob is not None:
+                decoded: Any = None
+                if blob_codec is None or blob is None:
+                    decoded = json.loads(str(body["result"]))
+                    usable = True
+                else:
+                    try:
+                        decoded, usable = blob_codec[1](blob), True
+                    except Exception:  # noqa: BLE001 - an undecodable blob is a miss
+                        usable = False
+                if usable:
+                    if on_reuse is not None:
+                        on_reuse(str(stored["receipt_sha256"]))
+                    return decoded  # type: ignore[no-any-return]
+            still_valid = False  # blob missing or altered: recompute and replace it
     with _record() as recorder:
         result = compute()
-    result_json = _roundtrip_json(result)
+    blob_bytes: bytes | None = None
+    if blob_codec is not None:
+        if _receipt_path(state_root, name, key) is None:
+            return result  # no sidecar directory without persistence
+        try:
+            blob_bytes = blob_codec[0](result)
+        except Exception:  # noqa: BLE001 - unpicklable result: serve it live, store nothing
+            return result
+        result_json = _roundtrip_json(
+            {"blob_sha256": hashlib.sha256(blob_bytes).hexdigest()}
+        )
+    else:
+        result_json = _roundtrip_json(result)
     with stage_timing.stage("verification_receipt_store", verifier=name) as extra:
         if result_json is None:
             body_new, why = None, "result is not JSON-native"
@@ -802,5 +877,198 @@ def run_with_receipt(
                 raise VerificationReceiptMismatch(
                     f"live re-run of {name} disagrees with its stored receipt"
                 )
+        if blob_bytes is not None and not _write_blob(
+            state_root, name, key, blob_bytes
+        ):
+            return result
         _store(state_root, name, key, body_new)
     return result
+
+
+_SAFE_CLASSES = {
+    # Containers and numbers are pickle opcodes and never reach find_class; a builtin
+    # callable (bytes, range, ...) would let a forged REDUCE allocate unbounded memory.
+    ("collections", "OrderedDict"),
+    ("decimal", "Decimal"),
+    ("datetime", "date"),
+    ("datetime", "datetime"),
+    ("datetime", "time"),
+    ("datetime", "timedelta"),
+    ("pathlib", "PurePosixPath"),
+    ("pathlib", "PureWindowsPath"),
+    ("pathlib", "WindowsPath"),
+    ("pathlib", "PosixPath"),
+}
+
+
+class _RestrictedUnpickler(pickle.Unpickler):
+    """Plain data only: a forged sidecar cannot name a callable to run on load."""
+
+    def find_class(self, module: str, name: str) -> object:
+        if (module, name) not in _SAFE_CLASSES:
+            raise pickle.UnpicklingError(
+                f"class not allowed in a receipt blob: {module}.{name}"
+            )
+        return super().find_class(module, name)
+
+
+def _restricted_loads(data: bytes) -> Any:
+    return _RestrictedUnpickler(io.BytesIO(data)).load()
+
+
+RENDER_REUSE_ENV = "QE_RENDER_REUSE"
+RENDER_STATE_ENV = "QE_RENDER_STATE_ROOT"
+
+
+RENDER_TOKEN_ENV = "QE_RENDER_RUN_TOKEN"
+PROVISIONAL_MARKER = "PROVISIONAL.json"
+PROVISIONAL_SCHEMA = "qe-provisional-refresh/1"
+RESOLVED_CYCLE = "resolved-cycle.json"
+RENDER_CACHE_DIR = "render-cache"
+
+
+def provisional_token(cycle: Path) -> str | None:
+    """sha256 of the cycle's PROVISIONAL.json, or None unless it stamps a provisional tier."""
+
+    path = cycle / PROVISIONAL_MARKER
+    try:
+        raw = path.read_bytes()
+        stamp = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(stamp, dict)
+        or stamp.get("tier") != "PROVISIONAL"
+        or stamp.get("not_a_release") is not True
+        or stamp.get("schema_version") != PROVISIONAL_SCHEMA
+    ):
+        return None
+    try:
+        resolved = json.loads((cycle / RESOLVED_CYCLE).read_bytes())
+    except (OSError, ValueError):
+        return None
+    manifest_sha = stamp.get("cycle_manifest_sha256")
+    if (
+        not isinstance(resolved, dict)
+        or not isinstance(manifest_sha, str)
+        or not manifest_sha
+        or resolved.get("cycle_manifest_sha256") != manifest_sha
+    ):
+        return None  # the stamp is for another cycle's manifest
+    return hashlib.sha256(raw).hexdigest()
+
+
+def stage_render_env(env: dict[str, str], cycle: Path) -> None:
+    """Driver-owned: every stage child starts without render reuse; only a cycle stamped
+    PROVISIONAL gets it, bound to that stamp by a token. A release cycle has no path in."""
+
+    for key in (RENDER_REUSE_ENV, RENDER_STATE_ENV, RENDER_TOKEN_ENV):
+        env.pop(key, None)
+    stamp_sha = provisional_token(cycle)
+    if stamp_sha is None:
+        return
+    cache = cycle / RENDER_CACHE_DIR
+    cache.mkdir(parents=True, exist_ok=True)
+    env[RENDER_REUSE_ENV] = "provisional"
+    env[RENDER_STATE_ENV] = str(cache)
+    env[RENDER_TOKEN_ENV] = stamp_sha
+
+
+def render_reuse_authorized(env: Mapping[str, str] | None = None) -> bool:
+    """True when reuse is unset, or set with the token of the provisional cycle that owns
+    the cache directory. A release builder calls this and refuses on False."""
+
+    env = os.environ if env is None else env
+    if not env.get(RENDER_REUSE_ENV):
+        return True
+    state = env.get(RENDER_STATE_ENV)
+    supplied = env.get(RENDER_TOKEN_ENV)
+    if not state or not supplied:
+        return False
+    actual = provisional_token(Path(state).parent)
+    return actual is not None and hmac.compare_digest(actual, supplied)
+
+
+def render_reuse_covers(
+    output_root: Path, env: Mapping[str, str] | None = None
+) -> bool:
+    """True when ``output_root`` lies inside the provisional cycle that owns the cache."""
+
+    env = os.environ if env is None else env
+    state = env.get(RENDER_STATE_ENV)
+    if not state:
+        return False
+    try:
+        Path(output_root).resolve().relative_to(Path(state).parent.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def render_reuse_enabled() -> bool:
+    """Only the refresh driver sets this, and only for a PROVISIONAL run (#885 1d); a
+    process that merely inherited the two variables, without the stamp-bound token, renders live."""
+
+    return (
+        os.environ.get(RENDER_REUSE_ENV) == "provisional"
+        and bool(os.environ.get(RENDER_STATE_ENV))
+        and render_reuse_authorized()
+    )
+
+
+def _argument_identity(value: object) -> object:
+    if isinstance(value, (bytes, bytearray)):
+        return {"bytes_sha256": hashlib.sha256(bytes(value)).hexdigest()}
+    if isinstance(value, os.PathLike):
+        return {"path": os.fspath(value)}
+    if isinstance(value, Mapping):
+        return {
+            str(k): _argument_identity(v) for k, v in sorted(value.items(), key=str)
+        }
+    if isinstance(value, (list, tuple)):
+        return [_argument_identity(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return {"repr": repr(value)}  # unknown type: still part of the key, never dropped
+
+
+def reuse_render(
+    name: str,
+    args: Sequence[object],
+    kwargs: Mapping[str, object],
+    *,
+    repo_root: Path,
+    compute: Callable[[], Any],
+) -> Any:
+    """``compute`` (a deterministic render of files it reads) once per input state.
+
+    Release runs never set ``QE_RENDER_REUSE``: they call ``compute`` directly. A hit
+    returns the pickled result of the earlier render only after the receipt's
+    read-set is re-hashed unchanged and the sidecar digest matches.
+    """
+
+    if not render_reuse_enabled() or os.environ.get(MODE_ENV) == "off":
+        return compute()
+    state_root = Path(os.environ[RENDER_STATE_ENV])
+    identity = {
+        "args": _argument_identity(list(args)),
+        "kwargs": _argument_identity(dict(kwargs)),
+    }
+    restore = PERSIST.set(True)
+    previous = os.environ.get(MODE_ENV)
+    os.environ[MODE_ENV] = "persist"
+    try:
+        return run_with_receipt(
+            name,
+            identity,
+            repo_root=repo_root,
+            state_root=state_root,
+            compute=compute,
+            blob_codec=(lambda v: pickle.dumps(v, protocol=4), _restricted_loads),
+        )
+    finally:
+        PERSIST.reset(restore)
+        if previous is None:
+            os.environ.pop(MODE_ENV, None)
+        else:
+            os.environ[MODE_ENV] = previous
