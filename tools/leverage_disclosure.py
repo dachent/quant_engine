@@ -57,6 +57,14 @@ def _until(rows: Sequence[Mapping[str, Any]], cutoff: str) -> list[Mapping[str, 
 # field read zero (or the account type has no margin feature): the generic input a reader
 # emits for providers without IBKR's base cash rows.
 ZERO_FINANCING_BASIS: Final = "OBSERVED_ZERO_FINANCING_DAY"
+# Zero days that are derived with closure, not read as a daily observation: any ``DERIVED_*``
+# verdict, plus the two Schwab cash-replay verdicts (the strings are in pinned ledger bytes and
+# are not renamed): end-of-day cash derived from the statement's transactions, and the capture
+# cash replay.  They are disclosed in the account-state reason, never described as verification.
+DERIVED_VERDICT_PREFIX: Final = "DERIVED_"
+DERIVED_VERDICTS: Final = frozenset(
+    {"CASH_LADDER_CLOSES", "CAPTURE_CASH_REPLAY_CLOSES"}
+)
 
 
 def _amount(row: Mapping[str, Any]) -> Decimal | None:
@@ -239,7 +247,11 @@ def _debit_evidence(
                 free_days.add(day.isoformat())
         else:
             observed.add(day.isoformat())
-            if str(r.get("verdict_reason", "")).startswith("DERIVED_"):
+            verdict = str(r.get("verdict_reason", ""))
+            if (
+                verdict.startswith(DERIVED_VERDICT_PREFIX)
+                or verdict in DERIVED_VERDICTS
+            ):
                 derived_days.add(day.isoformat())
     currency_days = {
         r["as_of_date"]

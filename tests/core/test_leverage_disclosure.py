@@ -627,6 +627,23 @@ def test_derived_zero_days_are_counted_in_the_state_reason_and_do_not_change_it(
     assert mixed["coverage_reason"].endswith(";DERIVED_ZERO_DAYS=1")
     every = state(["DERIVED_X"] * len(DAYS))
     assert every["coverage_reason"].endswith(f";DERIVED_ZERO_DAYS={len(DAYS)}")
+    # the two Schwab cash-replay verdicts are derived days too; other Schwab verdicts are not
+    schwab = state(
+        [
+            "CASH_LADDER_CLOSES",
+            "CAPTURE_CASH_REPLAY_CLOSES",
+            "LOAN_ZERO_NO_INTEREST_NO_MOVEMENT",
+        ]
+    )
+    assert schwab["coverage_reason"].endswith(";DERIVED_ZERO_DAYS=2")
+    other = state(
+        [
+            "BRACKET_PROVEN_BY_CAPTURE",
+            "RETIREMENT_ACCOUNT_NO_MARGIN_FEATURE",
+            "INTEREST_RECONCILED_NO_RANGE",
+        ]
+    )
+    assert "DERIVED_ZERO_DAYS" not in other["coverage_reason"]
     # the classification and coverage are unchanged: derived-with-closure counts as observed
     assert every["classification"] == plain["classification"] == "NOT_LEVERED"
     assert every["coverage_status"] == plain["coverage_status"] == "COMPLETE_DECLARED"
