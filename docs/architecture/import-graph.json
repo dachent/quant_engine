@@ -775,6 +775,11 @@
     ],
     [
       "provider_ledger",
+      "zero_financing_replay",
+      1
+    ],
+    [
+      "provider_ledger",
       "zero_financing_statements",
       1
     ],
@@ -1076,6 +1081,11 @@
     [
       "yahoo_refresh_capture",
       "yahoo_fetch_driver",
+      1
+    ],
+    [
+      "zero_financing_replay",
+      "zero_financing_statements",
       1
     ],
     [
