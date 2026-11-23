@@ -497,3 +497,146 @@ def test_post_release_uses_existing_release_inputs_without_extra_qa_directories(
         == 0
     )
     assert json.loads(capsys.readouterr().out)["status"] == "PASS"
+
+
+def _fake_loaded_spec_modules(
+    monkeypatch: pytest.MonkeyPatch, spec: Any, validated: list[object]
+) -> None:
+    """Stand in for the spec loader and the minutes-long financial-outcome validator."""
+
+    import sys
+
+    def validate(loaded: Any, **_kwargs: Any) -> dict[str, Any]:
+        validated.append(loaded)
+        return _proof()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "quant_engine.core.pipeline",
+        SimpleNamespace(
+            PipelineSpec=SimpleNamespace(from_json_bytes=lambda _raw: spec)
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "portfolio_financial_outcomes",
+        SimpleNamespace(validate_financial_outcomes=validate),
+    )
+
+
+def test_release_preflight_refuses_a_missing_provider_before_the_long_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The provider gate reads catalogs on disk; it must fire before the validator runs."""
+
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text("{}", encoding="utf-8")
+    spec = _spec(tmp_path)
+    validated: list[object] = []
+    _fake_loaded_spec_modules(monkeypatch, spec, validated)
+
+    def refuse(_spec: Any) -> dict[str, Any]:
+        raise qc.QualityControlFailure(
+            "fact admission gate did not check every bound provider: ibkr"
+        )
+
+    monkeypatch.setattr(qc, "_fact_admission", refuse)
+    monkeypatch.setattr(
+        qc, "_candidate_qa", lambda *_args: pytest.fail("candidate QA must not run")
+    )
+
+    assert (
+        qc.main(
+            [
+                "--profile",
+                "release-preflight",
+                "--spec",
+                str(spec_path),
+                "--evidence-dir",
+                str(tmp_path / "evidence"),
+            ]
+        )
+        == 1
+    )
+    assert validated == []  # the financial-outcome validation never started
+    assert not (tmp_path / "evidence").exists() or not list(
+        (tmp_path / "evidence").glob("*.json")
+    )
+
+
+def test_release_preflight_still_records_the_provider_gate_result_in_the_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text("{}", encoding="utf-8")
+    spec = _spec(tmp_path)
+    validated: list[object] = []
+    _fake_loaded_spec_modules(monkeypatch, spec, validated)
+    gate = {"providers": {"ibkr": "PASS"}, "status": "PASS"}
+    calls: list[object] = []
+
+    def admit(loaded: Any) -> dict[str, Any]:
+        calls.append(loaded)
+        return gate
+
+    monkeypatch.setattr(qc, "_fact_admission", admit)
+    monkeypatch.setattr(qc, "_candidate_qa", lambda *_args: {})
+    evidence = tmp_path / "evidence"
+
+    assert (
+        qc.main(
+            [
+                "--profile",
+                "release-preflight",
+                "--spec",
+                str(spec_path),
+                "--evidence-dir",
+                str(evidence),
+            ]
+        )
+        == 0
+    )
+    receipt = json.loads(next(evidence.glob("*.json")).read_bytes())
+    assert receipt["candidate_qa"]["fact_admission"] == gate
+    # the early call only refuses fast; the recorded result is the one after the candidate QA
+    assert calls == [spec, spec]
+    assert validated == [spec]
+
+
+def test_release_preflight_refuses_when_the_ledger_changes_between_the_two_gate_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale early PASS must not ride bytes the candidate QA pinned later."""
+
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text("{}", encoding="utf-8")
+    spec = _spec(tmp_path)
+    validated: list[object] = []
+    _fake_loaded_spec_modules(monkeypatch, spec, validated)
+    calls: list[int] = []
+
+    def admit(_loaded: Any) -> dict[str, Any]:
+        calls.append(1)
+        if len(calls) > 1:
+            raise qc.QualityControlFailure("fact admission gate: ledger changed")
+        return {"providers": {"ibkr": "PASS"}, "status": "PASS"}
+
+    monkeypatch.setattr(qc, "_fact_admission", admit)
+    monkeypatch.setattr(qc, "_candidate_qa", lambda *_args: {})
+    evidence = tmp_path / "evidence"
+
+    assert (
+        qc.main(
+            [
+                "--profile",
+                "release-preflight",
+                "--spec",
+                str(spec_path),
+                "--evidence-dir",
+                str(evidence),
+            ]
+        )
+        == 1
+    )
+    assert len(calls) == 2
+    assert not evidence.exists() or not list(evidence.glob("*.json"))
