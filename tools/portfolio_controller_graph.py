@@ -170,6 +170,8 @@ _PATH_STAGES = {
     "tools/portfolio_totals_verify.py": ["report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
+    # Pure panel-state and assertion library for the factor lens; feeds only the panel block.
+    "tools/factor_lens_status.py": ["panel"],
     # Builds the style-return bundle the decomposition plan pins (calendar, return
     # columns); a change moves the plan inputs and everything downstream of them.
     "tools/portfolio_public_style_sources.py": ["analytics", "report", "panel"],
@@ -196,6 +198,9 @@ _PATH_STAGES = {
     "tools/event_completeness.py": list(_STAGE_ORDER),
     # Imported by the ledger builder (provider-observed zero-financing days).
     "tools/zero_financing_statements.py": list(_STAGE_ORDER),
+    "tools/zero_financing_replay.py": list(_STAGE_ORDER),
+    "tools/schwab_leverage_observations.py": list(_STAGE_ORDER),
+    "tools/schwab_margin_interest.py": list(_STAGE_ORDER),
     "tools/statement_reserve_nav.py": list(_STAGE_ORDER[1:]),
     # The orthogonal risk-share producer: one optional panel block derived from the
     # decomposition lenses and invested capital the panel already holds.
@@ -307,6 +312,7 @@ _PATH_STAGES = {
     "tools/yahoo_fetch_driver.py": [],
     # operator capture tool, writes no delivery artifact
     "tools/yahoo_refresh_capture.py": [],
+    "tools/french_fetch_driver.py": [],
     # Per-cycle input preparation (factor-model audit): builds the base proxy-factor file
     # (total-return proxies, French RF splice) and assembles the per-group style capture
     # into the style builder's single source.  Offline; the pipeline reads only the files
@@ -327,6 +333,7 @@ _PATH_STAGES = {
     "tools/lifecycle_fields.py": ["report", "panel"],
     "tools/sleeve_disclosures.py": ["report", "panel"],
     # #897: the series label (layer, entity, window, basis) every report and panel series carries.
+    "tools/factor_lens_currency.py": ["panel"],
     "tools/series_label.py": ["report", "panel"],
     # R2 (registry nine -> fifteen): the economic return-source registry and its
     # schema are read by tests and pinned by digest in the product contract (whose

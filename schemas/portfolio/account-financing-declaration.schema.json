@@ -48,8 +48,24 @@
         "scope": {"enum": ["ACTIVE", "RESERVE"]},
         "facility": {"enum": ["MARGIN_USED", "MARGIN_AVAILABLE_UNUSED", "NO_MARGIN_FACILITY"]},
         "verification": {"enum": ["VERIFIED", "UNVERIFIED"]},
-        "evidence_ref": {"type": "string", "minLength": 1, "maxLength": 512}
-      }
+        "evidence_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "settled_debit_interest": {
+          "description": "Owner ruling (#894): a settled debit of this account bears no interest because of the account type (a retirement account's settlement float is not borrowing). Valid only with settled_debit_interest_refs and only on a NO_MARGIN_FACILITY row; tools/account_financing.classify reads it together with the producer's per-day interest_bearing:false.",
+          "const": "NONE_BY_ACCOUNT_TYPE"
+        },
+        "settled_debit_interest_refs": {
+          "description": "The precedent statements (file names) that print a settled debit and 'No margin interest was charged'.",
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "pattern": "\\S"}
+        }
+      },
+      "dependentRequired": {
+        "settled_debit_interest": ["settled_debit_interest_refs"],
+        "settled_debit_interest_refs": ["settled_debit_interest"]
+      },
+      "if": {"required": ["settled_debit_interest"]},
+      "then": {"properties": {"facility": {"const": "NO_MARGIN_FACILITY"}}}
     }
   }
 }

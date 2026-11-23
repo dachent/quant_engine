@@ -28,7 +28,7 @@ import zlib
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping, Sequence, cast
 
 from quant_engine.core import check_entry_interpreter
-from quant_engine.core import last_nyse_trading_day
+from quant_engine.core import last_nyse_trading_day, timed_call
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -51,6 +51,7 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.core import inventory_identity
+from quant_engine.core import reuse_render
 import series_label
 import sleeve_disclosures
 import strategy_basis_lens_moves
@@ -13325,7 +13326,7 @@ def _validate_panel_data_schema(
         )
 
 
-def _rendered_files(
+def _rendered_files_live(
     report_root: Path | None,
     legacy_panel: Path,
     template_root: Path,
@@ -14151,6 +14152,19 @@ def _rendered_files(
     return files, data, bound_inputs
 
 
+def _rendered_files(*args: Any, **kwargs: Any) -> Any:
+    """Render the panel files; a PROVISIONAL refresh run reuses an earlier render of
+    unchanged inputs (#885 1d). Release runs always render live."""
+
+    return reuse_render(
+        "panel_rendered_files",
+        args,
+        kwargs,
+        repo_root=Path(__file__).resolve().parents[1],
+        compute=lambda: _rendered_files_live(*args, **kwargs),
+    )
+
+
 def _panel_id(files: Mapping[str, bytes]) -> str:
     identity = {
         name: hashlib.sha256(content).hexdigest()
@@ -14573,6 +14587,7 @@ def _check_implementation_layers(
     }
 
 
+@timed_call("panel_verify_candidate")
 def verify_candidate(
     report_root: Path | None,
     legacy_panel: Path,
