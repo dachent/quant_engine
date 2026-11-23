@@ -22,6 +22,7 @@ SPEC.loader.exec_module(ledger)
 
 END = date(2026, 11, 20)
 RELATIVE = "csv/dashboard_Volatis_Strategy_pricehistory.csv"
+HOLDINGS = "csv/dashboard_Volatis_Strategy_holdings.csv"
 
 
 def _day(offset: int) -> date:
@@ -34,6 +35,7 @@ def _run(
     *,
     intraday: object,
     latest: object = END.isoformat(),
+    captured_at: str = "2026-11-23T15:05:00.000000Z",
 ) -> dict[str, Any]:
     content = (
         "time,value,cost_basis\n"
@@ -41,7 +43,7 @@ def _run(
     ).encode()
     monkeypatch.setattr(ledger, "_bound_source_bytes", lambda _m, _a, _p: content)
     evidence: dict[str, Any] = {
-        "refreshed_datasets": [Path(RELATIVE).name],
+        "refreshed_datasets": [Path(HOLDINGS).name, Path(RELATIVE).name],
         "preserved_companions": [],
     }
     if intraday is not None:
@@ -52,10 +54,17 @@ def _run(
         "legacy_lineage": {"run_id": "run"},
         "datasets": [
             {
+                "relative_path": HOLDINGS,
+                "snapshot_kind": "CAPTURE_TIME_SNAPSHOT",
+                "captured_at": captured_at,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "bytes": len(content),
+            },
+            {
                 "relative_path": RELATIVE,
                 "sha256": hashlib.sha256(content).hexdigest(),
                 "bytes": len(content),
-            }
+            },
         ],
     }
     context = ledger._FinalityContext(
@@ -75,6 +84,7 @@ def _run(
 
 
 BASIS = "CONVERSION_RECEIPT_POLICY_SELECTED_NATIVE_LABEL"
+NEXT_DAY_BASIS = "NEXT_DAY_CAPTURE_NO_UNFINALIZED_LABEL"
 
 
 def test_same_day_capture_with_an_intraday_label_after_the_cutoff_passes(
@@ -88,7 +98,7 @@ def test_next_day_capture_ending_at_the_cutoff_label_passes_with_no_intraday(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = _run(monkeypatch, [-2, -1, 0], intraday=[])
-    assert result["basis"] == BASIS
+    assert result["basis"] == NEXT_DAY_BASIS
 
 
 @pytest.mark.parametrize(
@@ -124,3 +134,45 @@ def test_every_other_label_shape_still_refuses(
 ) -> None:
     with pytest.raises(ledger.ProviderLedgerError):
         _run(monkeypatch, labels, intraday=intraday, latest=latest)
+
+
+def test_a_same_day_capture_keeps_the_existing_basis_whatever_its_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _run(
+        monkeypatch,
+        [-1, 0, 1],
+        intraday=[_day(1).isoformat()],
+        captured_at="2026-11-21T21:30:00.000000Z",
+    )
+    assert result["basis"] == BASIS
+
+
+@pytest.mark.parametrize(
+    "captured_at",
+    [
+        # the cutoff day itself (the bar may still be intraday), before it, and the
+        # New York day of a capture just after midnight UTC
+        "2026-11-20T21:30:00.000000Z",
+        "2026-11-20T03:00:00.000000Z",
+        "2026-11-19T12:00:00.000000Z",
+        "2026-11-21T02:00:00.000000Z",
+    ],
+)
+def test_the_next_day_shape_needs_a_capture_after_the_cutoff_day(
+    monkeypatch: pytest.MonkeyPatch, captured_at: str
+) -> None:
+    with pytest.raises(ledger.ProviderLedgerError, match="after the cutoff day"):
+        _run(monkeypatch, [-2, -1, 0], intraday=[], captured_at=captured_at)
+
+
+def test_the_next_day_shape_accepts_the_first_new_york_day_after_the_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _run(
+        monkeypatch,
+        [-2, -1, 0],
+        intraday=[],
+        captured_at="2026-11-21T15:00:00.000000Z",
+    )
+    assert result["basis"] == NEXT_DAY_BASIS

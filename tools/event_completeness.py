@@ -512,10 +512,26 @@ def _evaluate_quantbase_positions(
             c = closure_of(p)
             difference = number(c.get("snapshot_difference_usd"))
             snapshot_day = str(c.get("snapshot_day") or "")
+            rolled = c.get("rollback")
+            # A next-day capture has no vendor NAV on its snapshot day, so there is no
+            # difference to read; its proof is the order replay that reproduces the
+            # snapshot and closes the opening holdings to the NAV of the cutoff.
+            next_day = (
+                c.get("snapshot_close_basis")
+                == "NEXT_DAY_CAPTURE_NAV_AT_LAST_LABELLED_DAY"
+                and c.get("snapshot_nav_usd") is None
+                and c.get("snapshot_difference_usd") is None
+                and isinstance(rolled, Mapping)
+                and rolled.get("replay_reproduces_snapshot") is True
+                and rolled.get("rollback_rebalance_count") == 0
+                and rolled.get("rollback_activity_count") == 0
+            )
             if (
                 c.get("activity_after_cutoff_count") != 0
-                or difference is None
-                or abs(difference) > _QUANTBASE_CENT
+                or (
+                    not next_day
+                    and (difference is None or abs(difference) > _QUANTBASE_CENT)
+                )
                 or not snapshot_day
                 or snapshot_day < end.isoformat()
             ):

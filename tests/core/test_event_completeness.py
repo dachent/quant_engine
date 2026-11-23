@@ -949,3 +949,56 @@ def test_a_rolled_back_quantbase_row_needs_its_replay_evidence() -> None:
         bad = _qb_run(rows=[_qb_row(value_basis=_ROLLED, closure=closure)])
         assert bad["status"] == ec.CLOSURE_FAILED
         assert "ROLLED_BACK_ROWS_CARRY_THEIR_REPLAY_EVIDENCE" in _qb_failed(bad)
+
+
+_QB_NEXT_DAY = {
+    "snapshot_nav_usd": None,
+    "snapshot_difference_usd": None,
+    "snapshot_close_basis": "NEXT_DAY_CAPTURE_NAV_AT_LAST_LABELLED_DAY",
+    "rollback": {
+        "replay_reproduces_snapshot": True,
+        "rollback_rebalance_count": 0,
+        "rollback_activity_count": 0,
+    },
+}
+
+
+def test_a_next_day_quantbase_snapshot_without_a_snapshot_day_nav_is_complete() -> None:
+    row = _qb_run([_qb_row(closure=_QB_NEXT_DAY)])
+    assert row["status"] == ec.DECLARED_COMPLETE, row["checks"]
+
+
+@pytest.mark.parametrize(
+    "closure",
+    [
+        # no difference and no declared next-day basis
+        {**_QB_NEXT_DAY, "snapshot_close_basis": None},
+        {**_QB_NEXT_DAY, "snapshot_close_basis": "SNAPSHOT_DAY_NAV_TO_THE_CENT"},
+        # the order replay is the proof: it must be there and clean
+        {**_QB_NEXT_DAY, "rollback": None},
+        {
+            **_QB_NEXT_DAY,
+            "rollback": {
+                **_QB_NEXT_DAY["rollback"],
+                "replay_reproduces_snapshot": False,
+            },
+        },
+        {
+            **_QB_NEXT_DAY,
+            "rollback": {**_QB_NEXT_DAY["rollback"], "rollback_rebalance_count": 1},
+        },
+        {
+            **_QB_NEXT_DAY,
+            "rollback": {**_QB_NEXT_DAY["rollback"], "rollback_activity_count": 1},
+        },
+        # a snapshot NAV or difference that is stated is read as before
+        {**_QB_NEXT_DAY, "snapshot_nav_usd": "100.00"},
+        {**_QB_NEXT_DAY, "snapshot_difference_usd": "240.00"},
+        {**_QB_NEXT_DAY, "activity_after_cutoff_count": 1},
+    ],
+)
+def test_the_next_day_snapshot_shape_is_not_a_blanket_pass(
+    closure: dict[str, Any],
+) -> None:
+    row = _qb_run([_qb_row(closure=closure)])
+    assert "NO_ACTIVITY_AFTER_CUTOFF_AND_SNAPSHOT_CLOSES_TO_THE_CENT" in _qb_failed(row)
