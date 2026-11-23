@@ -1527,6 +1527,22 @@ def with_truncated_row_fallbacks(
     return repaired
 
 
+def _market_vane_class_ok(vane: Mapping[str, Any]) -> bool:
+    """The current class is one of the eight, or the vendor's -1 recorded verbatim and flagged
+    (the class is a disclosure field: no calculation reads it)."""
+
+    current = vane.get("current_class_id")
+    if type(current) is not int:
+        return False
+    if current in range(8):
+        return True
+    return (
+        current == -1
+        and vane.get("state") == "VENDOR_PUBLISHED_UNCLASSIFIED"
+        and vane.get("note") == "vendor published -1, meaning not established"
+    )
+
+
 def _read_tt_source_manifest(
     path: Path,
     components: Sequence[str],
@@ -1674,7 +1690,7 @@ def _read_tt_source_manifest(
     if (
         not isinstance(vane, dict)
         or vane.get("class_ids") != list(range(8))
-        or vane.get("current_class_id") not in range(8)
+        or not _market_vane_class_ok(vane)
         or not isinstance(vane.get("signals"), dict)
         or not isinstance(vane.get("status_endpoint"), dict)
     ):
