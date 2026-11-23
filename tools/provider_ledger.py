@@ -35,6 +35,7 @@ import account_financing
 import event_completeness
 import quantbase_fund_days
 import schwab_leverage_observations
+import schwab_margin_interest
 import zero_financing_statements
 
 import quant_engine.schwab as schwab
@@ -3678,6 +3679,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "quantbase_rollback",
             "zero_financing_observations",
             "schwab_gross_exposure",
+            "schwab_margin_interest",
             "event_completeness_declaration",
         )
         allowed.update(
@@ -5411,6 +5413,120 @@ def _schwab_gross_exposure_rows(
     )
     return (
         [{**row, "observation_generation_id": observation} for row in rows],
+        artifacts,
+    )
+
+
+_MARGIN_INTEREST_KEYS: Final = _ZERO_FINANCING_KEYS | {"accounts"}
+
+
+def _schwab_margin_interest_rows(
+    value: object,
+    providers: set[str],
+    as_of: date,
+    combined: Mapping[str, Sequence[Mapping[str, Any]]],
+    manifests: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[SourceArtifact]]:
+    """Statement evidence of the named margin accounts' interest (#894 F2 part b).
+
+    The spec pins the statement directory's SHA256SUMS and the local-only account mapping
+    exactly as ``zero_financing_observations`` does; the ledger re-hashes every statement
+    and reads the margin-interest tables, charged periods and interest-paid columns itself
+    (``schwab_margin_interest``)."""
+
+    ref = _object(value, "schwab_margin_interest")
+    if set(ref) != _MARGIN_INTEREST_KEYS:
+        raise ProviderLedgerError("schwab_margin_interest keys differ")
+    provider_id = _text(ref["provider_id"], "schwab_margin_interest.provider_id")
+    if provider_id not in providers or provider_id not in manifests:
+        raise ProviderLedgerError(
+            "schwab_margin_interest names a provider the spec does not declare"
+        )
+    if not isinstance(ref["accounts"], list):
+        raise ProviderLedgerError("schwab_margin_interest accounts differ")
+    accounts = {_text(item, "schwab_margin_interest.accounts item") for item in ref["accounts"]}
+    observed = {
+        str(r["account_id"])
+        for r in combined.get("nav_observations", [])
+        if r.get("provider_id") == provider_id
+    }
+    if not accounts or len(accounts) != len(ref["accounts"]) or accounts - observed:
+        raise ProviderLedgerError(
+            "schwab_margin_interest accounts differ from the provider's observed accounts"
+        )
+    sums_raw = _pinned_file(ref["sums_path"], ref["sums_sha256"], "statement sums")
+    mapping_raw = _pinned_file(
+        ref["mapping_path"], ref["mapping_sha256"], "statement account mapping"
+    )
+    directory = _absolute_path(ref["statements_dir"], "statements_dir")
+    if not directory.is_dir() or directory.is_symlink():
+        raise ProviderLedgerError("schwab_margin_interest statements_dir differs")
+    prefix = f"margin-interest/{provider_id}"
+    try:
+        rows, manifest = schwab_margin_interest.statement_rows(
+            directory,
+            zero_financing_statements.load_sums(sums_raw),
+            zero_financing_statements.load_mapping(mapping_raw, provider_id),
+            provider_id=provider_id,
+            accounts=accounts,
+            prefix=prefix,
+        )
+    except (OSError, ValueError, zero_financing_statements.ZeroFinancingError) as exc:
+        raise ProviderLedgerError(f"schwab_margin_interest: {exc}") from exc
+    if not rows:
+        raise ProviderLedgerError("schwab_margin_interest found no margin statement")
+    artifacts = [
+        SourceArtifact(
+            artifact_id=f"{prefix}/{item['name']}",
+            sha256=item["sha256"],
+            size_bytes=item["size_bytes"],
+            as_of_date=as_of,
+            schema_name=f"{provider_id}-statement-pdf",
+            schema_version="1",
+        )
+        for item in manifest
+        if any(r["source_artifact_id"] == f"{prefix}/{item['name']}" for r in rows)
+    ] + [
+        SourceArtifact(
+            artifact_id=f"{prefix}/SHA256SUMS",
+            sha256=hashlib.sha256(sums_raw).hexdigest(),
+            size_bytes=len(sums_raw),
+            as_of_date=as_of,
+            schema_name="statement-sums",
+            schema_version="1",
+        ),
+        SourceArtifact(
+            artifact_id=f"{prefix}/account-mapping",
+            sha256=hashlib.sha256(mapping_raw).hexdigest(),
+            size_bytes=len(mapping_raw),
+            as_of_date=as_of,
+            schema_name="statement-account-mapping",
+            schema_version="1",
+        ),
+    ]
+    ids = {a.artifact_id for a in artifacts}
+    if any(r["source_artifact_id"] not in ids for r in rows):
+        raise ProviderLedgerError("schwab_margin_interest: a row names a source the manifest lacks")
+    observation = "margin-interest-" + hashlib.sha256(
+        "\n".join(
+            [
+                hashlib.sha256(sums_raw).hexdigest(),
+                hashlib.sha256(mapping_raw).hexdigest(),
+                as_of.isoformat(),
+                *sorted(accounts),
+            ]
+        ).encode()
+    ).hexdigest()[:24]
+    return (
+        [
+            {
+                **row,
+                "generation_id": manifests[provider_id].generation_id,
+                "observation_generation_id": observation,
+            }
+            for row in rows
+            if row["as_of_date"] <= as_of.isoformat()
+        ],
         artifacts,
     )
 
@@ -12718,6 +12834,28 @@ def build_catalog(
         )
         combined["leverage_exposure_observations"].extend(exposure_rows)
         provider_artifacts.extend(exposure_artifacts)
+    if "schwab_margin_interest" in spec:
+        interest_rows, interest_artifacts = _schwab_margin_interest_rows(
+            spec["schwab_margin_interest"],
+            set(spec["providers"]),
+            as_of,
+            combined,
+            manifests,
+        )
+        combined["financing_cost_observations"].extend(interest_rows)
+        exceptions.extend(
+            {
+                "account_in_provenance": row["account_id"] in accounts,
+                "effective_date": row["as_of_date"],
+                "fact_type": "financing_cost_observations",
+                "mapping_reason": row["mapping_reason"],
+                "provider_id": row["provider_id"],
+                "record_id": row["record_id"],
+                "status": "UNMAPPED",
+            }
+            for row in interest_rows
+        )
+        provider_artifacts.extend(interest_artifacts)
 
     completeness_rows: list[dict[str, Any]] | None = None
     if "event_completeness_declaration" in spec:

@@ -438,16 +438,28 @@ def account_financing_rows(
             {str(r["as_of_date"]) for r in parts["nav"]}
         )
         epoch_start = mapped_days[0] if mapped_days else None
-        cost_closure = leverage_closure.financing_cost_closure(
-            parts["cost"],
-            statement_days,
-            cutoff,
-            epoch_start,
-            (reserve_windows or {}).get(name),
-            # every account that reaches the cost closure (levered, incidental debit, or a
-            # conflicted NOT_LEVERED) closes an empty accrual section only on a stated zero
-            require_explicit_zero=True,
-        )
+        if leverage_closure.posting_reconciliation_applies(parts["cost"]):
+            # a margin account charged interest on settled debits: no accrual balance, the
+            # statements' interest tables reconcile to the postings instead
+            cost_closure = leverage_closure.financing_cost_posting_reconciliation(
+                parts["cost"],
+                parts["liability"],
+                cutoff,
+                epoch_start,
+                (reserve_windows or {}).get(name),
+            )
+        else:
+            cost_closure = leverage_closure.financing_cost_closure(
+                parts["cost"],
+                statement_days,
+                cutoff,
+                epoch_start,
+                (reserve_windows or {}).get(name),
+                # every account that reaches the cost closure (levered, incidental debit, or
+                # a conflicted NOT_LEVERED) closes an empty accrual section only on a stated
+                # zero
+                require_explicit_zero=True,
+            )
         rows.append(
             make(
                 "FINANCING_COST",

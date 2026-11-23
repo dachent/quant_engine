@@ -414,3 +414,230 @@ def gross_exposure(
         gross_value,
         nav_value,
     )
+
+
+# --- margin-interest posting reconciliation (#894 F2 part b) -------------------------------
+# A margin account charged interest on settled debit balances has no accrual balance to roll
+# forward.  Its cost is covered when what the statements print equals what the ledger posted.
+POSTING_RECONCILIATION_CHECK: Final = "FINANCING_COST_POSTING_RECONCILIATION"
+_TABLE_ROW: Final = "STATEMENT_INTEREST_TABLE_ROW"
+_CHARGED_PERIOD: Final = "STATEMENT_CHARGED_PERIOD"
+_INTEREST_PAID: Final = "STATEMENT_INTEREST_PAID"
+_LOAN_BLOCK: Final = "STATEMENT_MARGIN_LOAN_BLOCK"
+STATEMENT_EVIDENCE_BASES: Final = frozenset(
+    {_TABLE_ROW, _CHARGED_PERIOD, _INTEREST_PAID, _LOAN_BLOCK}
+)
+_CENT: Final = Decimal("0.005")
+# the printed average balance is rounded and the interest accrues on daily balances: the
+# recomputation is a plausibility bound (the real statements stay within 0.015), the
+# load-bearing equalities are posting = table and statement paid = table to the cent
+_RECOMPUTE: Final = Decimal("0.02")
+_POSTING_LAG_DAYS: Final = 4  # a posting follows its cycle by a day, or a weekend
+
+
+def posting_reconciliation_applies(cost_rows: Iterable[Mapping[str, Any]]) -> bool:
+    return any(
+        r.get("measurement_basis") in STATEMENT_EVIDENCE_BASES for r in cost_rows
+    )
+
+
+def _dates(row: Mapping[str, Any]) -> tuple[date, date] | None:
+    try:
+        return _day(row["period_start"]), _day(row["period_end"])
+    except (KeyError, ValueError):
+        return None
+
+
+def _posting_day(row: Mapping[str, Any]) -> date | None:
+    when = row.get("accounting_date") or row.get("effective_date") or row.get("event_date")
+    try:
+        return _day(when) if when else None
+    except ValueError:
+        return None
+
+
+def financing_cost_posting_reconciliation(
+    cost_rows: Iterable[Mapping[str, Any]],
+    liability_rows: Iterable[Mapping[str, Any]],
+    cutoff: str,
+    epoch_start: str | None,
+    reserve_windows: Sequence[tuple[date, date, str]] | None = None,
+) -> Closure:
+    """Covered iff, for the whole statement window of the account:
+
+    * every posting (``BROKER_DEBIT_INTEREST``) follows a printed charged period by a day (a
+      weekend at most) and equals the sum of the statement-table rows inside that period;
+    * every table row recomputes (average balance x rate x days / 360) within two cents;
+    * every statement's "interest paid this period" equals its table rows, and the YTD
+      rolls to the cent (it restarts in January);
+    * a statement with no interest-paid column has an opening and closing loan of zero, no
+      table row and no posting in its month (a derived zero); a printed zero month has
+      no table row and no posting either;
+    * every settled-debit day of the ledger is a day of a table row, or a derived day whose
+      interest at its cycle's rate is below the billing cent together, inside a charged
+      period; every table day is a ledger debit day.
+    The failing checks are named in the evidence, never silence."""
+
+    rows = [
+        r
+        for r in cost_rows
+        if str(r.get("as_of_date") or r.get("accounting_date") or r.get("period_end") or "")
+        <= cutoff
+    ]
+    postings = [
+        r
+        for r in rows
+        if r.get("classification") == "BROKER_DEBIT_INTEREST"
+        and r.get("measurement_basis") == "CASH_POSTING"
+    ]
+    evidence_rows = [r for r in rows if r.get("measurement_basis") in STATEMENT_EVIDENCE_BASES]
+    tables = [r for r in evidence_rows if r["measurement_basis"] == _TABLE_ROW]
+    cycles = [r for r in evidence_rows if r["measurement_basis"] == _CHARGED_PERIOD]
+    paid = [r for r in evidence_rows if r["measurement_basis"] == _INTEREST_PAID]
+    blocks = [r for r in evidence_rows if r["measurement_basis"] == _LOAN_BLOCK]
+    failures: list[str] = []
+
+    def fail(reason: str) -> None:
+        if reason not in failures:
+            failures.append(reason)
+
+    _placed, gaps = _split_unmapped(postings, epoch_start, reserve_windows)
+    if gaps:
+        fail("POSTING_UNMAPPED_IN_EPOCH")
+    if any(r.get("refusal") for r in evidence_rows):
+        fail("STATEMENT_TABLE_UNREADABLE")
+    # (first day, last day, interest, rate, average balance, statement day)
+    table_rows: list[tuple[date, date, Decimal, Decimal, Decimal, str]] = []
+    for r in tables:
+        if r.get("refusal"):
+            continue
+        span, interest, average = _dates(r), _value(r), _value(r, "average_balance")
+        try:
+            rate: Decimal | None = Decimal(str(r["rate_percent"]))
+        except (KeyError, ArithmeticError):
+            rate = None
+        if span is None or interest is None or average is None or rate is None:
+            fail("TABLE_ROW_UNREADABLE")
+            continue
+        days = (span[1] - span[0]).days + 1
+        if abs(abs(average) * rate / 100 * days / 360 - interest) > _RECOMPUTE:
+            fail(f"TABLE_ROW_DOES_NOT_RECOMPUTE:{span[0].isoformat()}")
+        table_rows.append(
+            (span[0], span[1], interest, rate, abs(average), str(r["as_of_date"]))
+        )
+    cycle_spans = sorted({s for r in cycles if (s := _dates(r)) is not None})
+    matched: set[tuple[date, date]] = set()
+    for r in postings:
+        posted, day = _value(r), _posting_day(r)
+        if posted is None or day is None:
+            fail("POSTING_UNREADABLE")
+            continue
+        owners = [
+            (a, b)
+            for a, b in cycle_spans
+            if b < day <= b + timedelta(days=_POSTING_LAG_DAYS)
+        ]
+        if len(owners) != 1:
+            fail(f"POSTING_WITHOUT_ONE_CYCLE:{day.isoformat()}")
+            continue
+        a, b = owners[0]
+        matched.add((a, b))
+        total = sum((t[2] for t in table_rows if a <= t[0] and t[1] <= b), _ZERO)
+        if abs(total - abs(posted)) > _CENT:
+            fail(f"POSTING_NOT_EQUAL_TO_TABLE:{day.isoformat()}")
+    if any(c not in matched for c in cycle_spans):
+        fail("CHARGED_PERIOD_WITHOUT_POSTING")
+    if any(not any(a <= t[0] and t[1] <= b for a, b in cycle_spans) for t in table_rows):
+        fail("TABLE_ROW_OUTSIDE_CHARGED_PERIOD")
+    paid_by_day: dict[str, tuple[Decimal, Decimal]] = {}
+    for r in paid:
+        this, ytd = _value(r), _value(r, "ytd_amount")
+        if this is None or ytd is None:
+            fail("INTEREST_PAID_UNREADABLE")
+            continue
+        paid_by_day[str(r["as_of_date"])] = (this, ytd)
+    previous: tuple[date, Decimal] | None = None
+    for stamp in sorted(paid_by_day):
+        this, ytd = paid_by_day[stamp]
+        end = _day(stamp)
+        printed = sum((t[2] for t in table_rows if t[5] == stamp), _ZERO)
+        if abs(printed - this) > _CENT:
+            fail(f"STATEMENT_PAID_NOT_EQUAL_TO_TABLE:{stamp}")
+        if previous is not None and previous[0].year == end.year:
+            if abs(previous[1] + this - ytd) > _CENT:
+                fail(f"YTD_DOES_NOT_ROLL:{stamp}")
+        elif end.month == 1 and abs(this - ytd) > _CENT:
+            fail(f"YTD_DOES_NOT_RESTART:{stamp}")
+        previous = (end, ytd)
+    block_by_day = {str(r["as_of_date"]): r for r in blocks}
+    posting_days = sorted(d for r in postings if (d := _posting_day(r)) is not None)
+    ends = sorted(_day(k) for k in block_by_day)
+    for index, end in enumerate(ends):
+        stamp = end.isoformat()
+        block = block_by_day[stamp]
+        opening, closing = _value(block, "opening_amount"), _value(block)
+        start = ends[index - 1] + timedelta(days=1) if index else date.min
+        listed = any(t[5] == stamp for t in table_rows)
+        in_month = any(start <= p <= end for p in posting_days)
+        if stamp in paid_by_day:
+            if paid_by_day[stamp][0] == 0 and (listed or in_month):
+                fail(f"ZERO_MONTH_HAS_INTEREST:{stamp}")
+        elif opening != 0 or closing != 0 or listed or in_month:
+            fail(f"MONTH_WITHOUT_PAID_COLUMN_NOT_ZERO:{stamp}")
+    listed_days = {
+        t[0] + timedelta(days=n) for t in table_rows for n in range((t[1] - t[0]).days + 1)
+    }
+    range_days: set[date] = set()
+    dust: dict[tuple[date, date], Decimal] = defaultdict(lambda: _ZERO)
+    for r in liability_rows:
+        if (
+            r.get("classification") != "OBSERVED_FINANCING_DAY"
+            or str(r.get("as_of_date")) > cutoff
+        ):
+            continue
+        balance = _value(r, "amount")
+        if balance is None or balance <= 0:
+            fail("DEBIT_DAY_UNREADABLE")
+            continue
+        day = _day(r["as_of_date"])
+        if r.get("amount_measurement") == "RANGE_AVERAGE":
+            range_days.add(day)
+            if day not in listed_days:
+                fail(f"DEBIT_DAY_NOT_IN_A_TABLE_RANGE:{day.isoformat()}")
+        elif day not in listed_days:
+            owners = [(a, b) for a, b in cycle_spans if a <= day <= b]
+            if len(owners) != 1:
+                fail(f"DEBIT_DAY_OUTSIDE_CHARGED_PERIOD:{day.isoformat()}")
+                continue
+            rate = max(
+                (t[3] for t in table_rows if owners[0][0] <= t[0] and t[1] <= owners[0][1]),
+                default=None,
+            )
+            if rate is None:
+                fail(f"DEBIT_DAY_WITHOUT_CYCLE_RATE:{day.isoformat()}")
+                continue
+            dust[owners[0]] += balance * rate / 100 / 360
+        else:
+            range_days.add(day)
+    if not listed_days <= range_days:
+        fail("TABLE_DAY_NOT_A_LEDGER_DEBIT_DAY")
+    if any(total >= _CENT for total in dust.values()):
+        fail("UNLISTED_DEBIT_DAYS_ARE_MORE_THAN_DUST")
+    covered = bool(postings) and bool(table_rows) and bool(blocks) and not failures
+    return Closure(
+        POSTING_RECONCILIATION_CHECK,
+        covered,
+        {
+            "postings": len(postings),
+            "charged_periods": len(cycle_spans),
+            "table_rows": len(table_rows),
+            "statements_with_paid_column": len(paid_by_day),
+            "statements_with_loan_block": len(blocks),
+            "range_average_debit_days": len(range_days),
+            "unlisted_debit_dust": str(
+                sum(dust.values(), _ZERO).quantize(Decimal("0.0001"))
+            ),
+            "failure_count": len(failures),
+            "failures": ",".join(failures[:20]),
+        },
+    )
