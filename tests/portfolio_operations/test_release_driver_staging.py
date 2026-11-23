@@ -1164,11 +1164,11 @@ def test_a_release_cycle_never_gets_render_reuse_even_when_exported(
 def test_a_provisional_cycle_gets_a_cache_and_a_token_bound_to_its_stamp(
     tmp_path: Path,
 ) -> None:
-    token = _stamp(tmp_path)
-    env = {"QE_RENDER_RUN_TOKEN": "operator"}
+    stamp_sha = _stamp(tmp_path)
+    env = {"QE_RENDER_RUN_TOKEN": "x"}
     driver.stage_render_env(env, tmp_path)
     assert env["QE_RENDER_REUSE"] == "provisional"
-    assert env["QE_RENDER_RUN_TOKEN"] == token
+    assert env["QE_RENDER_RUN_TOKEN"] == stamp_sha
     assert Path(env["QE_RENDER_STATE_ROOT"]) == tmp_path / "render-cache"
     assert (tmp_path / "render-cache").is_dir()
     assert render_reuse_authorized(env)

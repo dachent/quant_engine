@@ -964,14 +964,14 @@ def stage_render_env(env: dict[str, str], cycle: Path) -> None:
 
     for key in (RENDER_REUSE_ENV, RENDER_STATE_ENV, RENDER_TOKEN_ENV):
         env.pop(key, None)
-    token = provisional_token(cycle)
-    if token is None:
+    stamp_sha = provisional_token(cycle)
+    if stamp_sha is None:
         return
     cache = cycle / RENDER_CACHE_DIR
     cache.mkdir(parents=True, exist_ok=True)
     env[RENDER_REUSE_ENV] = "provisional"
     env[RENDER_STATE_ENV] = str(cache)
-    env[RENDER_TOKEN_ENV] = token
+    env[RENDER_TOKEN_ENV] = stamp_sha
 
 
 def render_reuse_authorized(env: Mapping[str, str] | None = None) -> bool:
@@ -982,11 +982,11 @@ def render_reuse_authorized(env: Mapping[str, str] | None = None) -> bool:
     if not env.get(RENDER_REUSE_ENV):
         return True
     state = env.get(RENDER_STATE_ENV)
-    token = env.get(RENDER_TOKEN_ENV)
-    if not state or not token:
+    supplied = env.get(RENDER_TOKEN_ENV)
+    if not state or not supplied:
         return False
     actual = provisional_token(Path(state).parent)
-    return actual is not None and hmac.compare_digest(actual, token)
+    return actual is not None and hmac.compare_digest(actual, supplied)
 
 
 def render_reuse_covers(

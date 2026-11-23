@@ -750,7 +750,7 @@ def test_inherited_render_vars_without_the_token_render_live_and_store_nothing(
     monkeypatch.setenv(vr.RENDER_REUSE_ENV, "provisional")
     monkeypatch.setenv(vr.RENDER_STATE_ENV, str(world["state"]))
     calls = []
-    for _ in range(2):  # no token, then a foreign token: both render live
+    for _ in range(2):  # no run id, then a foreign one: both render live
         vr.reuse_render(
             "x", [], {}, repo_root=world["repo"], compute=lambda: calls.append(1)
         )
