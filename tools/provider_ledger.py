@@ -4289,11 +4289,13 @@ def _finality_quantbase(ctx: _FinalityContext) -> dict[str, Any]:
             evidence.get("intraday_unfinalized_dates"), "quantbase intraday dates"
         )
     }
+    # An empty intraday set is the next-trading-day capture: the file ends at the
+    # cutoff label itself. It is accepted only then, because `max(labels - intraday)
+    # == end` with nothing removed also proves no label lies past the cutoff.
     if (
         not labels
-        or not intraday
         or not intraday.issubset(labels)
-        or min(intraday) <= end
+        or (intraday and min(intraday) <= end)
         or not labels - intraday
         or max(labels - intraday) != end
         or evidence.get("latest_complete_daily_cutoff") != end.isoformat()
