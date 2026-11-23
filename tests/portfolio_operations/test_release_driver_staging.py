@@ -1119,6 +1119,46 @@ def test_a_config_key_no_stage_reads_does_not_rebind_it_but_a_referenced_one_doe
         pytest.skip("the first stage references no scalar config key")
 
 
+def test_the_ledger_spec_stage_passes_the_f2_schwab_pins_only_when_configured() -> None:
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    stage = next(
+        s
+        for s in graph["stages"]
+        if any(
+            isinstance(a, str) and a.endswith("release_ledger_spec.py")
+            for a in s.get("argv", [])
+        )
+    )
+    config = {
+        "repo_root": "R",
+        "python": "py",
+        "cycle": "C",
+        "run": "C/run",
+        "code_commit": "c" * 40,
+        "mode": "release",
+        "requested_as_of": "2026-11-06",
+        "ceremony": "full",
+        "predecessor_ledger_spec": "P/pred.json",
+    }
+    bare = driver.stage_argv(driver.Run(config, graph, offline=True), stage)
+    assert "--schwab-gross-exposure" not in bare
+    assert "--schwab-margin-interest" not in bare
+    full = driver.stage_argv(
+        driver.Run(
+            {
+                **config,
+                "schwab_gross_exposure": "D/gross.json",
+                "schwab_margin_interest": "D/margin.json",
+            },
+            graph,
+            offline=True,
+        ),
+        stage,
+    )
+    assert full[full.index("--schwab-gross-exposure") + 1] == "D/gross.json"
+    assert full[full.index("--schwab-margin-interest") + 1] == "D/margin.json"
+
+
 def _stamp(cycle: Path, tier: str = "PROVISIONAL", not_a_release: bool = True) -> str:
     cycle.mkdir(parents=True, exist_ok=True)
     (cycle / "resolved-cycle.json").write_bytes(b'{"cycle_manifest_sha256": "m1"}')

@@ -770,7 +770,22 @@
     ],
     [
       "provider_ledger",
+      "schwab_leverage_observations",
+      1
+    ],
+    [
+      "provider_ledger",
+      "schwab_margin_interest",
+      1
+    ],
+    [
+      "provider_ledger",
       "schwab_rollback",
+      1
+    ],
+    [
+      "provider_ledger",
+      "zero_financing_replay",
       1
     ],
     [
@@ -1009,6 +1024,11 @@
       1
     ],
     [
+      "schwab_margin_interest",
+      "zero_financing_statements",
+      1
+    ],
+    [
       "schwab_nav_derive",
       "schwab_capture_driver",
       1
@@ -1081,6 +1101,11 @@
     [
       "yahoo_refresh_capture",
       "yahoo_fetch_driver",
+      1
+    ],
+    [
+      "zero_financing_replay",
+      "zero_financing_statements",
       1
     ],
     [

@@ -65,6 +65,8 @@ CARRIED_KEYS = (
     "quantbase_fill_closes",
     "quantbase_position_closes",
     "zero_financing_observations",
+    "schwab_gross_exposure",
+    "schwab_margin_interest",
     "event_completeness_declaration",
     "quantbase_rollback",
 )

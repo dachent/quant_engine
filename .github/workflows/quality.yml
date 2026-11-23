@@ -235,6 +235,8 @@ jobs:
           tools/schwab_statement_cash_summaries.py
           tools/schwab_page_actions.py
           tools/schwab_rollback.py
+          tools/schwab_leverage_observations.py
+          tools/schwab_margin_interest.py
           tools/schwab_zf_capture.py
           tools/p123_cdp_recorder.py
           tools/p123_book_identity_check.py
@@ -287,6 +289,7 @@ jobs:
           tools/portfolio_cash_drag.py
           tools/portfolio_cash_drag_spec.py
           tools/zero_financing_statements.py
+          tools/zero_financing_replay.py
           tools/ibkr_overlap_equivalences.py
           tools/event_completeness.py
           tools/check_new_commit_owner_shapes.py

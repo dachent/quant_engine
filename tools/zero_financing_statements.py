@@ -707,6 +707,25 @@ def _pdftotext(path: Path) -> str:
     return result.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
 
 
+def statement_text(path: Path) -> str:
+    """The layout text of one statement: the entry point for sibling statement readers."""
+
+    return _pdftotext(path)
+
+
+def parse_money_amount(amount_text: str) -> Decimal:
+    """One printed money amount (``$x``, ``($x)``, ``-$x``)."""
+
+    return _parse_money(amount_text)
+
+
+def refine_table_from_raw(facts: dict[str, Any], raw_text: str) -> None:
+    """Re-read the Margin Interest table from the content-stream text (see the private
+    reader); public for sibling statement readers."""
+
+    _refine_table_from_raw(facts, raw_text)
+
+
 def load_mapping(raw: bytes, provider_id: str) -> dict[str, tuple[str, str]]:
     """label -> (ledger account id, last3) from the local-only mapping input."""
 
@@ -1801,6 +1820,10 @@ def _admit_by_cash_replay(
         }
         if financing:
             row["amount_measurement"] = DAY_BALANCE_DERIVED
+            if not margin:
+                # a retirement account's settled debit: the precedent statements print
+                # "No margin interest was charged", so the day is stated interest-free
+                row["interest_bearing"] = False
         if debits_only:
             drop_row(current)
         rows.append(row)
@@ -2583,7 +2606,11 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
         for p in artifact.get("printed_range_days", [])
     }
     for row in artifact["rows"]:
-        optional = {"amount_measurement", "printed_margin_loan_trade_date"}
+        optional = {
+            "amount_measurement",
+            "interest_bearing",
+            "printed_margin_loan_trade_date",
+        }
         if not isinstance(row, dict) or not (keys <= set(row) <= keys | optional):
             raise ZeroFinancingError("zero-financing row keys differ")
         financing = row.get("classification") == FINANCING_CLASSIFICATION
@@ -2592,6 +2619,12 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
             and row["amount_measurement"] not in (RANGE_AVERAGE, DAY_BALANCE_DERIVED)
         ):
             raise ZeroFinancingError("financing-day row must declare RANGE_AVERAGE")
+        if "interest_bearing" in row and (
+            row["interest_bearing"] is not False or not financing
+        ):
+            raise ZeroFinancingError(
+                "interest_bearing may only state False on a financing day"
+            )
         try:
             date.fromisoformat(row["as_of_date"])
         except (TypeError, ValueError) as exc:
