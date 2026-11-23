@@ -149,9 +149,24 @@ def test_a_position_without_an_official_close_of_the_day_is_refused(
         _apply(doc, _rolled({"AAA": "10", "YYY": "7"}), closes)
 
 
-def test_ambiguous_position_row_shapes_are_refused(tmp_path: Path) -> None:
-    doc = _doc(equity=[_row("AAA", "10"), _row("CCC", "5", extraField=1)])
-    with pytest.raises(nd.DeriveError, match="different shapes"):
+def test_a_field_some_rows_of_the_group_lack_is_not_copied(tmp_path: Path) -> None:
+    doc = _doc(equity=[_row("AAA", "10"), _row("CCC", "5", optionalOnlyHere=1)])
+    out, _z, _flags = _apply(
+        doc,
+        _rolled({"AAA": "10", "CCC": "5", "ZZZ": "7"}),
+        _closes(tmp_path, {"ZZZ": "3"}),
+    )
+    rows = out["accounts"][0]["groupedPositions"][0]["holdingsRows"]
+    assert "optionalOnlyHere" not in next(r for r in rows if r["dataSymbol"] == "ZZZ")
+
+
+def test_a_group_whose_rows_do_not_all_carry_quantity_price_and_symbol_is_refused(
+    tmp_path: Path,
+) -> None:
+    broken = _row("CCC", "5")
+    del broken["price"]
+    doc = _doc(equity=[_row("AAA", "10"), broken])
+    with pytest.raises(nd.DeriveError, match="shape of its row is ambiguous"):
         _apply(
             doc,
             _rolled({"AAA": "10", "CCC": "5", "ZZZ": "7"}),

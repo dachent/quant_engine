@@ -386,8 +386,8 @@ def _derived_row(
 
     The row goes into the account's only position group, or, when it has several, into the group
     an earlier governed capture put the same symbol of the same account in (``classification``);
-    without that it refuses. Every row of that group must have the same set of fields (the shape is
-    then not ambiguous). The row carries only the symbol, the rolled-back quantity and the official
+    without that it refuses. The row takes the fields common to every row of that group, which must include
+    the quantity, price and symbol fields. The row carries only the symbol, the rolled-back quantity and the official
     close; every value field of the sibling is blanked. Returns the row, its flag and its group.
     """
 
@@ -427,14 +427,19 @@ def _derived_row(
         raise DeriveError(
             f"{internal}: {symbol} was held at the close but its group has no row to take a shape from"
         )
-    shapes = {frozenset(_mapping(r, "holdings row")) for r in rows}
-    if len(shapes) != 1:
+    # the fields every row of the group carries: the provider adds optional fields to some rows
+    # only, so the derived row takes exactly the common ones (and refuses when one the reader
+    # needs is not common to all)
+    common = frozenset.intersection(
+        *(frozenset(_mapping(r, "holdings row")) for r in rows)
+    )
+    if not {"qty", "price"} <= common or not ({"dataSymbol", "symbol"} & common):
         raise DeriveError(
-            f"{internal}: {symbol} was held at the close but the rows of its group have "
-            "different shapes, so the shape of its row is ambiguous"
+            f"{internal}: {symbol} was held at the close but the rows of its group do not all "
+            "carry the quantity, price and symbol fields, so the shape of its row is ambiguous"
         )
-    template = _mapping(_list(group.get("holdingsRows"), "holdings rows")[0], "row")
-    row = copy.deepcopy(dict(template))
+    template = _mapping(rows[0], "row")
+    row = {k: copy.deepcopy(v) for k, v in template.items() if k in common}
     for key in _DERIVED_ROW_BLANKED:
         if key in row:
             row[key] = None
