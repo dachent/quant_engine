@@ -15,6 +15,7 @@ import sys
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
+from quant_engine.core import timed_stage
 from quant_engine.core import (
     GenerationBundle,
     GenerationFileIdentity,
@@ -4968,7 +4969,8 @@ def stage_account_manifest_generation(
             "selected generation code differs from executing bytes"
         )
 
-    subjects = dict(build_account_manifest_payloads(selected_inputs))
+    with timed_stage("account_manifest_build"):
+        subjects = dict(build_account_manifest_payloads(selected_inputs))
     expected_subject_paths = _generation_artifact_paths(selected_inputs)
     if set(subjects) != set(expected_subject_paths):
         raise AccountAssignmentPerimeterError("generated subject path set is invalid")
@@ -5009,7 +5011,8 @@ def stage_account_manifest_generation(
             else {}
         ),
     )
-    report = verifier_type().verify(verifier_inputs, subjects)
+    with timed_stage("account_manifest_verify"):
+        report = verifier_type().verify(verifier_inputs, subjects)
     if type(report) is not bytes:
         raise AccountAssignmentPerimeterError(
             "independent verifier did not return exact report bytes"
