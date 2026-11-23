@@ -431,21 +431,21 @@ def test_the_tool_carries_no_real_id_or_absolute_path() -> None:
     assert "qe-p2" not in text and "worktrees" not in text
 
 
-def _load_pre_chain_module() -> Any:
+def _load_pre_chain_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("_release_pre_chain_under_test", TOOL)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     return module
 
 
 def test_a_revised_bundle_must_be_staged_with_its_producer_sidecar(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    module = _load_pre_chain_module()
+    module = _load_pre_chain_module(monkeypatch)
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"qsi_source_revision": {}}), encoding="utf-8")
     with pytest.raises(module.PreChainError, match="sidecar is absent"):
