@@ -216,6 +216,7 @@ class Fit:
     rank_status: str
     constraint: str
     ridge: str
+    data_sha256: str
 
 
 @dataclass(frozen=True)
@@ -228,6 +229,7 @@ class DynamicFit:
     rank_status: str
     smoothness: str
     ridge: str
+    data_sha256: str
 
 
 def _strict_keys(value: Mapping[str, Any], expected: set[str], name: str) -> None:
@@ -1577,6 +1579,7 @@ def _fit(
             status,
             constraint,
             _identity_number(ridge),
+            _data_digest(matrix, target),
         )
 
     centered_matrix = matrix - np.mean(matrix, axis=0)
@@ -1606,6 +1609,7 @@ def _fit(
         "CONSTRAINED_SIMPLEX",
         constraint,
         _identity_number(ridge),
+        _data_digest(matrix, target),
     )
 
 
@@ -1947,6 +1951,7 @@ def _dynamic_fit(
         rank_status=rank_status,
         smoothness=_identity_number(smoothness),
         ridge=_identity_number(ridge),
+        data_sha256=_data_digest(matrix, target),
     )
 
 
@@ -1970,6 +1975,7 @@ def _dynamic_loo_score(
     if fit is not None and (
         fit.smoothness != _identity_number(smoothness)
         or fit.ridge != _identity_number(ridge)
+        or fit.data_sha256 != _data_digest(matrix, target)
     ):
         # A retained fit made with other parameters than these is never reused.
         fit = None
@@ -2051,6 +2057,16 @@ def _identity_number(value: float) -> str:
     return float(value).hex()
 
 
+def _data_digest(matrix: FloatArray, target: FloatArray) -> str:
+    """The exact bytes a fit was solved on."""
+
+    digest = hashlib.sha256()
+    for array in (matrix, target):
+        digest.update(repr(array.shape).encode())
+        digest.update(np.ascontiguousarray(array, dtype=np.float64).tobytes())
+    return digest.hexdigest()
+
+
 def _consumed_producer_identity() -> dict[str, str]:
     """Hash only the local bytes the decomposition producer actually consumes."""
 
@@ -2079,6 +2095,7 @@ _FIT_CACHE_ROOTS: Final = (
     "_fit_from_cache",
     "_benchmark_fit",
     "_cached_fit_parameters",
+    "_data_digest",
 )
 _NUMERIC_STACK: Final = ("numpy", "scipy", "scikit-learn")
 
@@ -2348,6 +2365,7 @@ def _dynamic_fit_to_cache(fit: DynamicFit) -> dict[str, object]:
         "rank_status": fit.rank_status,
         "ridge": fit.ridge,
         "smoothness": fit.smoothness,
+        "data_sha256": fit.data_sha256,
     }
 
 
@@ -2355,6 +2373,7 @@ def _dynamic_fit_from_cache(
     value: object, expected_shape: tuple[int, int]
 ) -> DynamicFit | None:
     if not isinstance(value, dict) or set(value) != {
+        "data_sha256",
         "exposures",
         "fitted",
         "intercept",
@@ -2380,6 +2399,7 @@ def _dynamic_fit_from_cache(
         or not isinstance(value["rank_status"], str)
         or not isinstance(value["ridge"], str)
         or not isinstance(value["smoothness"], str)
+        or not isinstance(value["data_sha256"], str)
     ):
         return None
     return DynamicFit(
@@ -2389,6 +2409,7 @@ def _dynamic_fit_from_cache(
         rank_status=value["rank_status"],
         smoothness=value["smoothness"],
         ridge=value["ridge"],
+        data_sha256=value["data_sha256"],
     )
 
 
@@ -2400,12 +2421,14 @@ def _fit_to_cache(fit: Fit) -> dict[str, object]:
         "rank": fit.rank,
         "rank_status": fit.rank_status,
         "ridge": fit.ridge,
+        "data_sha256": fit.data_sha256,
     }
 
 
 def _fit_from_cache(value: object, factor_count: int) -> Fit | None:
     if not isinstance(value, dict) or set(value) != {
         "constraint",
+        "data_sha256",
         "exposures",
         "intercept",
         "rank",
@@ -2426,6 +2449,7 @@ def _fit_from_cache(value: object, factor_count: int) -> Fit | None:
         or not isinstance(value["rank_status"], str)
         or not isinstance(value["constraint"], str)
         or not isinstance(value["ridge"], str)
+        or not isinstance(value["data_sha256"], str)
     ):
         return None
     return Fit(
@@ -2435,6 +2459,7 @@ def _fit_from_cache(value: object, factor_count: int) -> Fit | None:
         rank_status=value["rank_status"],
         constraint=value["constraint"],
         ridge=value["ridge"],
+        data_sha256=value["data_sha256"],
     )
 
 
@@ -2453,6 +2478,7 @@ def _benchmark_fit(
         fit is None
         or fit.constraint != constraint
         or fit.ridge != _identity_number(ridge)
+        or fit.data_sha256 != _data_digest(matrix, target)
     ):
         fit = _fit(matrix, target, constraint=constraint, ridge=ridge)
     return fit

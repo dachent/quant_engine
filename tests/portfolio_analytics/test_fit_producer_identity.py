@@ -320,3 +320,57 @@ def test_the_walk_follows_unpacked_conditional_augmented_and_async_names(
         assert (
             decomposition._fit_source_identity(template.format(**changed)) != reference
         ), name
+
+
+def _wrap_arrays(monkeypatch: pytest.MonkeyPatch, name: str, position: int) -> None:
+    """Mimic an edit that hands the fit other arrays than the ones the key hashed."""
+
+    real = getattr(decomposition, name)
+
+    def changed(*args: Any, **kwargs: Any) -> Any:
+        edited = list(args)
+        edited[position] = edited[position] * 2.0
+        edited[position + 1] = edited[position + 1] * 2.0
+        return real(*edited, **kwargs)
+
+    monkeypatch.setattr(decomposition, name, changed)
+
+
+@pytest.mark.parametrize(
+    ("function", "position", "expect"),
+    [
+        ("_dynamic_loo_score", 0, "dynamic"),
+        ("_benchmark_fit", 1, "static"),
+    ],
+    ids=["M-d-dynamic-arrays", "M-h-static-arrays"],
+)
+def test_a_fit_made_on_other_arrays_is_a_miss_not_a_stale_hit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    work: Any,
+    function: str,
+    position: int,
+    expect: str,
+) -> None:
+    spec, source_root, retained, out = _first_run_then_new_result_key(
+        tmp_path, monkeypatch, work
+    )
+    _wrap_arrays(monkeypatch, function, position)
+    decomposition.stage_candidate(spec, source_root, out, retained_cache_root=retained)
+    assert (work.dynamic_fits if expect == "dynamic" else work.static_fits) > 0
+
+
+def test_a_retained_fit_without_its_data_digest_is_refused() -> None:
+    import numpy as np
+
+    matrix = np.arange(12.0).reshape(6, 2) ** 0.5
+    target = np.linspace(0.0, 1.0, 6)
+    static = decomposition._fit(matrix, target, constraint="UNCONSTRAINED", ridge=1e-10)
+    dynamic = decomposition._dynamic_fit(matrix, target, smoothness=1e-3, ridge=1e-10)
+    stored_static = decomposition._fit_to_cache(static)
+    stored_dynamic = decomposition._dynamic_fit_to_cache(dynamic)
+    assert decomposition._fit_from_cache(stored_static, 2) is not None
+    assert decomposition._dynamic_fit_from_cache(stored_dynamic, (6, 2)) is not None
+    del stored_static["data_sha256"], stored_dynamic["data_sha256"]
+    assert decomposition._fit_from_cache(stored_static, 2) is None
+    assert decomposition._dynamic_fit_from_cache(stored_dynamic, (6, 2)) is None
