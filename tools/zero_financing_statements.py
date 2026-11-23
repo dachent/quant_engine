@@ -1801,6 +1801,10 @@ def _admit_by_cash_replay(
         }
         if financing:
             row["amount_measurement"] = DAY_BALANCE_DERIVED
+            if not margin:
+                # a retirement account's settled debit: the precedent statements print
+                # "No margin interest was charged", so the day is stated interest-free
+                row["interest_bearing"] = False
         if debits_only:
             drop_row(current)
         rows.append(row)
@@ -2583,7 +2587,11 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
         for p in artifact.get("printed_range_days", [])
     }
     for row in artifact["rows"]:
-        optional = {"amount_measurement", "printed_margin_loan_trade_date"}
+        optional = {
+            "amount_measurement",
+            "interest_bearing",
+            "printed_margin_loan_trade_date",
+        }
         if not isinstance(row, dict) or not (keys <= set(row) <= keys | optional):
             raise ZeroFinancingError("zero-financing row keys differ")
         financing = row.get("classification") == FINANCING_CLASSIFICATION
@@ -2592,6 +2600,10 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
             and row["amount_measurement"] not in (RANGE_AVERAGE, DAY_BALANCE_DERIVED)
         ):
             raise ZeroFinancingError("financing-day row must declare RANGE_AVERAGE")
+        if "interest_bearing" in row and (
+            row["interest_bearing"] is not False or not financing
+        ):
+            raise ZeroFinancingError("interest_bearing may only state False on a financing day")
         try:
             date.fromisoformat(row["as_of_date"])
         except (TypeError, ValueError) as exc:

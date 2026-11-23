@@ -30,6 +30,14 @@ FACILITIES: Final = frozenset(
 STATES: Final = ("LEVERED", "INCIDENTAL_DEBIT", "NOT_LEVERED")
 _ACCOUNT_ID = re.compile(r"^account-[0-9a-f]{16}$")
 _KEYS = {"account_id", "scope", "facility", "verification", "evidence_ref"}
+# Optional per-account statement that a settled debit bears no interest because of the
+# account type (a retirement account: no margin loan, so a settlement float is not borrowing),
+# with the precedent statements.  ``classify`` reads it with the producer's per-day
+# ``interest_bearing: false``; neither alone is enough.
+# the owner's ruling (#894): such an account is its own state, not LEVERED.
+SETTLED_DEBIT_INTEREST_NONE: Final = "NONE_BY_ACCOUNT_TYPE"
+SETTLED_DEBIT_NO_INTEREST: Final = "SETTLED_DEBIT_NO_INTEREST"  # the state reason
+_OPTIONAL_KEYS = {"settled_debit_interest", "settled_debit_interest_refs"}
 _DAY = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$")
 
 
@@ -65,6 +73,8 @@ class Declared:
     facility: str
     verified: bool
     evidence_ref: str
+    settled_debit_interest: str | None = None
+    settled_debit_interest_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -84,6 +94,9 @@ class DebitEvidence:
     # Debit days whose amount is a statement range average (disclosed estimate, never a
     # day balance); a subset of ``net_base_debit_days``.
     range_average_debit_days: int = 0
+    # Debit days a producer states as interest-free (``interest_bearing: false``, emitted
+    # only for a retirement account's settled debit); a subset of ``net_base_debit_days``.
+    interest_free_debit_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -114,8 +127,23 @@ def load_declaration(raw: bytes) -> dict[str, Declared]:
         raise FinancingDeclarationError("declaration identity or shape is invalid")
     out: dict[str, Declared] = {}
     for row in top["accounts"]:
-        if not isinstance(row, dict) or set(row) != _KEYS:
+        if not isinstance(row, dict) or not _KEYS <= set(row) <= _KEYS | _OPTIONAL_KEYS:
             raise FinancingDeclarationError("an account row has the wrong keys")
+        interest = row.get("settled_debit_interest")
+        refs = row.get("settled_debit_interest_refs", [])
+        if ("settled_debit_interest" in row) != ("settled_debit_interest_refs" in row) or (
+            "settled_debit_interest" in row
+            and (
+                interest != SETTLED_DEBIT_INTEREST_NONE
+                or not isinstance(refs, list)
+                or not refs
+                or not all(isinstance(r, str) and r.strip() for r in refs)
+                or row.get("facility") != "NO_MARGIN_FACILITY"
+            )
+        ):
+            raise FinancingDeclarationError(
+                f"settled_debit_interest is invalid: {row.get('account_id')!r}"
+            )
         account = row["account_id"]
         if (
             not isinstance(account, str)
@@ -138,6 +166,8 @@ def load_declaration(raw: bytes) -> dict[str, Declared]:
             row["facility"],
             row["verification"] == "VERIFIED",
             row["evidence_ref"],
+            interest,
+            tuple(refs),
         )
     return out
 
@@ -148,6 +178,13 @@ def classify(
     accounts: Iterable[str],
 ) -> dict[str, AccountState]:
     """The state of every named account.
+
+    A ``NO_MARGIN_FACILITY`` account whose declaration (verified) says ``settled_debit_interest:
+    NONE_BY_ACCOUNT_TYPE`` and whose every net debit day is stated interest-free by the
+    producer (``interest_bearing: false``, with no interest posting) is ``INCIDENTAL_DEBIT``
+    with reason ``SETTLED_DEBIT_NO_INTEREST`` and no conflict (owner ruling, #894): a
+    retirement account's settlement float is not borrowing.  A margin account's debit days
+    carry no such statement, so they still make it LEVERED.
 
     A ``NO_MARGIN_FACILITY`` account that shows a net base debit or a debit-interest
     posting is a conflict.  An account the declaration does not name raises.
@@ -162,7 +199,16 @@ def classify(
             )
         seen = evidence.get(account, DebitEvidence())
         conflicts: list[str] = []
-        if seen.net_base_debit_days:
+        if (
+            row.verified
+            and row.facility == "NO_MARGIN_FACILITY"
+            and row.settled_debit_interest == SETTLED_DEBIT_INTEREST_NONE
+            and seen.net_base_debit_days
+            and seen.interest_free_debit_days >= seen.net_base_debit_days
+            and not seen.debit_interest_postings
+        ):
+            state, reason = "INCIDENTAL_DEBIT", SETTLED_DEBIT_NO_INTEREST
+        elif seen.net_base_debit_days:
             state, reason = "LEVERED", "NET_BASE_CASH_NEGATIVE"
             if seen.range_average_debit_days >= seen.net_base_debit_days:
                 reason = "OBSERVED_FINANCING_DAYS_RANGE_AVERAGE"

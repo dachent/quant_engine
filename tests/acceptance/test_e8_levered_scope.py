@@ -125,3 +125,76 @@ def test_a_not_levered_row_with_a_foreign_or_conflicted_reason_does_not_narrow(
         _state("B2", "NOT_LEVERED"),
     )
     assert _uncovered_accounts(found) == {"A1", "B1"}
+
+
+SETTLED = "SETTLED_DEBIT_NO_INTEREST"
+
+
+def test_a_settled_debit_no_interest_account_leaves_the_check_like_not_levered(tmp_path):
+    """Owner ruling (#894): a retirement settlement float is not borrowing; the one exception
+    to the rule that INCIDENTAL_DEBIT stays applicable."""
+
+    found = _e8(
+        tmp_path,
+        _state("A1", "INCIDENTAL_DEBIT", SETTLED),
+        _state("B1", "NOT_LEVERED"),
+        _state("B2", "NOT_LEVERED"),
+    )
+    assert found == []
+
+
+def test_only_the_exact_settled_debit_state_leaves_the_check(tmp_path):
+    found = _e8(
+        tmp_path,
+        _state("A1", "INCIDENTAL_DEBIT", SETTLED),
+        _state("B1", "INCIDENTAL_DEBIT"),  # an incidental debit with another reason stays
+        _state("B2", "LEVERED", SETTLED),  # the reason belongs to INCIDENTAL_DEBIT only
+    )
+    assert _uncovered_accounts(found) == {"B1", "B2"}
+
+
+def test_a_margin_accounts_debit_makes_it_levered_and_applicable(tmp_path):
+    found = _e8(
+        tmp_path,
+        _state("A1", "INCIDENTAL_DEBIT", SETTLED),
+        _state("B1", "LEVERED", "NET_BASE_CASH_NEGATIVE"),
+        _state("B2", "NOT_LEVERED"),
+    )
+    assert _uncovered_accounts(found) == {"B1"}
+
+
+def test_the_state_does_not_borrow_the_not_levered_reasons(tmp_path):
+    found = _e8(
+        tmp_path,
+        _state("A1", "INCIDENTAL_DEBIT", "DECLARED_NO_MARGIN_AND_NO_DEBIT_EVIDENCE"),
+        _state("B1", "NOT_LEVERED"),
+        _state("B2", "NOT_LEVERED"),
+    )
+    assert _uncovered_accounts(found) == {"A1"}
+
+
+def test_a_conflicted_or_unverified_settled_debit_state_does_not_narrow(tmp_path):
+    found = _e8(
+        tmp_path,
+        _state("A1", "INCIDENTAL_DEBIT", SETTLED + ";CONFLICT=X"),
+        _state("B1", "INCIDENTAL_DEBIT", SETTLED + ";VERIFICATION=UNVERIFIED"),
+        _state("B2", "NOT_LEVERED"),
+    )
+    assert _uncovered_accounts(found) == {"A1", "B1"}
+
+
+def test_an_unavailable_settled_debit_state_row_does_not_narrow(tmp_path):
+    def mutate(report):
+        report["leverage_disclosures"].append(
+            {
+                "account_id": "A1",
+                "strategy_id": None,
+                **STATE,
+                "classification": "INCIDENTAL_DEBIT",
+                "coverage_status": "OBSERVED_UNRECONCILED",
+                "coverage_reason": SETTLED,
+            }
+        )
+
+    found = _e8(tmp_path, mutate, _state("B1", "NOT_LEVERED"), _state("B2", "NOT_LEVERED"))
+    assert _uncovered_accounts(found) == {"A1"}

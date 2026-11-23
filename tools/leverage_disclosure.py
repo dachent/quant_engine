@@ -199,6 +199,7 @@ def _debit_evidence(
         if r.get("classification") == "NET_CASH_DEBIT_BALANCE" and _amount(r) is None
     )
     range_days: set[str] = set()
+    free_days: set[str] = set()
     observed = {r["as_of_date"] for r in base if _amount(r) is not None}
     # Generic provider-observed financing day (any provider): ``amount`` is the provider's
     # borrowed balance for the day (never negative).  Exactly 0 is an observed zero day; a
@@ -233,6 +234,8 @@ def _debit_evidence(
                 # the amount is a statement range average: a disclosed estimate that is
                 # never read as a day balance (borrowed_principal ignores these rows)
                 range_days.add(day.isoformat())
+            if r.get("interest_bearing") is False:
+                free_days.add(day.isoformat())
         else:
             observed.add(day.isoformat())
     currency_days = {
@@ -259,6 +262,7 @@ def _debit_evidence(
         unobserved_days=_unobserved_days(nav_days, known_days, cutoff),
         net_base_debit_days=len(base_days),
         range_average_debit_days=len(range_days & base_days),
+        interest_free_debit_days=len(free_days & base_days),
         debit_interest_postings=postings,
         currency_debit_days=len(currency_days),
         unreadable_debit_rows=unreadable,
@@ -414,6 +418,11 @@ def account_financing_rows(
             )
         )
         if state.state == "NOT_LEVERED" and not state.conflicts:
+            continue
+        if state.reason == account_financing.SETTLED_DEBIT_NO_INTEREST:
+            # owner ruling (#894): a retirement account's interest-free settled debit is its
+            # own state; the state row (and the debit days, which the panel shows) is the
+            # disclosure, no cost or exposure row is owed
             continue
         mapped_days = sorted(
             {

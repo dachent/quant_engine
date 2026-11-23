@@ -9024,9 +9024,11 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
         reference = universe(ctx)
         # E8 scope (#894/#895): the check applies to levered accounts. An account is
         # outside it only when the report itself states ACCOUNT_FINANCING_STATE rows for
-        # it and every one reads NOT_LEVERED; an account with no state row, a LEVERED or
-        # INCIDENTAL_DEBIT one, or an unreadable classification stays applicable, so a
-        # missing declaration never narrows the check.
+        # it and every one reads NOT_LEVERED, or INCIDENTAL_DEBIT for the reason
+        # SETTLED_DEBIT_NO_INTEREST (a retirement settlement float, owner ruling); an
+        # account with no state row, a LEVERED or any other INCIDENTAL_DEBIT one, or an
+        # unreadable classification stays applicable, so a missing declaration never
+        # narrows the check.
         not_levered = {
             account
             for account in {
@@ -9036,12 +9038,19 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
                 and row.get("measurement_basis") == "ACCOUNT_FINANCING_STATE"
             }
             if all(
-                row.get("classification") == "NOT_LEVERED"
+                (
+                    row.get("classification") == "NOT_LEVERED"
+                    or (
+                        row.get("classification") == "INCIDENTAL_DEBIT"
+                        and str(row.get("coverage_reason")).split(";")[0]
+                        == "SETTLED_DEBIT_NO_INTEREST"
+                    )
+                )
                 and is_available(row.get("coverage_status"))
                 and "UNVERIFIED" not in str(row.get("coverage_reason"))
                 and "CONFLICT" not in str(row.get("coverage_reason"))
                 and str(row.get("coverage_reason")).split(";")[0]
-                in _NOT_LEVERED_EVIDENCE_REASONS
+                in _NOT_LEVERED_EVIDENCE_REASONS | _SETTLED_DEBIT_REASONS
                 for row in disclosures
                 if str(row.get("account_id")) == account
                 and row.get("data_class") == "ACCOUNT_FINANCING"
@@ -9113,6 +9122,11 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
 
 # The only reasons under which a producer's NOT_LEVERED may narrow E8: the declaration
 # plus observed cash days showing no debit (tools/account_financing.classify).
+# Owner ruling (#894): a retirement account's interest-free settled debit (the producer's
+# INCIDENTAL_DEBIT / SETTLED_DEBIT_NO_INTEREST state, declared NONE_BY_ACCOUNT_TYPE) is not
+# borrowing, so it leaves E8 scope like NOT_LEVERED: the one exception to the rule that an
+# INCIDENTAL_DEBIT account stays applicable.  Any other INCIDENTAL_DEBIT still does.
+_SETTLED_DEBIT_REASONS = frozenset({"SETTLED_DEBIT_NO_INTEREST"})
 _NOT_LEVERED_EVIDENCE_REASONS = frozenset(
     {
         "MARGIN_AVAILABLE_UNUSED_NO_DEBIT_EVIDENCE",

@@ -5,12 +5,14 @@ balance to the cent.  A debit day is a financing day at its exact settled balanc
 that does not close, or is not covered by the rule, stays unobserved."""
 
 from __future__ import annotations
-
+import pytest
 import hashlib
 import json
 from datetime import date
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 import zero_financing_statements as zf
 
@@ -604,3 +606,54 @@ def test_a_retirement_replay_that_does_not_close_leaves_the_published_zero_rows(
         "reason": "CAPTURE_CASH_REPLAY_DOES_NOT_CLOSE",
     }
     assert {r["classification"] for r in artifact["rows"]} == {zf.CLASSIFICATION}
+
+
+def test_only_a_retirement_settled_debit_day_states_it_is_interest_free(tmp_path: Path) -> None:
+    """The field the disclosure's owner-gated exemption reads: emitted by the retirement
+    cash-replay path on financing days only, never inferred from the amount measurement."""
+
+    rows = [trade("2026-04-02", "2026-04-03", "-150.00")]
+    artifact = _build(
+        tmp_path,
+        margin=False,
+        raw=_capture(tmp_path, rows, live_cash="-50.00", retirement_loan=50.0),
+    )
+    days = _rows(artifact, "2026-04-01")
+    for day, row in days.items():
+        if row["classification"] == zf.FINANCING_CLASSIFICATION:
+            assert row["interest_bearing"] is False, day
+        else:
+            assert "interest_bearing" not in row, day
+    zf.validate_rows(artifact, {ACCOUNT})
+
+
+def test_a_margin_accounts_debit_day_never_states_it_is_interest_free(tmp_path: Path) -> None:
+    rows = [
+        trade("2026-03-31", "2026-04-03", "-150.00"),
+        trade("2026-04-03", "2026-04-06", "100.00", action="Sell"),
+    ]
+    artifact = _build(
+        tmp_path, margin=True, raw=_capture(tmp_path, rows, live_cash="50.00")
+    )
+    financing = [r for r in artifact["rows"] if r["classification"] == zf.FINANCING_CLASSIFICATION]
+    assert financing  # the margin debit day exists, and it is not stated interest-free
+    assert all("interest_bearing" not in r for r in artifact["rows"])
+
+
+def test_validate_rows_accepts_interest_bearing_false_on_a_financing_day_only(tmp_path: Path) -> None:
+    rows = [trade("2026-04-02", "2026-04-03", "-150.00")]
+    artifact = _build(
+        tmp_path,
+        margin=False,
+        raw=_capture(tmp_path, rows, live_cash="-50.00", retirement_loan=50.0),
+    )
+    import copy
+
+    financing = next(r for r in artifact["rows"] if r["classification"] == zf.FINANCING_CLASSIFICATION)
+    zero = next(r for r in artifact["rows"] if r["classification"] == zf.CLASSIFICATION)
+    for row, value in ((financing, True), (financing, "false"), (zero, False)):
+        broken = copy.deepcopy(artifact)
+        target = next(r for r in broken["rows"] if r["as_of_date"] == row["as_of_date"])
+        target["interest_bearing"] = value
+        with pytest.raises(zf.ZeroFinancingError, match="interest_bearing"):
+            zf.validate_rows(broken, {ACCOUNT})
