@@ -38,8 +38,10 @@ without preserving stale calculations or hard-coded operator conclusions.
   verifier validates the closed object and accounts for the three strategies as
   causal, policy-unavailable or stale.
 - The governed PORT-HWM-4 number appears as `advisory.hwm_candidate`, labelled
-  as pending owner acceptance with the E2 reason. The numeric HWM status stays
-  not accepted and `hwm_summary` is unchanged.
+  as pending owner acceptance, or as owner accepted when the owner's hashed record
+  (`contracts/portfolio-hwm-owner-acceptance-v1.json`) covers exactly that index and its
+  missing daily points; a changed index or gap set reads pending. `hwm_summary` is
+  computed by its own gates and is not overridden by the acceptance.
 - The numerical HWM composite (the `hwm_inputs` envelope) is reconciled
   against the governed baseline generation, never against the report's
   carried copies: the panel requires the baseline root (`--baseline-root`),

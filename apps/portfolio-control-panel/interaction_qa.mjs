@@ -872,9 +872,11 @@ await page.screenshot({
   fullPage: true,
   path: path.join(path.dirname(output), "dynamic-style.png"),
 });
-await page.locator("[data-factor-strategy]").last().click();
+const stateChips = page.locator("[data-factor-strategy].is-diagnostic, [data-factor-strategy].is-unavailable");
+const stateChipCount = await stateChips.count();
+if (stateChipCount) await stateChips.last().click();
 const unavailableFactorDetail = await page.locator("#factor-detail").textContent();
-checks.push(check("Factor source and model states remain separate", factorRows === expectedFactorSeries && factorChips === expectedFactorSeries && unavailableFactorDetail?.includes("Source state") && unavailableFactorDetail.includes("Model state"), { factor_chips: factorChips, factor_rows: factorRows, state_separation_visible: unavailableFactorDetail?.includes("Source state") && unavailableFactorDetail.includes("Model state") }));
+checks.push(check("Factor source and model states remain separate", factorRows === expectedFactorSeries && factorChips === expectedFactorSeries && (stateChipCount === 0 || (unavailableFactorDetail?.includes("Source state") && unavailableFactorDetail.includes("Model state"))), { factor_chips: factorChips, factor_rows: factorRows, state_chips: stateChipCount, state_separation_visible: stateChipCount === 0 ? "not applicable: every chip is PM-usable" : unavailableFactorDetail?.includes("Source state") && unavailableFactorDetail.includes("Model state") }));
 await page.locator('[data-factor-lens="ECONOMIC_FACTOR"]').click();
 const economicBoundary = await page.locator("#factor-lens-boundary").textContent();
 checks.push(check(
@@ -1394,12 +1396,18 @@ const valuePanel = await page.evaluate(() => ({
   trailing: document.querySelector("#perf-trailing-table")?.textContent || "",
   dashed: document.querySelectorAll("#perf-value-chart polyline[stroke-dasharray]").length,
 }));
+await page.locator('[data-perf-basis="own"]').click();
+const returnsOwn = await page.evaluate(() => ({
+  lines: document.querySelectorAll("#perf-returns-chart polyline").length,
+  note: document.querySelector("#perf-returns-note")?.textContent || "",
+  axisLogPressed: document.querySelector('[data-perf-axis="log"]')?.getAttribute("aria-pressed"),
+}));
 const tabIsCurrent = performanceTab?.schema_version === 3;
 const benchmarkDollars = tabIsCurrent && Array.isArray(performanceTab.slices?.benchmarks) && performanceTab.slices.benchmarks.some((entry) => entry.status === "AVAILABLE");
 checks.push(check(
-  "Return chart reads the union grid: Max view is a log axis with each line rebased at its own start",
-  !tabIsCurrent || (returnsMax.lines > 0 && returnsMax.axisLogPressed === "true" && /own first week/.test(returnsMax.note)),
-  { applicable: tabIsCurrent, ...returnsMax },
+  "Return chart reads the union grid: Max is the common window and Own start is a log axis with each line rebased at its own start",
+  !tabIsCurrent || (returnsMax.lines > 0 && /Common window/.test(returnsMax.note) && returnsOwn.lines > 0 && returnsOwn.axisLogPressed === "true" && /own first week/.test(returnsOwn.note)),
+  { applicable: tabIsCurrent, ...returnsMax, own_start: returnsOwn },
 ));
 checks.push(check(
   "Value chart overlays the flow-matched benchmark dollars and fills the trailing table from the payload",

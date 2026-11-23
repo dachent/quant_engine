@@ -119,6 +119,8 @@ class StressComponent:
     series_id: str
     allocation_weight: float
     adverse_loss_fraction: float
+    # inputs of the rule that computed the loss; absent for a hand-written spec
+    adverse_loss_basis: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -333,9 +335,15 @@ def _implementation_mapping(
 def _stress_component(value: Mapping[str, Any], index: int) -> StressComponent:
     name = f"correlation_one.components[{index}]"
     _strict_keys(
-        value, {"adverse_loss_fraction", "allocation_weight", "series_id"}, name
+        {key: item for key, item in value.items() if key != "adverse_loss_basis"},
+        {"adverse_loss_fraction", "allocation_weight", "series_id"},
+        name,
     )
+    basis = value.get("adverse_loss_basis")
+    if basis is not None and not isinstance(basis, dict):
+        raise CorrelationError(f"{name}.adverse_loss_basis must be an object")
     return StressComponent(
+        adverse_loss_basis=cast("dict[str, Any] | None", basis),
         series_id=_text(value["series_id"], f"{name}.series_id"),
         allocation_weight=_bounded(
             value["allocation_weight"],
@@ -1570,7 +1578,7 @@ def _dependence_payload(
     difference = loss - spec.expected_correlation_one_loss
     if abs(difference) > spec.correlation_one_tolerance:
         raise CorrelationError(
-            "correlation-one stress does not reconcile to declared conservative loss"
+            "correlation-one stress does not reconcile to the declared adverse loss"
         )
     stress_contributions = [
         {
@@ -1581,6 +1589,11 @@ def _dependence_payload(
             ),
             "classification": "CONCEPTUAL_STRESS_BOUND_NOT_EXPECTATION",
             "conservative_loss_fraction": _number(item.adverse_loss_fraction),
+            **(
+                {"adverse_loss_basis": item.adverse_loss_basis}
+                if item.adverse_loss_basis is not None
+                else {}
+            ),
             "evidence_layer": "CONCEPTUAL_STRESS",
             "loss_contribution": _number(
                 item.allocation_weight * item.adverse_loss_fraction

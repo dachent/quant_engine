@@ -2081,14 +2081,15 @@ def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged
     )
     # D6/D1/N29 added the strategy MWR fields (36036 - 34412 = 1624 bytes); the
     # paired test below undoes them and reproduces cfb1ab00....
-    assert len(previous) == 36036
+    # +27 = the PROVIDER_COVERAGE row's typed "structural_boundaries": [] list (PR 977).
+    assert len(previous) == 36063
     assert hashlib.sha256(previous).hexdigest() == (
-        "f5a865e31e434e6ae28f3c51afcd94a2b63f660b14e1c9fc37c2a9fcf6924912"
+        "eeda3c1b769375a0761dc6e54c74612026483bb6c0425da6a24aed7e4371846b"
     )
-    assert len(content) == 36317
+    assert len(content) == 36344
     assert (
         hashlib.sha256(content).hexdigest()
-        == "d3893d32428d9311bc0fc4c37da010d8ca43110fbc2166b8d942184aa91f7f59"
+        == "fca7981d4c21c5400e5d41c75827641155f0c2f4c777f6545427c97504c6f876"
     )
 
 
@@ -2166,7 +2167,8 @@ def test_undoing_exactly_the_current_capital_labels_reproduces_the_v1_bytes(
         assert content.count(current.encode()) >= 1
         content = content.replace(current.encode(), recorded.encode())
 
-    assert len(content) == 31543
+    # +27 = the PROVIDER_COVERAGE row's typed "structural_boundaries": [] list (PR 977).
+    assert len(content) == 31570
     assert hashlib.sha256(content).hexdigest() == (
-        "cfb1ab0012f918cd500cf662b8c682302ca5f28a1b1dd56eaf8048c16ae91b78"
+        "e91034d96fe326d75618752fd1d726986c01b60e78440c78ab086f70e775b441"
     )

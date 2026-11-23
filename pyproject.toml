@@ -10,6 +10,11 @@ market-data = [
   "pandas>=2.2,<4",
   "yfinance>=1.2,<2",
 ]
+# live Schwab capture only (tools/schwab_capture_driver.py, tools/schwab_zf_capture.py attach to the
+# owner's signed-in Edge over CDP); offline CI and every other tool do not need it
+schwab-live = [
+  "playwright>=1.65,<2",
+]
 
 [dependency-groups]
 dev = [

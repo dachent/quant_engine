@@ -187,6 +187,15 @@ def base_payload() -> Payload:
                 {"date": "2026-01-27", "origin_label": "ADMITTED_ALTERNATE_SOURCE"}
             ]
         },
+        "strategy_concepts": {
+            "schema_version": 1,
+            "source_artifact": "contracts/strategy-return-sources-v1.json",
+            "source_sha256": "0" * 64,
+            "rows": [
+                {"strategy_id": "A", "strategy_name": "A", "concept": None},
+                {"strategy_id": "B", "strategy_name": "B", "concept": None},
+            ],
+        },
         "strategy_underwriting": {
             "rows": [
                 {

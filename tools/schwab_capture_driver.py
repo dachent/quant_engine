@@ -410,13 +410,11 @@ def assess_timing(
 ) -> CaptureTiming:
     """Classify a capture against the cutoff close and the first date after it.
 
-    Unlabelled captures must fall on the first New York calendar date after the
-    cutoff (so the capture's UTC date is the same date and the generation as-of is
-    exactly cutoff + 1), before 20:00 New York, and, when that date is a trading
-    day, before 09:30 New York (the first price update of the next session).
-    Friday cutoff: Saturday only. Sunday, Monday before the open, a Saturday
-    evening capture, a same-day post-close capture, a pre-close capture and
-    everything else need the approved exception label.
+    A capture is classified, not refused: the first New York date after the cutoff, before 20:00
+    New York and (on a trading day) before 09:30, is MODE_NEXT_SESSION; a capture before the close
+    (MODE_BEFORE_CLOSE) or on the cutoff date itself (MODE_SAME_DAY) is refused unless it carries the
+    approved exception label; any later date is MODE_LATE (rolled back to the cutoff close from the
+    account's own transactions), which needs no label.
     """
 
     if captured_at.tzinfo is None:

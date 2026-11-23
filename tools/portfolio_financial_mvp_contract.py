@@ -201,7 +201,7 @@ _RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST: Final = (
 _MATRIXPORT_OWNER_EPOCH: Final = {
     "effective_start": "2025-12-06",
     "observed_start": "2025-12-07",
-    "observed_end": "2026-09-03",
+    "observed_end": "2026-11-06",
 }
 _MATRIXPORT_GAP_SPAN_RECEIPTS: Final = (
     {
@@ -235,31 +235,31 @@ _MATRIXPORT_GAP_SPAN_RECEIPTS: Final = (
         "subscription_events_in_span": 0,
     },
 )
-_HISTORY_AUTHORITY_COMMIT: Final = "0a0c0ddc3d1c17e889fda05f1cf9866938b32776"
+_HISTORY_AUTHORITY_COMMIT: Final = "52af564deb26a66c2de650b3fc785223d817a577"
 _HISTORY_AUTHORITY_RAW_SHA256: Final = (
-    "841cf5cf1796b3477251d360b6ccdc6402053a2024fdf4268a22fac1d8ccf49d"
+    "d5dda0ac77382cb2bf6ca152e8b9fa099186d8008e1f9649824754aa455a082c"
 )
 _HISTORY_AUTHORITY_SEMANTIC_SHA256: Final = (
-    "f75abff29f9c1572eb234d4cd0568e3048469c8f86b427e47c3e639f7d2513f7"
+    "7b0bfc1c9357b8dc62f66ce4ebe4e1d794138de3a900044eecf5cfe6946607b3"
 )
 _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
     "accepted_generation_id": (
-        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
+        "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f"
     ),
     "accepted_manifest_sha256": (
-        "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+        "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
     ),
     "accepted_catalog_sha256": (
-        "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
+        "972eb0934fff097414f7698295255cf7e981d417387c0b9342756a71508e5adf"
     ),
     "current_generation_id": (
-        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
+        "ce07cc854ab9581813febf7551b514c62ead43096343e200455247833d8e700f"
     ),
     "current_manifest_sha256": (
-        "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+        "2cc7261496a92c94ecdcd8da2ae65d7f322f870989d2db1b8fb609735d24b799"
     ),
     "current_catalog_sha256": (
-        "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
+        "972eb0934fff097414f7698295255cf7e981d417387c0b9342756a71508e5adf"
     ),
     "legacy_generation_id": (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"

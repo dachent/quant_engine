@@ -101,10 +101,11 @@ def test_an_owner_excluded_account_yields_only_its_latest_point_on_or_before_the
     facts = srn.statement_reserve_facts(
         _catalog(), date(2026, 11, 6), role="EXCLUDED_IMMATERIAL"
     )
-    assert facts["nav"] == facts["admissions"] == facts["assignments"] == []
-    assert [(m["as_of_date"], m["value"]) for m in facts["excluded"]] == [
+    # one point, no admissions/assignments/excluded: the baseline binds it to the census account
+    assert [(r["as_of_date"], r["nav"]["value"]) for r in facts["nav"]] == [
         ("2026-09-30", "110.00")
     ]
-    assert facts["excluded"][0]["label"] == "EXCLUDED_IMMATERIAL:john_hancock"
+    assert facts["admissions"] == facts["assignments"] == facts["excluded"] == []
+    assert facts["accounts"][0]["role"] == "EXCLUDED_IMMATERIAL"
     with pytest.raises(srn.StatementReserveError, match="role is unknown"):
         srn.statement_reserve_facts(_catalog(), date(2026, 11, 6), role="OTHER")

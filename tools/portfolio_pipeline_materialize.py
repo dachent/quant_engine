@@ -11,11 +11,13 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 from typing import Any, Callable, Final, Mapping, Sequence, cast
 from zoneinfo import ZoneInfo
 
+import quant_engine.schwab as schwab
 from quant_engine.core import (
     CoverageStatus,
     GenerationManifest,
@@ -31,6 +33,7 @@ from quant_engine.core import (
     InterpreterRefusal,
     require_interpreter,
     run_storage,
+    timed_stage,
     verify_if_promoted,
 )
 from quant_engine.core import (
@@ -1143,8 +1146,17 @@ def _schwab_selected_point_positions(
             or any(row["observed_at"] != clock for row in current)
         ):
             raise ValueError("point account/clock scope differs")
+        point_provider = "schwab"
         expected = {}
+        derived_natives = [
+            native
+            for native in source["positions"]
+            if "as_of_basis" in native
+            or native.get("evidence_class") == schwab.DERIVED_BASIS
+        ]
         for native in source["positions"]:
+            if native in derived_natives:
+                continue
             identity = {
                 "account_id": native["account_id"],
                 "as_of_date": native["as_of_date"],
@@ -1187,7 +1199,7 @@ def _schwab_selected_point_positions(
                     )
                 },
                 "evidence_layer": "ACCOUNT_LIVE",
-                "provider_id": "schwab",
+                "provider_id": point_provider,
                 "record_id": "schwab:" + record_id,
                 "source_record_id": record_id,
                 "source_artifact_id": artifact["artifact_id"],
@@ -1202,6 +1214,55 @@ def _schwab_selected_point_positions(
             {row["account_id"] for row in expected.values()}
         ):
             raise ValueError("point position account count differs")
+        if derived_natives:
+            if valuation_cutoff is None:
+                raise ValueError("derived positions need a valuation cutoff")
+            try:
+                admitted = schwab.admit_derived_position_rows(
+                    derived_natives,
+                    accepted_accounts=accounts,
+                    transactions=source["transactions"],
+                    valuation_cutoff=valuation_cutoff,
+                    snapshot_day=schwab.derived_positions.snapshot_business_day(clock),
+                    artifact_schemas={
+                        a["artifact_id"]: a["schema"]["name"]
+                        for a in source["source_artifacts"]
+                    },
+                    transaction_history=source["coverage"]["transaction_history"],
+                    nav_observations=source["nav_observations"],
+                )
+            except schwab.SchwabDerivedPositionError as exc:
+                raise ValueError("derived position refused") from exc
+            for record_id, native in admitted.items():
+                if record_id in expected:
+                    raise ValueError("point position record identifiers collide")
+                expected[record_id] = {
+                    **{
+                        key: native[key]
+                        for key in (
+                            "account_id",
+                            "as_of_date",
+                            "as_of_basis",
+                            "capture_date",
+                            "closure",
+                            "evidence_class",
+                            "quantity",
+                            "market_value",
+                            "security_id",
+                            "source_artifact_id",
+                            "symbol",
+                        )
+                    },
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "provider_id": point_provider,
+                    "record_id": "schwab:" + record_id,
+                    "residual_reallocation_window_days": schwab.residual_window_days(
+                        native
+                    ),
+                    "source_record_id": record_id,
+                    "generation_id": manifest.generation_id,
+                    "valuation_cutoff": valuation_cutoff.isoformat(),
+                }
     except (KeyError, ValueError, TypeError, AttributeError) as exc:
         raise MaterializationError("Schwab selected point authority differs") from exc
     return expected if financial_observation_date <= requested_as_of else None
@@ -6346,18 +6407,231 @@ def _attended_completed_stages(
             raise MaterializationError(
                 f"attended completed {role} stage root is invalid"
             )
-        if role == "ledger":
-            _attended_completed_ledger(result, stage_root)
-        elif role == "baseline":
-            _attended_completed_baseline(result, stage_root)
-        elif role == "attribution":
-            _attended_completed_attribution(result, stage_root)
-        elif role == "panel-candidate":
-            _attended_completed_panel_candidate(result, stage_root)
-        else:
-            _attended_completed_stage_root(result, stage_root, role)
+        _attended_verify_completed_role(result, stage_root, role)
         completed.append(role)
     return completed
+
+
+def _attended_verify_completed_role(
+    result: Mapping[str, Any], stage_root: Path, role: str
+) -> None:
+    """The native, content-reading verification of ONE completed stage."""
+
+    if role == "ledger":
+        _attended_completed_ledger(result, stage_root)
+    elif role == "baseline":
+        _attended_completed_baseline(result, stage_root)
+    elif role == "attribution":
+        _attended_completed_attribution(result, stage_root)
+    elif role == "panel-candidate":
+        _attended_completed_panel_candidate(result, stage_root)
+    else:
+        _attended_completed_stage_root(result, stage_root, role)
+
+
+def _attended_verify_new_role(output_root: Path, role: str) -> None:
+    """Verify the one stage a child just wrote, with the same checks a resume applies to it."""
+
+    receipt = output_root / "stage-results" / f"{role}.json"
+    stage_root = _attended_stage_root(output_root, role)
+    if not receipt.exists() or not stage_root.exists():
+        raise MaterializationError(
+            f"attended {role} child returned success without completed artifacts"
+        )
+    result = _load(receipt, f"attended {role} stage result")
+    if stage_root.is_symlink() or not stage_root.is_dir():
+        raise MaterializationError(f"attended completed {role} stage root is invalid")
+    _attended_verify_completed_role(result, stage_root, role)
+
+
+class _StageFingerprints:
+    """Immutability tripwires for stages this run has already verified (G1 and G2).
+
+    A stage is verified natively once (the resume pass, or right after its own child). From then on
+    the run does not re-read its content after every later child; it instead proves the stage did not
+    change: G1 re-stats every verified stage root (relative path, size, mtime_ns) after each child
+    and re-hashes the small stage receipts; G2 re-hashes the receipts before a child starts, because
+    the children read their predecessors' receipts (baseline <- ledger; attribution <- ledger,
+    baseline; analytics <- attribution; report <- ledger, baseline, attribution, analytics; panel
+    stages <- all of those and report) without hashing them. Any difference refuses and names the
+    child. This is a tripwire, not a proof: a change that preserves path, size and mtime_ns is only
+    caught by the mandatory full re-verification that every passing run still ends with.
+    """
+
+    def __init__(self) -> None:
+        self._rows: dict[str, tuple[str, tuple[tuple[str, int, int], ...]]] = {}
+
+    @staticmethod
+    def _receipt_sha256(output_root: Path, role: str) -> str:
+        receipt = output_root / "stage-results" / f"{role}.json"
+        return hashlib.sha256(receipt.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _inventory(output_root: Path, role: str) -> tuple[tuple[str, int, int], ...]:
+        root = _attended_stage_root(output_root, role)
+        # `panel-candidate` owns only `candidates`: the `panel` child legitimately writes the
+        # rest of the shared root.
+        top = root / "candidates" if role == "panel-candidate" else root
+        rows: list[tuple[str, int, int]] = []
+        for directory, directories, files in os.walk(top):
+            directories.sort()
+            for name in sorted([*directories, *files]):
+                path = Path(directory) / name
+                info = path.lstat()
+                size = -1 if stat.S_ISDIR(info.st_mode) else info.st_size
+                rows.append((path.relative_to(top).as_posix(), size, info.st_mtime_ns))
+        return tuple(rows)
+
+    @classmethod
+    def snapshot(
+        cls, output_root: Path, role: str
+    ) -> tuple[str, tuple[tuple[str, int, int], ...]]:
+        return (
+            cls._receipt_sha256(output_root, role),
+            cls._inventory(output_root, role),
+        )
+
+    def adopt(
+        self, role: str, row: tuple[str, tuple[tuple[str, int, int], ...]]
+    ) -> None:
+        self._rows[role] = row
+
+    def require_roots_unchanged_before(
+        self, output_root: Path, *, before_child: str
+    ) -> None:
+        """G1 at the start of a child: nothing changed since the snapshot that preceded verification.
+
+        Nothing writes before a child starts, so every verified role is checked here, the roles
+        that share the child's stage root included (`panel-candidate` is fingerprinted over its own
+        `candidates/` only, which the `panel` child does not own).
+        """
+
+        for role, (receipt_sha256, inventory) in self._rows.items():
+            try:
+                changed = (
+                    self._inventory(output_root, role) != inventory
+                    or self._receipt_sha256(output_root, role) != receipt_sha256
+                )
+            except OSError:
+                changed = True
+            if changed:
+                raise MaterializationError(
+                    f"attended {role} stage changed after it was verified, "
+                    f"before child {before_child} started"
+                )
+
+    def reset(self) -> None:
+        self._rows.clear()
+
+    def roles(self) -> list[str]:
+        return list(self._rows)
+
+    def require_receipts_unchanged(
+        self, output_root: Path, *, before_child: str
+    ) -> None:
+        """G2: the receipts the next child reads still are the ones that were verified."""
+
+        for role, (receipt_sha256, _inventory) in self._rows.items():
+            try:
+                current = self._receipt_sha256(output_root, role)
+            except OSError as exc:
+                raise MaterializationError(
+                    f"attended {role} stage receipt vanished before child "
+                    f"{before_child} started"
+                ) from exc
+            if current != receipt_sha256:
+                raise MaterializationError(
+                    f"attended {role} stage receipt changed before child "
+                    f"{before_child} started"
+                )
+
+    def require_roots_unchanged(self, output_root: Path, *, after_child: str) -> None:
+        """G1: no verified stage root changed while this child ran."""
+
+        shared = set(_attended_shared_stage_roles(output_root, after_child))
+        for role, (receipt_sha256, inventory) in self._rows.items():
+            if role in shared:
+                continue  # the child's own root: the final full pass covers it
+            try:
+                changed = (
+                    self._inventory(output_root, role) != inventory
+                    or self._receipt_sha256(output_root, role) != receipt_sha256
+                )
+            except OSError:
+                changed = True
+            if changed:
+                raise MaterializationError(
+                    f"attended child {after_child} modified completed stage {role}"
+                )
+
+
+class _VerifiedStages:
+    """The completed-stage verification results of ONE attended invocation.
+
+    ``_attended_completed_stages`` re-reads every bound artifact of every completed stage (minutes
+    on a full run). One resume asked for it three times in a row with nothing written in between.
+    This memo returns the result of a verification already made by this invocation for the same
+    (stages, failed stage) instead of repeating it. It never outlives the invocation, and every
+    writer of stage state calls ``invalidate`` first, so a stage changed after a verification is
+    always verified again. Nothing is cached across processes or runs.
+    """
+
+    def __init__(self) -> None:
+        self._results: dict[tuple[str, tuple[str, ...], str | None], list[str]] = {}
+        self._snapshots: dict[
+            tuple[str, tuple[str, ...], str | None],
+            dict[str, tuple[str, tuple[tuple[str, int, int], ...]]],
+        ] = {}
+
+    def snapshots(
+        self,
+        output_root: Path,
+        required_stages: Sequence[str],
+        *,
+        failed_stage: str | None = None,
+    ) -> dict[str, tuple[str, tuple[tuple[str, int, int], ...]]]:
+        """The stat inventories and receipt hashes taken BEFORE that verification read the stages."""
+
+        key = (str(output_root), tuple(required_stages), failed_stage)
+        snapshots = self._snapshots[key]
+        if any(role not in snapshots for role in self._results[key]):
+            # a stage reported complete that could not be snapshotted before it was read
+            raise MaterializationError(
+                "attended completed stage changed while it was being verified"
+            )
+        return dict(snapshots)
+
+    def completed(
+        self,
+        output_root: Path,
+        required_stages: Sequence[str],
+        *,
+        label: str,
+        failed_stage: str | None = None,
+    ) -> list[str]:
+        key = (str(output_root), tuple(required_stages), failed_stage)
+        if key in self._results:
+            with timed_stage("attended_completed_stages_reused", label=label):
+                return list(self._results[key])
+        # Snapshot first, verify second: a stage that changes while it is being verified is then
+        # verified-as-old but fingerprinted-as-old too, so the tripwires see the change.
+        before: dict[str, tuple[str, tuple[tuple[str, int, int], ...]]] = {}
+        for role in required_stages:
+            try:
+                before[role] = _StageFingerprints.snapshot(output_root, role)
+            except OSError:
+                continue  # no receipt or root yet: that stage cannot be verified-complete
+        with timed_stage("attended_completed_stages", label=label):
+            result = _attended_completed_stages(
+                output_root, required_stages, failed_stage=failed_stage
+            )
+        self._results[key] = list(result)
+        self._snapshots[key] = {role: before[role] for role in result if role in before}
+        return result
+
+    def invalidate(self) -> None:
+        self._results.clear()
+        self._snapshots.clear()
 
 
 ATTENDED_QA_STAGE: Final = "panel"
@@ -7699,7 +7973,9 @@ def _attended_start_or_resume(
     *,
     resume: bool,
     on_create: Callable[[Path], None] | None = None,
+    verified: _VerifiedStages | None = None,
 ) -> str | None:
+    verified = verified if verified is not None else _VerifiedStages()
     request_identity = preflight["request_identity"]
     if not isinstance(request_identity, dict):
         raise MaterializationError("attended request identity differs")
@@ -7717,7 +7993,11 @@ def _attended_start_or_resume(
                     "attended run receipt is missing after execution started"
                 )
             return _attended_start_or_resume(
-                preflight, output_root, resume=False, on_create=on_create
+                preflight,
+                output_root,
+                resume=False,
+                on_create=on_create,
+                verified=verified,
             )
         value = _load(receipt, "attended run receipt")
         failed = value.get("failed_stage")
@@ -7745,8 +8025,11 @@ def _attended_start_or_resume(
             ):
                 raise MaterializationError("attended failed-stage checkpoint differs")
             failed_role = cast(str, failed["role"])
-        completed = _attended_completed_stages(
-            output_root, preflight["required_stages"], failed_stage=failed_role
+        completed = verified.completed(
+            output_root,
+            preflight["required_stages"],
+            label="start_or_resume",
+            failed_stage=failed_role,
         )
         source_phase = preflight.get("source_phase")
         if not isinstance(source_phase, dict) or (
@@ -7961,12 +8244,15 @@ def _attended_execute(
     *,
     resume: bool,
     storage: run_storage.AttendedStorage | None = None,
+    verified: _VerifiedStages | None = None,
 ) -> tuple[int, dict[str, Any]]:
+    verified = verified if verified is not None else _VerifiedStages()
     failed_stage = _attended_start_or_resume(
         preflight,
         output_root,
         resume=resume,
         on_create=storage.mark_created if storage is not None else None,
+        verified=verified,
     )
     attempt = _attended_start_execution_attempt(output_root)
     measured: dict[str, Any] = {}
@@ -7989,16 +8275,27 @@ def _attended_execute(
         if storage is not None:
             # The overlay is created (or its base re-verified) before any child can
             # read the cache, and the run is measured before any child can write.
-            measured["cache"] = storage.open_cache()
-            measured["start"] = storage.start()
+            with timed_stage("attended_open_cache"):
+                measured["cache"] = storage.open_cache()
+            with timed_stage("attended_storage_start"):
+                measured["start"] = storage.start()
             _attended_record_attempt_storage(
                 output_root, "execution", attempt, {**measured, "stages": stage_bytes}
             )
         if failed_stage is not None:
             _attended_preserve_failed_stage(output_root, failed_stage)
-        completed = _attended_completed_stages(
-            output_root, preflight["required_stages"], failed_stage=failed_stage
+            verified.invalidate()  # the failed stage's root was just moved aside
+        verified_roles = verified.completed(
+            output_root,
+            preflight["required_stages"],
+            label="execute_start",
+            failed_stage=failed_stage,
         )
+        fingerprints = _StageFingerprints()
+        for role, row in verified.snapshots(
+            output_root, preflight["required_stages"], failed_stage=failed_stage
+        ).items():
+            fingerprints.adopt(role, row)
         # An interruption that killed a child before it returned leaves partial bytes with no
         # receipt and no failed_stage, and the create-only producer refuses its own partial
         # directory on the retry.  Three conditions keep this to exactly that case:
@@ -8013,10 +8310,10 @@ def _attended_execute(
         preserved_partial = False
         if attempt > 1:
             for role in preflight["required_stages"]:
-                if role in completed:
+                if role in verified_roles:
                     continue
                 if any(
-                    other in completed
+                    other in verified_roles
                     for other in _attended_shared_stage_roles(output_root, role)
                 ):
                     continue
@@ -8025,20 +8322,39 @@ def _attended_execute(
                     _attended_preserve_failed_stage(output_root, role)
                     preserved_partial = True
         if preserved_partial:
-            completed = _attended_completed_stages(
-                output_root, preflight["required_stages"], failed_stage=failed_stage
+            verified.invalidate()
+            verified_roles = verified.completed(
+                output_root,
+                preflight["required_stages"],
+                label="execute_after_preserve",
+                failed_stage=failed_stage,
             )
+            fingerprints.reset()
+            for role, row in verified.snapshots(
+                output_root, preflight["required_stages"], failed_stage=failed_stage
+            ).items():
+                fingerprints.adopt(role, row)
         for role in preflight["required_stages"]:
-            if role in completed:
+            if role in verified_roles:
                 continue
             command = _attended_stage_command(preflight, output_root, role)
-            result = subprocess.run(
-                command,
-                cwd=cast(Path, preflight["repo_root"]),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            with timed_stage("attended_tripwire_receipts", role=role):
+                fingerprints.require_receipts_unchanged(output_root, before_child=role)
+                fingerprints.require_roots_unchanged_before(
+                    output_root, before_child=role
+                )
+            # The child inherits this process's stdout/stderr, so its output reaches the
+            # driver log as it is written instead of in one block after the child ends
+            # (a captured child made the driver see minutes of silence).
+            sys.stdout.flush()
+            sys.stderr.flush()
+            with timed_stage("attended_role", role=role):
+                result = subprocess.run(
+                    command,
+                    cwd=cast(Path, preflight["repo_root"]),
+                    text=True,
+                    check=False,
+                )
             if result.stdout:
                 print(result.stdout, end="")
             if result.stderr:
@@ -8054,21 +8370,25 @@ def _attended_execute(
                     "FAILED",
                     reason=f"stage {role} exited {result.returncode}",
                 )
+                # The failed-child view claims no verified stage: nothing was re-verified after
+                # this child ran, and re-reading here could replace its exit code with a refusal.
                 return result.returncode, _attended_view(
                     output_root,
                     preflight["required_stages"],
                     preflight["request_identity"],
-                    completed,
+                    [],
                 )
             record_stage_bytes(role)
-            completed = _attended_completed_stages(
-                output_root,
-                preflight["required_stages"],
-            )
-            if role not in completed:
-                raise MaterializationError(
-                    f"attended {role} child returned success without completed artifacts"
-                )
+            verified.invalidate()
+            with timed_stage("attended_tripwire_roots", role=role):
+                fingerprints.require_roots_unchanged(output_root, after_child=role)
+            new_row = _StageFingerprints.snapshot(
+                output_root, role
+            )  # before it is read
+            with timed_stage("attended_verify_new_role", role=role):
+                _attended_verify_new_role(output_root, role)
+            verified_roles.append(role)
+            fingerprints.adopt(role, new_row)
             if failed_stage == role:
                 _attended_clear_failed_stage(output_root, preflight["request_identity"])
                 failed_stage = None
@@ -8080,10 +8400,13 @@ def _attended_execute(
             )
             if breach is not None:
                 raise breach
-        _attended_finish_execution_attempt(output_root, attempt, "PASSED")
-        return 0, _attended_view(
+        # The one mandatory full re-verification of every stage, content included, that a passing
+        # run ends with: it runs BEFORE the attempt is recorded PASSED, and is never skipped.
+        final_view = _attended_view(
             output_root, preflight["required_stages"], preflight["request_identity"]
         )
+        _attended_finish_execution_attempt(output_root, attempt, "PASSED")
+        return 0, final_view
     except KeyboardInterrupt:
         # The attempt stays open, as for any interruption: its successor records it
         # CANCELLED without inventing an ending instant. The run state says so now.
@@ -8376,14 +8699,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "--oracle-manifest (the acceptance inputs manifest)"
                 )
 
+            verified = _VerifiedStages()
+
             def qa_gate() -> None:
                 # The hold concerns the stages this run will still execute: a resume
                 # whose panel stage is already complete needs no declaration.
                 completed_stages: list[str] = []
                 if args.resume:
                     try:
-                        completed_stages = _attended_completed_stages(
-                            Path(args.output_root).resolve(), ATTENDED_STAGES
+                        completed_stages = verified.completed(
+                            Path(args.output_root).resolve(),
+                            ATTENDED_STAGES,
+                            label="qa_gate",
                         )
                     except MaterializationError:
                         # An unreadable receipt is reported with its own message when
@@ -8453,22 +8780,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 storage = storage or _attended_storage(args)
                 storage.admit(resume=args.resume)
-                prepared = preparation.prepare_attended_inputs(
-                    preparation_spec_path=args.preparation_spec,
-                    output_root=Path(args.output_root).resolve(),
-                    requested_as_of=args.requested_as_of,
-                    evaluated_on=args.evaluated_on,
-                    release_commit=_git(
-                        REPOSITORY_ROOT,
-                        "rev-parse",
-                        "HEAD^{tree}"
-                        if getattr(args, "code_identity_scheme", COMMIT_SCHEME)
-                        == TREE_SCHEME
-                        else "HEAD",
-                    ),
-                    resume=args.resume,
-                    on_create=storage.mark_created,
-                )
+                # a plain call inside the timer block: the controller graph reads
+                # `preparation.prepare_attended_inputs` as a call of `main`
+                with timed_stage("attended_prepare_inputs"):
+                    prepared = preparation.prepare_attended_inputs(
+                        preparation_spec_path=args.preparation_spec,
+                        output_root=Path(args.output_root).resolve(),
+                        requested_as_of=args.requested_as_of,
+                        evaluated_on=args.evaluated_on,
+                        release_commit=_git(
+                            REPOSITORY_ROOT,
+                            "rev-parse",
+                            "HEAD^{tree}"
+                            if getattr(args, "code_identity_scheme", COMMIT_SCHEME)
+                            == TREE_SCHEME
+                            else "HEAD",
+                        ),
+                        resume=args.resume,
+                        on_create=storage.mark_created,
+                    )
+                # preparation builds the ledger/baseline/attribution stage roots: whatever the
+                # gate verified before it is stale
+                verified.invalidate()
                 source_run = prepared.get("source_run")
                 financial = prepared.get("financial_stage_inputs")
                 if not isinstance(source_run, Path) or not isinstance(
@@ -8485,7 +8818,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "attended preparation financial bindings differ"
                         )
                     setattr(args, flag[2:].replace("-", "_"), path)
-            preflight = _attended_preflight(args)
+            with timed_stage("attended_preflight"):
+                preflight = _attended_preflight(args)
             if args.execute and args.resume and args.preparation_spec is None:
                 qa_gate()
             # Join against the FINAL admitted source phase, the ledger the run will
@@ -8505,6 +8839,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     Path(args.output_root).resolve(),
                     resume=args.resume,
                     storage=storage,
+                    verified=verified,
                 )
             else:
                 result = _attended_view(

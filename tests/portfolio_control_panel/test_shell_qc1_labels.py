@@ -615,7 +615,12 @@ def test_epoch_legend_describes_the_annualisation_kernel(tmp_path: Path) -> None
 
 def test_limit_breach_is_a_percentage_point_difference() -> None:
     source = (PANEL_ROOT / "app.js").read_text(encoding="utf-8")
-    kpi = [line for line in source.splitlines() if '"Correlation-one bound"' in line]
+    kpi = [
+        line
+        for line in source.splitlines()
+        if '"Correlation-one stress bound (not an expectation)"' in line
+        and "limit_breach" in line
+    ]
     assert len(kpi) == 1
     assert "pp above the" in kpi[0]
     assert "${pct(clusterBudget.limit_breach)} above" not in kpi[0]
@@ -1319,3 +1324,28 @@ def test_an_unavailable_causal_effect_is_printed_unavailable_never_as_zero(
     assert "Unexplained actual activity -0.500 pp" in cell
     assert " 0.000 pp" not in cell
     assert "Closure not computable for the unavailable effects" in cell
+
+
+def test_the_correlation_one_bound_is_named_as_a_stress_bound_not_an_expectation() -> (
+    None
+):
+    """Owner question: how was the conservative loss established? The name states the rule."""
+
+    source = (PANEL_ROOT / "app.js").read_text(encoding="utf-8")
+    assert source.count("Correlation-one stress bound (not an expectation)") >= 3
+    assert '["Stress reduction"]' in source
+    assert "Conservative reduction" not in source
+    # the humanised constants carry the same name
+    assert (
+        'CORRELATION_ONE_CONSERVATIVE_BOUND: "Correlation-one stress bound (not an expectation)"'
+        in source
+    )
+
+
+def test_the_lens_header_states_how_far_its_factor_data_ends_before_the_cutoff() -> (
+    None
+):
+    source = (PANEL_ROOT / "app.js").read_text(encoding="utf-8")
+    assert "Research lens:" in source
+    assert "const lensLagDays = daysBeforeCutoff(analysis.as_of_date);" in source
+    assert "days before the" in source

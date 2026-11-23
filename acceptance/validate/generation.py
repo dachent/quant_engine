@@ -119,6 +119,10 @@ class Generation:
     index_shell: str | None
     scan: ScanResult
     external: External
+    # a panel CANDIDATE (G2, before publication) has no generation.json yet: ``manifest`` is {}
+    # and the checks that compare the manifest with the files are not run (``--candidate``);
+    # the same checks run on the published generation at the findings-panel stage
+    candidate_only: bool = False
 
 
 def is_placeholder(path: Path) -> bool:
@@ -634,11 +638,18 @@ def load_generation(
     discover: bool = True,
     crosswalk_path: Path | None = None,
     release_pointer_path: Path | None = None,
+    candidate_only: bool = False,
 ) -> Generation:
     gen_dir = gen_dir.resolve()
     if not gen_dir.is_dir():
         raise GenerationError(f"generation directory does not exist: {gen_dir}")
     for name in REQUIRED_FILES:
+        if candidate_only and name == GENERATION_MANIFEST:
+            if (gen_dir / name).is_file():
+                raise GenerationError(
+                    "a candidate directory has no generation.json; this is a generation"
+                )
+            continue
         if not (gen_dir / name).is_file():
             raise GenerationError(f"required generation file is absent: {name}")
     candidate_value = read_json_file(gen_dir / CANDIDATE)
@@ -661,6 +672,9 @@ def load_generation(
         )
     documents: dict[str, dict[str, Any]] = {}
     for name in (GENERATION_MANIFEST, CANDIDATE, PANEL, REPORT):
+        if candidate_only and name == GENERATION_MANIFEST:
+            documents[name] = {}
+            continue
         value = parsed.get(name)
         if not isinstance(value, dict):
             raise GenerationError(f"{name} is not a JSON object")
@@ -678,4 +692,5 @@ def load_generation(
         index_shell=index_shell,
         scan=scan,
         external=external,
+        candidate_only=candidate_only,
     )

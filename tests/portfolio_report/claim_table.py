@@ -438,6 +438,33 @@ def b_portfolio_return_sentence(payload: Payload) -> None:
     payload.panel["advisory"]["hwm_candidate"]["kpi"]["value"] = None
 
 
+def p_hwm_accepted_label(payload: Payload) -> Result:
+    candidate = get(payload.panel, "advisory", "hwm_candidate")
+    if not isinstance(candidate, dict):
+        return skip("no governed HWM candidate published")
+    acceptance = candidate.get("financial_acceptance")
+    points = get(candidate, "kpi", "missing_daily_points")
+    label = str(candidate.get("label"))
+    if acceptance != "OWNER_ACCEPTED":
+        return ok("candidate is not owner accepted; no accepted label claim made")
+    if not isinstance(points, list):
+        return bad("accepted candidate carries no missing_daily_points list")
+    if not label.endswith(f"filled by span returns: {len(points)}"):
+        return bad(
+            f"label says {label!r} but the receipts list {len(points)} missing daily points"
+        )
+    return ok(f"accepted label counts the {len(points)} listed missing daily points")
+
+
+def b_hwm_accepted_label(payload: Payload) -> None:
+    payload.panel["advisory"]["hwm_candidate"] = {
+        "financial_acceptance": "OWNER_ACCEPTED",
+        "label": "Governed PORT-HWM-4 high-water mark, owner accepted; "
+        "missing daily points filled by span returns: 2",
+        "kpi": {"missing_daily_points": [{}, {}, {}]},
+    }
+
+
 # --- coverage / facts / counts ---------------------------------------------
 
 _ATTENTION = {"UNAVAILABLE", "NO_ACCEPTED_FACT_PATH", "PARTIAL", "LATE", "STALE"}
@@ -511,6 +538,62 @@ def p_fact_matrix_grid(payload: Payload) -> Result:
 
 def b_fact_matrix_grid(payload: Payload) -> None:
     payload.panel["fact_coverage_matrix"].pop()
+
+
+_CLOSURE_UNMAPPED = re.compile(
+    r"; (\d+) provider \w+ records without a strategy attribution lie inside the "
+    r"tie-out-closed interval and are proved by the closure"
+)
+
+
+def p_closure_unmapped_declared(payload: Payload) -> Result:
+    matrix = rows_of(payload.panel.get("fact_coverage_matrix"))
+    named = [
+        r
+        for r in matrix
+        if _CLOSURE_UNMAPPED.search(str(r.get("missing_interval_reason")))
+    ]
+    if not named:
+        return skip(
+            "no matrix row states unattributed records inside a closed interval"
+        )
+    wrong = [
+        str(r.get("account_id"))
+        for r in named
+        if r.get("status") != "DECLARED_COMPLETE"
+        or r.get("boundary_basis") != "LEDGER_CLOSURE"
+        or int(_CLOSURE_UNMAPPED.search(str(r["missing_interval_reason"])).group(1)) < 1  # type: ignore[union-attr]
+    ]
+    if wrong:
+        return bad(
+            "a row states closure-proved unattributed records but is not "
+            f"DECLARED_COMPLETE by LEDGER_CLOSURE with a positive count: {names(wrong)}"
+        )
+    return ok(
+        f"{len(named)} row(s) state closure-proved unattributed records, all DECLARED_COMPLETE"
+    )
+
+
+def f_closure_unmapped_declared(payload: Payload) -> None:
+    payload.panel["fact_coverage_matrix"].append(
+        {
+            "account_id": "a3",
+            "fact_type": "flows",
+            "status": "DECLARED_COMPLETE",
+            "boundary_basis": "LEDGER_CLOSURE",
+            "missing_interval_reason": (
+                "completeness proved by ledger closure X; 5 provider flows records "
+                "without a strategy attribution lie inside the tie-out-closed interval "
+                "and are proved by the closure: pre-epoch or unmapped, not strategy capital"
+            ),
+        }
+    )
+
+
+def b_closure_unmapped_declared(payload: Payload) -> None:
+    payload.panel["fact_coverage_matrix"][-1]["status"] = (
+        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+    )
 
 
 _OLD_MWR = (
@@ -680,27 +763,40 @@ def b_positions_total(payload: Payload) -> None:
     payload.panel["counts"]["positions"] = 1
 
 
-def p_underwriting_none(payload: Payload) -> Result:
-    rows = rows_of(get(payload.panel, "strategy_underwriting", "rows"))
-    if not rows:
-        return skip("no underwriting rows")
-    off = [
-        str(r.get("strategy_id") or i)
-        for i, r in enumerate(rows)
-        if get(r, "advisory_disposition", "execution_effect") != "NONE"
-        or get(r, "advisory_disposition", "allocation_effect") != "NONE"
-    ]
-    if off:
+def p_concept_cards(payload: Payload) -> Result:
+    block = payload.panel.get("strategy_concepts")
+    strategies = rows_of(payload.panel.get("strategies"))
+    if not isinstance(block, dict) or not strategies:
+        return skip("no strategy_concepts block or strategies")
+    cards = {str(r.get("strategy_id")) for r in rows_of(block.get("rows"))}
+    current = {str(r.get("strategy_id")) for r in strategies}
+    if cards != current:
         return bad(
-            f"{len(off)} underwriting rows declare an allocation/execution effect"
+            f"concept cards {names(cards ^ current)} differ from the current strategies"
         )
-    return ok(f"allocation and execution effect NONE on all {len(rows)} rows")
+    return ok(f"{len(cards)} concept cards equal the {len(current)} current strategies")
 
 
-def b_underwriting_none(payload: Payload) -> None:
-    rows_of(get(payload.panel, "strategy_underwriting", "rows"))[0][
-        "advisory_disposition"
-    ]["execution_effect"] = "TRADE"
+def b_concept_cards(payload: Payload) -> None:
+    payload.panel["strategy_concepts"]["rows"].pop()
+
+
+def p_concept_source(payload: Payload) -> Result:
+    block = payload.panel.get("strategy_concepts")
+    if not isinstance(block, dict):
+        return skip("no strategy_concepts block")
+    digest = str(block.get("source_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return bad("strategy_concepts carries no source sha256")
+    if not str(block.get("source_artifact") or "").endswith(".json"):
+        return bad("strategy_concepts names no source artifact")
+    return ok(
+        f"concept text is bound to {block['source_artifact']} sha256 {digest[:12]}"
+    )
+
+
+def b_concept_source(payload: Payload) -> None:
+    payload.panel["strategy_concepts"]["source_sha256"] = "x"
 
 
 def p_hwm_perimeter(payload: Payload) -> Result:
@@ -1127,6 +1223,37 @@ BASELINE_PY = "tools/portfolio_baseline.py"
 
 ROWS: tuple[Row, ...] = (
     Row(
+        "FD1",
+        "count",
+        "Data",
+        BASELINE_PY,
+        (r"are proved by the closure: pre-epoch or unmapped, not strategy capital",),
+        "a fact-matrix row that states closure-proved unattributed records is DECLARED_COMPLETE by LEDGER_CLOSURE with a positive stated count",
+        p_closure_unmapped_declared,
+        b_closure_unmapped_declared,
+        pass_fixture=f_closure_unmapped_declared,
+    ),
+    Row(
+        "HWM1",
+        "count",
+        "Risk",
+        PANEL_PY,
+        (r"missing daily points filled by span returns: ",),
+        "an owner-accepted HWM label states exactly as many filled missing daily points as the receipts list",
+        p_hwm_accepted_label,
+        b_hwm_accepted_label,
+    ),
+    Row(
+        "HWM2",
+        "count",
+        "Risk",
+        PANEL_JS,
+        (r"missing daily point\(s\) filled by span returns",),
+        "the accepted-HWM sentence states the count of listed missing daily points, from the payload",
+        p_hwm_accepted_label,
+        b_hwm_accepted_label,
+    ),
+    Row(
         "B1",
         "universal",
         "Command",
@@ -1432,14 +1559,24 @@ ROWS: tuple[Row, ...] = (
         b_current_positions_mapped,
     ),
     Row(
-        "T20",
+        "CN1",
+        "count",
+        "Strategy concepts",
+        PANEL_HTML,
+        (r"One card per current strategy",),
+        "there is one concept card for each current strategy",
+        p_concept_cards,
+        b_concept_cards,
+    ),
+    Row(
+        "CN2",
         "universal",
-        "Signals",
+        "Strategy concepts",
         PANEL_JS,
-        (r"Read-only advisory surface; declared by every underwriting row",),
-        "allocation and execution effect are NONE on every underwriting row",
-        p_underwriting_none,
-        b_underwriting_none,
+        (r"Concept text is the governed contract",),
+        "concept text is the governed return-sources contract, bound by its sha256",
+        p_concept_source,
+        b_concept_source,
     ),
     Row(
         "T13b",

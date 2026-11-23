@@ -707,15 +707,24 @@ def test_the_central_case_adverse_loss_is_derived_from_the_restated_path(
     assert hybrid_on["return_observations"] == 3
 
 
-def test_the_policy_constants_do_not_move_with_the_basis(
+def test_the_policy_weights_and_the_rule_loss_do_not_move_with_the_basis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     restated = _chain(tmp_path / "on", monkeypatch, restated=True)
     parent = _chain(tmp_path / "off", monkeypatch, restated=False)
     on = restated["result"]["dependence_modes"]["LIVE_ONLY"]["correlation_one"]
     off = parent["result"]["dependence_modes"]["LIVE_ONLY"]["correlation_one"]
-    assert on == off
+
+    def without_basis(block: dict[str, Any]) -> list[dict[str, Any]]:
+        # the inputs of the rule follow each path; the weights and the loss it gives here do not
+        return [
+            {key: value for key, value in row.items() if key != "adverse_loss_basis"}
+            for row in block["components"]
+        ]
+
+    assert without_basis(on) == without_basis(off)
     ai = _component(on, AI_SERIES)
+    assert ai["adverse_loss_basis"]["rule_statement"].startswith("1.25x prior")
     policy = json.loads(
         (
             Path(__file__).parents[2]
@@ -725,7 +734,9 @@ def test_the_policy_constants_do_not_move_with_the_basis(
     )
     literal = next(row for row in policy["series"] if row["series_id"] == AI_SERIES)
     assert Decimal(ai["conservative_loss_fraction"]) == pytest.approx(
-        Decimal(literal["adverse_loss_fraction"]), abs=Decimal("1e-9")
+        # the fixture holds three live rows, under the minimum: the prior term plus the 5pp uplift
+        Decimal(literal["audit_adverse_loss_fraction"]) + Decimal("0.05"),
+        abs=Decimal("1e-9"),
     )
 
 

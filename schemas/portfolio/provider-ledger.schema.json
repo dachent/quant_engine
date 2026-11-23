@@ -70,6 +70,7 @@
     "catalog_schema_version": {"const": 2},
     "corporate_actions": {"type": "array", "items": {"type": "object"}},
     "fact_counts": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/factCount"}},
+    "event_completeness": {"type": "array", "items": {"$ref": "#/$defs/eventCompleteness"}},
     "financing_cost_observations": {"type": "array", "items": {"type": "object"}},
     "financing_liability_observations": {"type": "array", "items": {"type": "object"}},
     "flows": {"type": "array", "items": {"type": "object"}},
@@ -102,6 +103,15 @@
             "then": {"required": ["source_artifact_id"], "properties": {"value_basis": {"const": "ACCOUNT_VALUE"}}}
           }
         ]
+      }
+    },
+    "portfolio_fx_generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id"],
+      "properties": {
+        "generation_id": {"type": "string", "minLength": 1},
+        "selection": {"type": "string", "minLength": 1}
       }
     },
     "positions": {"type": "array", "items": {"type": "object"}},
@@ -146,6 +156,62 @@
       }
     },
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "eventCompleteness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id", "checks", "citation", "closure", "declared_end", "declared_start",
+        "evidence_refs", "fact_type", "provider_id", "status"
+      ],
+      "properties": {
+        "account_id": {"type": "string", "minLength": 1},
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["check", "status"],
+            "properties": {
+              "check": {"type": "string", "minLength": 1},
+              "status": {"enum": ["PASS", "FAIL"]},
+              "failures": {"type": "integer", "minimum": 0}
+            }
+          }
+        },
+        "citation": {"type": "string", "minLength": 1},
+        "closure": {"type": "string", "minLength": 1},
+        "declared_end": {"type": "string", "format": "date"},
+        "declared_start": {"type": "string", "format": "date"},
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256"],
+            "properties": {
+              "path": {"type": "string", "minLength": 1},
+              "sha256": {"$ref": "#/$defs/sha256"}
+            }
+          }
+        },
+        "fact_type": {"enum": ["flows", "nav", "positions", "transactions"]},
+        "proven_record_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "proven_records": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["amount", "event_date", "record_id"],
+            "properties": {
+              "amount": {"type": ["string", "null"]},
+              "event_date": {"type": "string", "minLength": 1},
+              "record_id": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "provider_id": {"type": ["string", "null"]},
+        "status": {"enum": ["DECLARED_COMPLETE", "CLOSURE_FAILED", "CAPTURED_NOT_ADMITTED", "EXCLUDED_BY_RULING"]}
+      }
+    },
     "admission": {
       "type": "object",
       "additionalProperties": false,

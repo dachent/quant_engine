@@ -32,7 +32,9 @@ DECLARATION = {
 # sha256 of the canonical report bytes the unmodified main (f10eb617, after the pass-29 and pass-30 wording) builds from this
 # fixture with no declaration; the switch off must reproduce them exactly
 # #904: re-pinned when CAGR under 365 days became null (this fixture is a 28-day window)
-MAIN_OFF_DIGEST = "e24cbcb5adeb50f5c2cd8467a565a358b38f00d16f298aa2882b645c4ee56620"
+# Moved once: the Schwab liquidation-value carrier (PR 977) gave every PROVIDER_COVERAGE row a typed
+# "structural_boundaries": [] list; the synthetic report has one such row (+27 bytes: ,"structural_boundaries":[]).
+MAIN_OFF_DIGEST = "2746488b07e346689defec4491ed277396121afb1938445d9e6a9dd10787563d"
 
 
 def _facts() -> dict[str, Any]:

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-BUILDER_VERSION = "0.3.0"
+BUILDER_VERSION = "0.4.0"
 FRESHNESS_POLICY_ID = "KENNETH_FRENCH_MONTHLY_DAILY_45D_V1"
 PUBLICATION_LAG_CALENDAR_DAYS = 45
 DATE_PATTERN = re.compile(r"\d{8}")
@@ -424,6 +424,29 @@ def _rows_by_date(
     return column_tuple, indexed
 
 
+def _latest_published_month_end(
+    outputs: Mapping[str, bytes], required_month_end: date
+) -> date:
+    """Latest month every output carries through its last business days, at least required."""
+
+    lasts: list[date] = []
+    for data in outputs.values():
+        rows = list(csv.reader(io.StringIO(data.decode("utf-8"))))
+        days = [_date_value(row[0], "normalized observation date") for row in rows[1:]]
+        if not days:
+            return required_month_end
+        lasts.append(max(days))
+    common_last = min(lasts)
+    month_end = _month_end(common_last)
+    # a month counts as published when its data runs into the last four days
+    candidate = (
+        month_end
+        if (month_end - common_last).days <= 4
+        else _month_end(common_last.replace(day=1) - timedelta(days=1))
+    )
+    return max(required_month_end, candidate)
+
+
 def _csv_bytes(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> bytes:
     stream = io.StringIO(newline="")
     writer = csv.writer(stream, lineterminator="\n")
@@ -631,6 +654,10 @@ def build_bundle(
         OUTPUT_NAMES[2]: industry_coverage,
     }
     required_month_end = _required_observation_month_end(evaluated_on)
+    # Factor-model audit D1: the 45-day rule is the MINIMUM month a run must carry and
+    # the recorded publication lag; the admitted month is the latest complete month
+    # the provider has published at capture (research lens: not cutoff-current).
+    required_month_end = _latest_published_month_end(outputs, required_month_end)
     publication_deadline = required_month_end + timedelta(
         days=PUBLICATION_LAG_CALENDAR_DAYS
     )

@@ -165,7 +165,7 @@ def test_the_policy_constant_sensitivity_is_printed_for_each_mode(
     table = dom["#policy-constant-table"]["innerHTML"]
     for mode in ("Live only", "Live plus backtest"):
         assert mode in table
-    assert "Central-case loss" in table and "Conservative-bound" in table
+    assert "Central-case loss" in table and "Adverse-loss bound" in table
     assert "12.0000%" in table and "13.0000%" in table and "1.0000%" in table
     assert "Strategy One weight" in table
 

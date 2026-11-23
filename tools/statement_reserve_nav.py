@@ -73,20 +73,17 @@ def statement_reserve_facts(
     }
     if not points:
         return empty
+    provider = str(account.get("provider", "")).upper().replace("_", " ")
     if role == "EXCLUDED_IMMATERIAL":
-        day, row = points[-1]
-        provider = str(account.get("provider", "")).lower()
+        # Its latest point on or before the cutoff only.  The baseline binds it to the census
+        # account, a member of a retained-excluded strategy, so it is counted once, there.
+        _day, row = points[-1]
         return {
             **empty,
-            "excluded": [
-                {
-                    "account_id": account_id,
-                    "as_of_date": day.isoformat(),
-                    "label": "EXCLUDED_IMMATERIAL:" + provider,
-                    "record_id": row.get("record_id"),
-                    "value": str(row["nav"]["value"]),
-                }
+            "accounts": [
+                {"account_id": account_id, "provider": provider, "role": role}
             ],
+            "nav": [{**dict(row), "provider_id": provider.lower().replace(" ", "_")}],
         }
     if role != "RESERVE":
         raise StatementReserveError("statement reserve role is unknown")
@@ -113,12 +110,7 @@ def statement_reserve_facts(
     return {
         # The census owns the account row and its open reserve-pool assignment; the baseline
         # binds these points to the census account of the same provider (never a second account).
-        "accounts": [
-            {
-                "account_id": account_id,
-                "provider": str(account.get("provider", "")).upper().replace("_", " "),
-            }
-        ],
+        "accounts": [{"account_id": account_id, "provider": provider, "role": role}],
         "assignments": [],
         "nav": [
             {**dict(row), "provider_id": str(account.get("provider", "")).lower()}

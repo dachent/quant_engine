@@ -144,7 +144,12 @@ def test_the_evidence_keys_stay_equal_across_producers() -> None:
     )
     assert tuple(report.COST_EVIDENCE_KEYS) == tuple(attribution.COST_EVIDENCE_KEYS)
     assert tuple(report.COST_RATE_KEYS) == tuple(attribution.COST_RATE_KEYS)
-    assert report.COST_RATE_KEYS == ("fee_rates",)
+    assert report.COST_RATE_KEYS == (
+        "cost_classification",
+        "cost_derivation",
+        "derived_annual_cost_usd",
+        "fee_rates",
+    )
 
 
 def test_a_settled_non_qualified_sentence_states_the_derived_billing() -> None:
@@ -175,3 +180,76 @@ def test_a_row_without_a_derivation_keeps_the_not_stated_wording() -> None:
 
     assert "billed monthly" not in sentence
     assert "none billed" not in sentence
+
+
+def test_a_derived_dollar_amount_is_named_with_its_rate_base_and_date() -> None:
+    row = _row(docs.volatis_rates("NON_QUALIFIED_FLAT"))
+    row["derived_annual_cost_usd"] = "2325.99465"
+    row["cost_derivation"] = {
+        "as_of": "2026-09-17",
+        "base_value_usd": "66456.99",
+        "method": "DERIVED_FROM_DOCUMENTED_RATE",
+        "rate": "0.035",
+        "rate_kind": "management_rate",
+        "tier": "NON_QUALIFIED_FLAT",
+        "unpriced_components": [],
+        "classified_components": [],
+    }
+    sentence = report.cost_rate_disclosure(row)
+
+    assert (
+        "derived annual management rate cost $2325.99465 "
+        "(DERIVED_FROM_DOCUMENTED_RATE): 3.5% of $66456.99 capital value at the cutoff "
+        "2026-09-17; billed dollar amount: not published." in sentence
+    )
+    assert "no dollar cost is published" not in sentence
+    assert "not priced" not in sentence
+
+
+def test_an_in_nav_performance_fee_is_stated_as_classified() -> None:
+    row = _row(docs.robuxio_rates())
+    row["derived_annual_cost_usd"] = "0"
+    row["cost_derivation"] = {
+        "as_of": "2026-09-17",
+        "base_value_usd": "48348.11",
+        "method": "DERIVED_FROM_DOCUMENTED_RATE",
+        "rate": "0",
+        "rate_kind": "management_rate",
+        "tier": "SINGLE_RATE",
+        "unpriced_components": [],
+        "classified_components": [
+            {
+                "classification": "IN_NAV_NOT_BILLED",
+                "component": "performance_rate",
+                "mechanism": "over the high-water mark",
+                "rate": "0.3",
+                "reason": "inside the vehicle NAV",
+            }
+        ],
+    }
+    sentence = report.cost_rate_disclosure(row)
+    assert (
+        "performance rate 30% is IN_NAV_NOT_BILLED (charged inside the vehicle NAV, "
+        "not a billed dollar cost)" in sentence
+    )
+    assert "not priced" not in sentence
+
+
+def test_a_settled_tier_sentence_names_the_date_and_the_condition() -> None:
+    row = _row(docs.volatis_rates("NON_QUALIFIED_FLAT"))
+    row["derived_annual_cost_usd"] = "1682.02"
+    row["cost_derivation"] = {
+        "as_of": "2026-11-06",
+        "base_value_usd": "48057.62",
+        "classified_components": [],
+        "method": "DERIVED_FROM_DOCUMENTED_RATE",
+        "rate": "0.035",
+        "rate_kind": "management_rate",
+        "tier": "NON_QUALIFIED_FLAT",
+        "tier_settled_through": "2026-09-02",
+        "unpriced_components": [],
+    }
+    assert (
+        "fee tier settled through 2026-09-02 (fee journals); derived dollars valid "
+        "if the tier is unchanged since" in report.cost_rate_disclosure(row)
+    )

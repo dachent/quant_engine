@@ -1172,6 +1172,14 @@ def test_diagnostic_dynamic_contributions_use_changing_beta_rows(
             "residual": "0.002" if broken_identity else "0.001",
         },
     ]
+    model["diagnostics"]["dynamic"] = {
+        "exposure_path": [{"date": "2026-07-29", "betas": {"SPY_XS": "0.7"}}],
+        "holdout_forecasts": [
+            {"date": "2026-07-30", "forecast_exposures": {"SPY_XS": "0.5"}}
+        ],
+        "largest_exposure_changes": [{"date": "2026-07-30", "exposure_change_l2": "1"}],
+        "rank_status": "BLOCK_TRIDIAGONAL_FULL_RANK",
+    }
     identity = {"generation_id": "a" * 64, "sha256": "b" * 64}
     if broken_identity:
         with pytest.raises(panel.ControlPanelValidationError, match="do not reconcile"):
@@ -1183,8 +1191,42 @@ def test_diagnostic_dynamic_contributions_use_changing_beta_rows(
     )
     assert row["status"] == "DIAGNOSTIC_ONLY"
     assert row["use_boundary"] == "FORENSIC_DIAGNOSTIC_NOT_PM_ACCEPTED"
-    assert row["alpha"] == model["diagnostic_outputs"]["alpha"]
-    assert row["contribution_summary"] == {
+    assert row["alpha"]["net_annualized"] is None
+    assert row["alpha"]["net_status"] == "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE"
+    assert row["diagnostic_detail"]["alpha"] == model["diagnostic_outputs"]["alpha"]
+    assert row["exposures"] == []
+
+    # no block outside diagnostic_detail carries a beta, exposure path or forecast exposure
+    forbidden = {
+        "betas",
+        "exposures",
+        "forecast_exposures",
+        "exposure_path",
+        "holdout_forecasts",
+        "largest_exposure_changes",
+        "mode_coefficients",
+        "raw_exposures",
+        "factor_means",
+        "alpha_mean",
+    }
+
+    def leaks(value: object, path: str) -> list[str]:
+        found: list[str] = []
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                if key in forbidden and inner not in (None, [], {}):
+                    found.append(f"{path}.{key}")
+                found.extend(leaks(inner, f"{path}.{key}"))
+        elif isinstance(value, list):
+            for index, inner in enumerate(value):
+                found.extend(leaks(inner, f"{path}[{index}]"))
+        return found
+
+    public = {key: value for key, value in row.items() if key != "diagnostic_detail"}
+    assert leaks(public, "row") == []
+    assert row["diagnostic_detail"]["dynamic"]["exposure_path"]
+    assert row["contribution_summary"] is None
+    assert row["diagnostic_detail"]["contribution_summary"] == {
         "alpha_mean": "0.001",
         "factor_means": {"SPY_XS": "0.005"},
         "fitted_mean": "0.006",
@@ -1195,8 +1237,8 @@ def test_diagnostic_dynamic_contributions_use_changing_beta_rows(
     }
     # Latest beta times mean factor return is 0.008, not the actual path mean.
     assert (
-        row["contribution_summary"]["factor_means"]["SPY_XS"]
-        != row["exposures"][0]["holdout_mean_period_contribution"]
+        row["diagnostic_detail"]["contribution_summary"]["factor_means"]["SPY_XS"]
+        != row["diagnostic_detail"]["exposures"][0]["holdout_mean_period_contribution"]
     )
 
 
@@ -6469,8 +6511,8 @@ def test_real_qa_harness_output_validates_and_publishes_without_locators(
 
     manifests = sorted(qa.glob("*/manifest.json"))
     lints = sorted(qa.glob("*/visual-lint.json"))
-    assert len(manifests) == 34
-    assert len(lints) == 33
+    assert len(manifests) == 37
+    assert len(lints) == 36
     for path in (*manifests, *lints):
         record = json.loads(path.read_text(encoding="utf-8"))
         assert record["qa_manifest_version"] == 2
@@ -7672,7 +7714,7 @@ def test_mvp_exposes_all_nine_accepted_views() -> None:
     # appendix link: interaction_qa.mjs:878 requires zero [data-nav="candidates"]
     # elements anywhere in the document, and the last published generation
     # (41f41362) shipped none.
-    assert template.count('class="nav-item') == 10
+    assert template.count('class="nav-item') == 11
     for view in (
         "command",
         "capital",
@@ -7683,6 +7725,7 @@ def test_mvp_exposes_all_nine_accepted_views() -> None:
         "weekly",
         "performance",
         "modelvsactual",
+        "concepts",
         "data",
     ):
         assert f'data-nav="{view}"' in template
@@ -14345,6 +14388,7 @@ def test_g2_lazy_view_renders_only_direct_hash_and_refreshes_hidden_context(
         "renderWeekly",
         "renderPerformance",
         "renderModelVsActual",
+        "renderConcepts",
         "renderCandidates",
         "renderData",
     )
@@ -14439,7 +14483,7 @@ def test_g2_lazy_view_keeps_source_clock_visible_to_native_browser_qa(
     )
     assert result.returncode == 0, f"native browser QA failed: {result.stderr}"
     manifests = list(output.glob("*/manifest.json"))
-    assert len(manifests) == 34
+    assert len(manifests) == 37
     assert all(
         json.loads(path.read_text(encoding="utf-8"))["source_clock_display"]["valid"]
         for path in manifests
@@ -15746,6 +15790,48 @@ def test_panel_appends_retained_strategy_records_after_the_current_rows(
     assert all("lifecycle_state" in row for row in data["performance"])
 
 
+def test_panel_carries_the_cost_classification_of_a_retained_record(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """F2 item 36: a retained record's classification reaches the panel strategy row."""
+
+    classification = {
+        "classification": "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+        "product_interval_end": "2024-12-12",
+        "reason": "SYNTHETIC owner-approved exclusion from live costs",
+        "ruling_reference": "OWNER_1_COMMENT_2_DEPRECATED",
+        "ruling_url": "https://github.com/dachent/quant_engine/issues/1#issuecomment-2",
+        "source": "contracts/portfolio-financial-mvp-source-v1.json",
+    }
+    report = _report_with_baseline(inputs)
+    report["lifecycle_schema_version"] = 1
+    report["strategy_summary"] = [
+        {**row, **_LIFECYCLE_ACTIVE} for row in report["strategy_summary"]
+    ]
+    report["twr_mwr"] = [{**row, **_LIFECYCLE_ACTIVE} for row in report["twr_mwr"]]
+    report["retained_strategies"] = [
+        _retained_record("fund-retired", cost_classification=classification),
+        _retained_record("sleeve-plain"),
+    ]
+    root = tmp_path / "classified-report"
+    _publish_report(
+        root,
+        tmp_path / "classified-report.json",
+        _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog()),
+    )
+    built = panel.build_candidate(
+        root,
+        inputs["legacy"],
+        tmp_path / "classified-output",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    rows = {row["strategy_id"]: row for row in _candidate_data(built)["strategies"]}
+    assert rows["fund-retired"]["cost_classification"] == classification
+    assert "cost_classification" not in rows["sleeve-plain"]
+
+
 def test_panel_without_the_lifecycle_marker_keeps_the_previous_shape(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -15863,6 +15949,48 @@ def test_model_vs_actual_rides_through_the_real_render_schema_and_pin(
         )
 
 
+def test_the_underwriting_references_use_the_blocks_own_as_of_through_the_real_render(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reference lookup receives the panel's own as-of sources and the pinned input."""
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_mva_synthetic_refs", Path(__file__).with_name("test_model_vs_actual.py")
+    )
+    assert spec is not None and spec.loader is not None
+    mva_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mva_tests)
+    staged = tmp_path / "audit-bridges.json"
+    staged.write_bytes(mva_tests.synthetic_staged_bytes())
+    pin = hashlib.sha256(staged.read_bytes()).hexdigest()
+    seen: list[tuple[Any, bytes, str, Any]] = []
+    real = panel.model_account_gap_references_for
+
+    def spy(panel_like: Any, raw: bytes, sha: str, ids: Any) -> dict[str, Any]:
+        seen.append((panel_like, raw, sha, ids))
+        return real(panel_like, raw, sha, ids)  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(panel, "model_account_gap_references_for", spy)
+    _files, data, _bound = panel._rendered_files(
+        inputs["report"],
+        inputs["legacy"],
+        panel.DEFAULT_TEMPLATE_ROOT,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        model_vs_actual_input=(staged, pin),
+    )
+
+    assert len(seen) == 1
+    panel_like, raw, sha, ids = seen[0]
+    assert (raw, sha) == (staged.read_bytes(), pin)
+    assert tuple(ids) == panel.REPLICA_REFERENCE_STRATEGY_IDS
+    # the as-of the lookup cuts off at is the one the block cuts its own windows at
+    mva = panel._model_vs_actual_module
+    assert mva._as_of(panel_like) == data["model_vs_actual"]["as_of"]  # noqa: SLF001
+
+
 def test_vendor_gap_fills_input_is_pinned_bound_and_closed_against_receipts(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -15961,3 +16089,205 @@ def test_underwriting_gap_drops_cash_and_fee_causes_when_evidenced() -> None:
         assert ("ACCOUNT_BOUND_FEE_PATH_INCOMPLETE" in got) == (
             fees != reporter.FEES_STATUS_EVIDENCED
         )
+
+
+def test_a_gate_rejected_schema_three_row_publishes_no_number_outside_the_detail() -> (
+    None
+):
+    """Validator finding: 23 of 28 gated rows leaked betas through the orthogonal and dynamic blocks."""
+
+    decomposition = _decomposition()
+    decomposition["analytics_schema_version"] = 3
+    decomposition["proxy_governance"] = {
+        "candidate_count": 1,
+        "orthogonality_claim": "RAW_CANDIDATES_NOT_ASSUMED_ORTHOGONAL",
+        "proxies": [{"factor_id": "SPY_XS"}],
+        "selection_boundary": "TRAIN_ONLY",
+    }
+    for item in decomposition["model_results"]:
+        item["analytics_identities"] = {
+            "raw": {
+                "methodology_manifest_sha256": "e" * 64,
+                "model_id": item["model_id"],
+                "surface": "RAW_MODEL",
+            },
+            "orthogonal": {
+                "methodology_manifest_sha256": "e" * 64,
+                "model_id": item["model_id"],
+                "surface": "ORTHOGONAL_RISK_ATTRIBUTION",
+            },
+        }
+        item["interval_association"] = {
+            "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+            "holdout_display_claim": "holdout association using selected historical snapshot",
+        }
+        item["orthogonal_attribution"] = {
+            "method_id": "TRAIN_SYMMETRIC_WHITENING_V1",
+            "rank": 1,
+            "status": "AVAILABLE",
+            "training_row_identity": "f" * 64,
+            "mode_coefficients": [{"symmetric_mode:SPY_XS": "0.7"}],
+            "raw_exposures": [{"SPY_XS": "0.7"}],
+            "orthogonal_intercept": ["0.001"],
+        }
+    model = next(
+        row
+        for row in decomposition["model_results"]
+        if row["status"] == "DIAGNOSTIC_ONLY"
+    )
+    model["estimator"] = "DYNAMIC_FLS"
+    model["diagnostics"]["dynamic"] = {
+        "exposure_path": [{"date": "2026-07-29", "betas": {"SPY_XS": "0.7"}}],
+        "holdout_forecasts": [
+            {"date": "2026-07-30", "forecast_exposures": {"SPY_XS": "0.5"}}
+        ],
+        "largest_exposure_changes": [{"date": "2026-07-30", "exposure_change_l2": "1"}],
+    }
+
+    output = panel._factor_analysis(
+        decomposition,
+        {"generation_id": "a" * 64, "sha256": "b" * 64},
+        set(STRATEGY_NAMES),
+    )
+    row = next(
+        item for item in output["series"] if item["model_id"] == model["model_id"]
+    )
+    assert row["status"] == "DIAGNOSTIC_ONLY"
+    assert row["orthogonal_attribution"] == {"status": "WITHHELD_MODEL_QUALITY_GATE"}
+    forbidden = {
+        "betas",
+        "exposures",
+        "forecast_exposures",
+        "exposure_path",
+        "holdout_forecasts",
+        "largest_exposure_changes",
+        "mode_coefficients",
+        "raw_exposures",
+        "orthogonal_intercept",
+        "factor_means",
+        "alpha_mean",
+    }
+
+    def leaks(value: object, path: str) -> list[str]:
+        found: list[str] = []
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                if key in forbidden and inner not in (None, [], {}):
+                    found.append(f"{path}.{key}")
+                found.extend(leaks(inner, f"{path}.{key}"))
+        elif isinstance(value, list):
+            for index, inner in enumerate(value):
+                found.extend(leaks(inner, f"{path}[{index}]"))
+        return found
+
+    public = {key: value for key, value in row.items() if key != "diagnostic_detail"}
+    assert leaks(public, "row") == []
+    detail = row["diagnostic_detail"]
+    assert detail["orthogonal_attribution"]["mode_coefficients"]
+    assert detail["dynamic"]["exposure_path"]
+
+
+def _provisional_stamp(cycle):
+    """Write the stamp and the cycle's own resolved manifest the way a refresh cycle has them;
+    return the token the driver would hand to its stages."""
+    import hashlib
+    import json as _json
+
+    cycle.mkdir(parents=True, exist_ok=True)
+    (cycle / "resolved-cycle.json").write_bytes(b'{"cycle_manifest_sha256": "m1"}')
+    raw = _json.dumps(
+        {
+            "tier": "PROVISIONAL",
+            "not_a_release": True,
+            "schema_version": "qe-provisional-refresh/1",
+            "cycle_manifest_sha256": "m1",
+        }
+    ).encode("utf-8")
+    (cycle / "PROVISIONAL.json").write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _render_reuse_world(monkeypatch, tmp_path: Path):
+    state = tmp_path / "render-state"
+    state.mkdir()
+    monkeypatch.setenv("QE_RENDER_REUSE", "provisional")
+    monkeypatch.setenv("QE_RENDER_STATE_ROOT", str(state))
+    monkeypatch.setenv("QE_RENDER_RUN_TOKEN", _provisional_stamp(tmp_path))
+    live = {"n": 0}
+    real = panel._rendered_files_live
+
+    def counting(*args, **kwargs):
+        live["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(panel, "_rendered_files_live", counting)
+    return live
+
+
+def _render_reuse_verify(inputs: dict[str, Path], candidate: Path):
+    return panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+
+
+def _render_reuse_build(inputs: dict[str, Path]):
+    return panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+
+
+def test_provisional_render_is_built_once_and_verification_is_identical(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch
+) -> None:
+    reference = _render_reuse_build(inputs)
+    full = _render_reuse_verify(inputs, Path(reference["candidate_dir"]))
+    live = _render_reuse_world(monkeypatch, tmp_path)
+    built = _render_reuse_build(inputs)
+    verified = _render_reuse_verify(inputs, Path(built["candidate_dir"]))
+    again = _render_reuse_verify(inputs, Path(built["candidate_dir"]))
+    assert live["n"] == 1  # build rendered; both verifications reused it
+    assert verified == again == full  # byte-identical to the full verification
+    assert built["panel_id"] == reference["panel_id"]
+
+
+def test_provisional_render_reuse_never_hides_a_tampered_candidate_or_input(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch
+) -> None:
+    live = _render_reuse_world(monkeypatch, tmp_path)
+    built = _render_reuse_build(inputs)
+    candidate = Path(built["candidate_dir"])
+    assert _render_reuse_verify(inputs, candidate)["all_passed"] is True
+    assert live["n"] == 1
+    page = candidate / "index.html"
+    page.write_bytes(page.read_bytes() + b" ")  # one byte on the candidate
+    with pytest.raises(panel.ControlPanelValidationError, match="deterministic"):
+        _render_reuse_verify(inputs, candidate)
+    page.write_bytes(page.read_bytes()[:-1])
+    assert _render_reuse_verify(inputs, candidate)["all_passed"] is True
+    freshness = inputs["freshness"]
+    freshness.write_bytes(freshness.read_bytes() + b"\n")  # one byte of an input
+    before = live["n"]
+    with pytest.raises(panel.ControlPanelValidationError, match="deterministic"):
+        _render_reuse_verify(inputs, candidate)
+    assert (
+        live["n"] == before + 1
+    )  # re-rendered and refused, not served from the receipt
+
+
+def test_release_runs_render_live_every_time(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch
+) -> None:
+    live = _render_reuse_world(monkeypatch, tmp_path)
+    monkeypatch.delenv("QE_RENDER_REUSE")
+    built = _render_reuse_build(inputs)
+    _render_reuse_verify(inputs, Path(built["candidate_dir"]))
+    assert live["n"] == 2
+    assert not list((tmp_path / "render-state").rglob("*"))

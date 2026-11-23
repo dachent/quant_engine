@@ -3,7 +3,7 @@ name = "quant-engine-schwab"
 version = "0.3.0"
 description = "Read-only Schwab current-state, history, and generation contracts for quant_engine."
 requires-python = ">=3.11,<3.14"
-dependencies = ["quant-engine-core", "quant-engine-portfolio-ledger"]
+dependencies = ["quant-engine-core", "quant-engine-portfolio-ledger", "tzdata>=2025.2"]
 classifiers = ["Private :: Do Not Upload"]
 
 [build-system]

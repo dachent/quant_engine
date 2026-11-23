@@ -49,6 +49,7 @@ from acceptance.validate.checks import (  # noqa: E402
     findings_document,
     load_facts_sources,
     parse_strategy_basis,
+    plausibility as plausibility,
     rollup,
     run_checks,
     to_date,
@@ -289,6 +290,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("generation_dir", type=Path)
     parser.add_argument("--expected", type=Path, help="expected-baseline JSON")
+    parser.add_argument(
+        "--candidate",
+        action="store_true",
+        help="the directory is a panel CANDIDATE (G2, before publication): it has no "
+        "generation.json, so the checks that compare the manifest with the files are "
+        "not run; they run on the published generation at the findings-panel stage",
+    )
     parser.add_argument("--out", type=Path, help="findings document path")
     parser.add_argument("--details-out", type=Path, help="findings with messages")
     parser.add_argument(
@@ -308,6 +316,14 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="provider-ledger.json the generation was built from: the governed source "
         "of each strategy's opening capital anchor for the CAGR window check",
+    )
+    parser.add_argument(
+        "--owner-eyes",
+        choices=("off", "warn", "block"),
+        default="warn",
+        help="the owner-eyes plausibility rules (#912): warn (default) lists their hits as "
+        "WARNING and leaves the exit status alone; block makes a hit block, after the rules "
+        "are calibrated on a release payload; off skips them",
     )
     parser.add_argument(
         "--admission-receipt",
@@ -441,8 +457,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             discover=not args.no_discover,
             crosswalk_path=args.crosswalk,
             release_pointer_path=args.release_pointer,
+            candidate_only=args.candidate,
         )
-        generation_id = generation.manifest.get("generation_id")
+        generation_id = (
+            generation.gen_dir.name
+            if args.candidate
+            else generation.manifest.get("generation_id")
+        )
         if not isinstance(generation_id, str) or not generation_id:
             raise ContractError("generation.json has no generation_id")
         cutoff_text, cutoff_source = next(
@@ -480,6 +501,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         corrections=corrections,
         provider_ledger=provider_ledger,
         provider_receipt=provider_receipt,
+        owner_eyes=args.owner_eyes.upper(),
         strategy_basis=strategy_basis,
         sleeve_facts=sleeve_facts,
         facts_sources=facts_sources,

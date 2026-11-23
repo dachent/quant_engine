@@ -1372,7 +1372,9 @@ def _write_market(path: Path, columns: tuple[str, ...], days: list[date]) -> Non
                 (
                     observed.isoformat(),
                     *(
-                        f"{(index + position) / 100000:.12f}"
+                        # the risk-free column stays a plausible daily rate (the fit
+                        # loader refuses one outside [-0.05%, +0.5%])
+                        f"{((index % 400 if columns[position] in ('rf', 'BIL') else index) + position) / 100000:.12f}"
                         for position in range(len(columns))
                     ),
                 )

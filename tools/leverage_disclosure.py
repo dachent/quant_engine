@@ -57,6 +57,14 @@ def _until(rows: Sequence[Mapping[str, Any]], cutoff: str) -> list[Mapping[str, 
 # field read zero (or the account type has no margin feature): the generic input a reader
 # emits for providers without IBKR's base cash rows.
 ZERO_FINANCING_BASIS: Final = "OBSERVED_ZERO_FINANCING_DAY"
+# Zero days that are derived with closure, not read as a daily observation: any ``DERIVED_*``
+# verdict, plus the two Schwab cash-replay verdicts (the strings are in pinned ledger bytes and
+# are not renamed): end-of-day cash derived from the statement's transactions, and the capture
+# cash replay.  They are disclosed in the account-state reason, never described as verification.
+DERIVED_VERDICT_PREFIX: Final = "DERIVED_"
+DERIVED_VERDICTS: Final = frozenset(
+    {"CASH_LADDER_CLOSES", "CAPTURE_CASH_REPLAY_CLOSES"}
+)
 
 
 def _amount(row: Mapping[str, Any]) -> Decimal | None:
@@ -199,6 +207,8 @@ def _debit_evidence(
         if r.get("classification") == "NET_CASH_DEBIT_BALANCE" and _amount(r) is None
     )
     range_days: set[str] = set()
+    derived_days: set[str] = set()
+    free_days: set[str] = set()
     observed = {r["as_of_date"] for r in base if _amount(r) is not None}
     # Generic provider-observed financing day (any provider): ``amount`` is the provider's
     # borrowed balance for the day (never negative).  Exactly 0 is an observed zero day; a
@@ -233,8 +243,16 @@ def _debit_evidence(
                 # the amount is a statement range average: a disclosed estimate that is
                 # never read as a day balance (borrowed_principal ignores these rows)
                 range_days.add(day.isoformat())
+            if r.get("interest_bearing") is False:
+                free_days.add(day.isoformat())
         else:
             observed.add(day.isoformat())
+            verdict = str(r.get("verdict_reason", ""))
+            if (
+                verdict.startswith(DERIVED_VERDICT_PREFIX)
+                or verdict in DERIVED_VERDICTS
+            ):
+                derived_days.add(day.isoformat())
     currency_days = {
         r["as_of_date"]
         for r in liability
@@ -259,6 +277,8 @@ def _debit_evidence(
         unobserved_days=_unobserved_days(nav_days, known_days, cutoff),
         net_base_debit_days=len(base_days),
         range_average_debit_days=len(range_days & base_days),
+        interest_free_debit_days=len(free_days),
+        derived_zero_days=len(derived_days),
         debit_interest_postings=postings,
         currency_debit_days=len(currency_days),
         unreadable_debit_rows=unreadable,
@@ -404,16 +424,26 @@ def account_financing_rows(
 
         conflict_text = ",".join(state.conflicts)
         unverified = "" if declaration[name].verified else ";VERIFICATION=UNVERIFIED"
+        derived = evidence[name].derived_zero_days
+        derived_text = f";DERIVED_ZERO_DAYS={derived}" if derived else ""
         rows.append(
             make(
                 "ACCOUNT_FINANCING",
                 "ACCOUNT_FINANCING_STATE",
                 state.state,
                 NOT_COVERED if state.conflicts else DECLARED,
-                f"{state.reason}{';CONFLICT=' + conflict_text if conflict_text else ''}{unverified}",
+                f"{state.reason}{';CONFLICT=' + conflict_text if conflict_text else ''}{unverified}{derived_text}",
             )
         )
         if state.state == "NOT_LEVERED" and not state.conflicts:
+            continue
+        if (
+            state.reason == account_financing.SETTLED_DEBIT_NO_INTEREST
+            and not state.conflicts
+        ):
+            # owner ruling (#894): a retirement account's interest-free settled debit is its
+            # own state; the state row (and the debit days, which the panel shows) is the
+            # disclosure, no cost or exposure row is owed
             continue
         mapped_days = sorted(
             {
@@ -426,16 +456,28 @@ def account_financing_rows(
             {str(r["as_of_date"]) for r in parts["nav"]}
         )
         epoch_start = mapped_days[0] if mapped_days else None
-        cost_closure = leverage_closure.financing_cost_closure(
-            parts["cost"],
-            statement_days,
-            cutoff,
-            epoch_start,
-            (reserve_windows or {}).get(name),
-            # every account that reaches the cost closure (levered, incidental debit, or a
-            # conflicted NOT_LEVERED) closes an empty accrual section only on a stated zero
-            require_explicit_zero=True,
-        )
+        if leverage_closure.posting_reconciliation_applies(parts["cost"]):
+            # a margin account charged interest on settled debits: no accrual balance, the
+            # statements' interest tables reconcile to the postings instead
+            cost_closure = leverage_closure.financing_cost_posting_reconciliation(
+                parts["cost"],
+                parts["liability"],
+                cutoff,
+                epoch_start,
+                (reserve_windows or {}).get(name),
+            )
+        else:
+            cost_closure = leverage_closure.financing_cost_closure(
+                parts["cost"],
+                statement_days,
+                cutoff,
+                epoch_start,
+                (reserve_windows or {}).get(name),
+                # every account that reaches the cost closure (levered, incidental debit, or
+                # a conflicted NOT_LEVERED) closes an empty accrual section only on a stated
+                # zero
+                require_explicit_zero=True,
+            )
         rows.append(
             make(
                 "FINANCING_COST",
