@@ -375,72 +375,87 @@ def test_the_classification_reader_refuses_a_symbol_listed_twice_and_an_unknown_
         nd.holdings_classification(_doc(equity=[_row("AAA", "10")]), {"EXT-X": "x"})
 
 
-def test_a_derived_row_on_an_account_whose_native_nav_does_not_agree_is_refused(
+def test_the_record_states_whether_the_native_nav_checked_the_derived_rows(
     tmp_path: Path,
 ) -> None:
-    """The closure against the provider's own balance is what checks a derived row: a stale carry
-    (patched) or a waived prior closure leaves nothing to check it, so the record refuses."""
+    """A stale carry (patched) leaves nothing to check a derived row; the record says so and the
+    ingest-side check refuses it, while an agreeing account passes."""
 
-    run = tmp_path / "run"
-    (run / "raw/balances.historical").mkdir(parents=True)
-    doc = {
-        "accounts": [
-            {
-                "accountId": "EXT-A",
-                "groupedPositions": [
-                    {
-                        "groupName": "ETF",
-                        "securityType": 2,
-                        "holdingsRows": [_row("BBB", "4")],
-                    },
-                    {
-                        "groupName": "Cash",
-                        "securityType": 9,
-                        "holdingsRows": [{"marketValue": {"val": "100.50"}}],
-                    },
-                ],
-            }
-        ]
-    }
-    (run / "raw/holdings.v2.json").write_text(json.dumps(doc), encoding="utf-8")
-
-    def history(prior: float, day: float) -> str:
-        return json.dumps(
-            {
-                "histories": {
-                    "9/16/2026": {"AccountValue": prior},
-                    "9/17/2026": {"AccountValue": day},
+    def world(native_prior: float, native_day: float, root: Path):
+        run = root / "run"
+        (run / "raw/balances.historical").mkdir(parents=True)
+        doc = {
+            "accounts": [
+                {
+                    "accountId": "EXT-A",
+                    "groupedPositions": [
+                        {
+                            "groupName": "ETF",
+                            "securityType": 2,
+                            "holdingsRows": [_row("BBB", "4")],
+                        },
+                        {
+                            "groupName": "Cash",
+                            "securityType": 9,
+                            "holdingsRows": [{"marketValue": {"val": "100.50"}}],
+                        },
+                    ],
                 }
+            ]
+        }
+        (run / "raw/holdings.v2.json").write_text(json.dumps(doc), encoding="utf-8")
+        history = {
+            "histories": {
+                "9/16/2026": {"AccountValue": native_prior},
+                "9/17/2026": {"AccountValue": native_day},
             }
+        }
+        (run / "raw/balances.historical" / f"{ACCOUNT}.json").write_text(
+            json.dumps(history)
         )
-
-    # AAA (1 share, sold on 09/18) is held at the close: official value 600.00, prior 574.50;
-    # a native balance that just repeats the day before (574.50 twice) is a stale carry
-    (run / "raw/balances.historical" / f"{ACCOUNT}.json").write_text(
-        history(574.5, 574.5)
-    )
-    folder = run / "transactions/normalized/wch/transactions"
-    folder.mkdir(parents=True)
-    sale = {
-        "transactionDate": "09/18/2026",
-        "effectiveDate": "09/18/2026",
-        "action": "Sell",
-        "symbol": "AAA",
-        "shareQuantity": "1",
-        "amount": "$96.00",
-    }
-    (folder / f"{ACCOUNT}.json").write_text(json.dumps([sale]), encoding="utf-8")
-    closes = tmp_path / "closes"
-    closes.mkdir()
-    for symbol, pair in {"AAA": ("90.00", "95.5"), "BBB": ("120.00", "125.00")}.items():
-        (closes / f"{symbol}_yahoo_daily.csv").write_text(
-            f"date,close\n2026-09-16,{pair[0]}\n2026-09-17,{pair[1]}\n"
-        )
-    with pytest.raises(nd.DeriveError, match="nothing checks them"):
-        nd.derive(
+        folder = run / "transactions/normalized/wch/transactions"
+        folder.mkdir(parents=True)
+        sale = {
+            "transactionDate": "09/18/2026",
+            "effectiveDate": "09/18/2026",
+            "action": "Sell",
+            "symbol": "AAA",
+            "shareQuantity": "1",
+            "amount": "$96.00",
+        }
+        (folder / f"{ACCOUNT}.json").write_text(json.dumps([sale]), encoding="utf-8")
+        closes = root / "closes"
+        closes.mkdir()
+        for symbol, pair in {
+            "AAA": ("90.00", "95.5"),
+            "BBB": ("120.00", "125.00"),
+        }.items():
+            (closes / f"{symbol}_yahoo_daily.csv").write_text(
+                f"date,close\n2026-09-16,{pair[0]}\n2026-09-17,{pair[1]}\n"
+            )
+        record, _report = nd.derive(
             run_dir=run,
             crosswalk={"EXT-A": ACCOUNT},
             closes_dir=closes,
             day=DAY,
             prior_day=date(2026, 9, 16),
         )
+        return record
+
+    (tmp_path / "ok").mkdir()
+    (tmp_path / "stale").mkdir()
+    agreeing = world(574.5, 600.0, tmp_path / "ok")
+    assert agreeing[ACCOUNT]["derived_rows_native_closure"] == nd.STATUS_AGREES
+    nd.assert_derived_rows_checked(agreeing, [ACCOUNT])
+    # a native balance that just repeats the day before (574.50 twice) is a stale carry
+    stale = world(574.5, 574.5, tmp_path / "stale")
+    assert stale[ACCOUNT]["derived_rows_native_closure"] == nd.STATUS_PATCH
+    with pytest.raises(nd.DeriveError, match="nothing checks them"):
+        nd.assert_derived_rows_checked(stale, [ACCOUNT])
+
+
+def test_derived_rows_without_the_record_that_lists_them_are_refused() -> None:
+    with pytest.raises(nd.DeriveError, match="need the derivation record"):
+        nd.assert_derived_rows_checked(None, [ACCOUNT])
+    with pytest.raises(nd.DeriveError, match="need the derivation record"):
+        nd.assert_derived_rows_checked({ACCOUNT: {"cash": "1"}}, [ACCOUNT])

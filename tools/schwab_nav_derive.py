@@ -332,6 +332,29 @@ def absent_rolled_positions(
     return {s: q for s, q in sorted(after.quantities.items()) if s not in seen}
 
 
+def assert_derived_rows_checked(
+    derivation: Mapping[str, Any] | None, accounts: Sequence[str]
+) -> None:
+    """Refuse derived rows (positions sold in full after the day) on an account whose derivation
+    record does not show them checked: the native NAV of the day must agree with the official value
+    that includes them, with no waived prior closure and no stale-carry patch."""
+
+    for account in sorted(set(accounts)):
+        row = (derivation or {}).get(account)
+        if not isinstance(row, Mapping) or not row.get(
+            "derived_rows_absent_from_capture"
+        ):
+            raise DeriveError(
+                f"{account}: derived rows need the derivation record that lists them "
+                "(pass the record of schwab_nav_derive derive)"
+            )
+        if row.get("derived_rows_native_closure") != STATUS_AGREES:
+            raise DeriveError(
+                f"{account}: derived rows are not checked: the native NAV does not agree with the "
+                f"official value ({row.get('derived_rows_native_closure')}), so nothing checks them"
+            )
+
+
 def holdings_classification(
     raw: object, crosswalk: Mapping[str, str]
 ) -> dict[tuple[str, str], tuple[str, int]]:
@@ -645,14 +668,6 @@ def derive(
                 f"{official_day} by more than {tolerance} and is not a carry of {prior_day}"
             )
         absent = absent_rolled_positions(raw_accounts[account], rolled)
-        if absent and (waived or status != STATUS_AGREES):
-            # a derived row is only as good as the closure that checks it: the provider's own
-            # balance of the day must agree with the value that includes it
-            raise DeriveError(
-                f"{account}: {','.join(absent)} were sold in full after {day} and get derived rows, "
-                f"but the account's native NAV does not agree with the official value "
-                f"({'waived prior closure' if waived else status}), so nothing checks them"
-            )
         entry = {
             f"official_{day_tag}": str(official_day),
             f"official_{prior_tag}": str(official_prior),
@@ -678,6 +693,10 @@ def derive(
                 f"{k} x{v}" for k, v in sorted(rolled.rows_rolled_back.items())
             )
         if absent:
+            # the provider's own balance of the day is what checks a derived row: say whether it did
+            entry["derived_rows_native_closure"] = (
+                PRIOR_CLOSURE_WAIVED if waived else status
+            )
             entry["derived_rows_absent_from_capture"] = "; ".join(
                 f"{symbol} quantity={format(quantity, 'f')} "
                 f"official_close={format(closes[symbol][day], 'f')} source={ROLLBACK_SOURCE}"

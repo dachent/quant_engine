@@ -775,15 +775,12 @@ def ingest(
             )
     except derive_tool.DeriveError as exc:
         raise IngestError(str(exc)) from exc
-    for flagged in sorted({str(f["account_id"]) for f in derived_rows}):
-        recorded = (derivation or {}).get(flagged)
-        if not isinstance(recorded, Mapping) or not recorded.get(
-            "derived_rows_absent_from_capture"
-        ):
-            raise IngestError(
-                f"{flagged}: derived rows need the derivation record that checked them "
-                "against the native NAV (pass --derivation-record from schwab_nav_derive derive)"
-            )
+    try:
+        derive_tool.assert_derived_rows_checked(
+            derivation, [str(f["account_id"]) for f in derived_rows]
+        )
+    except derive_tool.DeriveError as exc:
+        raise IngestError(str(exc)) from exc
     if late:
         # the quote date is informational: the value comes from the official closes of the cutoff
         raw_response, quote_dates_set = _quotes_dated_at_cutoff(
