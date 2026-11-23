@@ -135,6 +135,7 @@ jobs:
           tools/portfolio_release_builder.py
           tools/portfolio_pipeline_materialize.py
           tools/portfolio_controller_graph.py
+          tools/factor_lens_status.py
           tools/portfolio_financial_mvp_contract.py
           tools/portfolio_layer_series.py
           tools/data_pipeline.py
@@ -243,6 +244,7 @@ jobs:
           tools/style_capture_assemble.py
           tools/yahoo_fetch_driver.py
           tools/yahoo_refresh_capture.py
+          tools/french_fetch_driver.py
           tools/tt_source_manifest_builder.py
           tools/tt_order_planner.py
           tools/grizzlybulls_capture.py
@@ -275,6 +277,7 @@ jobs:
           tools/leverage_closure.py
           tools/leverage_disclosure.py
           tools/quantbase_fund_days.py
+          tools/factor_lens_currency.py
           tools/series_label.py
           tools/published_render_check.py
           tools/check_plausibility.py
