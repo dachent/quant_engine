@@ -714,6 +714,11 @@ def test_the_balances_reference_keys_are_exact(tmp_path: Path) -> None:
             False,
         ),  # stamp after, declared before: still refuses
         ("2026-11-20", "2026-11-19", True),  # stamp == cutoff clears
+        (
+            "2026-11-19",
+            "2026-11-19",
+            True,
+        ),  # the row only refuses a declared date before it
         ("2026-11-23", "2026-11-20", True),  # weekend: stamp after the cutoff
         ("2026-12-01", "2026-11-30", True),
     ],
