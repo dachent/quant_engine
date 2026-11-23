@@ -177,6 +177,7 @@ EXCUSED = {
     "release_measurements": "wall-clock and size measurements of the run",
     "release_canary": "filesystem timing and environment probe of the commit path; derives no figure",
     "verify_sleeve_ledger": "re-reads a ledger and compares digests",
+    "factor_lens_status": "wraps already-published figures into a staleness-state document; computes no regression and reaches no pin (math is isfinite validation only)",
 }
 GUARDED_MARKERS = (
     "check_entry_interpreter",
