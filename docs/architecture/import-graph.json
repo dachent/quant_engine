@@ -820,6 +820,11 @@
     ],
     [
       "release_driver",
+      "decision_refresh",
+      1
+    ],
+    [
+      "release_driver",
       "release_cycle_manifest",
       1
     ],
