@@ -1,10 +1,8 @@
 """Stage wall times and work counters for the release ceremony.
 
-Timings are observations about a run, never inputs to it. Only when
-``QE_STAGE_TIMING_LOG`` names a file do they exist at all: they go to stderr and to that
-JSON-lines file. Without it a timer reads no clock and prints nothing, so a deterministic
-stage (one that forbids wall-clock reads) is unaffected. Nothing here is hashed into a
-generation, receipt or journal.
+Timings are observations about a run, never inputs to it: they go to stderr and,
+when ``QE_STAGE_TIMING_LOG`` names a file, to that JSON-lines file, and nothing
+here is hashed into a generation, receipt or journal.
 """
 
 from __future__ import annotations
@@ -56,9 +54,6 @@ def _emit(record: dict[str, object]) -> None:
 def stage(name: str, **fields: object) -> Iterator[dict[str, object]]:
     """Time one stage; the body may add result fields to the yielded dict."""
     extra: dict[str, object] = {}
-    if not os.environ.get(TIMING_LOG_ENV):
-        yield extra  # strict no-op without a log: no clock read, no output
-        return
     before = counters()
     started = time.monotonic()
     try:
