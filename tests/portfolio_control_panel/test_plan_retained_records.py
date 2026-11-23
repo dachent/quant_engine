@@ -65,10 +65,10 @@ def test_both_panel_checks_read_the_plan_through_the_one_helper() -> None:
         )
     }
     # the lens plan validation (D10) and the weekly/correlation identity mapping (D11)
-    assert {"_decomposition_lenses_for_mode", "_rendered_files"} <= users
+    assert {"_decomposition_lenses_for_mode", "_rendered_files_live"} <= users
     # no other place derives the retained ids from the plan: the helper is the only
     # reader of the contract's history-only rule for a plan
     assert users == {
         "_decomposition_lenses_for_mode",
-        "_rendered_files",
+        "_rendered_files_live",
     }
