@@ -96,7 +96,7 @@ def _load_and_validate_spec(
     path: Path,
     *,
     profile: str,
-    before_validation: Callable[[Any], None] | None = None,
+    before_validation: Callable[[Any], object] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Load the spec and validate its financial outcomes.
 
