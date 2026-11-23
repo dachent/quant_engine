@@ -196,6 +196,8 @@ _PATH_STAGES = {
     "tools/event_completeness.py": list(_STAGE_ORDER),
     # Imported by the ledger builder (provider-observed zero-financing days).
     "tools/zero_financing_statements.py": list(_STAGE_ORDER),
+    "tools/schwab_leverage_observations.py": list(_STAGE_ORDER),
+    "tools/schwab_margin_interest.py": list(_STAGE_ORDER),
     "tools/statement_reserve_nav.py": list(_STAGE_ORDER[1:]),
     # The orthogonal risk-share producer: one optional panel block derived from the
     # decomposition lenses and invested capital the panel already holds.
