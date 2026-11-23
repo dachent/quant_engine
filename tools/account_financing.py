@@ -131,7 +131,9 @@ def load_declaration(raw: bytes) -> dict[str, Declared]:
             raise FinancingDeclarationError("an account row has the wrong keys")
         interest = row.get("settled_debit_interest")
         refs = row.get("settled_debit_interest_refs", [])
-        if ("settled_debit_interest" in row) != ("settled_debit_interest_refs" in row) or (
+        if ("settled_debit_interest" in row) != (
+            "settled_debit_interest_refs" in row
+        ) or (
             "settled_debit_interest" in row
             and (
                 interest != SETTLED_DEBIT_INTEREST_NONE

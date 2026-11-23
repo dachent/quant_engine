@@ -45,14 +45,23 @@ def _declaration(**extra: Any) -> bytes:
     ).encode()
 
 
-def _classify(account: str = RET, declaration: bytes | None = None, **evidence: Any) -> af.AccountState:
+def _classify(
+    account: str = RET, declaration: bytes | None = None, **evidence: Any
+) -> af.AccountState:
     declared = af.load_declaration(declaration or _declaration())
-    base = {"net_base_debit_days": 3, "interest_free_debit_days": 3, "observed_base_days": 10, "unobserved_days": 0}
+    base = {
+        "net_base_debit_days": 3,
+        "interest_free_debit_days": 3,
+        "observed_base_days": 10,
+        "unobserved_days": 0,
+    }
     seen = af.DebitEvidence(**{**base, **evidence})
     return af.classify(declared, {account: seen}, [account])[account]
 
 
-def test_an_interest_free_declared_settled_debit_is_incidental_without_conflict() -> None:
+def test_an_interest_free_declared_settled_debit_is_incidental_without_conflict() -> (
+    None
+):
     state = _classify()
     assert (state.state, state.reason, state.conflicts) == (
         "INCIDENTAL_DEBIT",
@@ -69,7 +78,15 @@ def test_a_margin_accounts_debit_days_still_make_it_levered() -> None:
     declared = af.load_declaration(_declaration())
     used = {
         **declared,
-        RET: af.Declared(RET, "ACTIVE", "MARGIN_USED", True, "owner", af.SETTLED_DEBIT_INTEREST_NONE, tuple(REFS)),
+        RET: af.Declared(
+            RET,
+            "ACTIVE",
+            "MARGIN_USED",
+            True,
+            "owner",
+            af.SETTLED_DEBIT_INTEREST_NONE,
+            tuple(REFS),
+        ),
     }
     seen = af.DebitEvidence(net_base_debit_days=3, interest_free_debit_days=3)
     assert af.classify(used, {RET: seen}, [RET])[RET].state == "LEVERED"
@@ -80,10 +97,14 @@ def test_a_margin_accounts_debit_days_still_make_it_levered() -> None:
     [
         {"interest_free_debit_days": 2},  # one debit day is not stated interest-free
         {"interest_free_debit_days": 0},
-        {"debit_interest_postings": 1},  # a posted interest charge is evidence of interest
+        {
+            "debit_interest_postings": 1
+        },  # a posted interest charge is evidence of interest
     ],
 )
-def test_a_partly_free_or_interest_posted_debit_is_not_exempt(evidence: dict[str, Any]) -> None:
+def test_a_partly_free_or_interest_posted_debit_is_not_exempt(
+    evidence: dict[str, Any],
+) -> None:
     state = _classify(**evidence)
     assert state.state == "LEVERED" and state.conflicts
 
@@ -209,10 +230,14 @@ def test_the_exempt_account_gets_a_state_row_and_no_cost_or_exposure_row() -> No
     assert state["coverage_reason"] == "SETTLED_DEBIT_NO_INTEREST"
 
 
-def test_without_the_producer_statement_the_account_stays_levered_with_its_rows() -> None:
+def test_without_the_producer_statement_the_account_stays_levered_with_its_rows() -> (
+    None
+):
     rows = _rows(_catalog(free=False))
     state = next(r for r in rows if r["measurement_basis"] == "ACCOUNT_FINANCING_STATE")
-    assert state["classification"] == "LEVERED" and "CONFLICT" in state["coverage_reason"]
+    assert (
+        state["classification"] == "LEVERED" and "CONFLICT" in state["coverage_reason"]
+    )
     assert {r["data_class"] for r in rows} >= {"FINANCING_COST", "LEVERAGE_EXPOSURE"}
 
 
@@ -220,12 +245,20 @@ def test_without_the_producer_statement_the_account_stays_levered_with_its_rows(
 def test_only_the_boolean_false_is_a_statement_of_no_interest(value: Any) -> None:
     catalog = _catalog()
     catalog["financing_liability_observations"][0]["interest_bearing"] = value
-    state = next(r for r in _rows(catalog) if r["measurement_basis"] == "ACCOUNT_FINANCING_STATE")
+    state = next(
+        r for r in _rows(catalog) if r["measurement_basis"] == "ACCOUNT_FINANCING_STATE"
+    )
     assert state["classification"] == "LEVERED"
 
 
 def test_the_debit_days_stay_in_the_ledger_rows_for_the_panel() -> None:
     catalog = _catalog()
     _rows(catalog)
-    days = [r for r in catalog["financing_liability_observations"] if r["classification"] == "OBSERVED_FINANCING_DAY"]
-    assert [r["amount"]["value"] for r in days] == ["97.33"] * 3  # the disclosure never drops them
+    days = [
+        r
+        for r in catalog["financing_liability_observations"]
+        if r["classification"] == "OBSERVED_FINANCING_DAY"
+    ]
+    assert [r["amount"]["value"] for r in days] == [
+        "97.33"
+    ] * 3  # the disclosure never drops them

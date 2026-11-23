@@ -2603,7 +2603,9 @@ def validate_rows(artifact: object, accounts: set[str]) -> list[Mapping[str, Any
         if "interest_bearing" in row and (
             row["interest_bearing"] is not False or not financing
         ):
-            raise ZeroFinancingError("interest_bearing may only state False on a financing day")
+            raise ZeroFinancingError(
+                "interest_bearing may only state False on a financing day"
+            )
         try:
             date.fromisoformat(row["as_of_date"])
         except (TypeError, ValueError) as exc:

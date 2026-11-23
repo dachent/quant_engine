@@ -130,7 +130,9 @@ def test_a_not_levered_row_with_a_foreign_or_conflicted_reason_does_not_narrow(
 SETTLED = "SETTLED_DEBIT_NO_INTEREST"
 
 
-def test_a_settled_debit_no_interest_account_leaves_the_check_like_not_levered(tmp_path):
+def test_a_settled_debit_no_interest_account_leaves_the_check_like_not_levered(
+    tmp_path,
+):
     """Owner ruling (#894): a retirement settlement float is not borrowing; the one exception
     to the rule that INCIDENTAL_DEBIT stays applicable."""
 
@@ -147,7 +149,9 @@ def test_only_the_exact_settled_debit_state_leaves_the_check(tmp_path):
     found = _e8(
         tmp_path,
         _state("A1", "INCIDENTAL_DEBIT", SETTLED),
-        _state("B1", "INCIDENTAL_DEBIT"),  # an incidental debit with another reason stays
+        _state(
+            "B1", "INCIDENTAL_DEBIT"
+        ),  # an incidental debit with another reason stays
         _state("B2", "LEVERED", SETTLED),  # the reason belongs to INCIDENTAL_DEBIT only
     )
     assert _uncovered_accounts(found) == {"B1", "B2"}
@@ -196,5 +200,7 @@ def test_an_unavailable_settled_debit_state_row_does_not_narrow(tmp_path):
             }
         )
 
-    found = _e8(tmp_path, mutate, _state("B1", "NOT_LEVERED"), _state("B2", "NOT_LEVERED"))
+    found = _e8(
+        tmp_path, mutate, _state("B1", "NOT_LEVERED"), _state("B2", "NOT_LEVERED")
+    )
     assert _uncovered_accounts(found) == {"A1"}
