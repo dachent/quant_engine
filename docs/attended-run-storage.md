@@ -145,3 +145,16 @@ refuses to start unless the invocation says how that evidence arrives:
 
 A plan-only invocation (no `--execute`) prints a `qa` block naming the stage, the
 required flag, whether `--qa-dir` was supplied, and these instructions.
+
+### Warm start for the next release (release driver)
+
+Fits, the decomposition index and financial replay receipts are content-keyed, so a
+release seeded from the last sealed base refits only the windows whose inputs changed
+(measured on A5: a cold run spent 12.7 of 52.5 attended minutes on fits and lens builds,
+and the production spec refit 5,404 models; `records/sprint/REFRESH-RUNTIME-MEASUREMENT.md`).
+The run config's `retained_cache_base` must lie inside the cycle, so:
+
+1. After a PASSED run: `python tools/release_cache_base.py promote --overlay <cycle>/cache --base <bases>/<name> --run-root <cycle>/out1` (a cold run seals only the content-keyed kinds).
+2. Next cycle, before the run: `python tools/release_cache_base.py seed --base <bases>/<name> --target <cycle>/cachebase` (hard links, verified before and after; refuses a changed base or an existing target; both paths on one volume).
+3. Set `retained_cache_base` to `<cycle>/cachebase` in the run config.
+4. After the run: `python tools/release_cache_base.py report ...` (exit 4 = producers changed but nothing recomputed: an undeclared producer dependency, do not trust the run), then promote the new overlay as the next base.

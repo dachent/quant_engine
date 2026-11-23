@@ -306,3 +306,51 @@ def test_a_cold_root_with_no_cache_entries_is_refused(tmp_path: Path) -> None:
         )
     assert not (tmp_path / "b").exists()
     assert _promote(tmp_path, run, tmp_path / "b2") == 1
+
+
+def test_seed_hard_links_a_verified_base_into_the_cycle(tmp_path: Path) -> None:
+    run = _cold_run(tmp_path)
+    base = tmp_path / "base"
+    assert _promote(tmp_path, run, base) == 0
+    target = tmp_path / "cycle" / "cachebase"
+    record = cb.seed(base, target)
+    assert record["manifest"] == core_base.verify_cache_base(base)["manifest"]
+    rel = ".decomposition-index/k1.json"
+    assert (target / rel).read_bytes() == (base / rel).read_bytes()
+    assert os.path.samestat((target / rel).stat(), (base / rel).stat())
+    assert core_base.verify_cache_base(target)["source_commit"] == COMMIT
+
+
+def test_seed_refuses_a_tampered_base_and_an_existing_target(tmp_path: Path) -> None:
+    run = _cold_run(tmp_path)
+    base = tmp_path / "base"
+    assert _promote(tmp_path, run, base) == 0
+    target = tmp_path / "cycle" / "cachebase"
+    target.mkdir(parents=True)
+    with pytest.raises(core_base.CacheBaseError, match="already exists"):
+        cb.seed(base, target)
+    target.rmdir()
+    victim = base / ".decomposition-index" / "k1.json"
+    victim.chmod(stat.S_IWUSR | stat.S_IRUSR)
+    victim.write_text("tampered", encoding="utf-8")
+    with pytest.raises(core_base.CacheBaseError, match="differ"):
+        cb.seed(base, target)
+    assert not target.exists()
+
+
+def test_a_failed_seed_leaves_no_usable_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _cold_run(tmp_path)
+    base = tmp_path / "base"
+    assert _promote(tmp_path, run, base) == 0
+    target = tmp_path / "cycle" / "cachebase"
+
+    def boom(src: str, dst: str) -> None:
+        raise OSError("cross-device")
+
+    monkeypatch.setattr(cb.os, "link", boom)
+    with pytest.raises(core_base.CacheBaseError, match="hard-link"):
+        cb.seed(base, target)
+    assert not target.exists()
+    assert not core_base.provenance_path(target).exists()
