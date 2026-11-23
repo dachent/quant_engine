@@ -177,13 +177,14 @@ EXCUSED = {
     "release_measurements": "wall-clock and size measurements of the run",
     "release_canary": "filesystem timing and environment probe of the commit path; derives no figure",
     "verify_sleeve_ledger": "re-reads a ledger and compares digests",
-    "factor_lens_status": "wraps already-published figures into a staleness-state document; computes no regression and reaches no pin (math is isfinite validation only)",
+    "factor_lens_status": "stdlib-only: date arithmetic and threshold/sign comparisons on already-published figures; no regression, no numeric library, no pin",
 }
 GUARDED_MARKERS = (
     "check_entry_interpreter",
     "require_current_interpreter",
     "require_interpreter",
 )
+# Textual heuristic: a tool with main() that later adds one of these (e.g. factor_lens_currency, french_fetch_driver) trips this test.
 NUMERIC = ("import math", "import numpy", "import pandas", "float(")
 
 
