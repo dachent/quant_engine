@@ -297,13 +297,29 @@ def test_held_qsi_and_qb_kinds_are_driver_valid_and_cover_their_tickers() -> Non
 FX_FIRST = date(2025, 1, 1)
 
 
+FX_COLUMNS = [
+    "Ticker",
+    "Date",
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Adj Close",
+    "Volume",
+    "Dividends",
+    "Stock Splits",
+]
+
+
 def _write_fx(
     folder: Path,
     *,
     drop: dict[str, str] | None = None,
     stop: dict[str, str] | None = None,
     close: dict[str, float] | None = None,
-) -> None:
+) -> Path:
+    """A capture-v0 history file (the exact keys the driver writes for the fx profile)."""
+
     folder.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     for symbol in ("USDC-USD", "USDT-USD"):
@@ -314,19 +330,39 @@ def _write_fx(
                 symbol, "9999"
             )
             if not skip:
+                price = (close or {}).get(symbol, 1.0)
                 rows.append(
                     {
                         "Ticker": symbol,
                         "Date": f"{iso}T00:00:00",
-                        "Close": (close or {}).get(symbol, 1.0),
+                        "Open": price,
+                        "High": price,
+                        "Low": price,
+                        "Close": price,
+                        "Adj Close": price,
+                        "Volume": 1.0,
                         "Dividends": 0.0,
+                        "Stock Splits": 0.0,
                     }
                 )
             day += timedelta(days=1)
-    for name in ("history", "history_adjusted"):
-        (folder / f"yahoo-fx-usd-stables-{name}.json").write_text(
-            json.dumps({"rows": rows}), encoding="utf-8"
-        )
+    document = {
+        "provider": "yahoo",
+        "transport": "yfinance",
+        "dataset": "history",
+        "tickers": ["USDC-USD", "USDT-USD"],
+        "columns": FX_COLUMNS,
+        "rows": rows,
+        "start": FX_FIRST.isoformat(),
+        "end": (CUTOFF + timedelta(days=1)).isoformat(),
+        "interval": "1d",
+        "prepost": False,
+    }
+    target = folder / "yahoo-fx-usd-stables-history.json"
+    target.write_text(json.dumps(document), encoding="utf-8")
+    return (
+        target  # no history_adjusted file: the capture-v0 profile carries history only
+    )
 
 
 def test_fx_kind_is_driver_valid_every_day_from_the_fx_observed_start() -> None:
@@ -334,6 +370,17 @@ def test_fx_kind_is_driver_valid_every_day_from_the_fx_observed_start() -> None:
     assert [g["symbols"] for g in config["groups"]] == [["USDC-USD", "USDT-USD"]]
     assert [g["start"] for g in config["groups"]] == ["2025-01-01"]
     assert [g["calendar"] for g in config["groups"]] == ["every_day"]
+    # the profile the FX stager reads: history only, capture-v0 keys (not the default tape)
+    assert [g["artifact_profile"] for g in config["groups"]] == ["capture-v0"]
+    assert [g["datasets"] for g in config["groups"]] == [["history"]]
+    parsed = driver.parse_config(y.config_bytes(config), cutoff_override="2026-11-06")
+    assert [g.artifact_profile for g in parsed.groups] == ["capture-v0"]
+    assert [list(g.datasets) for g in parsed.groups] == [["history"]]
+    # other kinds keep the default tape profile
+    assert all(
+        "artifact_profile" not in g
+        for g in y.build_config("base", CUTOFF, "R5")["groups"]
+    )
     assert config == y.build_config("fx", CUTOFF, "R5")
     assert y.config_sha256(config) != y.config_sha256(
         y.build_config("fx", date(2026, 11, 13), "R5")
@@ -369,3 +416,31 @@ def test_fx_acceptance_refuses_a_bad_close(tmp_path: Path) -> None:
     _write_fx(tmp_path, close={"USDC-USD": 0.5})
     findings = y.acceptance(tmp_path, "fx", CUTOFF)["findings"]
     assert any(f.startswith("USDC-USD: close outside") for f in findings)
+
+
+def test_fx_capture_feeds_the_fx_stager(tmp_path: Path) -> None:
+    import portfolio_fx_rates as fxr
+
+    history = _write_fx(tmp_path / "artifacts")
+    assert y.acceptance(history.parent, "fx", CUTOFF)["passed"]
+    value, _raw = fxr._capture(history)  # noqa: SLF001 - the exact-keys check the stager runs
+    assert set(value) == {
+        "provider",
+        "transport",
+        "dataset",
+        "tickers",
+        "columns",
+        "rows",
+        "start",
+        "end",
+        "interval",
+        "prepost",
+    }
+    staged = fxr.stage_candidate(
+        history,
+        tmp_path / "staged",
+        observed_start="2025-01-01",
+        observed_end=CUTOFF.isoformat(),
+    )
+    assert staged["published"] is False
+    assert staged["rate_count"] == 2 * ((CUTOFF - FX_FIRST).days + 1)

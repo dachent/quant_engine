@@ -5352,7 +5352,7 @@
   },
   {
    "source_id": "portfolio-fx-rates",
-   "source_version": "portfolio-fx-rates:1add4dec409918e16d75c9fa7806ed4f9d215b828dc9743450a55d859be00aa9",
+   "source_version": "portfolio-fx-rates:3eb90259867a08a42eb1fcca7c89ff38be3d7e33c9d5c4307da7bf0c1600dece",
    "strategy_version": {
     "status": "NOT_APPLICABLE",
     "binding": "REFERENCE_DATA_NOT_STRATEGY_VERSIONED",
@@ -5374,7 +5374,7 @@
     "FX_RATE"
    ],
    "authority": "OWNER_APPROVED_EVENT_DATE_AND_VALUATION_DATE_FX_SOURCE",
-   "endpoint_or_artifact_selector": "Yahoo USDC-USD and USDT-USD daily Close on each original UTC event or NAV date; generation 1add4dec409918e16d75c9fa7806ed4f9d215b828dc9743450a55d859be00aa9, catalog 3c2a924423024cf10fb3e8e3068cfffb015b0efa1c7fbc159d2a213fdfc5a132, rates 7312e7f6756a4a74b07bbfdaca800b3a5c039fd6514e89f81747b4ad423f314d",
+   "endpoint_or_artifact_selector": "Yahoo USDC-USD and USDT-USD daily Close on each original UTC event or NAV date; generation 3eb90259867a08a42eb1fcca7c89ff38be3d7e33c9d5c4307da7bf0c1600dece, catalog 8affd9190d72c5812d8291d4a2ddc42a8efaa6d8d742e1ff6dc4cd66bc50264d, rates 93820428b3a7cd4342950fa7941a7e354197e7d04bcd7546d48b29e690cead1b",
    "acquisition": {
     "adapter": "agent-market-data-terminal-approved-route",
     "mode": "ALREADY_LOCAL_APPROVED_SOURCE_FREEZE",
@@ -5383,7 +5383,7 @@
    "evidence_layer": "MARKET_OBSERVATION",
    "interval": {
     "observed_start": "2025-01-01",
-    "observed_end": "2026-11-19",
+    "observed_end": "2026-11-20",
     "effective_start": null,
     "effective_end": null,
     "splice_policy": "EVENT_DATE_FOR_FLOWS_AND_DECLARED_VALUATION_DATE_FOR_NAV; ORIGINAL_UTC_DATE; NO_PARITY_INTERPOLATION_OR_FILL"
@@ -5422,9 +5422,9 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "1add4dec409918e16d75c9fa7806ed4f9d215b828dc9743450a55d859be00aa9",
-    "sha256": "0b7630383f80599fc8e58543a3b585119dc39314f010af810724b32d273c60a0",
-    "as_of": "2026-11-19"
+    "generation_id": "3eb90259867a08a42eb1fcca7c89ff38be3d7e33c9d5c4307da7bf0c1600dece",
+    "sha256": "fdbaadef5e548e2834acfedbc2de6c83c7b593fd6df8ed9111177f36bfa529a9",
+    "as_of": "2026-11-20"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",
@@ -5439,7 +5439,7 @@
     "PANEL",
     "RELEASE_RECEIPT"
    ],
-   "owner_policy_decision": "Owner approval #374 selects Yahoo USDC-USD and USDT-USD daily Close, quoted as USD per native unit, on each original UTC deposit, withdrawal, or NAV date. Preserve original amounts, currencies, and timestamps. No parity assumption, interpolation, or fill. Owner selection 2026-10-01 (#374 comment 5924282578) admitted generation fd6096d8 for UTC dates 2025-01-01 through 2026-09-17; the R3 owner selection for cutoff 2026-11-06 (#374, extending that comment) admitted generation ff77af45 for UTC dates 2025-01-01 through 2026-11-06; the same-method extension to cutoff 2026-11-19 (same source, same selection rule, owner standing instruction 2026-11-17, capture record #283 comment 7065163148) admits generation 1add4dec for UTC dates 2025-01-01 through 2026-11-19."
+   "owner_policy_decision": "Owner approval #374 selects Yahoo USDC-USD and USDT-USD daily Close, quoted as USD per native unit, on each original UTC deposit, withdrawal, or NAV date. Preserve original amounts, currencies, and timestamps. No parity assumption, interpolation, or fill. Owner selection 2026-10-01 (#374 comment 5924282578) admitted generation fd6096d8 for UTC dates 2025-01-01 through 2026-09-17; the R3 owner selection for cutoff 2026-11-06 (#374, extending that comment) admitted generation ff77af45 for UTC dates 2025-01-01 through 2026-11-06; the same-method extension to cutoff 2026-11-19 (same source, same selection rule, owner standing instruction 2026-11-17, capture record #283 comment 7065163148) admitted generation 1add4dec for UTC dates 2025-01-01 through 2026-11-19; the same-method extension to cutoff 2026-11-20 (same source, same selection rule, owner standing instruction 2026-11-17, capture record #283 comment 7104996248) admits generation 3eb90259 for UTC dates 2025-01-01 through 2026-11-20."
   },
   {
    "source_id": "portfolio-calendars",

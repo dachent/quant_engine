@@ -145,6 +145,9 @@ MONTHLY_PAYERS = ("BIL", "HYG", "IEF", "LQD", "TLT")
 CRYPTO = ("BTC-USD", "ETH-USD", "USDC-USD", "USDT-USD")
 # Stablecoin FX series: no missing UTC day and a close near 1 (a depeg or a bad bar is a finding).
 STABLECOINS = ("USDC-USD", "USDT-USD")
+# Kinds whose artifact is the history-only capture-v0 shape that tools/portfolio_fx_rates.py reads
+# (exact keys provider, transport, dataset, tickers, columns, rows, start, end, interval, prepost).
+CAPTURE_V0_KINDS = frozenset({"fx"})
 STABLECOIN_CLOSE_BAND = (0.9, 1.1)
 MONTH_WINDOW_DAYS = 1095
 MAX_DISTRIBUTION_GAP_DAYS = 52
@@ -189,6 +192,9 @@ def build_config(kind: str, cutoff: date, label: str) -> dict[str, Any]:
         }
         if calendar != "weekday":
             group["calendar"] = calendar
+        if kind in CAPTURE_V0_KINDS:
+            group["artifact_profile"] = "capture-v0"
+            group["datasets"] = ["history"]
         groups.append(group)
     return {
         "cutoff": cutoff.isoformat(),
@@ -230,7 +236,8 @@ def comment_body(
         f"Record (control-directed; not an owner approval): Yahoo public price fetch under "
         f"#283, cutoff {cutoff.isoformat()}. Scope: read-only public Yahoo Finance requests "
         f"through the committed yahoo_fetch_driver fetch (file sha256 "
-        f"{_driver_sha256()}), daily bars, history and history_adjusted, through the "
+        f"{_driver_sha256()}), daily bars, history and history_adjusted (history only "
+        f"for the fx kind), through the "
         f"cutoff; no login, no credentials, no account write, no refresh of any retained "
         f"dataset. Runs: {runs}; max_requests {MAX_REQUESTS}, single use each. Outputs stay "
         f"under the evidence area; nothing is published as CURRENT by this step."
@@ -302,11 +309,14 @@ def acceptance(artifacts: Path, kind: str, cutoff: date) -> dict[str, Any]:
     tickers: dict[str, Any] = {}
     for group_id, first_bar, symbols, calendar in KINDS[kind]:
         raw = _rows(artifacts / f"yahoo-{group_id}-history.json")
-        adjusted = _rows(artifacts / f"yahoo-{group_id}-history_adjusted.json")
-        raw_keys = {(r["Ticker"], r["Date"][:10]) for r in raw}
-        adjusted_keys = {(r["Ticker"], r["Date"][:10]) for r in adjusted}
-        if raw_keys != adjusted_keys:
-            findings.append(f"{group_id}: raw and adjusted rows cover different dates")
+        if kind not in CAPTURE_V0_KINDS:
+            adjusted = _rows(artifacts / f"yahoo-{group_id}-history_adjusted.json")
+            raw_keys = {(r["Ticker"], r["Date"][:10]) for r in raw}
+            adjusted_keys = {(r["Ticker"], r["Date"][:10]) for r in adjusted}
+            if raw_keys != adjusted_keys:
+                findings.append(
+                    f"{group_id}: raw and adjusted rows cover different dates"
+                )
         floor = int(
             _expected_bars(date.fromisoformat(first_bar), cutoff, calendar) * ROW_FLOOR
         )
