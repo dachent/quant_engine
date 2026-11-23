@@ -6826,84 +6826,300 @@ def _eu_live_segment(dates: list[str]) -> list[dict[str, str]]:
     ]
 
 
-def _eu_extension(
-    rows: list[dict[str, str]],
-    *,
-    block: object | None = None,
-    as_of: date | None = None,
-) -> dict[str, object] | None:
-    pinned = target_series._row_identity(rows[:2])
-    if block is None:
-        block = {
+_EU_DATES = ["2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09"]
+_EU_DESIGNER_SHA = "a" * 64
+_EU_PREDECESSOR = {
+    "bundle_id": "b" * 64,
+    "manifest_sha256": "c" * 64,
+    "returns_sha256": "d" * 64,
+}
+
+
+def _eu_resync(case: dict[str, Any]) -> None:
+    """Re-declare the block from the rows, so only the targeted check can refuse."""
+
+    rows = case["rows"]
+    case["block"].update(
+        {
             "model_live_observations": len(rows),
             "model_live_first": rows[0]["date"],
             "model_live_last": rows[-1]["date"],
+            "model_live_tail_rows_sha256": target_series._row_identity(rows[2:])[
+                "sha256"
+            ],
         }
+    )
+
+
+def _eu_case() -> dict[str, Any]:
+    rows = _eu_live_segment(_EU_DATES)
+    case: dict[str, Any] = {
+        "rows": rows,
+        "bundle_id": "9" * 64,
+        "pinned": target_series._row_identity(rows[:2]),
+        "block": {
+            "accepted_predecessor": dict(_EU_PREDECESSOR),
+            "designer_model_returns_sha256": _EU_DESIGNER_SHA,
+        },
+        "receipt": {
+            "accepted_predecessor": {**_EU_PREDECESSOR, "extra": "x"},
+            "sources": [
+                {
+                    "source_id": "p123-eu-designer-model-returns",
+                    "sha256": _EU_DESIGNER_SHA,
+                }
+            ],
+        },
+        "accepted_as_of": date(2026, 11, 19),
+    }
+    _eu_resync(case)
+    return case
+
+
+def _eu_run(case: dict[str, Any]) -> dict[str, object] | None:
     return target_series._eu_model_live_extension_identity(
-        block=block,
-        pinned=pinned,
-        segment_rows=rows,
-        accepted_as_of=as_of or date(2026, 11, 19),
+        block=case["block"],
+        bundle_id=case["bundle_id"],
+        receipt=case["receipt"],
+        pinned=case["pinned"],
+        segment_rows=case["rows"],
+        accepted_as_of=case["accepted_as_of"],
     )
 
 
 def test_eu_model_live_extension_identity_admits_only_a_pure_declared_extension() -> (
     None
 ):
-    rows = _eu_live_segment(["2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09"])
-    identity = _eu_extension(rows)
+    case = _eu_case()
+    identity = _eu_run(case)
     assert identity == {
-        key: target_series._row_identity(rows)[key]
+        key: target_series._row_identity(case["rows"])[key]
         for key in ("sha256", "observed_start", "observed_end", "return_observations")
     }
+    # the last row may sit exactly on the cutoff
+    case["accepted_as_of"] = date(2026, 11, 9)
+    assert _eu_run(case) == identity
     # no declaration: the pin stays frozen and the caller's own comparison refuses
-    assert (
-        target_series._eu_model_live_extension_identity(
-            block=None,
-            pinned=target_series._row_identity(rows[:2]),
-            segment_rows=rows,
-            accepted_as_of=date(2026, 11, 19),
-        )
-        is None
-    )
+    case["block"] = None
+    assert _eu_run(case) is None
+
+
+def test_eu_model_live_extension_legacy_bundle_needs_no_digest_and_no_other_bundle_does() -> (
+    None
+):
+    case = _eu_case()
+    del case["block"]["model_live_tail_rows_sha256"]
+    with pytest.raises(TargetSeriesError, match="declaration"):
+        _eu_run(case)
+    (legacy,) = target_series.EU_EXTENSION_LEGACY_BUNDLE_IDS
+    case["bundle_id"] = legacy
+    assert _eu_run(case) is not None
+    # a legacy bundle still gets every other check, and a wrong digest still refuses
+    case["rows"][3]["return"] = "0.5"
+    assert _eu_run(case) is not None  # no digest to disagree: values are the producer's
+    case["block"]["model_live_tail_rows_sha256"] = "f" * 64
+    with pytest.raises(TargetSeriesError, match="declaration"):
+        _eu_run(case)
+
+
+def _duplicate_tail_date(case: dict[str, Any]) -> None:
+    case["rows"][3]["date"] = case["rows"][2]["date"]
+    _eu_resync(case)
+
+
+def _tail_starts_on_pinned_end(case: dict[str, Any]) -> None:
+    case["rows"][2]["date"] = case["pinned"]["observed_end"]
+    _eu_resync(case)
+
+
+def _other_series(case: dict[str, Any]) -> None:
+    case["rows"][3]["series_id"] = "QSI"
+    _eu_resync(case)
+
+
+def _other_layer(case: dict[str, Any]) -> None:
+    case["rows"][3]["evidence_layer"] = "BACKTEST"
+    _eu_resync(case)
+
+
+def _other_version(case: dict[str, Any]) -> None:
+    case["rows"][3]["strategy_version"] = "other"
+    _eu_resync(case)
+
+
+def _hole_in_tail(case: dict[str, Any]) -> None:
+    case["rows"][3]["date"] = "2026-11-16"
+    _eu_resync(case)
+
+
+def _hole_before_tail(case: dict[str, Any]) -> None:
+    case["rows"][2]["date"] = "2026-11-16"
+    case["rows"][3]["date"] = "2026-11-17"
+    _eu_resync(case)
+
+
+def _tail_value(case: dict[str, Any]) -> None:
+    case["rows"][3]["return"] = "0.5"
+
+
+def _declare(key: str, value: object) -> Any:
+    def mutate(case: dict[str, Any]) -> None:
+        case["block"][key] = value
+
+    return mutate
+
+
+def _receipt_without_designer(case: dict[str, Any]) -> None:
+    case["receipt"]["sources"] = []
+
+
+def _predecessor(key: str) -> Any:
+    def mutate(case: dict[str, Any]) -> None:
+        case["block"]["accepted_predecessor"][key] = "e" * 64
+
+    return mutate
+
+
+def _predecessor_absent(case: dict[str, Any]) -> None:
+    case["block"]["accepted_predecessor"] = None
+
+
+def _past_cutoff(case: dict[str, Any]) -> None:
+    case["accepted_as_of"] = date(2026, 11, 6)
+
+
+def _prefix_value(case: dict[str, Any]) -> None:
+    case["rows"][0]["return"] = "0.9"
 
 
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
-        (lambda rows: rows[0].update({"return": "0.9"}), "pinned prefix"),
-        (lambda rows: rows.pop(), "differs from its declaration"),
+        (_prefix_value, "pinned prefix"),
+        (_duplicate_tail_date, "declaration"),
+        (_tail_starts_on_pinned_end, "declaration"),
+        (_other_series, "declaration"),
+        (_other_layer, "declaration"),
+        (_other_version, "declaration"),
+        (_hole_in_tail, "hole"),
+        (_hole_before_tail, "hole"),
+        (_tail_value, "declaration"),
+        (_past_cutoff, "declaration"),
+        (_declare("model_live_observations", 5), "declaration"),
+        (_declare("model_live_first", "2026-11-03"), "declaration"),
+        (_declare("model_live_last", "2026-11-10"), "declaration"),
+        (_declare("model_live_tail_rows_sha256", "f" * 64), "declaration"),
+        (_declare("designer_model_returns_sha256", "f" * 64), "receipt"),
+        (_receipt_without_designer, "receipt"),
+        (_predecessor("bundle_id"), "receipt"),
+        (_predecessor("manifest_sha256"), "receipt"),
+        (_predecessor("returns_sha256"), "receipt"),
+        (_predecessor_absent, "receipt"),
     ],
 )
-def test_eu_model_live_extension_identity_refuses_a_changed_prefix_or_count(
+def test_eu_model_live_extension_identity_refuses_anything_but_the_declared_extension(
     mutate: Any, message: str
 ) -> None:
-    rows = _eu_live_segment(["2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09"])
-    pinned = target_series._row_identity(rows[:2])
-    block = {
-        "model_live_observations": 4,
-        "model_live_first": "2026-11-04",
-        "model_live_last": "2026-11-09",
-    }
-    mutate(rows)
+    case = _eu_case()
+    mutate(case)
     with pytest.raises(TargetSeriesError, match=message):
-        target_series._eu_model_live_extension_identity(
-            block=block,
-            pinned=pinned,
-            segment_rows=rows,
-            accepted_as_of=date(2026, 11, 19),
-        )
-
-
-def test_eu_model_live_extension_identity_refuses_rows_past_the_cutoff() -> None:
-    rows = _eu_live_segment(["2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09"])
-    with pytest.raises(TargetSeriesError, match="differs from its declaration"):
-        _eu_extension(rows, as_of=date(2026, 11, 6))
+        _eu_run(case)
 
 
 def test_eu_model_live_extension_identity_refuses_a_declaration_that_adds_nothing() -> (
     None
 ):
-    rows = _eu_live_segment(["2026-11-04", "2026-11-05"])
+    case = _eu_case()
+    case["rows"] = case["rows"][:2]
     with pytest.raises(TargetSeriesError, match="differs from its declaration"):
-        _eu_extension(rows)
+        _eu_run(case)
+
+
+def _stub_eu_extension(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the call site see a declared extension without building an EU fixture.
+
+    The identity is deliberately wrong for any segment it is applied to, so a call site that
+    leaks it beyond the EU model-live segment cannot validate.
+    """
+
+    monkeypatch.setattr(
+        target_series,
+        "_eu_model_live_extension_identity",
+        lambda **_: {
+            "sha256": "0" * 64,
+            "observed_start": "2000-01-01",
+            "observed_end": "2000-01-02",
+            "return_observations": 1,
+        },
+    )
+
+
+@pytest.mark.parametrize("altered", [False, True])
+def test_a_declared_eu_extension_moves_only_the_eu_model_live_pin(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+    monkeypatch: pytest.MonkeyPatch,
+    altered: bool,
+) -> None:
+    """Through validate_layered_history_generation: the relaxation is scoped to one segment.
+
+    Unaltered, every other pin is unmoved and the generation is valid. With another
+    non-QSI backtest segment altered, the QSI-revision refusal still fires even though an
+    extension is declared.
+    """
+
+    fixture, refreshed, generation = _qsi_revision_fixture(tmp_path)
+    fixture.update(
+        {
+            "strategy_history_manifest_path": refreshed / "manifest.json",
+            "strategy_history_returns_path": refreshed / "returns.csv",
+            "strategy_backtests_generation_path": generation,
+        }
+    )
+    artifacts, manifest_content = _build(fixture)
+    manifest = json.loads(manifest_content)
+    if altered:
+        rows = list(csv.DictReader(io.StringIO(artifacts["segments.csv"].decode())))
+        next(
+            row
+            for row in rows
+            if row["source_id"] == "strategy-backtests" and row["series_id"] != "QSI"
+        )["return"] = "0.8"
+        _replace_output(
+            artifacts, manifest, "segments.csv", target_series._segment_view_bytes(rows)
+        )
+        manifest_content = _reidentify_manifest(manifest)
+    _stub_eu_extension(monkeypatch)
+    if altered:
+        with pytest.raises(TargetSeriesError, match="altered a non-QSI backtest"):
+            validate_layered_history_generation(
+                artifacts=artifacts,
+                manifest_content=manifest_content,
+                contract_path=fixture["contract_path"],
+            )
+    else:
+        assert (
+            validate_layered_history_generation(
+                artifacts=artifacts,
+                manifest_content=manifest_content,
+                contract_path=fixture["contract_path"],
+            )["verification"]
+            == "VALID"
+        )
+
+
+def test_the_bundle_id_is_recomputed_from_content_so_a_block_edit_cannot_ride_the_allowlist() -> (
+    None
+):
+    bundle: dict[str, Any] = {
+        "schema_version": 1,
+        "eu_model_live_refresh": {"model_live_last": "2026-11-19"},
+    }
+    bundle["bundle_id"] = target_series._bundle_content_id(bundle)
+    assert target_series._bundle_content_id(bundle) == bundle["bundle_id"]
+    bundle["eu_model_live_refresh"]["model_live_last"] = "2026-11-20"
+    assert target_series._bundle_content_id(bundle) != bundle["bundle_id"]
+    (legacy,) = target_series.EU_EXTENSION_LEGACY_BUNDLE_IDS
+    # a copied legacy id on edited content is not the content's id
+    bundle["bundle_id"] = legacy
+    assert target_series._bundle_content_id(bundle) != legacy
