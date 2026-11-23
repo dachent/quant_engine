@@ -1029,6 +1029,11 @@ def _recompute_capture(
             if len(entries) == 1
             else None
         )
+        raw_sweep, raw_total = (
+            _raw_sweep_and_total(entries[0]["cashInvestments"])
+            if len(entries) == 1
+            else (Decimal(0), None)
+        )
         raw_loan: list[Decimal] | None = None
         if len(entries) == 1 and isinstance(entries[0].get("marginsInfo"), dict):
             info = entries[0]["marginsInfo"]
@@ -1052,7 +1057,20 @@ def _recompute_capture(
     if raw_loan is not None and any(v != 0 for v in raw_loan):
         if margin_account:
             raise CaptureClaimsDiffer("capture raw loan fields are not zero")
-        return max(raw_loan), capture_date, scan  # a retirement account showing a loan
+        trade_date_credit = (
+            raw_loan[0] == 0
+            and raw_loan[1] > 0
+            and raw_total is not None
+            and raw_loan[1] == raw_total
+        )
+        # a positive trade-date balance that is the account's own cash total is a credit
+        # (pending trades), never a loan: the page's total must say so below, to the cent
+        if not trade_date_credit:
+            return (
+                max(raw_loan),
+                capture_date,
+                scan,
+            )  # a retirement account showing a loan
     claimed_balances = top["balances"]
     if not margin_account and isinstance(claimed_balances, dict):
         claimed_loan = claimed_balances.get("margin_loan_balance")
@@ -1079,12 +1097,17 @@ def _recompute_capture(
         return subject, capture_date, scan  # a retirement page showing a loan (P1-7)
     # the API marginBalance field is the account's cash credit when it is non-zero: it
     # is only that when the page's own cash total says so, to the cent
-    if raw_margin != 0 and (cash_total is None or raw_margin != cash_total):
+    if raw_margin != 0 and (
+        cash_total is None or _live_credit(raw_margin, raw_sweep) != cash_total
+    ):
         if margin_account:
             raise CaptureClaimsDiffer(
                 "capture raw marginBalance is not the page's cash total"
             )
         return raw_margin, capture_date, scan  # unexplained borrowing
+    if raw_total is not None and cash_total is not None and raw_total != cash_total:
+        # the raw total is only the credit when the page agrees with it to the cent
+        return abs(raw_total - cash_total), capture_date, scan
     if margin_account:
         if subject is None or subject < 0:
             raise CaptureClaimsDiffer(
@@ -1103,6 +1126,21 @@ def _recompute_capture(
             if value != subject:
                 raise CaptureClaimsDiffer(f"capture {key} differs from its page")
     return Decimal(0), capture_date, scan
+
+
+def _raw_sweep_and_total(cash: Mapping[str, Any]) -> tuple[Decimal, Decimal | None]:
+    """The bank-sweep credit (absent: zero) and the response's own cash total (absent: None)."""
+
+    sweep = Decimal(str(cash.get("schwabBankSweepFeature") or 0))
+    total = cash.get("total")
+    return sweep, (None if total is None else Decimal(str(total)))
+
+
+def _live_credit(margin_balance: Decimal, bank_sweep: Decimal) -> Decimal:
+    """The cash credit the live page totals: the margin-balance field plus the bank-sweep
+    credit it does not carry.  A negative sweep is not a credit and is never added."""
+
+    return margin_balance + (bank_sweep if bank_sweep > 0 else Decimal(0))
 
 
 def _zero_amount(value: object) -> bool:
@@ -1325,7 +1363,8 @@ def capture_cash_replay(
     if len(entries) != 1:
         return None, "CAPTURE_LIVE_CASH_ACCOUNT_NOT_ONCE"
     raw_credit = Decimal(str(entries[0]["cashInvestments"]["marginBalance"]))
-    if raw_credit != 0 and raw_credit != live:
+    raw_sweep, _raw_total = _raw_sweep_and_total(entries[0]["cashInvestments"])
+    if raw_credit != 0 and _live_credit(raw_credit, raw_sweep) != live:
         return None, "CAPTURE_LIVE_CASH_DISAGREES_WITH_RAW"
     # the history reaches back past the last statement's start (checked by the bracket's own
     # recompute), so every trade that was still unsettled at the statement end is in it
@@ -1364,7 +1403,12 @@ def capture_cash_replay(
             Decimal(0),
         )
         day += timedelta(days=1)
-    if capture_date <= last_end or settled[capture_date] != live:
+    # the live total is the settled balance, or that plus the trades done today that settle
+    # later (a capture taken in a trading session): the replay's trade-date balance
+    if capture_date <= last_end or live not in (
+        settled[capture_date],
+        trade[capture_date],
+    ):
         return None, "CAPTURE_CASH_REPLAY_DOES_NOT_CLOSE"
     return {
         "capture_date": capture_date,
