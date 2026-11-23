@@ -846,7 +846,10 @@ def run_with_receipt(
     if blob_codec is not None:
         if _receipt_path(state_root, name, key) is None:
             return result  # no sidecar directory without persistence
-        blob_bytes = blob_codec[0](result)
+        try:
+            blob_bytes = blob_codec[0](result)
+        except Exception:  # noqa: BLE001 - unpicklable result: serve it live, store nothing
+            return result
         result_json = _roundtrip_json(
             {"blob_sha256": hashlib.sha256(blob_bytes).hexdigest()}
         )

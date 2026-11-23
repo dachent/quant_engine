@@ -695,3 +695,26 @@ def test_restricted_loader_refuses_builtin_callables_and_off_mode_computes_live(
             "x", [], {}, repo_root=world["repo"], compute=lambda: calls.append(1)
         )
     assert len(calls) == 2 and not list(world["state"].rglob("*"))
+
+
+def test_an_unpicklable_result_is_served_live_and_stores_nothing(world):
+    import types
+
+    v = BlobVerifier(world)
+    base = v.compute
+
+    def compute() -> dict[str, object]:
+        out = base()
+        out["view"] = types.MappingProxyType({"k": 1})  # not picklable
+        return out
+
+    result = vr.run_with_receipt(
+        "blob",
+        {"spec": "unpicklable"},
+        repo_root=world["repo"],
+        state_root=world["state"],
+        compute=compute,
+        blob_codec=(lambda value: __import__("pickle").dumps(value), vr._restricted_loads),
+    )
+    assert result["view"]["k"] == 1
+    assert not list(vr.receipt_directory(world["state"]).glob("blob-*"))
