@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo
 import account_financing
 import event_completeness
 import quantbase_fund_days
+import schwab_leverage_observations
 import zero_financing_statements
 
 import quant_engine.schwab as schwab
@@ -3676,6 +3677,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "quantbase_position_closes",
             "quantbase_rollback",
             "zero_financing_observations",
+            "schwab_gross_exposure",
             "event_completeness_declaration",
         )
         allowed.update(
@@ -5308,6 +5310,109 @@ def _zero_financing_rows(
             }
         )
     return provider_id, out, artifacts
+
+
+_GROSS_EXPOSURE_KEYS: Final = frozenset({"accounts", "closes", "provider_id"})
+
+
+def _schwab_gross_exposure_rows(
+    value: object,
+    providers: set[str],
+    as_of: date,
+    combined: Mapping[str, Sequence[Mapping[str, Any]]],
+    zero_rows: Sequence[Mapping[str, Any]],
+    manifests: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[SourceArtifact]]:
+    """Gross position value at the cutoff for the named accounts (#894 F2 part a).
+
+    The spec names the provider, the accounts and the hash-pinned vendor close files; the
+    rows come from ``schwab_leverage_observations`` (two closures, or a refusal row)."""
+
+    ref = _object(value, "schwab_gross_exposure")
+    if set(ref) != _GROSS_EXPOSURE_KEYS:
+        raise ProviderLedgerError("schwab_gross_exposure keys differ")
+    provider_id = _text(ref["provider_id"], "schwab_gross_exposure.provider_id")
+    if provider_id not in providers or provider_id not in manifests:
+        raise ProviderLedgerError(
+            "schwab_gross_exposure names a provider the spec does not declare"
+        )
+    if not isinstance(ref["accounts"], list):
+        raise ProviderLedgerError("schwab_gross_exposure accounts differ")
+    accounts = [
+        _text(item, "schwab_gross_exposure.accounts item") for item in ref["accounts"]
+    ]
+    observed = {
+        str(r["account_id"])
+        for r in combined.get("nav_observations", [])
+        if r.get("provider_id") == provider_id
+    }
+    if not accounts or len(set(accounts)) != len(accounts) or set(accounts) - observed:
+        raise ProviderLedgerError(
+            "schwab_gross_exposure accounts differ from the provider's observed accounts"
+        )
+    closes: dict[tuple[str, str], Decimal] = {}
+    artifacts: list[SourceArtifact] = []
+    digests: list[str] = []
+    for item in _objects(ref["closes"], "schwab_gross_exposure.closes"):
+        file_ref = _object(item, "schwab_gross_exposure close file")
+        if set(file_ref) != {"path", "sha256", "size_bytes"}:
+            raise ProviderLedgerError("schwab_gross_exposure close file keys differ")
+        raw = _pinned_file(file_ref["path"], file_ref["sha256"], "close file")
+        if len(raw) != file_ref["size_bytes"]:
+            raise ProviderLedgerError("close file size differs")
+        try:
+            for key, close in schwab_leverage_observations.load_closes(raw).items():
+                if closes.setdefault(key, close) != close:
+                    raise ProviderLedgerError("close files disagree on a close")
+        except (UnicodeDecodeError, schwab_leverage_observations.SchwabExposureError) as exc:
+            raise ProviderLedgerError(f"schwab_gross_exposure: {exc}") from exc
+        digest = hashlib.sha256(raw).hexdigest()
+        digests.append(digest)
+        artifacts.append(
+            SourceArtifact(
+                artifact_id=f"gross-exposure/{provider_id}/closes-{digest[:16]}.csv",
+                sha256=digest,
+                size_bytes=len(raw),
+                as_of_date=as_of,
+                schema_name="vendor-daily-closes",
+                schema_version="1",
+            )
+        )
+    if not artifacts:
+        raise ProviderLedgerError("schwab_gross_exposure names no close file")
+    cutoff = as_of.isoformat()
+    observation = "gross-exposure-" + hashlib.sha256(
+        "\n".join([*sorted(digests), cutoff, *sorted(accounts)]).encode()
+    ).hexdigest()[:24]
+    rows = schwab_leverage_observations.gross_exposure_rows(
+        accounts=accounts,
+        positions=[
+            r for r in combined.get("positions", []) if r.get("provider_id") == provider_id
+        ],
+        nav_rows=[
+            r
+            for r in combined.get("nav_observations", [])
+            if r.get("provider_id") == provider_id
+        ],
+        zero_financing_rows=zero_rows,
+        transactions=[
+            r
+            for r in combined.get("transactions", [])
+            if r.get("provider_id") == provider_id
+        ],
+        closes=closes,
+        closes_source={
+            "artifact_id": artifacts[0].artifact_id,
+            "sha256": artifacts[0].sha256,
+        },
+        cutoff=cutoff,
+        provider_id=provider_id,
+        generation_id=manifests[provider_id].generation_id,
+    )
+    return (
+        [{**row, "observation_generation_id": observation} for row in rows],
+        artifacts,
+    )
 
 
 def _quantbase_fill_closes(
@@ -12532,6 +12637,7 @@ def build_catalog(
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
     zero_financing = None
+    zero_projected: list[dict[str, Any]] = []
     if "zero_financing_observations" in spec:
         # the account type rule reaches back to each account's first NAV day
         first_nav: dict[str, date] = {}
@@ -12585,6 +12691,7 @@ def build_catalog(
             for row in zero_rows
             if date.fromisoformat(row["as_of_date"]) <= zero_cutoff
         ]
+        zero_projected = projected
         if projected:  # never create an empty fact collection (ids must not move)
             combined["financing_liability_observations"].extend(projected)
             exceptions.extend(
@@ -12600,6 +12707,17 @@ def build_catalog(
                 for row in projected
             )
         provider_artifacts.extend(zero_artifacts)
+    if "schwab_gross_exposure" in spec:
+        exposure_rows, exposure_artifacts = _schwab_gross_exposure_rows(
+            spec["schwab_gross_exposure"],
+            set(spec["providers"]),
+            as_of,
+            combined,
+            zero_projected,
+            manifests,
+        )
+        combined["leverage_exposure_observations"].extend(exposure_rows)
+        provider_artifacts.extend(exposure_artifacts)
 
     completeness_rows: list[dict[str, Any]] | None = None
     if "event_completeness_declaration" in spec:

@@ -394,13 +394,22 @@ def gross_exposure(
     gross_values = [v for v in gross if v is not None]
     nav_values = [v for v in navs if v is not None]
     covered = len(gross_values) == 1 and len(nav_values) == 1 and nav_values[0] != 0
+    # a producer that refused (a failed closure) says why on its row: never silence
+    refusals = sorted(
+        {
+            str(r["refusal"])
+            for r in exposure_rows
+            if str(r.get("as_of_date")) == cutoff and r.get("refusal")
+        }
+    )
     gross_value = gross_values[0] if len(gross_values) == 1 else None
     nav_value = nav_values[0] if len(nav_values) == 1 else None
     return (
         Closure(
             "GROSS_EXPOSURE_CUTOFF",
             covered,
-            {"gross_rows": len(gross_values), "nav_rows": len(nav_values)},
+            {"gross_rows": len(gross_values), "nav_rows": len(nav_values)}
+            | ({"refusals": ",".join(refusals)} if refusals else {}),
         ),
         gross_value,
         nav_value,
