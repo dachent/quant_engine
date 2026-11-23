@@ -5407,7 +5407,9 @@ def _zero_financing_replay_rows(
 
 
 _GROSS_EXPOSURE_KEYS: Final = frozenset({"accounts", "closes", "provider_id"})
-_ZERO_HOLDINGS_KEYS: Final = frozenset({"account_id", "balances", "last3"})
+_ZERO_HOLDINGS_KEYS: Final = frozenset(
+    {"account_id", "balances", "capture_date", "last3"}
+)
 
 
 def _schwab_gross_exposure_rows(
@@ -5513,6 +5515,10 @@ def _schwab_gross_exposure_rows(
                 balances = schwab_leverage_observations.load_balances(
                     raw, _text(held["last3"], "zero holding last3")
                 )
+                stamp = schwab_leverage_observations.capture_stamp(raw)
+                capture_date = schwab_leverage_observations.check_capture_date(
+                    _text(held["capture_date"], "zero holding capture_date"), stamp
+                )
             except schwab_leverage_observations.SchwabExposureError as exc:
                 raise ProviderLedgerError(f"schwab_gross_exposure: {exc}") from exc
             digest = hashlib.sha256(raw).hexdigest()
@@ -5528,13 +5534,25 @@ def _schwab_gross_exposure_rows(
             artifacts.append(artifact)
             zero_holdings[account] = {
                 "balances": balances,
+                "capture_date": capture_date,
+                "capture_stamp": stamp,
                 "source": {"artifact_id": artifact.artifact_id, "sha256": digest},
             }
     cutoff = as_of.isoformat()
     observation = (
         "gross-exposure-"
         + hashlib.sha256(
-            "\n".join([*sorted(digests), cutoff, *sorted(accounts)]).encode()
+            "\n".join(
+                [
+                    *sorted(digests),
+                    cutoff,
+                    *sorted(accounts),
+                    *(
+                        f"{a}:{zero_holdings[a]['capture_date']}"
+                        for a in sorted(zero_holdings)
+                    ),
+                ]
+            ).encode()
         ).hexdigest()[:24]
     )
     rows = schwab_leverage_observations.gross_exposure_rows(
