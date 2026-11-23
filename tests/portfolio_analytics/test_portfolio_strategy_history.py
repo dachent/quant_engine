@@ -1955,3 +1955,67 @@ def test_eu_designer_curve_refuses_a_catalog_that_differs_from_its_manifest(
     catalog.write_bytes(catalog.read_bytes().replace(b"2024-02-18", b"2024-02-25"))
     with pytest.raises(history.StrategyHistoryError, match="catalog differs"):
         history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+
+def _rewrite_manifest(path: Path, edit: Any) -> Path:
+    """A self-consistent manifest copy (canonical bytes, recomputed bundle id) after `edit`."""
+
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    edit(manifest)
+    manifest.pop("bundle_id")
+    manifest["bundle_id"] = hashlib.sha256(
+        history.canonical_json_bytes(manifest)
+    ).hexdigest()
+    out = path.with_name("tampered-manifest.json")
+    out.write_bytes(history.canonical_json_bytes(manifest))
+    return out
+
+
+@pytest.mark.parametrize("kept", ["model_live_end", "source_artifacts"])
+def test_qsi_eu_extension_replay_rejects_a_definition_that_keeps_the_seed_value(
+    tmp_path: Path, kept: str
+) -> None:
+    """The EU series definition must move with the rows; a seed value left behind is refused."""
+
+    setup = _qsi_eu_setup(tmp_path)
+    seed = json.loads(setup["retained_manifest_path"].read_text(encoding="utf-8"))
+    seed_eu = next(item for item in seed["series"] if item["series_id"] == "EU [P123]")
+    result = _qsi_eu_refresh(tmp_path, setup, [*_EU_BACKTEST, *_EU_LIVE_NEWER])
+    combined = Path(str(result["destination"]))
+
+    def edit(manifest: dict[str, Any]) -> None:
+        eu = next(i for i in manifest["series"] if i["series_id"] == "EU [P123]")
+        assert eu[kept] != seed_eu[kept]
+        eu[kept] = seed_eu[kept]
+
+    tampered = _rewrite_manifest(combined / "manifest.json", edit)
+    with pytest.raises(history.StrategyHistoryError):
+        _verify_refreshed(combined, manifest=tampered)
+
+
+def test_qsi_eu_extension_build_validates_the_bundle_it_produced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The extended bundle must itself be an admissible seed: validated after the build."""
+
+    setup = _qsi_eu_setup(tmp_path)
+    real = history._validated_retained_bundle
+    calls: list[bytes] = []
+
+    def spy(manifest_content: bytes, returns_content: bytes) -> Any:
+        calls.append(manifest_content)
+        # the seed also carries an EU block; only the produced bundle carries the revision
+        if b'"qsi_source_revision"' in manifest_content:
+            raise history.StrategyHistoryError("injected: produced bundle refused")
+        return real(manifest_content, returns_content)
+
+    monkeypatch.setattr(history, "_validated_retained_bundle", spy)
+    # the builder itself, not the writer: the replay verifier calls it without a write step
+    with pytest.raises(history.StrategyHistoryError, match="injected"):
+        history._build_qsi_refresh_bundle(
+            **setup,
+            eu_designer_model_generation=_designer_generation(
+                tmp_path / "designer-ext", [*_EU_BACKTEST, *_EU_LIVE_NEWER]
+            ),
+        )
+    assert any(b'"qsi_source_revision"' in call for call in calls)

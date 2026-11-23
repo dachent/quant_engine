@@ -10,6 +10,7 @@ cycle and every byte either writes is compared.
 from __future__ import annotations
 
 import hashlib
+from datetime import date
 import json
 import re
 import shutil
@@ -442,19 +443,103 @@ def _load_pre_chain_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     return module
 
 
+def _selection(path: Path | None, *, pin_record: bool = True) -> dict[str, Any]:
+    """The real selected-inputs shape: a pin record under files, a plain string in kwargs."""
+
+    if path is None:
+        return {"files": {}, "builder_kwargs": {}}
+    pin: Any = (
+        {"path": str(path), "sha256": "0" * 64, "size_bytes": 1}
+        if pin_record
+        else str(path)
+    )
+    return {
+        "files": {"strategy_history_manifest_path": pin},
+        "builder_kwargs": {"strategy_history_manifest_path": str(path)},
+    }
+
+
+@pytest.mark.parametrize("pin_record", [True, False])
 def test_a_revised_bundle_must_be_staged_with_its_producer_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pin_record: bool
+) -> None:
+    module = _load_pre_chain_module(monkeypatch)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"qsi_source_revision": {}}), encoding="utf-8")
+    selection = _selection(manifest, pin_record=pin_record)
+    with pytest.raises(module.PreChainError, match="sidecar is absent"):
+        module._require_producer_sidecar(selection)
+    (tmp_path / "sources.local.json").write_text("{}", encoding="utf-8")
+    module._require_producer_sidecar(selection)
+    # a bundle without a revision, or inputs that name no bundle, need no sidecar
+    plain = tmp_path / "plain" / "manifest.json"
+    plain.parent.mkdir()
+    plain.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+    module._require_producer_sidecar(_selection(plain, pin_record=pin_record))
+    module._require_producer_sidecar(_selection(None))
+
+
+def test_the_sidecar_guard_reads_the_builder_kwargs_declaration_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _load_pre_chain_module(monkeypatch)
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"qsi_source_revision": {}}), encoding="utf-8")
+    only_kwargs = {
+        "files": {},
+        "builder_kwargs": {"strategy_history_manifest_path": str(manifest)},
+    }
     with pytest.raises(module.PreChainError, match="sidecar is absent"):
-        module._require_producer_sidecar(str(manifest))
-    (tmp_path / "sources.local.json").write_text("{}", encoding="utf-8")
-    module._require_producer_sidecar(str(manifest))
-    # a bundle without a revision, or inputs that name no bundle, need no sidecar
-    plain = tmp_path / "plain" / "manifest.json"
-    plain.parent.mkdir()
-    plain.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
-    module._require_producer_sidecar(str(plain))
-    module._require_producer_sidecar(None)
+        module._require_producer_sidecar(only_kwargs)
+
+
+@pytest.mark.parametrize(
+    "declared", [123, ["x"], {"sha256": "0" * 64}, {"path": 7}, "", {"path": ""}]
+)
+def test_a_malformed_history_manifest_declaration_is_refused_not_skipped(
+    monkeypatch: pytest.MonkeyPatch, declared: object
+) -> None:
+    module = _load_pre_chain_module(monkeypatch)
+    with pytest.raises(module.PreChainError, match="malformed"):
+        module._require_producer_sidecar(
+            {"files": {"strategy_history_manifest_path": declared}}
+        )
+
+
+def test_an_unreadable_history_manifest_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_pre_chain_module(monkeypatch)
+    with pytest.raises(module.PreChainError, match="unreadable"):
+        module._require_producer_sidecar(_selection(tmp_path / "absent.json"))
+    broken = tmp_path / "broken.json"
+    broken.write_text("{", encoding="utf-8")
+    with pytest.raises(module.PreChainError, match="unreadable"):
+        module._require_producer_sidecar(_selection(broken))
+
+
+def test_pre_chain_refuses_a_revised_bundle_without_a_sidecar_before_any_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_pre_chain_module(monkeypatch)
+    manifest = tmp_path / "bundle" / "manifest.json"
+    manifest.parent.mkdir()
+    manifest.write_text(json.dumps({"qsi_source_revision": {}}), encoding="utf-8")
+    selected = tmp_path / "selected-inputs.json"
+    selected.write_text(json.dumps(_selection(manifest)), encoding="utf-8")
+
+    class _Prep:
+        ROOT = tmp_path
+
+        def selected_history_authorities(self, files: object) -> None:
+            raise AssertionError("the guard must run before any history work")
+
+    with pytest.raises(module.PreChainError, match="sidecar is absent"):
+        module.pre_chain(
+            cycle=tmp_path / "cycle",
+            selected_inputs=selected,
+            baseline_gid="g",
+            evaluated_on=date(2026, 11, 19),
+            commit="c",
+            modules=(_Prep(), object(), object()),
+        )

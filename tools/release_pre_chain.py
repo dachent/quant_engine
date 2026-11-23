@@ -19,15 +19,16 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-from datetime import date
 import io
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import sys
 import tempfile
+from collections.abc import Mapping
+from datetime import date
+from pathlib import Path
 from typing import Any, Sequence
 
 RESOLVED_SCHEMA = "qe-release-resolved-cycle/1"
@@ -125,26 +126,49 @@ def _load_modules() -> tuple[Any, Any, Any]:
     return prep, dependence, attribution
 
 
-def _require_producer_sidecar(manifest_path: object) -> None:
+_HISTORY_MANIFEST_KEY = "strategy_history_manifest_path"
+
+
+def _declared_history_manifest(value: object) -> str:
+    """The manifest path from either selected-inputs shape: a plain string or a pin record."""
+
+    if isinstance(value, Mapping):
+        value = value.get("path")
+    if not isinstance(value, str) or not value:
+        raise PreChainError("selected strategy history manifest path is malformed")
+    return value
+
+
+def _require_producer_sidecar(selection: Mapping[str, object]) -> None:
     """A bundle carrying a source revision is replayed from its archives in pre-chain.
 
     The replay needs the producer's `sources.local.json` beside the bundle; without it the
     layered-history verifier silently falls back to the portable hash chain. That fallback
     is right for a replica, which never holds the archives, and wrong here.
+
+    The path is declared twice in a real selected-inputs file: a pin record under `files`
+    and the plain string the rebuild reads under `builder_kwargs`. Every declared path is
+    checked, and a declaration of an unrecognised shape or an unreadable bundle refuses.
     """
 
-    if not isinstance(manifest_path, str):
-        return
-    path = Path(manifest_path)
-    try:
-        revised = "qsi_source_revision" in json.loads(path.read_bytes())
-    except (OSError, ValueError):
-        return
-    if revised and not path.with_name("sources.local.json").is_file():
-        raise PreChainError(
-            "strategy history bundle carries a source revision but its producer "
-            "sidecar is absent; stage the bundle with sources.local.json"
-        )
+    declared = []
+    for section in ("files", "builder_kwargs"):
+        block = selection.get(section)
+        if isinstance(block, Mapping) and block.get(_HISTORY_MANIFEST_KEY) is not None:
+            declared.append(_declared_history_manifest(block[_HISTORY_MANIFEST_KEY]))
+    for manifest_path in declared:
+        path = Path(manifest_path)
+        try:
+            revised = "qsi_source_revision" in json.loads(path.read_bytes())
+        except (OSError, ValueError) as exc:
+            raise PreChainError(
+                f"selected strategy history manifest is unreadable: {path}"
+            ) from exc
+        if revised and not path.with_name("sources.local.json").is_file():
+            raise PreChainError(
+                "strategy history bundle carries a source revision but its producer "
+                "sidecar is absent; stage the bundle with sources.local.json"
+            )
 
 
 def pre_chain(
@@ -162,7 +186,7 @@ def pre_chain(
     policy = repo / "contracts" / "portfolio-dependence-policy-v1.json"
     selection = json.loads(selected_inputs.read_text(encoding="utf-8"))
     files = selection["files"]
-    _require_producer_sidecar(files.get("strategy_history_manifest_path"))
+    _require_producer_sidecar(selection)
     authorities = prep.selected_history_authorities(files)
 
     work = cycle / "pre"
