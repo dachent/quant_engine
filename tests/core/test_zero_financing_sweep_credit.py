@@ -319,3 +319,72 @@ def test_the_replay_refuses_a_margin_balance_the_sweep_does_not_explain(
     )
     replay, reason = _replay(tmp_path, raw, "100.00")
     assert replay is None and reason == "CAPTURE_LIVE_CASH_DISAGREES_WITH_RAW"
+
+
+def test_a_negative_margin_balance_is_not_offset_by_a_positive_sweep(
+    tmp_path: Path,
+) -> None:
+    """A debit stays a debit: the sweep credit is only added to a positive margin balance."""
+
+    raw = _capture(
+        tmp_path,
+        page_total="50.00",
+        margin_balance=-100.0,
+        sweep=150.0,
+        raw_total=50.0,
+    )
+    assert _verdict(raw, tmp_path) == (False, "RETIREMENT_ACCOUNT_SHOWS_BORROWING")
+
+
+def test_a_negative_margin_balance_cancelled_exactly_by_the_sweep_still_borrows(
+    tmp_path: Path,
+) -> None:
+    raw = _capture(
+        tmp_path,
+        page_total="0.00",
+        margin_balance=-100.0,
+        sweep=100.0,
+        raw_total=0.0,
+    )
+    assert _verdict(raw, tmp_path) == (False, "RETIREMENT_ACCOUNT_SHOWS_BORROWING")
+
+
+def test_the_replay_never_offsets_a_negative_margin_balance_with_the_sweep(
+    tmp_path: Path,
+) -> None:
+    raw = _capture(
+        tmp_path,
+        page_total="50.00",
+        margin_balance=-100.0,
+        sweep=150.0,
+        raw_total=50.0,
+        rows=_today_trades(),
+    )
+    replay, reason = _replay(tmp_path, raw, "0.00")
+    assert replay is None and reason == "CAPTURE_LIVE_CASH_DISAGREES_WITH_RAW"
+
+
+def test_an_unreadable_sweep_fails_closed_to_borrowing(tmp_path: Path) -> None:
+    for bad in ("NaN", "Infinity", "garbage"):
+        raw = _capture(
+            tmp_path,
+            page_total="1250.40",
+            margin_balance=1200.15,
+            sweep=None,
+            raw_total=1250.40,
+        )
+        # rewrite the pinned response with the unreadable sweep and repin it in the capture
+        path = tmp_path / "balances.json"
+        response = json.loads(path.read_text())
+        response["brokerageAccountList"][0]["cashInvestments"][
+            "schwabBankSweepFeature"
+        ] = bad
+        content = json.dumps(response).encode()
+        path.write_bytes(content)
+        top = json.loads(raw)
+        for item in top["raw_files"]:
+            if item["name"] == "balances.json":
+                item["sha256"] = hashlib.sha256(content).hexdigest()
+                item["size_bytes"] = len(content)
+        verdict = _verdict(json.dumps(top).encode(), tmp_path)
+        assert verdict == (False, "RETIREMENT_ACCOUNT_SHOWS_BORROWING"), bad

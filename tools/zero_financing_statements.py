@@ -1129,18 +1129,29 @@ def _recompute_capture(
 
 
 def _raw_sweep_and_total(cash: Mapping[str, Any]) -> tuple[Decimal, Decimal | None]:
-    """The bank-sweep credit (absent: zero) and the response's own cash total (absent: None)."""
+    """The bank-sweep credit (absent or unreadable: zero) and the response's own cash total
+    (absent or unreadable: None); an unreadable figure fails closed, never raises."""
 
-    sweep = Decimal(str(cash.get("schwabBankSweepFeature") or 0))
-    total = cash.get("total")
-    return sweep, (None if total is None else Decimal(str(total)))
+    def finite(value: object) -> Decimal | None:
+        try:
+            number = Decimal(str(value))
+        except (ArithmeticError, ValueError):
+            return None
+        return number if number.is_finite() else None
+
+    sweep = finite(cash.get("schwabBankSweepFeature") or 0)
+    total = finite(cash["total"]) if cash.get("total") is not None else None
+    return (Decimal(0) if sweep is None else sweep), total
 
 
 def _live_credit(margin_balance: Decimal, bank_sweep: Decimal) -> Decimal:
-    """The cash credit the live page totals: the margin-balance field plus the bank-sweep
-    credit it does not carry.  A negative sweep is not a credit and is never added."""
+    """The cash credit the live page totals: a positive margin-balance field plus the
+    bank-sweep credit it does not carry.  A margin balance at or below zero is never offset
+    (a debit stays a debit) and a negative sweep is not a credit."""
 
-    return margin_balance + (bank_sweep if bank_sweep > 0 else Decimal(0))
+    if margin_balance > 0 and bank_sweep > 0:
+        return margin_balance + bank_sweep
+    return margin_balance
 
 
 def _zero_amount(value: object) -> bool:
