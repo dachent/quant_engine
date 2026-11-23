@@ -603,3 +603,8 @@ def test_post_bound_override_capture_lateness_is_capped(tmp_path: Path) -> None:
             match="supplying capture before",
         ):
             reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+
+
+def test_post_bound_lateness_cap_is_three_days() -> None:
+    # The cap test above is relative to the constant, so a changed constant would still pass it.
+    assert reconciliation.POST_BOUND_MAX_LATENESS == reconciliation.timedelta(days=3)
