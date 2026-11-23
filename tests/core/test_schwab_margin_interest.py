@@ -252,6 +252,42 @@ def test_evidence_alone_without_a_posting_or_table_is_never_covered() -> None:
     assert not _close([], []).covered
 
 
+def test_a_table_row_outside_every_charged_period_is_not_covered() -> None:
+    cost, liability = _evidence()
+    # a zero-interest stray row inside the January statement but dated in February, with its
+    # ledger debit day: the only failing check is that no charged period contains it
+    cost.append(_table("2026-01-31", "2026-02-10", "2026-02-10", "0.00", "12.000", "0.00"))
+    liability.append(_debit("2026-02-10", "0.00001"))
+    assert _failures(cost, liability) == "TABLE_ROW_OUTSIDE_CHARGED_PERIOD"
+
+
+def test_statements_without_a_loan_block_never_cover_the_account() -> None:
+    cost, liability = _evidence()
+    no_blocks = [r for r in cost if r["measurement_basis"] != smi.LOAN_BLOCK]
+    assert not _close(no_blocks, liability).covered
+
+
+def test_an_account_with_only_zero_months_and_no_interest_table_is_not_covered_here() -> None:
+    """Zero-interest margin accounts are the zero-financing path's; this closure covers the
+    ones that were charged, so it needs a printed table (and its postings) to cover."""
+
+    cost = [
+        _ev(smi.INTEREST_PAID, "2026-01-31", source_amount=_amt("0.00"), ytd_amount=_amt("0.00")),
+        _ev(smi.LOAN_BLOCK, "2026-01-31", opening_amount=_amt("0.00"), source_amount=_amt("0.00")),
+    ]
+    closure = _close(cost, [])
+    assert not closure.covered and closure.evidence["failure_count"] == 0
+
+
+def test_rows_after_the_cutoff_are_not_read() -> None:
+    cost, liability = _evidence()
+    cost += [
+        _posting("2026-12-29", "-9.00"),  # no cycle, dated after the cutoff
+        _ev(smi.INTEREST_PAID, "2026-12-31", source_amount=_amt("9.00"), ytd_amount=_amt("9.00")),
+    ]
+    assert _close(cost, liability).covered
+
+
 def test_the_closure_applies_only_to_accounts_with_statement_evidence() -> None:
     cost, _ = _evidence()
     assert lc.posting_reconciliation_applies(cost)
@@ -356,6 +392,27 @@ def test_the_reader_feeds_the_closure(statements: tuple[Path, dict[str, str]]) -
     cost = [_posting("2026-01-29", "-1.00"), *rows]
     liability = [_debit(d, "1000.00") for d in _span("2026-01-02", "2026-01-04")]
     assert _close(cost, liability).covered
+
+
+def test_the_reader_skips_a_retirement_statement_even_with_a_loan_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ira = TEXTS[JAN].replace("Schwab One Account of", "Roth Contributory IRA of")
+    name = JAN
+    (tmp_path / name).write_bytes(b"x")
+    monkeypatch.setattr(zf, "_pdftotext", lambda path: ira)
+    monkeypatch.setattr(
+        zf, "pdftotext_raw", lambda path: (_ for _ in ()).throw(zf.ZeroFinancingError("none"))
+    )
+    rows, manifest = smi.statement_rows(
+        tmp_path,
+        {name: hashlib.sha256(b"x").hexdigest()},
+        {LABEL: (ACC, LAST3)},
+        provider_id="schwab",
+        accounts={ACC},
+        prefix="p",
+    )
+    assert rows == [] and len(manifest) == 1
 
 
 def test_the_reader_skips_other_accounts_and_refuses_a_tampered_statement(

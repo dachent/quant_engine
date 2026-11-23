@@ -623,7 +623,9 @@ def financing_cost_posting_reconciliation(
         fail("TABLE_DAY_NOT_A_LEDGER_DEBIT_DAY")
     if any(total >= _CENT for total in dust.values()):
         fail("UNLISTED_DEBIT_DAYS_ARE_MORE_THAN_DUST")
-    covered = bool(postings) and bool(table_rows) and bool(blocks) and not failures
+    # a posting with no table row cannot reconcile, a table row with no posting fails its
+    # cycle: the postings need no term of their own
+    covered = bool(table_rows) and bool(blocks) and not failures
     return Closure(
         POSTING_RECONCILIATION_CHECK,
         covered,
