@@ -61,7 +61,7 @@ def _row(currency: str = "NOK", day: str = "2026-03-02", **over: Any) -> dict[st
 
 def _run(rows: list[dict[str, Any]], catalog: dict[str, Any] | None = None) -> None:
     _attach_provider_conversion_evidence(
-        {"transactions": rows}, catalog or _catalog(), GID
+        {"transactions": rows}, catalog or _catalog(), GID, "ibkr"
     )
 
 
