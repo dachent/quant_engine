@@ -863,6 +863,7 @@ def _attach_provider_conversion_evidence(
     projections: Mapping[str, list[dict[str, Any]]],
     catalog: Mapping[str, Any],
     generation_id: str,
+    provider_id: str,
 ) -> None:
     """Price an IBKR non-USD flow/transaction row with the statement's own rate.
 
@@ -914,7 +915,7 @@ def _attach_provider_conversion_evidence(
                 "field": "ConversionRate",
                 "generation_id": generation_id,
                 "method": PROVIDER_CONVERSION_METHOD,
-                "provider": "ibkr",
+                "provider": provider_id,
                 "rate": rate_text,
                 "source_artifact_id": artifact or "ibkr-catalog.json",
                 "timing": "PROVIDER_DAILY_CONVERSION_RATE",
@@ -7680,8 +7681,11 @@ def _project_account_facts(
                     }
                 )
             projections[fact_type] = retained
-    if provider_id == "ibkr":
-        _attach_provider_conversion_evidence(projections, catalog, generation_id)
+    # Only a catalog that publishes its own daily rates (the IBKR one) is priced here.
+    if catalog.get("fx_observations"):
+        _attach_provider_conversion_evidence(
+            projections, catalog, generation_id, provider_id
+        )
     for rows in projections.values():
         rows.sort(
             key=lambda item: (
