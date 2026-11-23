@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo
 import account_financing
 import event_completeness
 import quantbase_fund_days
+import zero_financing_replay
 import zero_financing_statements
 
 import quant_engine.schwab as schwab
@@ -5303,6 +5304,97 @@ def _zero_financing_rows(
                 "mapping_status": "UNMAPPED",
                 "mapping_reason": "ACCOUNT_LEVEL_OBSERVATION",
                 "record_id": f"{row['provider_id']}:{source_id}",
+                "source_record_id": source_id,
+                "strategy_id": None,
+            }
+        )
+    return provider_id, out, artifacts
+
+
+def _zero_financing_replay_rows(
+    ref: Mapping[str, Any],
+    providers: set[str],
+    provider_facts: Mapping[str, Mapping[str, Any]],
+    as_of: date,
+    first_nav: Mapping[str, date],
+) -> tuple[str, list[dict[str, Any]], list[SourceArtifact]]:
+    """Zero-financing days DERIVED from a provider's pinned wallet ledger (F2).
+
+    Every input is a pinned file the ledger re-hashes from disk; the reader
+    (``zero_financing_replay.build``) refuses, with a named reason, anything that does not
+    close.  The provider must have exactly one observed account; rows run from its first
+    NAV day to the as-of date, so a day without a published NAV is still covered."""
+
+    if set(ref) != {"provider_id", "files", "credit_response_sha256"}:
+        raise ProviderLedgerError("zero_financing replay keys differ")
+    provider_id = _text(ref["provider_id"], "zero_financing replay provider_id")
+    if provider_id not in providers:
+        raise ProviderLedgerError("zero_financing replay names an undeclared provider")
+    pinned = _object(ref["files"], "zero_financing replay files")
+    if set(pinned) != set(zero_financing_replay.FILES):
+        raise ProviderLedgerError("zero_financing replay files differ")
+    contents: dict[str, bytes] = {}
+    artifacts: list[SourceArtifact] = []
+    for name in zero_financing_replay.FILES:
+        item = _object(pinned[name], f"zero_financing replay {name}")
+        if set(item) != {"path", "sha256"}:
+            raise ProviderLedgerError("zero_financing replay file keys differ")
+        raw = _pinned_file(item["path"], item["sha256"], f"replay {name}")
+        contents[name] = raw
+        artifacts.append(
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/replay/{name}",
+                sha256=hashlib.sha256(raw).hexdigest(),
+                size_bytes=len(raw),
+                as_of_date=as_of,
+                schema_name=f"{provider_id}-wallet-replay-input",
+                schema_version="1",
+            )
+        )
+    observed = {
+        str(row["account_id"])
+        for row in provider_facts.get(provider_id, {}).get("nav_observations", [])
+    }
+    if len(observed) != 1:
+        raise ProviderLedgerError(
+            "zero_financing replay needs exactly one observed account"
+        )
+    account = next(iter(observed))
+    try:
+        artifact = zero_financing_replay.build(
+            contents,
+            provider_id=provider_id,
+            account_id=account,
+            first_day=first_nav[account],
+            cutoff=as_of,
+            credit_response_sha256=_text(
+                ref["credit_response_sha256"], "credit_response_sha256"
+            ),
+        )
+        rows = zero_financing_statements.validate_rows(artifact, {account})
+    except (
+        KeyError,
+        ValueError,
+        zero_financing_replay.ReplayError,
+        zero_financing_statements.ZeroFinancingError,
+    ) as exc:
+        raise ProviderLedgerError(f"zero_financing replay: {exc}") from exc
+    identity = "\n".join(
+        [hashlib.sha256(contents[n]).hexdigest() for n in zero_financing_replay.FILES]
+        + [str(ref["credit_response_sha256"]), as_of.isoformat()]
+    )
+    generation = f"zero-financing-{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
+    out = []
+    for row in rows:
+        source_id = f"zero-financing:{row['account_id']}:{row['as_of_date']}"
+        out.append(
+            {
+                **row,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": generation,
+                "mapping_status": "UNMAPPED",
+                "mapping_reason": "ACCOUNT_LEVEL_OBSERVATION",
+                "record_id": f"{provider_id}:{source_id}",
                 "source_record_id": source_id,
                 "strategy_id": None,
             }
@@ -12531,7 +12623,7 @@ def build_catalog(
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
-    zero_financing = None
+    zero_sets: list[tuple[str, list[dict[str, Any]], list[SourceArtifact]]] = []
     if "zero_financing_observations" in spec:
         # the account type rule reaches back to each account's first NAV day
         first_nav: dict[str, date] = {}
@@ -12541,15 +12633,26 @@ def build_catalog(
                 account_ = str(nav_row["account_id"])
                 if account_ not in first_nav or day_ < first_nav[account_]:
                     first_nav[account_] = day_
+        pin = spec["zero_financing_observations"]
         zero_financing = _zero_financing_rows(
-            spec["zero_financing_observations"],
+            {k: v for k, v in pin.items() if k != "replays"},
             accounts,
             set(spec["providers"]),
             as_of,
             first_nav,
         )
-    if zero_financing is not None:
-        zero_provider, zero_rows, zero_artifacts = zero_financing
+        zero_sets.append(zero_financing)
+        for replay_ref in _objects(pin.get("replays", []), "zero_financing replays"):
+            zero_sets.append(
+                _zero_financing_replay_rows(
+                    replay_ref,
+                    set(spec["providers"]),
+                    provider_facts,
+                    as_of,
+                    first_nav,
+                )
+            )
+    for zero_provider, zero_rows, zero_artifacts in zero_sets:
         # each row must belong to an account this provider's own generation observes, and
         # rows past the provider's financial cutoff are not projected
         observed_accounts = {

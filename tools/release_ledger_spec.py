@@ -360,7 +360,8 @@ def build(
         # retained statements (provider, statements dir, sums and mapping with hashes)
         pin = json.loads(zero_financing_observations.read_bytes())
         capture_keys = {"captures_dir", "captures_sums_path", "captures_sums_sha256"}
-        if not isinstance(pin, dict) or set(pin) not in (
+        base = set(pin) - {"replays"} if isinstance(pin, dict) else set()
+        if not isinstance(pin, dict) or base not in (
             ZERO_FINANCING_PIN_KEYS,
             ZERO_FINANCING_PIN_KEYS | capture_keys,
         ):
