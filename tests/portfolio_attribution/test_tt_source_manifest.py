@@ -51,7 +51,9 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
 
 
-def _capture_fixture(root: Path) -> None:
+def _capture_fixture(
+    root: Path, vane_class: str = "1", drop_signal: str | None = None
+) -> None:
     portfolio_comp = {
         "slug": list(COMPONENTS),
         "portfolios": [f"Synthetic {slug}" for slug in COMPONENTS],
@@ -103,17 +105,18 @@ def _capture_fixture(root: Path) -> None:
         (root / f"{slug}__last-rebalance.txt").write_text(
             "September 1, 2026", encoding="utf-8"
         )
+    vane_rows = [
+        ["Key", "Value"],
+        ["MarketVane", vane_class],
+        ["StockMom", "1.5"],
+        ["EcoMom", "2.5"],
+        ["StockPref", "3.5"],
+        ["VixMargin", "4.5"],
+        ["DdMargin", "5.5"],
+    ]
     _write_json(
         root / "tt-market-vane__status.json",
-        [
-            ["Key", "Value"],
-            ["MarketVane", "1"],
-            ["StockMom", "1.5"],
-            ["EcoMom", "2.5"],
-            ["StockPref", "3.5"],
-            ["VixMargin", "4.5"],
-            ["DdMargin", "5.5"],
-        ],
+        [row for row in vane_rows if row[0] != drop_signal],
     )
     _write_json(
         root / "capture-manifest.json",
@@ -400,3 +403,86 @@ def test_both_consumers_use_normalized_direct_source_weights(tmp_path: Path) -> 
     assert events
     assert min(event.observed for event in events) == reconciliation.date(2026, 9, 1)
     assert set(latest) == set(COMPONENTS)
+
+
+def _build_with_vane(tmp_path: Path, vane_class: str, drop: str | None = None) -> bytes:
+    capture_root = tmp_path / "capture"
+    capture_root.mkdir()
+    _capture_fixture(capture_root, vane_class, drop)
+    return _build_manifest(capture_root, tmp_path)
+
+
+def test_the_eight_classes_leave_the_manifest_without_the_unclassified_flag(
+    tmp_path: Path,
+) -> None:
+    vane = json.loads(_build_with_vane(tmp_path, "1"))["market_vane"]
+    assert set(vane) == {"class_ids", "current_class_id", "signals", "status_endpoint"}
+    assert vane["current_class_id"] == 1
+
+
+@pytest.mark.parametrize("consumer", ["reconciliation", "attribution"])
+def test_a_vendor_published_minus_one_is_recorded_flagged_and_accepted(
+    tmp_path: Path, consumer: str
+) -> None:
+    content = _build_with_vane(tmp_path, "-1")
+    vane = json.loads(content)["market_vane"]
+    assert vane["class_ids"] == list(range(8))
+    assert vane["current_class_id"] == -1
+    assert vane["state"] == "VENDOR_PUBLISHED_UNCLASSIFIED"
+    assert vane["note"] == "vendor published -1, meaning not established"
+    manifest_path = tmp_path / "tt-source-manifest.json"
+    source_manifest.write_create_only(manifest_path, content)
+    loader = (
+        reconciliation._read_tt_source_manifest
+        if consumer == "reconciliation"
+        else attribution._read_tt_source_manifest
+    )
+    assert loader(manifest_path, COMPONENTS)["market_vane"]["current_class_id"] == -1
+
+
+@pytest.mark.parametrize("value", ["-2", "8", "9", "-0.5", "1.5", "x", ""])
+def test_the_producer_still_refuses_any_other_class(tmp_path: Path, value: str) -> None:
+    with pytest.raises(source_manifest.SourceManifestError):
+        _build_with_vane(tmp_path, value)
+
+
+def test_the_producer_still_refuses_a_status_without_a_signal(tmp_path: Path) -> None:
+    with pytest.raises(source_manifest.SourceManifestError, match="keys differ"):
+        _build_with_vane(tmp_path, "-1", drop="DdMargin")
+
+
+_FLAG = {
+    "state": "VENDOR_PUBLISHED_UNCLASSIFIED",
+    "note": "vendor published -1, meaning not established",
+}
+
+
+@pytest.mark.parametrize(
+    "vane, ok",
+    [
+        ({"current_class_id": 0}, True),
+        ({"current_class_id": 7}, True),
+        ({"current_class_id": -1, **_FLAG}, True),
+        ({"current_class_id": -1}, False),  # recorded without the flag
+        ({"current_class_id": -1, "state": _FLAG["state"]}, False),
+        ({"current_class_id": -1, "note": _FLAG["note"]}, False),
+        ({"current_class_id": -1, **_FLAG, "note": "unclassified"}, False),
+        ({"current_class_id": -2, **_FLAG}, False),
+        ({"current_class_id": 8}, False),
+        ({"current_class_id": True}, False),
+        ({"current_class_id": 1.0}, False),
+        ({"current_class_id": "1"}, False),
+        ({"current_class_id": None}, False),
+        ({}, False),
+    ],
+)
+def test_the_consumer_accepts_only_the_eight_or_the_flagged_minus_one(
+    vane: dict[str, object], ok: bool
+) -> None:
+    assert reconciliation._market_vane_class_ok(vane) is ok
+
+
+def test_the_two_modules_name_the_unclassified_state_identically() -> None:
+    assert source_manifest.MARKET_VANE_UNCLASSIFIED == -1
+    assert _FLAG["state"] == source_manifest.MARKET_VANE_UNCLASSIFIED_STATE
+    assert _FLAG["note"] == source_manifest.MARKET_VANE_UNCLASSIFIED_NOTE
