@@ -1064,13 +1064,17 @@ def _recompute_capture(
             and raw_loan[1] == raw_total
         )
         # a positive trade-date balance that is the account's own cash total is a credit
-        # (pending trades), never a loan: the page's total must say so below, to the cent
+        # (pending trades), never a loan, and only when the page's own total says so to the
+        # cent (confirmed once the page is read, below)
         if not trade_date_credit:
             return (
                 max(raw_loan),
                 capture_date,
                 scan,
             )  # a retirement account showing a loan
+        credit_to_confirm: Decimal | None = raw_loan[1]
+    else:
+        credit_to_confirm = None
     claimed_balances = top["balances"]
     if not margin_account and isinstance(claimed_balances, dict):
         claimed_loan = claimed_balances.get("margin_loan_balance")
@@ -1093,6 +1097,12 @@ def _recompute_capture(
         _PAGE_DEBIT_LINE.search(page) or (cash_total is not None and cash_total < 0)
     ):
         raise CaptureClaimsDiffer("capture page shows a debit or negative cash")
+    if credit_to_confirm is not None and cash_total != credit_to_confirm:
+        return (
+            credit_to_confirm,
+            capture_date,
+            scan,
+        )  # the page does not show the credit
     if subject is not None and subject != 0 and not margin_account:
         return subject, capture_date, scan  # a retirement page showing a loan (P1-7)
     # the API marginBalance field is the account's cash credit when it is non-zero: it
@@ -1414,15 +1424,25 @@ def capture_cash_replay(
             Decimal(0),
         )
         day += timedelta(days=1)
-    # the live total is the settled balance, or that plus the trades done today that settle
-    # later (a capture taken in a trading session): the replay's trade-date balance
-    if capture_date <= last_end or live not in (
-        settled[capture_date],
-        trade[capture_date],
+    # the live total is the settled balance (the basis the statements tie out on) or, for a
+    # capture taken in a trading session, the trade-date balance: accepted only when every
+    # trade that separates the two bases was done on the capture day itself, so a wrong
+    # settle date on an older trade cannot make an unrelated figure close
+    if capture_date <= last_end:
+        return None, "CAPTURE_CASH_REPLAY_DOES_NOT_CLOSE"
+    if live == settled[capture_date]:
+        closed_on = "settled"
+    elif live == trade[capture_date] and all(
+        traded == capture_date
+        for kind, when, traded, _amount in movers
+        if kind == "TRADE" and when > capture_date and traded <= capture_date
     ):
+        closed_on = "trade"
+    else:
         return None, "CAPTURE_CASH_REPLAY_DOES_NOT_CLOSE"
     return {
         "capture_date": capture_date,
+        "closed_on": closed_on,
         "live_cash": live,
         "settled": settled,
         "trade": trade,
@@ -1909,6 +1929,9 @@ def _admit_by_cash_replay(
         "closes": True,
         "reason": REPLAY_VERDICT,
         "retirement_debit_precedent_statements": precedent,
+        # the basis is recorded when it is the trade-date one (the settled basis keeps the
+        # note every earlier cycle published)
+        **({"closed_on": "trade"} if replay["closed_on"] == "trade" else {}),
         **counts,
     }
 

@@ -35,6 +35,7 @@ def _capture(
     subject_interest: float = 0.0,
     trade_date_balance: float = 0.0,
     rows: tuple[dict[str, str], ...] = (),
+    with_page: bool = True,
 ) -> bytes:
     history = {
         "brokerageTransactions": [
@@ -96,6 +97,8 @@ def _capture(
         "balances-page.txt": (page.encode(), "balances"),
         "history-page.txt": (stamp.encode(), "history"),
     }
+    if not with_page:
+        del files["balances-page.txt"]
     for name, (content, _kind) in files.items():
         (directory / name).write_bytes(content)
     body: dict[str, Any] = {
@@ -280,6 +283,7 @@ def test_the_replay_closes_to_the_live_total_on_the_trade_date_basis(
     )
     replay, reason = _replay(tmp_path, raw, "100.00")
     assert reason == zf.REPLAY_VERDICT and replay is not None
+    assert replay["closed_on"] == "trade"
     assert replay["settled"][date(2026, 4, 8)] == Decimal("100.00")
     assert replay["trade"][date(2026, 4, 8)] == Decimal("150.00")
 
@@ -293,6 +297,7 @@ def test_the_replay_still_closes_on_the_settled_basis(tmp_path: Path) -> None:
     )
     replay, reason = _replay(tmp_path, raw, "100.00")
     assert reason == zf.REPLAY_VERDICT and replay is not None
+    assert replay["closed_on"] == "settled"
 
 
 def test_a_live_total_that_is_on_neither_basis_does_not_close(tmp_path: Path) -> None:
@@ -388,3 +393,42 @@ def test_an_unreadable_sweep_fails_closed_to_borrowing(tmp_path: Path) -> None:
                 item["size_bytes"] = len(content)
         verdict = _verdict(json.dumps(top).encode(), tmp_path)
         assert verdict == (False, "RETIREMENT_ACCOUNT_SHOWS_BORROWING"), bad
+
+
+def test_the_trade_basis_needs_every_separating_trade_done_on_the_capture_day(
+    tmp_path: Path,
+) -> None:
+    """A sale done before the capture day that is dated to settle after it (a wrong or
+    long settle date) must not make the trade-date figure close."""
+
+    old_sale = (
+        {
+            "date": "2026-04-07",
+            "action": "Sell",
+            "amount": "$50.00",
+            "settle": "2026-04-10",
+        },
+    )
+    raw = _capture(tmp_path, page_total="150.00", raw_total=150.0, rows=old_sale)
+    replay, reason = _replay(tmp_path, raw, "100.00")
+    assert replay is None and reason == "CAPTURE_CASH_REPLAY_DOES_NOT_CLOSE"
+
+
+def test_a_trade_date_credit_the_page_does_not_show_still_borrows(
+    tmp_path: Path,
+) -> None:
+    raw = _capture(
+        tmp_path, page_total="100.00", trade_date_balance=640.20, raw_total=640.20
+    )
+    assert _verdict(raw, tmp_path) == (False, "RETIREMENT_ACCOUNT_SHOWS_BORROWING")
+
+
+def test_a_trade_date_credit_without_the_page_still_borrows(tmp_path: Path) -> None:
+    raw = _capture(
+        tmp_path,
+        page_total="640.20",
+        trade_date_balance=640.20,
+        raw_total=640.20,
+        with_page=False,
+    )
+    assert _verdict(raw, tmp_path) == (False, "RETIREMENT_ACCOUNT_SHOWS_BORROWING")
