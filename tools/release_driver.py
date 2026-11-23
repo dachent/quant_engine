@@ -928,12 +928,26 @@ def _check_replica_agrees(
             )
 
 
+def refuse_provisional_cycle(run: Run) -> None:
+    """A cycle (or release-inputs root) stamped PROVISIONAL is never committed or preflighted."""
+
+    import decision_refresh
+
+    for key in ("cycle", "release_inputs_root"):
+        if key in run.values:
+            try:
+                decision_refresh.check_not_release(Path(run.values[key]))
+            except decision_refresh.RefreshError as exc:
+                raise Refusal(str(exc)) from exc
+
+
 def check_commit_gate(run: Run, stage: Mapping[str, Any]) -> None:
     """``execute --commit`` runs only for the exact release the owner confirmed, from a prepared, unmoved state."""
 
     gate = stage.get("commit_gate")
     if gate is None:
         return
+    refuse_provisional_cycle(run)
     if run.values["mode"] != "release":
         raise Refusal(f"{stage['id']}: a commit needs mode 'release'")
     release_id = run.derive("release_id")

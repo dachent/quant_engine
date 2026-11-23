@@ -111,6 +111,9 @@ def row_config_paths(run: driver.Run, env: Env) -> None:
     evidence destination is outside the cycle; no configured root is a link."""
 
     driver.check_config_paths(run)
+    driver.refuse_provisional_cycle(
+        run
+    )  # a refresh (PROVISIONAL) cycle is no release candidate
     if "evidence_dest" in run.values and driver.inside(
         Path(run.values["evidence_dest"]), run.cycle
     ):
