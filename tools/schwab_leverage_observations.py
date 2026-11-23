@@ -23,11 +23,13 @@ A pure function of its inputs: no file access beyond ``load_closes`` / ``load_ba
 given bytes.
 
 Zero holdings (an account with no positions rows): the row is gross 0 only when the provider's
-own catalog lists the account as holding nothing, the pinned live balances capture was taken at
-or after the cutoff (its declared capture date, which the capture's own stamp must bracket),
-shows no securities (market value, investments and securities market value all 0), and its
-cash total equals the NAV at the cutoff to the cent.  That cash == NAV closure carries the
-weight.  A ledger transaction dated after the cutoff is only a guard that refuses (the ledger's
+own catalog lists the account as holding nothing, the pinned live balances capture was taken
+after the cutoff day (derived from the capture's own ``estYesterdayDate`` stamp, which prints
+the day before the capture: stamp >= cutoff; a capture taken on the cutoff day itself has
+stamp = cutoff - 1 and refuses, conservatively), shows no securities (market value, investments and securities market value all 0), and its
+cash total equals the NAV at the cutoff to the cent.  The declared capture date is not
+bytes-derived: it only has to be bracketed by that stamp (one to four days after it) and is
+kept as evidence.  The cash == NAV closure carries the weight.  A ledger transaction dated after the cutoff is only a guard that refuses (the ledger's
 Schwab window can end before the cutoff, so its absence proves nothing); it is not evidence.
 Each failure is a named refusal; nothing is plugged.
 
@@ -218,7 +220,7 @@ def gross_exposure_rows(
 
     ``close_source_index`` names, per (ticker, date), the index in ``closes_sources`` of the
     file the close came from.  ``zero_holdings`` maps an account to ``{"balances": the
-    parsed live balances, "capture_date": the ISO date it was taken, "source": {"artifact_id", "sha256"}}``."""
+    parsed live balances, "capture_date": the declared ISO date it was taken, "capture_stamp": the ISO date of its own stamp, "source": {"artifact_id", "sha256"}}``."""
 
     empty = set(empty_position_accounts)
     zero_holdings = zero_holdings or {}
@@ -421,10 +423,12 @@ def _zero_holdings_row(
         and None not in strategies
     )
     capture_date = str(declared["capture_date"])
+    capture_stamp_date = str(declared["capture_stamp"])
     evidence: dict[str, Any] = {
         "cash_total": str(balances["cash_total"]),
         "capture_market_value": str(balances["market_value"]),
         "capture_date": capture_date,
+        "capture_stamp": capture_stamp_date,
     }
 
     def done(reason: str | None, amount: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -449,7 +453,7 @@ def _zero_holdings_row(
         return done("NAV_AT_CUTOFF_NOT_ONE_ROW", nothing)
     if not listed_empty:
         return done("ZERO_HOLDINGS_NOT_OBSERVED_BY_PROVIDER", nothing)
-    if capture_date < cutoff:
+    if capture_stamp_date < cutoff or capture_date < cutoff:
         return done("CAPTURE_OLDER_THAN_CUTOFF", nothing)
     if (
         balances["market_value"] != 0

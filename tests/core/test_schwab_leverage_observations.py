@@ -348,7 +348,12 @@ BAL = {
     "securities_market_value": Decimal("0"),
     "cash_total": Decimal("3.81"),
 }
-HELD = {"balances": BAL, "capture_date": CAPTURED, "source": BAL_SRC}
+HELD = {
+    "balances": BAL,
+    "capture_date": CAPTURED,
+    "capture_stamp": "2026-11-19",
+    "source": BAL_SRC,
+}
 ZNAV = [
     {
         "account_id": ACC,
@@ -697,20 +702,29 @@ def test_the_balances_reference_keys_are_exact(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "captured, ok",
+    "captured, stamp, ok",
     [
-        ("2026-11-18", False),
-        ("2026-11-19", True),
-        ("2026-11-20", True),
-        ("2026-12-01", True),
+        ("2026-11-18", "2026-11-17", False),  # taken before the cutoff
+        ("2026-11-19", "2026-11-18", False),  # on the cutoff day itself: conservative
+        ("2026-11-20", "2026-11-18", False),  # declared after, stamp says before
+        ("2026-11-23", "2026-11-18", False),  # the declaration alone cannot clear it
+        (
+            "2026-11-18",
+            "2026-11-19",
+            False,
+        ),  # stamp after, declared before: still refuses
+        ("2026-11-20", "2026-11-19", True),  # stamp == cutoff clears
+        ("2026-11-23", "2026-11-20", True),  # weekend: stamp after the cutoff
+        ("2026-12-01", "2026-11-30", True),
     ],
 )
-def test_a_capture_before_the_cutoff_refuses_and_one_at_or_after_it_does_not(
-    captured: str, ok: bool
+def test_the_capture_is_after_the_cutoff_day_by_its_own_stamp(
+    captured: str, stamp: str, ok: bool
 ) -> None:
-    held = {**HELD, "capture_date": captured}
+    held = {**HELD, "capture_date": captured, "capture_stamp": stamp}
     row = _only(_zero(zero_holdings={ACC: held}))
     assert row["evidence"]["capture_date"] == captured
+    assert row["evidence"]["capture_stamp"] == stamp
     if ok:
         assert row["amount"] == _amt("0.00") and "refusal" not in row
     else:
@@ -722,6 +736,7 @@ def test_a_stale_capture_is_refused_before_its_content_is_read() -> None:
     held = {
         **HELD,
         "capture_date": "2026-11-18",
+        "capture_stamp": "2026-11-17",
         "balances": {**BAL, "market_value": Decimal("1")},
     }
     assert _zero_refusal(zero_holdings={ACC: held}) == "CAPTURE_OLDER_THAN_CUTOFF"
@@ -788,3 +803,28 @@ def test_a_balances_file_without_a_stamp_is_refused_at_load(tmp_path: Path) -> N
     }
     with pytest.raises(provider_ledger.ProviderLedgerError, match="no readable stamp"):
         _zero_call(spec, [ACC])
+
+
+def test_the_observation_id_binds_the_declared_capture_date_only_when_there_is_one(
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    plain_rows, plain_artifacts = _zero_call(spec, [])
+    cutoff = "2026-11-19"
+    expected = (
+        "gross-exposure-"
+        + hashlib.sha256(
+            "\n".join(
+                [*sorted(a.sha256 for a in plain_artifacts), cutoff, ACC]
+            ).encode()
+        ).hexdigest()[:24]
+    )
+    assert (
+        plain_rows[0]["observation_generation_id"] == expected
+    )  # unchanged by the key
+    one, _ = _zero_call(_zero_spec(tmp_path), [ACC])
+    later_spec = _zero_spec(tmp_path)
+    later_spec["zero_holdings"][0]["capture_date"] = "2026-11-21"
+    other, _ = _zero_call(later_spec, [ACC])
+    assert one[0]["observation_generation_id"] != other[0]["observation_generation_id"]
+    assert one[0]["observation_generation_id"] != expected
