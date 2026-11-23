@@ -305,6 +305,8 @@ _PATH_STAGES = {
     # Stages an unpublished public Yahoo price/FX fetch from a config; consumers read
     # only the artifacts and manifests they are handed, never this tool.
     "tools/yahoo_fetch_driver.py": [],
+    # operator capture tool, writes no delivery artifact
+    "tools/yahoo_refresh_capture.py": [],
     # Per-cycle input preparation (factor-model audit): builds the base proxy-factor file
     # (total-return proxies, French RF splice) and assembles the per-group style capture
     # into the style builder's single source.  Offline; the pipeline reads only the files
@@ -391,6 +393,8 @@ _PATH_STAGES = {
     "tools/verify_sleeve_ledger.py": [],
     "tools/schwab_capture_driver.py": [],
     "tools/schwab_capture_ingest.py": [],
+    # operator fallback: imports the owner's hand exports, labelled not release-eligible; writes no delivery artifact
+    "tools/schwab_hand_export_import.py": [],
     # derives the cutoff-day Schwab NAV from the verified holdings and official closes; an operator
     # step before the ingest, it writes no delivery artifact itself
     "tools/schwab_nav_derive.py": [],
@@ -399,6 +403,8 @@ _PATH_STAGES = {
     "tools/schwab_statement_cash_summaries.py": [],
     "tools/schwab_page_actions.py": [],
     "tools/schwab_rollback.py": [],
+    # operator capture tool, writes no delivery artifact
+    "tools/schwab_zf_capture.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     # #894: owner account financing declaration; read by the leverage disclosure
     "schemas/portfolio/account-financing-declaration.schema.json": ["report", "panel"],

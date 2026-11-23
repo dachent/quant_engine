@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import csv
 from collections.abc import Collection, Mapping, Sequence
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
 import re
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 from quant_engine.core import canonical_json_bytes
 
@@ -310,6 +311,29 @@ def residual_window_days(row: Mapping[str, Any]) -> list[str]:
     closure = row["closure"]
     through, capture = closure["history_through"], row["capture_date"]
     return [through, capture] if through < capture else []
+
+
+def snapshot_business_day(observed_at: str) -> date:
+    """The New York calendar date of a snapshot clock: the day the rows' ``capture_date`` is on.
+
+    A calendar date only: there is no holiday or weekend logic (the snapshot is a capture, not a trading day).
+
+    The clock's own date is in its own offset (UTC for the captured snapshots), which is the next
+    day for an evening capture in New York; comparing that to ``capture_date`` would refuse a
+    same-day capture.  A clock without a timezone is refused, not read as local time.
+    """
+
+    try:
+        moment = datetime.fromisoformat(observed_at)
+    except (TypeError, ValueError) as exc:
+        raise SchwabDerivedPositionError(
+            "derived position snapshot clock is not an ISO timestamp"
+        ) from exc
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise SchwabDerivedPositionError(
+            "derived position snapshot clock has no timezone"
+        )
+    return moment.astimezone(ZoneInfo("America/New_York")).date()
 
 
 def admit_derived_position_rows(

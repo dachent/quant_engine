@@ -4521,6 +4521,56 @@ def _strategies_without_a_backtest_layer(
     return without
 
 
+EU_MODEL_LIVE_SEGMENT_ID = "p123-eu:model-live"
+
+
+def _eu_model_live_extension_identity(
+    *,
+    block: object,
+    pinned: Mapping[str, Any] | None,
+    segment_rows: Sequence[Mapping[str, str]],
+    accepted_as_of: date,
+) -> dict[str, object] | None:
+    """The EU model-live identity a declared extension is allowed to move to.
+
+    The contract pins the seed's EU model-live segment. A bundle that extends it carries an
+    `eu_model_live_refresh` block; without one the pin stays frozen. With one, the first
+    pinned-count rows of the materialized segment must reproduce the pinned identity exactly
+    (the byte-equal prefix), and only strictly later rows, up to the declared last date and
+    count, may follow. Returns the four identity fields to substitute, or None when no
+    extension is declared.
+    """
+
+    if not isinstance(block, Mapping) or pinned is None:
+        return None
+    ordered = sorted(segment_rows, key=lambda row: row["date"])
+    count = int(pinned["return_observations"])
+    prefix = _row_identity(ordered[:count])
+    if any(
+        prefix[key] != pinned[key]
+        for key in ("sha256", "observed_start", "observed_end", "return_observations")
+    ):
+        raise TargetSeriesError("EU model-live extension changed the pinned prefix")
+    tail = ordered[count:]
+    if (
+        not tail
+        or tail[0]["date"] <= str(pinned["observed_end"])
+        or ordered[-1]["date"] > accepted_as_of.isoformat()
+        or (
+            block.get("model_live_observations"),
+            block.get("model_live_first"),
+            block.get("model_live_last"),
+        )
+        != (len(ordered), ordered[0]["date"], ordered[-1]["date"])
+    ):
+        raise TargetSeriesError("EU model-live extension differs from its declaration")
+    identity = _row_identity(ordered)
+    return {
+        key: identity[key]
+        for key in ("sha256", "observed_start", "observed_end", "return_observations")
+    }
+
+
 def _assert_admitted_rows_digest(
     *, segments: Sequence[Mapping[str, Any]], receipt: Mapping[str, Any]
 ) -> None:
@@ -7703,11 +7753,32 @@ def validate_layered_history_generation(
         # row is caught downstream by the product-authority comparison, but under a
         # revision it must be refused here, naming the revision -- otherwise the failure
         # reads as a contract mismatch and the reader looks in the wrong place.
+        eu_extension_identity = _eu_model_live_extension_identity(
+            block=json.loads(raw_source_manifests["strategy-history"]).get(
+                "eu_model_live_refresh"
+            ),
+            pinned=next(
+                (
+                    item
+                    for item in expected_segment_identities
+                    if item["segment_id"] == EU_MODEL_LIVE_SEGMENT_ID
+                ),
+                None,
+            ),
+            segment_rows=[
+                row for row in segments if row["segment_id"] == EU_MODEL_LIVE_SEGMENT_ID
+            ],
+            accepted_as_of=accepted_as_of,
+        )
         pinned_backtests = {
             item["segment_id"]: item
             for item in expected_segment_identities
             if item["source_id"] == "strategy-backtests"
             and item["segment_id"] != "qsi:backtest"
+            and not (
+                item["segment_id"] == EU_MODEL_LIVE_SEGMENT_ID
+                and eu_extension_identity is not None
+            )
         }
         for segment_id, pinned in pinned_backtests.items():
             actual = next(
@@ -7761,6 +7832,12 @@ def validate_layered_history_generation(
                         )
                     }
                     if item["segment_id"] == "qsi:backtest"
+                    else {}
+                ),
+                **(
+                    eu_extension_identity
+                    if item["segment_id"] == EU_MODEL_LIVE_SEGMENT_ID
+                    and eu_extension_identity is not None
                     else {}
                 ),
             }

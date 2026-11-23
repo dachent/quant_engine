@@ -16,6 +16,17 @@ Rules (control ruling 2026-11-14), per statement:
   transaction line;
 * the account number printed on the statement must match the account the mapping names.
 
+Days after an account's last statement come from its dated capture.  Where the capture
+bracket cannot be proven by silence (a buy in the window, or a retirement page showing a
+borrowing signal) a cash replay answers instead: the last statement's printed ending cash
+plus the pinned raw Transaction History (a Buy/Sell on its settle date) must close to the
+live balances page to the cent.  A day with settled cash below zero is then an
+``OBSERVED_FINANCING_DAY`` at that exact balance, any other day a zero day (a margin
+account's also needing trade-date cash at or above zero).  Rule line for a retirement
+account: its settled debit carries no margin interest, evidenced by the pinned retirement
+statements that print a settled debit and "No margin interest was charged" at 0.00%; a
+debit day is published only when at least one such statement is pinned.
+
 The mapping from the file label (h8 = sha256("acct-<provider>-<last3>")[:8]) to the ledger
 account id, and the last three digits, live in a local-only, hash-pinned input file; the
 digits never enter the artifact.
@@ -26,6 +37,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import hashlib
+from itertools import combinations
 import json
 from datetime import date, timedelta
 from decimal import Decimal
@@ -80,6 +92,9 @@ _LOAN_MOVE = re.compile(
 # A margin-interest posting names the days it charged: "INTEREST 03/30THRU 04/28".  Those
 # days were financing days whichever statement month they fall in (a debit on the 30th
 # posts in the NEXT statement), so they are never zero days.
+_NO_INTEREST_CHARGED = re.compile(
+    r"No margin interest was charged\.\s+This equates to 0\.00% annual interest rate"
+)
 _INTEREST_PERIOD = re.compile(
     r"INTEREST[ \t]+(\d{2})/(\d{2})[ \t]*THRU[ \t]+(\d{2})/(\d{2})"
 )
@@ -1221,6 +1236,125 @@ def evaluate_capture(
     return True, "BRACKET_PROVEN_BY_CAPTURE"
 
 
+# The bracket refuses a window it cannot prove by silence (a buy, or a borrowing signal).
+# Only these two reasons may be answered by a cash replay: every other reason is a structural
+# or provenance failure that a replay cannot repair.
+REPLAY_REASONS: Final = frozenset(
+    {"CAPTURE_TRANSACTION_CAN_CREATE_A_DEBIT", "RETIREMENT_ACCOUNT_SHOWS_BORROWING"}
+)
+REPLAY_VERDICT: Final = "CAPTURE_CASH_REPLAY_CLOSES"
+_FINANCING_ROW_WORDS = re.compile(
+    r"(?i)margin\s*int|interest on debit|debit interest|margin loan|loan advance|"
+    r"loan repay|margin borrow"
+)
+
+
+def _pinned_raw(files: list[Any], raw_dir: Path, kind: str, suffix: str) -> bytes:
+    """The one pinned raw file of ``kind`` and ``suffix``, its identity re-checked."""
+
+    named = [f for f in files if f["kind"] == kind and f["name"].endswith(suffix)]
+    if len(named) != 1:
+        raise ZeroFinancingError(f"capture needs exactly one raw {kind} {suffix} file")
+    path = raw_dir / str(named[0]["name"])
+    content = path.read_bytes() if path.is_file() and not path.is_symlink() else None
+    if (
+        content is None
+        or hashlib.sha256(content).hexdigest() != named[0]["sha256"]
+        or len(content) != named[0]["size_bytes"]
+    ):
+        raise ZeroFinancingError("capture raw file identity differs")
+    return content
+
+
+def capture_cash_replay(
+    raw: bytes,
+    *,
+    last3: str,
+    last_end: date,
+    raw_dir: Path,
+    ending_cash: Decimal,
+) -> tuple[dict[str, Any] | None, str]:
+    """(replay, reason): the account's settled and trade-date cash for every day after the
+    last statement, replayed from the last statement's printed ending cash with the pinned
+    raw Transaction History, and closed to the live balances page to the cent.
+
+    ``replay`` is None with the reason when it does not close (the days stay unobserved,
+    never a guess).  A Buy/Sell moves cash on its settle date (the basis the statements'
+    own settled balances and the month-end cash tie out on); every other row moves it on
+    its own date.  A trade dated before the statement end that settles after it is part of
+    the replay.  The live figure is the page's ``Cash & Cash Investments Total`` (a debit
+    shows there as a negative, where the summary line floors it at zero).  Any row naming
+    margin interest or a loan refuses: that is financing evidence this reader does not
+    price."""
+
+    top = json.loads(raw)
+    files = top["raw_files"]
+    history = json.loads(_pinned_raw(files, raw_dir, "history", ".json"))
+    page = _pinned_raw(files, raw_dir, "balances", ".txt").decode(
+        "utf-8", errors="replace"
+    )
+    balances = json.loads(_pinned_raw(files, raw_dir, "balances", ".json"))
+    capture_date = _page_facts(page, last3)
+    live = _page_amount(page, "Cash & Cash Investments Total")
+    if live is None:
+        return None, "CAPTURE_LIVE_CASH_ABSENT"
+    entries = [
+        e
+        for e in balances["brokerageAccountList"]
+        if str(e.get("accountId", ""))[-3:] == last3
+    ]
+    if len(entries) != 1:
+        return None, "CAPTURE_LIVE_CASH_ACCOUNT_NOT_ONCE"
+    raw_credit = Decimal(str(entries[0]["cashInvestments"]["marginBalance"]))
+    if raw_credit != 0 and raw_credit != live:
+        return None, "CAPTURE_LIVE_CASH_DISAGREES_WITH_RAW"
+    # the history reaches back past the last statement's start (checked by the bracket's own
+    # recompute), so every trade that was still unsettled at the statement end is in it
+    rows = history["brokerageTransactions"]
+    # (kind, date used for the settled basis, trade date, amount) of every cash mover
+    movers: list[tuple[str, date, date, Decimal]] = []
+    for row in rows:
+        traded = _row_date(row["transactionDate"])
+        text = f"{row.get('action', '')} {row.get('description', '')}"
+        if traded > last_end and _FINANCING_ROW_WORDS.search(text):
+            return None, "CAPTURE_SHOWS_FINANCING_ROW"
+        text_amount = str(row.get("amount", "")).strip()
+        amount = Decimal(0) if text_amount == "" else _tx_amount(text_amount)
+        if amount is None:
+            return None, "CAPTURE_TRANSACTION_AMOUNT_UNREADABLE"
+        detail = row.get("transactionDetail")
+        settle_text = detail.get("settleDate") if isinstance(detail, dict) else None
+        if isinstance(settle_text, str) and settle_text.strip():
+            movers.append(("TRADE", _row_date(settle_text), traded, amount))
+        else:
+            movers.append(("OTHER", traded, traded, amount))
+    settled: dict[date, Decimal] = {}
+    trade: dict[date, Decimal] = {}
+    day = last_end + timedelta(days=1)
+    while day <= capture_date:
+        settled[day] = ending_cash + sum(
+            (a for _k, when, _t, a in movers if last_end < when <= day), Decimal(0)
+        )
+        trade[day] = ending_cash + sum(
+            (
+                a
+                for k, when, traded, a in movers
+                if (k == "OTHER" and last_end < when <= day)
+                or (k == "TRADE" and when > last_end and traded <= day)
+            ),
+            Decimal(0),
+        )
+        day += timedelta(days=1)
+    if capture_date <= last_end or settled[capture_date] != live:
+        return None, "CAPTURE_CASH_REPLAY_DOES_NOT_CLOSE"
+    return {
+        "capture_date": capture_date,
+        "live_cash": live,
+        "settled": settled,
+        "trade": trade,
+    }, REPLAY_VERDICT
+
+
 _SUMMARY_ROW_AMOUNT = re.compile(r"\(?-?\$[\d,]+\.\d\d(?!\d)\)?")
 _LADDER_CATEGORY = re.compile(
     r"^(?:(\d{2})/(\d{2})[ \t]+)?(Purchase|Sale|Redemption|Dividend|Interest|Withdrawal|"
@@ -1286,7 +1420,8 @@ def _row_amount(category: str, text: str) -> Decimal:
     A row prints ``[quantity price] [charges] amount [realized gain]``.  Older statements
     suffix the realized gain with (ST)/(LT) and the last money token is the amount; newer
     ones print it bare, so for a Sale the amount is the money token nearest to
-    quantity x price (charges and rounding are cents) and a row that has none is refused.
+    quantity x price (rounding is cents; a gap larger than that must be explained by the printed
+    charges, one or several adding up) and a row that has none is refused.
     The printed category total still has to tie to the cent, so a wrong pick cannot pass."""
 
     amounts = _ROW_AMOUNT.findall(text)
@@ -1303,9 +1438,21 @@ def _row_amount(category: str, text: str) -> Decimal:
         Decimal(re.sub(r"[(),-]", "", quantity_price[0]))
         * Decimal(re.sub(r"[(),-]", "", quantity_price[1]))
     )
-    best = min((_parse_money(x) for x in amounts), key=lambda v: abs(abs(v) - proceeds))
-    if abs(abs(best) - proceeds) > Decimal("0.10") + proceeds / 10000:
-        raise ZeroFinancingError("TRANSACTION_AMOUNT_UNREADABLE")
+    values = [_parse_money(x) for x in amounts]
+    position = min(range(len(values)), key=lambda i: abs(abs(values[i]) - proceeds))
+    best = values[position]
+    gap = abs(abs(best) - proceeds)
+    if gap > Decimal("0.10") + proceeds / 10000:
+        # A commission or fee explains a larger gap only when it is printed BEFORE the amount (the
+        # realized gain follows it) and it reduces the proceeds; several charges may add up.
+        charges = [abs(v) for v in values[:position]][:6]
+        explained = abs(best) < proceeds and any(
+            abs(sum(subset, Decimal(0)) - gap) <= Decimal("0.01")
+            for size in range(1, len(charges) + 1)
+            for subset in combinations(charges, size)
+        )
+        if not explained:
+            raise ZeroFinancingError("TRANSACTION_AMOUNT_UNREADABLE")
     return best
 
 
@@ -1514,6 +1661,180 @@ def _refine_table_from_raw(facts: dict[str, Any], raw_text: str) -> None:
     facts["range_details"] = _interest_range_details(lines, end, 40)
 
 
+def _admit_by_cash_replay(
+    rows: list[dict[str, Any]],
+    unobserved: list[dict[str, Any]],
+    note: dict[str, Any],
+    *,
+    account: str,
+    record: Mapping[str, Any],
+    span: tuple[date, date],
+    raw: bytes,
+    last3: str,
+    raw_dir: Path | None,
+    cutoff: date,
+    provider_id: str,
+    source_id: str,
+    interest_days: set[date],
+    precedent: int,
+    debits_only: bool = False,
+) -> None:
+    """Days after the last statement of an account whose capture bracket cannot be proven by
+    silence, observed from a cash replay that closes to the live balance (see
+    ``capture_cash_replay``).  Rows are added only when the replay closes to the cent:
+
+    * a day whose settled cash is below zero is an ``OBSERVED_FINANCING_DAY`` with that
+      exact balance (``DAY_BALANCE_DERIVED``);
+    * any other day is a zero day, a margin account's also needing its trade-date cash at
+      or above zero (a trade-date shortfall may still bear interest);
+    * a retirement account's debit day is published only when the pinned statements carry a
+      precedent that a retirement account's settled debit bears no margin interest
+      (``precedent`` counts them; zero leaves such days unobserved);
+    * a margin account's final statement period is re-admitted only when the statement's
+      own daily cash never went below zero and its printed loan is zero at both ends.
+
+    With ``debits_only`` (a retirement type whose zero days a capture already published) the
+    replay only replaces the days whose settled cash is below zero: with a financing day
+    when the precedent exists, otherwise by an unobserved period; every other day keeps its
+    row untouched.
+
+    The outcome, with the counts, is written to ``note``; days it cannot observe get an
+    unobserved period with the reason, and nothing is guessed."""
+
+    def drop_row(day: date) -> None:
+        rows[:] = [
+            r
+            for r in rows
+            if not (r["account_id"] == account and r["as_of_date"] == day.isoformat())
+        ]
+
+    start, end = span
+    margin = not record["type_only"]
+
+    def refuse(reason: str) -> None:
+        note["cash_replay"] = {"closes": False, "reason": reason}
+
+    if raw_dir is None:
+        raise ZeroFinancingError("capture raw files need a directory")
+    # (the caller has already settled that the last statement is ZERO with a zero closing
+    # loan: a margin account whose is not never reaches here, and a retirement type is ZERO)
+    stmt = record["cash_stmt"]
+    if stmt is None:
+        refuse("LAST_STATEMENT_CASH_UNAVAILABLE")
+        return
+    statement_cash, ending_cash = stmt
+    if margin and any(balance < 0 for balance in statement_cash.values()):
+        refuse("LAST_STATEMENT_CASH_NEGATIVE")
+        return
+    replay, why = capture_cash_replay(
+        raw, last3=last3, last_end=end, raw_dir=raw_dir, ending_cash=ending_cash
+    )
+    if replay is None:
+        refuse(why)
+        return
+    digest = hashlib.sha256(raw).hexdigest()
+    first = start if margin else end + timedelta(days=1)
+    if margin:
+        rows[:] = [
+            r
+            for r in rows
+            if not (
+                r["account_id"] == account
+                and date.fromisoformat(r["as_of_date"]) >= start
+            )
+        ]
+        unobserved[:] = [
+            u
+            for u in unobserved
+            if not (
+                u["account_id"] == account and u["period_start"] == start.isoformat()
+            )
+        ]
+    counts = {"zero_days": 0, "financing_days": 0, "unobserved_days": 0}
+    skipped: list[tuple[date, str]] = []
+    for current in _days(first, cutoff):
+        if current in interest_days:
+            continue  # charged by a later posting: a financing day another path decides
+        financing = False
+        if current <= end:
+            settled_cash = statement_cash[current]
+            ok_zero = True
+        else:
+            if current not in replay["settled"]:
+                skipped.append((current, "REPLAY_DAY_ABSENT"))
+                continue
+            settled_cash, trade_cash = (
+                replay["settled"][current],
+                replay["trade"][current],
+            )
+            financing = settled_cash < 0
+            ok_zero = trade_cash >= 0 or not margin
+        if debits_only and not financing:
+            continue
+        if financing and not margin and precedent == 0:
+            if debits_only:
+                drop_row(current)
+            skipped.append((current, "RETIREMENT_DEBIT_PRECEDENT_ABSENT"))
+            continue
+        if not financing and not ok_zero:
+            skipped.append((current, "TRADE_DATE_CASH_BELOW_ZERO"))
+            continue
+        row: dict[str, Any] = {
+            "account_id": account,
+            "as_of_date": current.isoformat(),
+            "amount": {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": str(-settled_cash) if financing else "0",
+            },
+            "classification": FINANCING_CLASSIFICATION if financing else CLASSIFICATION,
+            "measurement_basis": BASIS,
+            "provider_id": provider_id,
+            "source_artifact_id": source_id,
+            "source_artifact_sha256": digest,
+            "source_field": (
+                "Capture cash replay: statement ending cash and captured rows, "
+                "closed to the live cash"
+            ),
+            "source_page": 1,
+            "verdict_reason": REPLAY_VERDICT,
+        }
+        if financing:
+            row["amount_measurement"] = DAY_BALANCE_DERIVED
+        if debits_only:
+            drop_row(current)
+        rows.append(row)
+        counts["financing_days" if financing else "zero_days"] += 1
+    run_start: date | None = None
+    for index, (current, reason) in enumerate(skipped):
+        previous = skipped[index - 1] if index else None
+        if previous is None or (
+            current - previous[0] != timedelta(days=1) or reason != previous[1]
+        ):
+            run_start = current
+        following = skipped[index + 1] if index + 1 < len(skipped) else None
+        if following is None or (
+            following[0] - current != timedelta(days=1) or following[1] != reason
+        ):
+            assert run_start is not None
+            unobserved.append(
+                {
+                    "account_id": account,
+                    "period_start": run_start.isoformat(),
+                    "period_end": current.isoformat(),
+                    "state": "UNVERIFIED",
+                    "reason": reason,
+                }
+            )
+    counts["unobserved_days"] = len(skipped)
+    note["cash_replay"] = {
+        "closes": True,
+        "reason": REPLAY_VERDICT,
+        "retirement_debit_precedent_statements": precedent,
+        **counts,
+    }
+
+
 def build(
     pdf_dir: Path,
     sums: Mapping[str, str],
@@ -1545,6 +1866,9 @@ def build(
     seen_accounts: set[str] = set()
     full_numbers: dict[str, str] = {}
     sizes: dict[str, int] = {}
+    # pinned retirement-type statements that print a settled debit and "No margin interest
+    # was charged": the evidence that a retirement account's settled debit carries no interest
+    retirement_debit_precedent = 0
     for name in names:
         match = re.fullmatch(
             re.escape(provider_id) + r"-stmt-([0-9a-f]{8})-(\d{4}-\d{2}-\d{2})\.pdf",
@@ -1612,6 +1936,13 @@ def build(
                 )
             duplicate_periods.append(name)
             continue
+        if (
+            facts["retirement"]
+            and not facts["margin_interest_postings"]
+            and re.search(r"Settled Debit Balance", text)
+            and _NO_INTEREST_CHARGED.search(text)
+        ):
+            retirement_debit_precedent += 1
         # the page the evidence sits on: the loan block, else the header (never invented)
         page = facts["block_page"] if facts["loan_block"] else facts["header_page"]
         if state == "ZERO" and page is None:
@@ -1648,7 +1979,22 @@ def build(
             "ladder_reason": None,
             "refine_reason": None,
             "table_page": facts["table_page"] or facts["header_page"],
+            "cash_stmt": None,
         }
+        if raw_text is not None:
+            # the statement's printed ending cash and daily cash, when the printed cash
+            # summary ties out (used only to start a capture cash replay)
+            try:
+                stmt_ladder, _begin, _why, stmt_printed = parse_cash_ladder_totals(
+                    raw_text, facts["period_start"], facts["period_end"]
+                )
+            except ZeroFinancingError:
+                stmt_ladder, stmt_printed = None, None
+            if stmt_ladder is not None and stmt_printed is not None:
+                periods[key]["cash_stmt"] = (
+                    stmt_ladder,
+                    stmt_printed["ending_cash"],
+                )
         if state == "FINANCING":
             ok, why = reconcile_interest(facts)
             periods[key]["refine_reason"] = why
@@ -1785,6 +2131,26 @@ def build(
                 "reason": why,
             }
             capture_notes.append(note)
+            if not holds and why in REPLAY_REASONS:
+                _admit_by_cash_replay(
+                    rows,
+                    unobserved,
+                    note,
+                    account=account,
+                    record=record,
+                    span=(start, end),
+                    raw=raw,
+                    last3=last3_of[account],
+                    raw_dir=capture_dir,
+                    cutoff=cutoff,
+                    provider_id=provider_id,
+                    source_id=(
+                        f"{prefix}/captures/{(capture_names or {}).get(account, account)}"
+                    ),
+                    interest_days=interest_days.get(account, set()),
+                    precedent=retirement_debit_precedent,
+                )
+                continue
             if not holds:
                 continue
             digest = hashlib.sha256(raw).hexdigest()
@@ -1832,6 +2198,28 @@ def build(
                         "source_page": 1,
                         "verdict_reason": why,
                     }
+                )
+            if record["type_only"]:
+                # a retirement type is a zero day through the cutoff only until a replay
+                # shows a settled debit on one of those days
+                _admit_by_cash_replay(
+                    rows,
+                    unobserved,
+                    note,
+                    account=account,
+                    record=record,
+                    span=(start, end),
+                    raw=raw,
+                    last3=last3_of[account],
+                    raw_dir=capture_dir,
+                    cutoff=cutoff,
+                    provider_id=provider_id,
+                    source_id=(
+                        f"{prefix}/captures/{(capture_names or {}).get(account, account)}"
+                    ),
+                    interest_days=interest_days.get(account, set()),
+                    precedent=retirement_debit_precedent,
+                    debits_only=True,
                 )
     # Charged periods of reconciled statements: every day of a charged period is observed,
     # a financing day inside a printed range (amount = the range average) and a zero day
