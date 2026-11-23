@@ -8617,3 +8617,47 @@ def test_the_failed_child_view_does_not_claim_verified_stages(
     assert seen == [
         []
     ]  # claims no verified stage, and never re-reads on the failure path
+
+
+def test_a_stage_changed_between_the_shared_verification_and_the_first_child_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The verification is shared by the gate and the execute start, which run well apart.
+
+    The stat inventory must be taken BEFORE that verification: a stage that changes in the window
+    (attempt start, cache open, storage measurement) is then seen by the tripwires, not
+    fingerprinted as already changed.
+    """
+
+    preflight, output_root = _cold_attended_run(tmp_path, monkeypatch)
+    # an interrupted run: the baseline never completed, so a child WOULD start after the gate
+    (output_root / "stage-results" / "baseline.json").unlink()
+    shutil.rmtree(output_root / "stages" / "baseline")
+    monkeypatch.setattr(materializer, "ATTENDED_STAGES", ("ledger", "baseline"))
+    real_attempt = materializer._attended_start_execution_attempt
+
+    def attempt_then_tamper(root: Path) -> int:
+        number = real_attempt(root)
+        target = next((root / "stages" / "ledger" / "generations").iterdir())
+        with (target / "provider-ledger.json").open("ab") as handle:
+            handle.write(b" ")  # a new size, after the memo was filled
+        return number
+
+    monkeypatch.setattr(
+        materializer, "_attended_start_execution_attempt", attempt_then_tamper
+    )
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a changed verified stage must stop the run first")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 1
+    )
+    assert (
+        "attended ledger stage changed after it was verified, before child baseline"
+        in capsys.readouterr().err
+    )

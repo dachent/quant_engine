@@ -688,22 +688,19 @@ def _release_preflight(args: argparse.Namespace) -> Path:
         raise PrerequisiteUnavailable("pipeline spec")
     # The provider-admission gate reads only catalogs on disk and takes seconds; the financial
     # outcome validation inside the loader takes minutes. Run the gate on the loaded spec first,
-    # so a bound provider generation missing from the workspace refuses at once. Same check, same
-    # refusal text, same receipt; only the order of two independent refusals changes.
-    admitted: dict[str, Any] = {}
-
-    def admit(loaded: Any) -> None:
-        admitted["result"] = _fact_admission(loaded)
-
+    # so a bound provider generation missing from the workspace refuses at once. That early
+    # result is used ONLY to refuse fast: the gate runs again below, after the candidate QA has
+    # pinned the ledger gate bytes it relies on, and that second result is the one recorded, so a
+    # PASS can never ride bytes that changed in between.
     spec, proof = _load_and_validate_spec(
-        args.spec, profile="release-preflight", before_validation=admit
+        args.spec,
+        profile="release-preflight",
+        before_validation=lambda loaded: _fact_admission(loaded),
     )
     evidence_dir = _evidence_directory(args.evidence_dir)
     before = _production_snapshot(spec)
     qa, plan = _candidate_qa(spec, proof), _expected_plan(spec)
-    qa["fact_admission"] = (
-        admitted["result"] if "result" in admitted else _fact_admission(spec)
-    )
+    qa["fact_admission"] = _fact_admission(spec)
     after = _production_snapshot(spec)
     if after != before:
         raise QualityControlFailure("production state changed during release preflight")

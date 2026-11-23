@@ -598,7 +598,45 @@ def test_release_preflight_still_records_the_provider_gate_result_in_the_receipt
     )
     receipt = json.loads(next(evidence.glob("*.json")).read_bytes())
     assert receipt["candidate_qa"]["fact_admission"] == gate
-    assert calls == [
-        spec
-    ]  # exactly once, on the loaded spec: not repeated after validation
+    # the early call only refuses fast; the recorded result is the one after the candidate QA
+    assert calls == [spec, spec]
     assert validated == [spec]
+
+
+def test_release_preflight_refuses_when_the_ledger_changes_between_the_two_gate_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale early PASS must not ride bytes the candidate QA pinned later."""
+
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text("{}", encoding="utf-8")
+    spec = _spec(tmp_path)
+    validated: list[object] = []
+    _fake_loaded_spec_modules(monkeypatch, spec, validated)
+    calls: list[int] = []
+
+    def admit(_loaded: Any) -> dict[str, Any]:
+        calls.append(1)
+        if len(calls) > 1:
+            raise qc.QualityControlFailure("fact admission gate: ledger changed")
+        return {"providers": {"ibkr": "PASS"}, "status": "PASS"}
+
+    monkeypatch.setattr(qc, "_fact_admission", admit)
+    monkeypatch.setattr(qc, "_candidate_qa", lambda *_args: {})
+    evidence = tmp_path / "evidence"
+
+    assert (
+        qc.main(
+            [
+                "--profile",
+                "release-preflight",
+                "--spec",
+                str(spec_path),
+                "--evidence-dir",
+                str(evidence),
+            ]
+        )
+        == 1
+    )
+    assert len(calls) == 2
+    assert not evidence.exists() or not list(evidence.glob("*.json"))

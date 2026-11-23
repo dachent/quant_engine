@@ -6483,11 +6483,41 @@ class _StageFingerprints:
                 rows.append((path.relative_to(top).as_posix(), size, info.st_mtime_ns))
         return tuple(rows)
 
-    def record(self, output_root: Path, role: str) -> None:
-        self._rows[role] = (
-            self._receipt_sha256(output_root, role),
-            self._inventory(output_root, role),
+    @classmethod
+    def snapshot(
+        cls, output_root: Path, role: str
+    ) -> tuple[str, tuple[tuple[str, int, int], ...]]:
+        return (
+            cls._receipt_sha256(output_root, role),
+            cls._inventory(output_root, role),
         )
+
+    def adopt(
+        self, role: str, row: tuple[str, tuple[tuple[str, int, int], ...]]
+    ) -> None:
+        self._rows[role] = row
+
+    def require_roots_unchanged_before(
+        self, output_root: Path, *, before_child: str
+    ) -> None:
+        """G1 at the start of a child: nothing changed since the snapshot that preceded verification."""
+
+        shared = set(_attended_shared_stage_roles(output_root, before_child))
+        for role, (receipt_sha256, inventory) in self._rows.items():
+            if role in shared:
+                continue
+            try:
+                changed = (
+                    self._inventory(output_root, role) != inventory
+                    or self._receipt_sha256(output_root, role) != receipt_sha256
+                )
+            except OSError:
+                changed = True
+            if changed:
+                raise MaterializationError(
+                    f"attended {role} stage changed after it was verified, "
+                    f"before child {before_child} started"
+                )
 
     def reset(self) -> None:
         self._rows.clear()
@@ -6547,6 +6577,23 @@ class _VerifiedStages:
 
     def __init__(self) -> None:
         self._results: dict[tuple[str, tuple[str, ...], str | None], list[str]] = {}
+        self._snapshots: dict[
+            tuple[str, tuple[str, ...], str | None],
+            dict[str, tuple[str, tuple[tuple[str, int, int], ...]]],
+        ] = {}
+
+    def snapshots(
+        self,
+        output_root: Path,
+        required_stages: Sequence[str],
+        *,
+        failed_stage: str | None = None,
+    ) -> dict[str, tuple[str, tuple[tuple[str, int, int], ...]]]:
+        """The stat inventories and receipt hashes taken BEFORE that verification read the stages."""
+
+        return dict(
+            self._snapshots[(str(output_root), tuple(required_stages), failed_stage)]
+        )
 
     def completed(
         self,
@@ -6560,15 +6607,29 @@ class _VerifiedStages:
         if key in self._results:
             with timed_stage("attended_completed_stages_reused", label=label):
                 return list(self._results[key])
+        # Snapshot first, verify second: a stage that changes while it is being verified is then
+        # verified-as-old but fingerprinted-as-old too, so the tripwires see the change.
+        before: dict[str, tuple[str, tuple[tuple[str, int, int], ...]]] = {}
+        for role in required_stages:
+            try:
+                before[role] = _StageFingerprints.snapshot(output_root, role)
+            except OSError:
+                continue  # no receipt or root yet: that stage cannot be verified-complete
         with timed_stage("attended_completed_stages", label=label):
             result = _attended_completed_stages(
                 output_root, required_stages, failed_stage=failed_stage
             )
+        if any(role not in before for role in result):
+            raise MaterializationError(
+                "attended completed stage changed while it was being verified"
+            )
         self._results[key] = list(result)
+        self._snapshots[key] = {role: before[role] for role in result}
         return result
 
     def invalidate(self) -> None:
         self._results.clear()
+        self._snapshots.clear()
 
 
 ATTENDED_QA_STAGE: Final = "panel"
@@ -8229,8 +8290,10 @@ def _attended_execute(
             failed_stage=failed_stage,
         )
         fingerprints = _StageFingerprints()
-        for role in verified_roles:
-            fingerprints.record(output_root, role)
+        for role, row in verified.snapshots(
+            output_root, preflight["required_stages"], failed_stage=failed_stage
+        ).items():
+            fingerprints.adopt(role, row)
         # An interruption that killed a child before it returned leaves partial bytes with no
         # receipt and no failed_stage, and the create-only producer refuses its own partial
         # directory on the retry.  Three conditions keep this to exactly that case:
@@ -8265,14 +8328,19 @@ def _attended_execute(
                 failed_stage=failed_stage,
             )
             fingerprints.reset()
-            for role in verified_roles:
-                fingerprints.record(output_root, role)
+            for role, row in verified.snapshots(
+                output_root, preflight["required_stages"], failed_stage=failed_stage
+            ).items():
+                fingerprints.adopt(role, row)
         for role in preflight["required_stages"]:
             if role in verified_roles:
                 continue
             command = _attended_stage_command(preflight, output_root, role)
             with timed_stage("attended_tripwire_receipts", role=role):
                 fingerprints.require_receipts_unchanged(output_root, before_child=role)
+                fingerprints.require_roots_unchanged_before(
+                    output_root, before_child=role
+                )
             # The child inherits this process's stdout/stderr, so its output reaches the
             # driver log as it is written instead of in one block after the child ends
             # (a captured child made the driver see minutes of silence).
@@ -8312,10 +8380,13 @@ def _attended_execute(
             verified.invalidate()
             with timed_stage("attended_tripwire_roots", role=role):
                 fingerprints.require_roots_unchanged(output_root, after_child=role)
+            new_row = _StageFingerprints.snapshot(
+                output_root, role
+            )  # before it is read
             with timed_stage("attended_verify_new_role", role=role):
                 _attended_verify_new_role(output_root, role)
             verified_roles.append(role)
-            fingerprints.record(output_root, role)
+            fingerprints.adopt(role, new_row)
             if failed_stage == role:
                 _attended_clear_failed_stage(output_root, preflight["request_identity"])
                 failed_stage = None
