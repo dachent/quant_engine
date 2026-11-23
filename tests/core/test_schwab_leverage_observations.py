@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -16,6 +17,8 @@ import schwab_leverage_observations as slo
 CUTOFF = "2026-11-19"
 ACC = "account-x"
 SRC = {"artifact_id": "gross-exposure/schwab/closes-0.csv", "sha256": "a" * 64}
+SRC2 = {"artifact_id": "gross-exposure/schwab/closes-1.csv", "sha256": "b" * 64}
+BAL_SRC = {"artifact_id": "gross-exposure/schwab/balances-0.json", "sha256": "c" * 64}
 
 
 def _amt(value: str) -> dict[str, str]:
@@ -57,7 +60,8 @@ def _rows(**over: Any) -> list[dict[str, Any]]:
         "zero_financing_rows": [DEBIT_DAY],
         "transactions": [],
         "closes": CLOSES,
-        "closes_source": SRC,
+        "closes_sources": [SRC, SRC2],
+        "close_source_index": {("AAA", CUTOFF): 0, ("BRK-B", CUTOFF): 1},
         "cutoff": CUTOFF,
         "provider_id": "schwab",
         "generation_id": "g",
@@ -79,6 +83,9 @@ def test_both_closures_pass_and_the_row_is_a_mapped_available_gross() -> None:
     assert row["measurement_basis"] == slo.GROSS_BASIS and "refusal" not in row
     assert row["evidence"]["nav_residual"] == "0.00"
     assert row["source_artifact_sha256"] == "a" * 64
+    # each close came from its own file: both are recorded, in index order
+    assert row["source_artifact_ids"] == [SRC["artifact_id"], SRC2["artifact_id"]]
+    assert row["source_artifact_sha256s"] == ["a" * 64, "b" * 64]
 
 
 def test_the_row_closes_the_disclosure_cutoff_gross() -> None:
@@ -330,3 +337,288 @@ def test_mapped_lines_without_a_strategy_are_not_a_mapped_row() -> None:
     nameless = [{**line, "strategy_id": None} for line in LINES]
     row = _only(_rows(positions=nameless))
     assert row["mapping_status"] == "UNMAPPED" and row["strategy_id"] is None
+
+
+# --- zero holdings: gross 0 closed against a pinned live balances capture -------------------
+BAL = {
+    "total": Decimal("3.81"),
+    "market_value": Decimal("0"),
+    "investments_total": Decimal("0"),
+    "securities_market_value": Decimal("0"),
+    "cash_total": Decimal("3.81"),
+}
+ZNAV = [
+    {
+        "account_id": ACC,
+        "as_of_date": CUTOFF,
+        "nav": _amt("3.81"),
+        "mapping_status": "MAPPED",
+        "strategy_id": "strategy-1",
+    }
+]
+
+
+def _zero(**over: Any) -> list[dict[str, Any]]:
+    args: dict[str, Any] = {
+        "positions": [],
+        "nav_rows": ZNAV,
+        "zero_financing_rows": [],
+        "empty_position_accounts": [ACC],
+        "zero_holdings": {ACC: {"balances": BAL, "source": BAL_SRC}},
+    }
+    args.update(over)
+    return _rows(**args)
+
+
+def test_a_zero_holding_account_with_nav_equal_to_its_cash_is_gross_zero() -> None:
+    row = _only(_zero())
+    assert row["amount"] == _amt("0.00") and "refusal" not in row
+    assert row["mapping_status"] == "MAPPED" and row["strategy_id"] == "strategy-1"
+    assert row["source_artifact_ids"] == [BAL_SRC["artifact_id"]]
+    assert row["evidence"]["nav_residual"] == "0.00"
+    closure, gross, nav = leverage_closure.gross_exposure([row], [ZNAV[0]], CUTOFF)
+    assert closure.covered and gross == Decimal("0.00") and nav == Decimal("3.81")
+
+
+def _zero_refusal(**over: Any) -> str:
+    row = _only(_zero(**over))
+    assert row["amount"]["status"] == "UNAVAILABLE"
+    return str(row["refusal"])
+
+
+def test_the_provider_must_list_the_account_as_holding_nothing() -> None:
+    assert (
+        _zero_refusal(empty_position_accounts=[])
+        == "ZERO_HOLDINGS_NOT_OBSERVED_BY_PROVIDER"
+    )
+    assert (
+        _zero_refusal(empty_position_accounts=["account-y"])
+        == "ZERO_HOLDINGS_NOT_OBSERVED_BY_PROVIDER"
+    )
+
+
+@pytest.mark.parametrize(
+    "field", ["market_value", "investments_total", "securities_market_value"]
+)
+def test_a_capture_that_shows_any_holding_refuses(field: str) -> None:
+    held = {"balances": {**BAL, field: Decimal("1")}, "source": BAL_SRC}
+    assert _zero_refusal(zero_holdings={ACC: held}) == "CAPTURE_SHOWS_HOLDINGS"
+
+
+def test_a_transaction_after_the_cutoff_refuses_the_zero_holding_cash() -> None:
+    later = {"account_id": ACC, "symbol": None, "event_date": "2026-11-20"}
+    assert (
+        _zero_refusal(transactions=[later]) == "TRANSACTION_AFTER_CUTOFF_CHANGES_CASH"
+    )
+    # another account's, or one on the cutoff itself, does not
+    other = {**later, "account_id": "account-y"}
+    on_cutoff = {**later, "event_date": CUTOFF}
+    assert _only(_zero(transactions=[other, on_cutoff]))["amount"] == _amt("0.00")
+
+
+def test_a_cutoff_debit_day_contradicts_zero_holdings() -> None:
+    assert (
+        _zero_refusal(zero_financing_rows=[DEBIT_DAY])
+        == "DEBIT_DAY_AT_CUTOFF_WITH_ZERO_HOLDINGS"
+    )
+
+
+def test_the_zero_holding_nav_must_equal_the_cash_to_the_cent() -> None:
+    one_cent = [{**ZNAV[0], "nav": _amt("3.82")}]
+    assert _zero_refusal(nav_rows=one_cent) == "NAV_CLOSURE_FAILS_OR_CASH_NOT_OBSERVED"
+    half_cent = [{**ZNAV[0], "nav": _amt("3.814")}]
+    assert _only(_zero(nav_rows=half_cent))["amount"] == _amt("0.00")
+    assert _zero_refusal(nav_rows=[]) == "NAV_AT_CUTOFF_NOT_ONE_ROW"
+    assert _zero_refusal(nav_rows=[ZNAV[0], ZNAV[0]]) == "NAV_AT_CUTOFF_NOT_ONE_ROW"
+
+
+def test_an_unmapped_zero_holding_nav_gives_an_unmapped_row() -> None:
+    unmapped = [{**ZNAV[0], "mapping_status": "UNMAPPED"}]
+    row = _only(_zero(nav_rows=unmapped))
+    assert row["mapping_status"] == "UNMAPPED" and row["strategy_id"] is None
+    nameless = [{**ZNAV[0], "strategy_id": None}]
+    assert _only(_zero(nav_rows=nameless))["mapping_status"] == "UNMAPPED"
+
+
+def test_an_account_not_declared_zero_holding_still_refuses_without_positions() -> None:
+    row = _only(_zero(zero_holdings={}))
+    assert row["refusal"] == "NO_POSITIONS_ROWS_AT_CUTOFF"
+    assert row["source_artifact_ids"] == [SRC["artifact_id"], SRC2["artifact_id"]]
+
+
+def test_positions_win_over_a_zero_holding_declaration() -> None:
+    row = _only(_rows(zero_holdings={ACC: {"balances": BAL, "source": BAL_SRC}}))
+    assert row["amount"] == _amt("223.45")  # priced from its lines, not 0
+    assert BAL_SRC["artifact_id"] not in row["source_artifact_ids"]
+
+
+def test_a_row_records_only_the_close_files_that_supplied_its_lines() -> None:
+    one_file = {("AAA", CUTOFF): 0, ("BRK-B", CUTOFF): 0}
+    row = _only(_rows(close_source_index=one_file))
+    assert row["source_artifact_ids"] == [SRC["artifact_id"]]
+    assert row["source_artifact_id"] == SRC["artifact_id"]
+
+
+def test_load_balances_reads_the_one_matching_account() -> None:
+    raw = json.dumps(
+        {
+            "brokerageAccountList": [
+                {
+                    "accountId": "12345054",
+                    "total": 3.81,
+                    "marketValue": 0,
+                    "investments": {"total": 0, "securitiesMarketValue": 0},
+                    "cashInvestments": {"total": 3.81},
+                },
+                {"accountId": "999999", "total": 5},
+            ]
+        }
+    ).encode()
+    assert slo.load_balances(raw, "054") == BAL
+    with pytest.raises(slo.SchwabExposureError, match="once"):
+        slo.load_balances(raw, "111")
+    twice = json.dumps(
+        {"brokerageAccountList": [{"accountId": "1054"}, {"accountId": "2054"}]}
+    ).encode()
+    with pytest.raises(slo.SchwabExposureError, match="once"):
+        slo.load_balances(twice, "054")
+    with pytest.raises(slo.SchwabExposureError, match="unreadable"):
+        slo.load_balances(b"not json", "054")
+    with pytest.raises(slo.SchwabExposureError, match="unreadable"):
+        slo.load_balances(raw.replace(b'"marketValue"', b'"mv"'), "054")
+
+
+def _balances_file(tmp_path: Path, **over: Any) -> dict[str, Any]:
+    raw = json.dumps(
+        {
+            "brokerageAccountList": [
+                {
+                    "accountId": "1234054",
+                    "total": 3.81,
+                    "marketValue": 0,
+                    "investments": {"total": 0, "securitiesMarketValue": 0},
+                    "cashInvestments": {"total": 3.81},
+                }
+            ]
+        }
+    ).encode()
+    path = tmp_path / "balances.json"
+    path.write_bytes(raw)
+    ref: dict[str, Any] = {
+        "path": str(path),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+    }
+    ref.update(over)
+    return ref
+
+
+def _zero_call(spec: dict[str, Any], empty: list[str]) -> Any:
+    combined = {
+        "positions": [],
+        "nav_observations": [{**ZNAV[0], "provider_id": "schwab"}],
+        "transactions": [],
+    }
+    return provider_ledger._schwab_gross_exposure_rows(
+        spec,
+        {"schwab"},
+        date(2026, 11, 19),
+        combined,
+        [],
+        {"schwab": SimpleNamespace(generation_id="gen-1")},
+        empty,
+    )
+
+
+def _zero_spec(tmp_path: Path, **over: Any) -> dict[str, Any]:
+    spec = _spec(tmp_path)
+    spec["zero_holdings"] = [
+        {"account_id": ACC, "last3": "054", "balances": _balances_file(tmp_path)}
+    ]
+    spec.update(over)
+    return spec
+
+
+def test_the_spec_key_closes_a_zero_holding_account_against_the_pinned_balances(
+    tmp_path: Path,
+) -> None:
+    rows, artifacts = _zero_call(_zero_spec(tmp_path), [ACC])
+    assert rows[0]["amount"] == _amt("0.00")
+    balances = [a for a in artifacts if a.schema_name == "live-balances-capture"]
+    assert len(balances) == 1
+    assert rows[0]["source_artifact_ids"] == [balances[0].artifact_id]
+    refused, _ = _zero_call(_zero_spec(tmp_path), [])
+    assert refused[0]["refusal"] == "ZERO_HOLDINGS_NOT_OBSERVED_BY_PROVIDER"
+
+
+@pytest.mark.parametrize(
+    "mutate, text",
+    [
+        (lambda s, t: {**s, "zero_holdings": "x"}, "zero_holdings differ"),
+        (
+            lambda s, t: {**s, "zero_holdings": [{"account_id": ACC, "last3": "054"}]},
+            "keys differ",
+        ),
+        (
+            lambda s, t: {
+                **s,
+                "zero_holdings": [
+                    {
+                        "account_id": "account-y",
+                        "last3": "054",
+                        "balances": _balances_file(t),
+                    }
+                ],
+            },
+            "unlisted or repeated",
+        ),
+        (
+            lambda s, t: {
+                **s,
+                "zero_holdings": s["zero_holdings"] * 2,
+            },
+            "unlisted or repeated",
+        ),
+        (
+            lambda s, t: {
+                **s,
+                "zero_holdings": [
+                    {
+                        "account_id": ACC,
+                        "last3": "054",
+                        "balances": _balances_file(t, sha256="0" * 64),
+                    }
+                ],
+            },
+            "identity differs",
+        ),
+        (
+            lambda s, t: {
+                **s,
+                "zero_holdings": [
+                    {
+                        "account_id": ACC,
+                        "last3": "054",
+                        "balances": _balances_file(t, size_bytes=1),
+                    }
+                ],
+            },
+            "size differs",
+        ),
+        (
+            lambda s, t: {
+                **s,
+                "zero_holdings": [
+                    {"account_id": ACC, "last3": "999", "balances": _balances_file(t)}
+                ],
+            },
+            "once",
+        ),
+    ],
+)
+def test_the_zero_holdings_spec_is_strict(
+    tmp_path: Path, mutate: Any, text: str
+) -> None:
+    spec = mutate(_zero_spec(tmp_path), tmp_path)
+    with pytest.raises(provider_ledger.ProviderLedgerError, match=text):
+        _zero_call(spec, [ACC])

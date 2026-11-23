@@ -428,9 +428,11 @@ STATEMENT_EVIDENCE_BASES: Final = frozenset(
     {_TABLE_ROW, _CHARGED_PERIOD, _INTEREST_PAID, _LOAN_BLOCK}
 )
 _CENT: Final = Decimal("0.005")
-# the printed average balance is rounded and the interest accrues on daily balances: the
-# recomputation is a plausibility bound (the real statements stay within 0.015), the
-# load-bearing equalities are posting = table and statement paid = table to the cent
+# EMPIRICAL plausibility bound, not derived: on the one real account the printed rows differ
+# from average x rate x days / 360 by up to 0.0142, and 3 of 8 rows exceed even the bounds
+# the printed rounding of the average and the interest would explain; the cause (daily
+# balances inside the range, or Schwab's own rounding) is not established.  Coverage does not
+# rest on this: it rests on posting = table sum and statement paid = table sum, to the cent.
 _RECOMPUTE: Final = Decimal("0.02")
 _POSTING_LAG_DAYS: Final = 4  # a posting follows its cycle by a day, or a weekend
 
@@ -469,7 +471,8 @@ def financing_cost_posting_reconciliation(
 
     * every posting (``BROKER_DEBIT_INTEREST``) follows a printed charged period by a day (a
       weekend at most) and equals the sum of the statement-table rows inside that period;
-    * every table row recomputes (average balance x rate x days / 360) within two cents;
+    * every table row recomputes (average balance x rate x days / 360) within two cents (an
+      empirical plausibility bound, see ``_RECOMPUTE``; not what coverage rests on);
     * every statement's "interest paid this period" equals its table rows, and the YTD
       rolls to the cent (it restarts in January);
     * a statement with no interest-paid column has an opening and closing loan of zero, no
