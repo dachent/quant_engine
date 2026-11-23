@@ -309,21 +309,128 @@ def _like(original: object, value: Decimal) -> object:
     return float(value)
 
 
+ROLLBACK_SOURCE = "ROLLED_BACK_ABSENT_FROM_CAPTURE"
+# the value-bearing and identity fields of a sibling row that must not be carried to a derived row
+_DERIVED_ROW_BLANKED = (
+    "canStream",
+    "closePrice",
+    "costBasis",
+    "dayChange",
+    "dayChngPerc",
+    "description",
+    "gainLoss",
+    "intraDayCostBasis",
+    "lastTrade",
+    "marketValue",
+    "nxtStps",
+    "pctOfAcct",
+    "priceChng",
+    "priceChngPrc",
+    "ratings",
+    "reinvestDtl",
+    "tradeTimeMs",
+)
+
+
+def absent_rolled_positions(
+    account: Mapping[str, Any], after: RolledBack
+) -> dict[str, Decimal]:
+    """The symbols held at the close of the day that the capture has no row for (sold in full after it)."""
+
+    seen: set[str] = set()
+    for group in _list(account.get("groupedPositions"), "holdings groups"):
+        if group.get("securityType") == CASH_SECURITY_TYPE:
+            continue
+        for row in _list(group.get("holdingsRows"), "holdings rows"):
+            symbol = row.get("dataSymbol")
+            if not isinstance(symbol, str) or not symbol.strip():
+                symbol = _mapping(row.get("symbol"), "symbol").get("symbol")
+            seen.add(str(symbol))
+    return {s: q for s, q in sorted(after.quantities.items()) if s not in seen}
+
+
+def _derived_row(
+    account: Mapping[str, Any],
+    internal: str,
+    symbol: str,
+    quantity: Decimal,
+    close: Decimal,
+) -> tuple[dict[str, Any], dict[str, Any], Mapping[str, Any]]:
+    """A row for a position the capture lacks, shaped from its account's own position rows.
+
+    Refuses unless the account has position rows and every position row of every position group
+    has the same set of fields (the shape is then not ambiguous). The row carries only the symbol,
+    the rolled-back quantity and the official close; every value field of the sibling is blanked.
+    Returns the row, its flag and the group it goes into.
+    """
+
+    groups = [
+        g
+        for g in _list(account.get("groupedPositions"), "holdings groups")
+        if g.get("securityType") != CASH_SECURITY_TYPE
+    ]
+    rows = [r for g in groups for r in _list(g.get("holdingsRows"), "holdings rows")]
+    if not rows:
+        raise DeriveError(
+            f"{internal}: {symbol} was held at the close but the capture has no position row "
+            "of the account to take a shape from"
+        )
+    shapes = {frozenset(_mapping(r, "holdings row")) for r in rows}
+    if len(shapes) != 1:
+        raise DeriveError(
+            f"{internal}: {symbol} was held at the close but the account's position rows have "
+            "different shapes, so the shape of its row is ambiguous"
+        )
+    group = groups[0]
+    template = _mapping(_list(group.get("holdingsRows"), "holdings rows")[0], "row")
+    row = copy.deepcopy(dict(template))
+    for key in _DERIVED_ROW_BLANKED:
+        if key in row:
+            row[key] = None
+    row["dataSymbol"] = symbol
+    if isinstance(row.get("symbol"), dict):
+        row["symbol"] = {**{k: None for k in row["symbol"]}, "symbol": symbol}
+    if isinstance(row.get("qty"), dict):
+        row["qty"] = {
+            **{k: 0 for k in row["qty"]},
+            "qty": _like(template["qty"].get("qty"), quantity),
+            "qtyBeforeSplt": _like(template["qty"].get("qtyBeforeSplt"), quantity),
+        }
+    if isinstance(row.get("price"), dict):
+        row["price"] = {**row["price"], "price": float(close)}
+    row["rollbackSynthesized"] = ROLLBACK_SOURCE
+    flag = {
+        "account_id": internal,
+        "symbol": symbol,
+        "quantity": format(quantity, "f"),
+        "official_close": format(close, "f"),
+        "group": str(group.get("groupName")),
+        "source": ROLLBACK_SOURCE,
+    }
+    return row, flag, group
+
+
 def apply_rollback(
     raw: object,
     crosswalk: Mapping[str, str],
     rolled: Mapping[str, RolledBack],
-) -> tuple[dict[str, Any], int]:
+    *,
+    closes_dir: Path | None = None,
+    day: date | None = None,
+) -> tuple[dict[str, Any], int, list[dict[str, Any]]]:
     """A copy of the raw holdings response whose quantities and cash are the rolled-back ones.
 
     Rows keep their shape; a position rolled to zero keeps a zero-quantity row (counted in the second
     result, for the caller to reconcile). A position the capture never listed (sold in full after the
-    day) cannot be given a row the provider never sent, and the cash change needs the account's one
-    quantity-less cash summary row: both refuse.
+    day) is given a derived row, flagged in the third result, only when the caller supplies the
+    official closes and the day, the rolled-back quantity is positive, the symbol has an official
+    close of the day and the account's position rows share one shape; otherwise it refuses. The cash
+    change needs the account's one quantity-less cash summary row, else it refuses.
     """
 
     document = copy.deepcopy(dict(_mapping(raw, "holdings")))
     zeroed = 0
+    derived_flags: list[dict[str, Any]] = []
     for account in _list(document.get("accounts"), "holdings accounts"):
         internal = crosswalk[
             str(_mapping(account, "holdings account").get("accountId"))
@@ -352,10 +459,29 @@ def apply_rollback(
                         zeroed += 1
         absent = sorted(set(after.quantities) - symbols_seen)
         if absent:
-            raise DeriveError(
-                f"{internal}: held at the close but absent from the capture (sold in full "
-                f"after it): {','.join(absent)}; the capture has no row to bind them to"
-            )
+            if closes_dir is None or day is None:
+                raise DeriveError(
+                    f"{internal}: held at the close but absent from the capture (sold in full "
+                    f"after it): {','.join(absent)}; the capture has no row to bind them to"
+                )
+            for symbol in absent:
+                quantity = after.quantities[symbol]
+                if quantity <= 0:
+                    raise DeriveError(
+                        f"{internal}: {symbol} rolls back to {quantity}, not a long position; "
+                        "no row is derived for it"
+                    )
+                close = read_closes(closes_dir, symbol).get(day)
+                if close is None:
+                    raise DeriveError(
+                        f"{internal}: {symbol} was sold in full after {day} but has no official "
+                        f"close for {day}, so its row cannot be derived"
+                    )
+                row, flag, group = _derived_row(
+                    account, internal, symbol, quantity, close
+                )
+                _list(group.get("holdingsRows"), "holdings rows").append(row)
+                derived_flags.append(flag)
         delta = after.cash - cash_now
         if delta:
             if len(summary) != 1:
@@ -367,7 +493,7 @@ def apply_rollback(
             value["val"] = _like(
                 value["val"], _decimal(value["val"], "cash value") + delta
             )
-    return document, zeroed
+    return document, zeroed, derived_flags
 
 
 def derive(
@@ -396,12 +522,14 @@ def derive(
         raise DeriveError(f"a waiver names accounts outside the crosswalk: {unknown}")
     if prior_day >= day:
         raise DeriveError("the prior day must precede the day")
-    held = read_holdings(
-        strict_json_loads(
-            (run_dir / "raw/holdings.v2.json").read_bytes(), label="raw holdings"
-        ),
-        crosswalk,
+    raw_holdings = strict_json_loads(
+        (run_dir / "raw/holdings.v2.json").read_bytes(), label="raw holdings"
     )
+    held = read_holdings(raw_holdings, crosswalk)
+    raw_accounts = {
+        crosswalk[str(_mapping(a, "holdings account").get("accountId"))]: a
+        for a in _list(_mapping(raw_holdings, "holdings").get("accounts"), "accounts")
+    }
     placements = decide_rolled(run_dir, held, closes_dir, day, tolerance)
     rolled_by_account = {a: p.rolled for a, p in placements.items()}
     symbols = sorted(
@@ -486,6 +614,13 @@ def derive(
         if rolled.rows_rolled_back:
             entry["rolled_back_rows"] = ", ".join(
                 f"{k} x{v}" for k, v in sorted(rolled.rows_rolled_back.items())
+            )
+        absent = absent_rolled_positions(raw_accounts[account], rolled)
+        if absent:
+            entry["derived_rows_absent_from_capture"] = "; ".join(
+                f"{symbol} quantity={format(quantity, 'f')} "
+                f"official_close={format(closes[symbol][day], 'f')} source={ROLLBACK_SOURCE}"
+                for symbol, quantity in absent.items()
             )
         if after_day:
             entry["after_day_informational_rows"] = ", ".join(

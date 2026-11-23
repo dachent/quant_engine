@@ -714,6 +714,7 @@ def ingest(
     rolled: dict[str, Any] = {}
     placed: dict[str, Any] = {}
     rolled_zero_rows = 0
+    derived_rows: list[dict[str, Any]] = []
     quote_dates_set = 0
     try:
         if late or derive_tool.rows_after_exist(
@@ -731,8 +732,12 @@ def ingest(
                 a: r for a, r in rolled.items() if r.rows_rolled_back or r.informational
             }
         if undone:
-            raw_response, rolled_zero_rows = derive_tool.apply_rollback(
-                raw_response, crosswalk, rolled
+            raw_response, rolled_zero_rows, derived_rows = derive_tool.apply_rollback(
+                raw_response,
+                crosswalk,
+                rolled,
+                closes_dir=closes_dir,
+                day=cutoff.as_of_date,
             )
     except derive_tool.DeriveError as exc:
         raise IngestError(str(exc)) from exc
@@ -755,7 +760,9 @@ def ingest(
         if rolled
         else held
     )
-    symbols = sorted({str(row["symbol"]) for row in scope})
+    symbols = sorted(
+        {str(row["symbol"]) for row in scope} | {str(r["symbol"]) for r in derived_rows}
+    )
     close_set = official_closes(closes_dir, cutoff.as_of_date)
     if label is None:
         if close_set.provenance["status"] != PROVENANCE_VERIFIED:
@@ -1052,6 +1059,15 @@ def ingest(
                         sorted(r.informational.items())
                     ),
                     "rows_rolled_back": dict(sorted(r.rows_rolled_back.items())),
+                    **(
+                        {
+                            "derived_rows_absent_from_capture": [
+                                f for f in derived_rows if f["account_id"] == account
+                            ]
+                        }
+                        if any(f["account_id"] == account for f in derived_rows)
+                        else {}
+                    ),
                     **(
                         {
                             "straddler_reading": placed[account].reading,
