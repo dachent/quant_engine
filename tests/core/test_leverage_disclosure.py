@@ -582,3 +582,54 @@ def test_the_market_holiday_list_matches_the_nyse_calendar() -> None:
     assert date(2021, 12, 31) not in ld.market_holidays(2022)
     assert date(2021, 6, 18) not in ld.market_holidays(2021)
     assert date(2022, 6, 20) in ld.market_holidays(2022)  # Juneteenth observed Monday
+
+
+def test_derived_zero_days_are_counted_in_the_state_reason_and_do_not_change_it() -> (
+    None
+):
+    """F2 (Matrixport): a day a producer labels DERIVED_* is still an observed zero day, but the
+    account-state row says how many of them there are, so the panel can disclose it."""
+
+    empty = _catalog(base_cash=True)
+    empty["financing_liability_observations"] = [
+        r for r in empty["financing_liability_observations"] if r["account_id"] != QUIET
+    ]
+
+    def zero(day: str, reason: str | None) -> dict[str, Any]:
+        row: dict[str, Any] = {
+            "account_id": QUIET,
+            "provider_id": "ibkr",
+            "measurement_basis": "OBSERVED_ZERO_FINANCING_DAY",
+            "classification": "ZERO_FINANCING_OBSERVED",
+            "as_of_date": day,
+            "amount": _amt("0"),
+            "source_artifact_id": "pins/x",
+            "source_field": "f",
+            "source_artifact_sha256": "a" * 64,
+        }
+        if reason is not None:
+            row["verdict_reason"] = reason
+        return row
+
+    def state(reasons: list[str | None]) -> dict[str, Any]:
+        catalog = {**empty}
+        catalog["financing_liability_observations"] = [
+            *empty["financing_liability_observations"],
+            *(zero(day, reason) for day, reason in zip(DAYS, reasons, strict=True)),
+        ]
+        return _quiet_state(catalog)
+
+    plain = state([None] * len(DAYS))
+    assert "DERIVED_ZERO_DAYS" not in plain["coverage_reason"]
+    mixed = state(
+        ["DERIVED_X", None, "STATEMENT"][: len(DAYS)] + [None] * (len(DAYS) - 3)
+    )
+    assert mixed["coverage_reason"].endswith(";DERIVED_ZERO_DAYS=1")
+    every = state(["DERIVED_X"] * len(DAYS))
+    assert every["coverage_reason"].endswith(f";DERIVED_ZERO_DAYS={len(DAYS)}")
+    # the classification and coverage are unchanged: derived-with-closure counts as observed
+    assert every["classification"] == plain["classification"] == "NOT_LEVERED"
+    assert every["coverage_status"] == plain["coverage_status"] == "COMPLETE_DECLARED"
+    # the suffix never reads as a conflict or an unverified declaration
+    assert "CONFLICT" not in every["coverage_reason"]
+    assert "UNVERIFIED" not in every["coverage_reason"]

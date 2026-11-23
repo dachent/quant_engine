@@ -199,6 +199,7 @@ def _debit_evidence(
         if r.get("classification") == "NET_CASH_DEBIT_BALANCE" and _amount(r) is None
     )
     range_days: set[str] = set()
+    derived_days: set[str] = set()
     free_days: set[str] = set()
     observed = {r["as_of_date"] for r in base if _amount(r) is not None}
     # Generic provider-observed financing day (any provider): ``amount`` is the provider's
@@ -238,6 +239,8 @@ def _debit_evidence(
                 free_days.add(day.isoformat())
         else:
             observed.add(day.isoformat())
+            if str(r.get("verdict_reason", "")).startswith("DERIVED_"):
+                derived_days.add(day.isoformat())
     currency_days = {
         r["as_of_date"]
         for r in liability
@@ -263,6 +266,7 @@ def _debit_evidence(
         net_base_debit_days=len(base_days),
         range_average_debit_days=len(range_days & base_days),
         interest_free_debit_days=len(free_days),
+        derived_zero_days=len(derived_days),
         debit_interest_postings=postings,
         currency_debit_days=len(currency_days),
         unreadable_debit_rows=unreadable,
@@ -408,13 +412,15 @@ def account_financing_rows(
 
         conflict_text = ",".join(state.conflicts)
         unverified = "" if declaration[name].verified else ";VERIFICATION=UNVERIFIED"
+        derived = evidence[name].derived_zero_days
+        derived_text = f";DERIVED_ZERO_DAYS={derived}" if derived else ""
         rows.append(
             make(
                 "ACCOUNT_FINANCING",
                 "ACCOUNT_FINANCING_STATE",
                 state.state,
                 NOT_COVERED if state.conflicts else DECLARED,
-                f"{state.reason}{';CONFLICT=' + conflict_text if conflict_text else ''}{unverified}",
+                f"{state.reason}{';CONFLICT=' + conflict_text if conflict_text else ''}{unverified}{derived_text}",
             )
         )
         if state.state == "NOT_LEVERED" and not state.conflicts:

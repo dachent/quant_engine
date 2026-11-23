@@ -97,11 +97,12 @@ def _manifest(
     status: str = "403",
     sha: str = BODY_SHA,
     balance_at: str = "2026-03-10T01:00:00+00:00",
+    credit_at: str = "2026-03-10T00:30:00+00:00",
 ) -> bytes:
     return _csv(
         ["path", "status_code", "response_sha256", "requested_at_utc"],
         [
-            ["/credit/agency/v1/accounts", status, sha, "2026-03-10T00:30:00+00:00"],
+            ["/credit/agency/v1/accounts", status, sha, credit_at],
             ["/mapi/v1/wallet/balance", "200", "0" * 64, balance_at],
         ],
     )
@@ -137,7 +138,7 @@ def test_a_closing_ledger_yields_one_derived_zero_row_per_calendar_day() -> None
     # weekends included: a day the provider published no NAV for is covered too
     assert [r["as_of_date"] for r in rows] == [f"2026-03-{d:02d}" for d in range(3, 10)]
     assert {r["verdict_reason"] for r in rows} == {rp.VERDICT}
-    assert rp.VERDICT.startswith("DERIVED_")
+    assert rp.VERDICT == "DERIVED_WALLET_LEDGER_REPLAY_CLOSES_NO_WALLET_BORROWING"
     assert all(r["amount"]["value"] == "0" for r in rows)
     assert rows[0]["source_artifact_sha256"] == hashlib.sha256(_bills()).hexdigest()
     assert BODY_SHA[:12] in rows[0]["source_field"]
@@ -185,8 +186,6 @@ def test_a_coverage_gap_refuses() -> None:
         _build(
             _files(**{"coverage.csv": _coverage(**{"/wallet/billsr": "page_limit"})})
         )
-    with pytest.raises(rp.ReplayError, match="coverage of /wallet/deposits"):
-        _build(_files(**{"coverage.csv": _coverage(**{"/wallet/deposits": "partial"})}))
 
 
 def test_a_wallet_balance_read_before_the_cutoff_refuses() -> None:
@@ -254,3 +253,31 @@ def test_a_replayed_currency_absent_from_the_observed_wallet_refuses() -> None:
     only_aaa = _csv(["balance", "currency", "frozen_balance"], [["0", "AAA", "0"]])
     with pytest.raises(rp.ReplayError, match="absent from the observed wallet"):
         _build(_files(**{"wallet_balances.csv": only_aaa}))
+
+
+def test_the_credit_read_must_be_on_or_after_the_cutoff_and_its_date_is_in_the_row() -> (
+    None
+):
+    early = _manifest(credit_at="2026-03-08T23:59:00+00:00")
+    with pytest.raises(rp.ReplayError, match="predates the cutoff"):
+        _build(_files(**{"request_manifest.csv": early}))
+    rows = _build()["rows"]
+    assert "credit accounts read 2026-03-10" in rows[0]["source_field"]
+    assert _build()["closure"]["credit_read_day"] == "2026-03-10"
+
+
+def test_the_rows_say_what_they_do_not_cover() -> None:
+    field = _build()["rows"][0]["source_field"]
+    assert "Phoenix margin/leverage" in field and "product-level margin" in field
+    assert "no wallet-level borrowing" in field
+    assert "credit facility" not in rp.VERDICT.lower()
+
+
+def test_deposits_and_withdrawals_are_not_part_of_the_completeness_claim() -> None:
+    # the weight is /wallet/bills (read to its last page) and the wallet balance read: a
+    # partial deposits or withdrawals read neither refuses nor is claimed
+    partial = _coverage(
+        **{"/wallet/deposits": "partial", "/wallet/withdrawals": "partial"}
+    )
+    assert len(_build(_files(**{"coverage.csv": partial}))["rows"]) == 7
+    assert "deposits" not in _build()["rows"][0]["source_field"]

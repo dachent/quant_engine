@@ -3,21 +3,32 @@
 Matrixport has no daily loan or wallet history, so a zero-financing day cannot be read; it is
 DERIVED, with closure, from bytes the ledger re-hashes itself:
 
-* the Prime Broker credit read ``GET /credit/agency/v1/accounts`` was refused with HTTP 403, code
-  12000007 "non-prime brokerage users Forbidden" (the account has no credit facility to borrow
-  from), and the body hash is the pinned one;
-* the wallet bill ledger is complete (the bills read ended with no next page), every bill is of a
-  known non-credit type, and every bill's reported balance equals the running per-currency sum
-  of the signed amounts (so a borrowed balance could not enter the wallet unseen);
+* the wallet bill ledger is complete (the bills read ended with no next page), every bill is of
+  a type observed on the account, and every bill's reported balance equals the running
+  per-currency sum of the signed amounts, so a wallet-level borrowed balance could not appear
+  unseen;
 * the replayed end state equals the wallet balance observed on or after the cutoff, with no
   negative or frozen balance;
-* the wallet reads are complete.
+* the Prime Broker credit read ``GET /credit/agency/v1/accounts``, made on or after the cutoff,
+  was refused with HTTP 403, code 12000007 "non-prime brokerage users Forbidden", and its body
+  hash is the pinned one (the account was not a Prime Brokerage client when it was read).
 
 Every calendar day from ``first_day`` to ``cutoff`` then carries one ``OBSERVED_ZERO_FINANCING_DAY``
-row labelled ``DERIVED_*``, so a day the provider published no NAV for is still covered.  Anything
-that does not close raises ``ReplayError`` with a named reason and yields no row at all.  The
-artifact is the shape ``zero_financing_statements.validate_rows`` accepts.  A pure function of its
-inputs: no file access.
+row labelled ``DERIVED_WALLET_LEDGER_REPLAY_CLOSES_NO_WALLET_BORROWING``, so a day the provider
+published no NAV for is still covered.
+
+What this does NOT prove (stated on every row): a loan or margin facility INSIDE a structured
+product or on the Phoenix margin/leverage API (separate host and credentials, unsupported for
+this key) never touches the wallet, and the 403 is one reading at capture time, not a history.
+Those rest on the owner's declaration, not on this reader.  The weight of the completeness claim
+is ``/wallet/bills`` (one request, terminal ``no_next_id``) and the one wallet balance read;
+deposits and withdrawals are NOT read or claimed (some currencies are rejected by the
+provider and dispositioned).  The bill types treated as non-credit are justified only as
+"observed on the account", not from a vendor type table.
+
+Anything that does not close raises ``ReplayError`` with a named reason and yields no row at
+all.  The artifact is the shape ``zero_financing_statements.validate_rows`` accepts.  A pure
+function of its inputs: no file access.
 """
 
 from __future__ import annotations
@@ -37,11 +48,13 @@ CREDIT_ACCOUNTS_PATH: Final = "/credit/agency/v1/accounts"
 BALANCE_PATH: Final = "/mapi/v1/wallet/balance"
 REFUSAL_CODE: Final = 12000007
 REFUSAL_TEXT: Final = "non-prime brokerage"
-# bill types observed on the account and known not to be credit: deposit, conversion in/out,
-# subscription.  Any other type is not proven non-credit and refuses.
+# the bill types observed on the account (deposit, conversion in/out, subscription), taken as
+# non-credit only because they were observed here, not from a vendor type table.  Any other type
+# is not proven non-credit and refuses.
 NON_CREDIT_BILL_TYPES: Final = frozenset({"2001", "2008", "2557", "2855"})
 COMPLETE: Final = "complete_to_observed_boundary"
-VERDICT: Final = "DERIVED_WALLET_LEDGER_REPLAY_CLOSES_NO_CREDIT_FACILITY"
+VERDICT: Final = "DERIVED_WALLET_LEDGER_REPLAY_CLOSES_NO_WALLET_BORROWING"
+NOT_COVERED: Final = "NOT covered: Phoenix margin/leverage, product-level margin"
 FILES: Final = (
     "request_manifest.csv",
     "wallet_bills.csv",
@@ -86,8 +99,8 @@ def _request(manifest: list[dict[str, str]], path: str) -> dict[str, str]:
 
 
 def _credit_refusal(
-    manifest: list[dict[str, str]], body: bytes, pinned_sha256: str, first_day: date
-) -> None:
+    manifest: list[dict[str, str]], body: bytes, pinned_sha256: str, cutoff: date
+) -> date:
     request = _request(manifest, CREDIT_ACCOUNTS_PATH)
     digest = hashlib.sha256(body).hexdigest()
     if digest != pinned_sha256 or request.get("response_sha256") != digest:
@@ -106,8 +119,10 @@ def _credit_refusal(
         or REFUSAL_TEXT not in str(parsed.get("message", "")).lower()
     ):
         raise ReplayError("the credit accounts refusal is not 12000007 non-prime")
-    if _utc_day(request["requested_at_utc"], "credit request time") < first_day:
-        raise ReplayError("the credit accounts read predates the window")
+    read_day = _utc_day(request["requested_at_utc"], "credit request time")
+    if read_day < cutoff:
+        raise ReplayError("the credit accounts read predates the cutoff")
+    return read_day
 
 
 def _replay(bills: list[dict[str, str]]) -> tuple[dict[str, Decimal], date]:
@@ -172,12 +187,7 @@ def _coverage(
             )
         return rows[0]
 
-    for suffix in (
-        "/wallet/bills",
-        "/wallet/balance",
-        "/wallet/deposits",
-        "/wallet/withdrawals",
-    ):
+    for suffix in ("/wallet/bills", "/wallet/balance"):
         if status(suffix)["status"] != COMPLETE:
             raise ReplayError(f"coverage of {suffix} is not {COMPLETE}")
     if status("/wallet/bills")["terminal_reason"] != "no_next_id":
@@ -206,11 +216,8 @@ def build(
     if cutoff < first_day:
         raise ReplayError("the cutoff precedes the first day")
     manifest = _rows(files["request_manifest.csv"], "request_manifest.csv")
-    _credit_refusal(
-        manifest,
-        files["credit-accounts-response.bin"],
-        credit_response_sha256,
-        first_day,
+    read_day = _credit_refusal(
+        manifest, files["credit-accounts-response.bin"], credit_response_sha256, cutoff
     )
     replay, first_bill = _replay(_rows(files["wallet_bills.csv"], "wallet_bills.csv"))
     if first_day < first_bill:
@@ -219,8 +226,9 @@ def build(
     _coverage(_rows(files["coverage.csv"], "coverage.csv"), manifest, cutoff)
     bills_sha = hashlib.sha256(files["wallet_bills.csv"]).hexdigest()
     field = (
-        "wallet bills replay closes to the observed wallet; credit accounts read "
-        f"403 code {REFUSAL_CODE} body {credit_response_sha256[:12]}"
+        "wallet bills replay closes to the observed wallet (no wallet-level borrowing); "
+        f"credit accounts read {read_day.isoformat()} 403 code {REFUSAL_CODE} body "
+        f"{credit_response_sha256[:12]}; {NOT_COVERED}"
     )
     rows = []
     day = first_day
@@ -251,6 +259,8 @@ def build(
             "bills": len(_rows(files["wallet_bills.csv"], "wallet_bills.csv")),
             "first_bill_day": first_bill.isoformat(),
             "days": len(rows),
+            "credit_read_day": read_day.isoformat(),
+            "not_covered": NOT_COVERED,
             "replay_end_state": {k: format(v, "f") for k, v in sorted(replay.items())},
         },
     }

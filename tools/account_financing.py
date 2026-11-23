@@ -97,6 +97,9 @@ class DebitEvidence:
     # Debit days a producer states as interest-free (``interest_bearing: false``, emitted
     # only for a retirement account's settled debit); a subset of ``net_base_debit_days``.
     interest_free_debit_days: int = 0
+    # Observed zero-financing days a producer labels ``DERIVED_*`` (derived with closure from
+    # the provider's own ledger, not read as a daily observation); disclosed, never a gap.
+    derived_zero_days: int = 0
 
 
 @dataclass(frozen=True)
