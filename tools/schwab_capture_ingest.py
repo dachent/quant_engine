@@ -890,10 +890,13 @@ def ingest(
         )
         for row in held
     }
+    # a derived row (a position sold in full after the cutoff) has no quote in the capture: it is
+    # listed in the binding with its own flag, not counted as a quote that differs
     quoted_differs = sum(
         1
         for row in snapshot.positions
-        if quoted[(str(row["account_id"]), str(row["symbol"]))]
+        if (str(row["account_id"]), str(row["symbol"])) in quoted
+        and quoted[(str(row["account_id"]), str(row["symbol"]))]
         != Decimal(str(_market_value(row)))
     )
 
