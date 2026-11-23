@@ -645,3 +645,40 @@ def test_a_capture_on_the_cutoff_day_without_its_label_is_not_the_next_day_shape
             captured_at="2026-11-20T15:00:00.000000Z",
             **{"csv/dashboard_Volatis_Strategy_pricehistory.csv": without_cutoff_label},
         )
+
+
+def test_without_a_cutoff_day_order_the_next_day_shape_keeps_the_strict_bound(
+    tmp_path: Path,
+) -> None:
+    # nothing filled on the cutoff day: the cutoff holdings are the opening ones
+    quiet = (
+        _HEADER
+        + _order("o1", "2026-11-18", "SHV", "100")
+        + _order("o2", "2026-11-18", "$USD", "10")
+        + _order("o3", "2026-11-19", "SHV", "-100")
+        + _order("o4", "2026-11-19", "SH", "150")
+        + _order("o5", "2026-11-19", "GLD", "20")
+        + _order("o6", "2026-11-19", "$USD", "-10")
+        + _order("o7", "2026-11-19", "$USD", "10")
+        + _txn("t19", "2026-11-19")
+    )
+    holdings = (
+        "symbol,quantity,value,latest_price,percentage\n"
+        "SH,150.00,6000.00,40.00,60.00\nGLD,20.00,4000.00,200.00,39.96\n"
+        "$USD,10.00,10.00,1.00,0.04\n"
+    )
+    rebalances = (
+        "date,symbol,proportion\n2026-11-18,SHV,1.000000000\n"
+        "2026-11-19,SH,0.500000000\n2026-11-19,GLD,0.500000000\n"
+    )
+    rows = _next_rows(
+        tmp_path,
+        **{
+            "csv/account_activity.csv": quiet,
+            "csv/dashboard_Volatis_Strategy_holdings.csv": holdings,
+            "csv/volatis_strategy_rebalance_history.csv": rebalances,
+        },
+    )
+    evidence = rows[0]["closure"]["rollback"]
+    assert evidence["cutoff_day_orders"] is False
+    assert evidence["scale_tolerance"] == "0.001"

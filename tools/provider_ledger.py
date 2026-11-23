@@ -2583,7 +2583,7 @@ def _quantbase_roll_back(
     cutoff_day: date,
     cutoff_nav: Decimal | None,
     closes: Mapping[str, Mapping[date, Decimal]],
-    scale_tolerance: Decimal = _QUANTBASE_ROLLBACK_SCALE_TOLERANCE,
+    relaxed_scale_tolerance: Decimal | None = None,
 ) -> tuple[
     Decimal,
     list[tuple[str, Decimal, Decimal, Decimal]],
@@ -2662,6 +2662,18 @@ def _quantbase_roll_back(
         raw[sym] = qty * close
     total = cutoff_nav - cash
     scale = total / sum(raw.values(), Decimal(0))
+    # The relaxed bound exists only for a cutoff-day rebalance: with no order filled on
+    # the cutoff day the cutoff holdings are the opening ones and the opening check
+    # above already pins their value to the NAV, so the strict bound stays.
+    cutoff_day_orders = any(
+        day == cutoff_day and sym != _QUANTBASE_CASH_SYMBOL and qty != 0
+        for day, sym, qty in mine
+    )
+    scale_tolerance = (
+        relaxed_scale_tolerance
+        if relaxed_scale_tolerance is not None and cutoff_day_orders
+        else _QUANTBASE_ROLLBACK_SCALE_TOLERANCE
+    )
     if abs(scale - 1) > scale_tolerance:
         raise ProviderLedgerError(
             "quantbase rolled-back holdings at the official closes differ from the "
@@ -2682,6 +2694,12 @@ def _quantbase_roll_back(
         "value_scale_to_nav": format(scale, "f"),
         "opening_tolerance": str(_QUANTBASE_OPENING_TOLERANCE),
         "scale_tolerance": str(scale_tolerance),
+        # recorded only for the next-day shape: the same-day evidence bytes are unchanged
+        **(
+            {"cutoff_day_orders": cutoff_day_orders}
+            if relaxed_scale_tolerance is not None
+            else {}
+        ),
     }
     return cash, risky, values, evidence
 
@@ -2929,10 +2947,8 @@ def _quantbase_positions(
             cutoff_day=cutoff_day,
             cutoff_nav=cutoff_nav,
             closes=fill_closes or {},
-            scale_tolerance=(
-                _QUANTBASE_NEXT_DAY_REBALANCE_SCALE_TOLERANCE
-                if next_day
-                else _QUANTBASE_ROLLBACK_SCALE_TOLERANCE
+            relaxed_scale_tolerance=(
+                _QUANTBASE_NEXT_DAY_REBALANCE_SCALE_TOLERANCE if next_day else None
             ),
         )
         rolled_evidence["rollback_rebalance_count"] = len(later_rebalances)
@@ -2960,7 +2976,9 @@ def _quantbase_positions(
     # the next-day shape scales the cutoff holdings to the start-of-day NAV, so the
     # official-close value may differ from it by up to the same bound
     independent_tolerance = (
-        _QUANTBASE_NEXT_DAY_REBALANCE_SCALE_TOLERANCE if next_day else Decimal("0.001")
+        Decimal(rolled_evidence["scale_tolerance"])
+        if next_day and rolled_evidence is not None
+        else Decimal("0.001")
     )
     for symbol, quantity, _value, _price in risky:
         close = (fill_closes or {}).get(symbol, {}).get(cutoff_day)

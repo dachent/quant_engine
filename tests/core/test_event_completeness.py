@@ -959,6 +959,8 @@ _QB_NEXT_DAY = {
         "replay_reproduces_snapshot": True,
         "rollback_rebalance_count": 0,
         "rollback_activity_count": 0,
+        "value_scale_to_nav": "0.9942",
+        "scale_tolerance": "0.01",
     },
 }
 
@@ -995,6 +997,25 @@ def test_a_next_day_quantbase_snapshot_without_a_snapshot_day_nav_is_complete() 
         {**_QB_NEXT_DAY, "snapshot_nav_usd": "100.00"},
         {**_QB_NEXT_DAY, "snapshot_difference_usd": "240.00"},
         {**_QB_NEXT_DAY, "activity_after_cutoff_count": 1},
+        # the scale is bounded by the tolerance it was built under, and that is capped
+        {
+            **_QB_NEXT_DAY,
+            "rollback": {**_QB_NEXT_DAY["rollback"], "value_scale_to_nav": "0.98"},
+        },
+        {
+            **_QB_NEXT_DAY,
+            "rollback": {
+                **_QB_NEXT_DAY["rollback"],
+                "scale_tolerance": "0.05",
+                "value_scale_to_nav": "0.97",
+            },
+        },
+        {
+            **_QB_NEXT_DAY,
+            "rollback": {**_QB_NEXT_DAY["rollback"], "value_scale_to_nav": None},
+        },
+        # the snapshot must be after the cutoff
+        {**_QB_NEXT_DAY, "snapshot_day": QB_DAY.isoformat()},
     ],
 )
 def test_the_next_day_snapshot_shape_is_not_a_blanket_pass(
