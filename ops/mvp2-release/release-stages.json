@@ -396,6 +396,20 @@
           ]
         },
         {
+          "if": "schwab_gross_exposure",
+          "args": [
+            "--schwab-gross-exposure",
+            "{schwab_gross_exposure}"
+          ]
+        },
+        {
+          "if": "schwab_margin_interest",
+          "args": [
+            "--schwab-margin-interest",
+            "{schwab_margin_interest}"
+          ]
+        },
+        {
           "if": "event_completeness_declaration",
           "args": [
             "--event-completeness-declaration",

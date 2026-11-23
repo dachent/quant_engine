@@ -661,3 +661,203 @@ def test_the_event_completeness_declaration_is_pinned_and_carried(
         world["provenance"],
     )["spec"]
     assert carried["event_completeness_declaration"] == pin
+
+
+# --- F2 Schwab keys (#894): schwab_gross_exposure and schwab_margin_interest ---------------
+GROSS_PIN = {
+    "provider_id": "schwab",
+    "accounts": ["account-0000000000000001"],
+    "closes": [{"path": "closes.csv", "sha256": "a" * 64, "size_bytes": 10}],
+}
+ZERO_HOLDINGS = [
+    {
+        "account_id": "account-0000000000000001",
+        "last3": "054",
+        "balances": {"path": "bal.json", "sha256": "b" * 64, "size_bytes": 7},
+    }
+]
+MARGIN_PIN = {
+    "provider_id": "schwab",
+    "accounts": ["account-0000000000000001"],
+    "statements_dir": "statements",
+    "sums_path": "statements/SHA256SUMS.txt",
+    "sums_sha256": "c" * 64,
+    "mapping_path": "mapping.json",
+    "mapping_sha256": "d" * 64,
+}
+
+
+def _pin_file(tmp_path: Path, name: str, document: Any) -> Path:
+    path = tmp_path / name
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def test_the_f2_keys_are_in_the_carried_set_and_mirror_the_ledger_readers() -> None:
+    assert {"schwab_gross_exposure", "schwab_margin_interest"} <= set(tool.CARRIED)
+    # the key sets the builder accepts are exactly the provider ledger's
+    assert tool.GROSS_EXPOSURE_KEYS == provider_ledger._GROSS_EXPOSURE_KEYS
+    assert tool.ZERO_HOLDING_KEYS == provider_ledger._ZERO_HOLDINGS_KEYS
+    assert tool.MARGIN_INTEREST_KEYS == provider_ledger._MARGIN_INTEREST_KEYS
+
+
+def test_the_f2_keys_are_absent_unless_given_or_carried(world: dict[str, Any]) -> None:
+    spec = _build(world)["spec"]
+    assert "schwab_gross_exposure" not in spec and "schwab_margin_interest" not in spec
+
+
+def test_the_f2_keys_are_carried_from_the_predecessor_spec(
+    world: dict[str, Any],
+) -> None:
+    held = {**GROSS_PIN, "zero_holdings": ZERO_HOLDINGS}
+    predecessor = {
+        **world["predecessor"],
+        "schwab_gross_exposure": held,
+        "schwab_margin_interest": MARGIN_PIN,
+    }
+    spec = tool.build(
+        world["resolved"], predecessor, world["out"], world["provenance"]
+    )["spec"]
+    assert spec["schwab_gross_exposure"] == held
+    assert spec["schwab_margin_interest"] == MARGIN_PIN
+
+
+def test_a_given_pin_file_replaces_the_carried_value(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    newer = {
+        **GROSS_PIN,
+        "closes": [{"path": "new.csv", "sha256": "e" * 64, "size_bytes": 11}],
+    }
+    predecessor = {**world["predecessor"], "schwab_gross_exposure": GROSS_PIN}
+    spec = tool.build(
+        world["resolved"],
+        predecessor,
+        world["out"],
+        world["provenance"],
+        schwab_gross_exposure=_pin_file(tmp_path, "g.json", newer),
+        schwab_margin_interest=_pin_file(tmp_path, "m.json", MARGIN_PIN),
+    )["spec"]
+    assert spec["schwab_gross_exposure"] == newer
+    assert spec["schwab_margin_interest"] == MARGIN_PIN
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {**GROSS_PIN, "extra": 1},
+        {k: v for k, v in GROSS_PIN.items() if k != "closes"},
+        {**GROSS_PIN, "accounts": []},
+        {**GROSS_PIN, "accounts": ["a", "a"]},
+        {**GROSS_PIN, "accounts": "a"},
+        {**GROSS_PIN, "provider_id": 3},
+        {**GROSS_PIN, "closes": []},
+        {**GROSS_PIN, "closes": [{"path": "x", "sha256": "a" * 64}]},
+        {
+            **GROSS_PIN,
+            "closes": [{"path": "x", "sha256": "a" * 64, "size_bytes": True}],
+        },
+        {**GROSS_PIN, "zero_holdings": []},
+        {**GROSS_PIN, "zero_holdings": [{"account_id": "a", "last3": "054"}]},
+        {
+            **GROSS_PIN,
+            "zero_holdings": [{**ZERO_HOLDINGS[0], "balances": {"path": "b"}}],
+        },
+        ["not", "an", "object"],
+    ],
+)
+def test_a_malformed_gross_exposure_pin_is_refused(
+    world: dict[str, Any], tmp_path: Path, document: Any
+) -> None:
+    with pytest.raises(tool.LedgerSpecError, match="INPUT"):
+        tool.build(
+            world["resolved"],
+            world["predecessor"],
+            world["out"],
+            world["provenance"],
+            schwab_gross_exposure=_pin_file(tmp_path, "g.json", document),
+        )
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {**MARGIN_PIN, "extra": 1},
+        {k: v for k, v in MARGIN_PIN.items() if k != "accounts"},
+        {k: v for k, v in MARGIN_PIN.items() if k != "mapping_sha256"},
+        {**MARGIN_PIN, "accounts": []},
+        {**MARGIN_PIN, "sums_sha256": 5},
+        {**MARGIN_PIN, "captures_dir": "x"},  # the margin reader takes no capture keys
+        "text",
+    ],
+)
+def test_a_malformed_margin_interest_pin_is_refused(
+    world: dict[str, Any], tmp_path: Path, document: Any
+) -> None:
+    with pytest.raises(tool.LedgerSpecError, match="INPUT"):
+        tool.build(
+            world["resolved"],
+            world["predecessor"],
+            world["out"],
+            world["provenance"],
+            schwab_margin_interest=_pin_file(tmp_path, "m.json", document),
+        )
+
+
+def test_an_unknown_predecessor_key_is_still_refused(world: dict[str, Any]) -> None:
+    with pytest.raises(tool.LedgerSpecError, match="PREDECESSOR_SPEC"):
+        tool.build(
+            world["resolved"],
+            {**world["predecessor"], "schwab_gross_exposure_typo": GROSS_PIN},
+            world["out"],
+            world["provenance"],
+        )
+
+
+def test_the_f2_keys_round_trip_through_the_spec_file(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    """Built from a pin, written as the spec, read back as the next cycle's predecessor."""
+
+    first = tool.build(
+        world["resolved"],
+        world["predecessor"],
+        world["out"],
+        world["provenance"],
+        schwab_gross_exposure=_pin_file(
+            tmp_path, "g.json", {**GROSS_PIN, "zero_holdings": ZERO_HOLDINGS}
+        ),
+        schwab_margin_interest=_pin_file(tmp_path, "m.json", MARGIN_PIN),
+    )["spec"]
+    reread = json.loads(json.dumps(first))
+    second = tool.build(world["resolved"], reread, world["out"], world["provenance"])[
+        "spec"
+    ]
+    assert second["schwab_gross_exposure"] == first["schwab_gross_exposure"]
+    assert second["schwab_margin_interest"] == first["schwab_margin_interest"]
+
+
+def test_the_command_line_takes_the_two_f2_pin_files(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    resolved = _pin_file(tmp_path, "resolved.json", world["resolved"])
+    predecessor = _pin_file(tmp_path, "pred.json", world["predecessor"])
+    code = tool.main(
+        [
+            "build",
+            "--resolved-cycle",
+            str(resolved),
+            "--predecessor-spec",
+            str(predecessor),
+            "--out-root",
+            str(world["out"]),
+            "--provenance-generation-dir",
+            str(world["provenance"]),
+            "--schwab-gross-exposure",
+            str(_pin_file(tmp_path, "g.json", GROSS_PIN)),
+            "--schwab-margin-interest",
+            str(_pin_file(tmp_path, "m.json", MARGIN_PIN)),
+            "--plan",
+        ]
+    )
+    assert code == 0

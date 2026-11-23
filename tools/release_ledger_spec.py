@@ -59,6 +59,14 @@ ZERO_FINANCING_PIN_KEYS = frozenset(
         "sums_sha256",
     }
 )
+# The F2 Schwab keys (#894): the ledger recomputes the rows from the pinned bytes.  Key sets mirror
+# provider_ledger's ``schwab_gross_exposure`` / ``schwab_margin_interest`` readers (a test keeps
+# them in step); the ledger itself re-hashes every pinned file.
+GROSS_EXPOSURE_KEYS = frozenset({"accounts", "closes", "provider_id"})
+GROSS_EXPOSURE_OPTIONAL = frozenset({"zero_holdings"})
+GROSS_EXPOSURE_FILE_KEYS = frozenset({"path", "sha256", "size_bytes"})
+ZERO_HOLDING_KEYS = frozenset({"account_id", "balances", "last3"})
+MARGIN_INTEREST_KEYS = ZERO_FINANCING_PIN_KEYS | {"accounts"}
 CARRIED = (
     "strategy_inputs",
     "strategy_provider_map",
@@ -67,6 +75,8 @@ CARRIED = (
     "quantbase_fill_closes",
     "quantbase_position_closes",
     "zero_financing_observations",
+    "schwab_gross_exposure",
+    "schwab_margin_interest",
     "event_completeness_declaration",
     "quantbase_rollback",
 )
@@ -81,6 +91,80 @@ REGENERATED = (
 )
 EVIDENCE_IS_MANIFEST = "GENERATION_MANIFEST"
 EVIDENCE_IS_ARTIFACT = "SELECTED_SOURCE_ARTIFACT"
+
+
+def _file_ref_ok(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == GROSS_EXPOSURE_FILE_KEYS
+        and all(isinstance(value[k], str) for k in ("path", "sha256"))
+        and isinstance(value["size_bytes"], int)
+        and not isinstance(value["size_bytes"], bool)
+    )
+
+
+def _accounts_ok(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(a, str) and a for a in value)
+        and len(set(value)) == len(value)
+    )
+
+
+def gross_exposure_pin(pin: Any) -> dict[str, Any]:
+    """The ``schwab_gross_exposure`` pin: provider, accounts, hash-pinned close files and an
+    optional per-account zero-holdings balances capture."""
+
+    ok = (
+        isinstance(pin, dict)
+        and set(pin)
+        in (GROSS_EXPOSURE_KEYS, GROSS_EXPOSURE_KEYS | GROSS_EXPOSURE_OPTIONAL)
+        and isinstance(pin["provider_id"], str)
+        and _accounts_ok(pin["accounts"])
+        and isinstance(pin["closes"], list)
+        and bool(pin["closes"])
+        and all(_file_ref_ok(c) for c in pin["closes"])
+    )
+    if ok and "zero_holdings" in pin:
+        held = pin["zero_holdings"]
+        ok = (
+            isinstance(held, list)
+            and bool(held)
+            and all(
+                isinstance(h, dict)
+                and set(h) == ZERO_HOLDING_KEYS
+                and isinstance(h["account_id"], str)
+                and isinstance(h["last3"], str)
+                and _file_ref_ok(h["balances"])
+                for h in held
+            )
+        )
+    if not ok:
+        raise LedgerSpecError(
+            "INPUT",
+            "schwab gross exposure pin must carry exactly "
+            + ", ".join(sorted(GROSS_EXPOSURE_KEYS))
+            + " (and optionally zero_holdings: account_id, last3, balances path/sha256/size_bytes)",
+        )
+    return dict(pin)
+
+
+def margin_interest_pin(pin: Any) -> dict[str, Any]:
+    """The ``schwab_margin_interest`` pin: the zero-financing statement pins plus accounts."""
+
+    if (
+        not isinstance(pin, dict)
+        or set(pin) != MARGIN_INTEREST_KEYS
+        or not all(isinstance(pin[k], str) for k in ZERO_FINANCING_PIN_KEYS)
+        or not _accounts_ok(pin["accounts"])
+    ):
+        raise LedgerSpecError(
+            "INPUT",
+            "schwab margin interest pin must carry exactly "
+            + ", ".join(sorted(MARGIN_INTEREST_KEYS)),
+        )
+    return dict(pin)
 
 
 class LedgerSpecError(Exception):
@@ -247,6 +331,8 @@ def build(
     quantbase_position_closes: Path | None = None,
     event_completeness_declaration: Path | None = None,
     quantbase_rollback: Path | None = None,
+    schwab_gross_exposure: Path | None = None,
+    schwab_margin_interest: Path | None = None,
 ) -> dict[str, Any]:
     """Return ``{"observation": bytes, "spec": bytes-builder inputs}``; writes nothing.
 
@@ -261,6 +347,9 @@ def build(
     is a pin file (``ZERO_FINANCING_PIN_KEYS``, plus an optional capture trio) naming the
     retained statements directory, statement sums, account mapping and capture sums, each
     by path and sha256; the ledger recomputes the zero-financing rows from those bytes.
+    ``schwab_gross_exposure`` and ``schwab_margin_interest`` (F2, #894) are pin files of the same
+    kind (``gross_exposure_pin`` / ``margin_interest_pin``): each is carried from the
+    predecessor spec unless a pin file is given, and a given file replaces the carried value.
     """
 
     if resolved.get("schema_version") != release_cycle_manifest.RESOLVED_VERSION:
@@ -371,6 +460,18 @@ def build(
                 + ", ".join(sorted(ZERO_FINANCING_PIN_KEYS)),
             )
         spec["zero_financing_observations"] = pin
+    if "schwab_gross_exposure" in predecessor_spec:
+        spec["schwab_gross_exposure"] = predecessor_spec["schwab_gross_exposure"]
+    if schwab_gross_exposure is not None:
+        spec["schwab_gross_exposure"] = gross_exposure_pin(
+            json.loads(schwab_gross_exposure.read_bytes())
+        )
+    if "schwab_margin_interest" in predecessor_spec:
+        spec["schwab_margin_interest"] = predecessor_spec["schwab_margin_interest"]
+    if schwab_margin_interest is not None:
+        spec["schwab_margin_interest"] = margin_interest_pin(
+            json.loads(schwab_margin_interest.read_bytes())
+        )
     if "event_completeness_declaration" in predecessor_spec:
         spec["event_completeness_declaration"] = predecessor_spec[
             "event_completeness_declaration"
@@ -479,6 +580,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     command.add_argument("--zero-financing-observations", type=Path)
     command.add_argument("--event-completeness-declaration", type=Path)
     command.add_argument("--quantbase-rollback", type=Path)
+    command.add_argument("--schwab-gross-exposure", type=Path)
+    command.add_argument("--schwab-margin-interest", type=Path)
     command.add_argument(
         "--plan", action="store_true", help="build and print, write nothing"
     )
@@ -504,6 +607,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             quantbase_position_closes=args.quantbase_position_closes,
             event_completeness_declaration=args.event_completeness_declaration,
             quantbase_rollback=args.quantbase_rollback,
+            schwab_gross_exposure=args.schwab_gross_exposure,
+            schwab_margin_interest=args.schwab_margin_interest,
         )
         if args.plan:
             print(
