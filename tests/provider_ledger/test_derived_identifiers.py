@@ -95,3 +95,27 @@ def test_disclosure_entries_are_read_from_the_evidence_headers() -> None:
         script.entries_from_evidence("no sleeve headers here\n")
     with pytest.raises(script.Refused):
         script.entries_from_evidence(text + text)
+
+
+def test_build_catalog_runs_under_the_fixed_decimal_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import decimal
+
+    seen: list[tuple[int, str]] = []
+
+    class _Stop(Exception):
+        pass
+
+    def spy(_path: Path) -> object:
+        context = decimal.getcontext()
+        seen.append((context.prec, context.rounding))
+        raise _Stop
+
+    monkeypatch.setattr(ledger, "_load_spec", spy)
+    with decimal.localcontext() as outer:
+        outer.prec = 5
+        outer.rounding = decimal.ROUND_DOWN
+        with pytest.raises(_Stop):
+            ledger.build_catalog(tmp_path / "spec.json")
+    assert seen == [(28, decimal.ROUND_HALF_EVEN)]

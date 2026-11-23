@@ -42,9 +42,25 @@
     "provider_id": {"const": "ibkr"},
     "as_of_date": {"type": "string", "format": "date"},
     "accounts": {"type": "array", "items": {"type": "object"}},
+    "change_in_nav_observations": {"type": "array", "items": {"type": "object"}},
+    "closed_accounts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["account_id", "closed_date"],
+        "properties": {
+          "account_id": {"type": "string", "minLength": 1},
+          "closed_date": {"type": "string", "format": "date"}
+        }
+      }
+    },
     "corporate_actions": {"type": "array", "items": {"type": "object"}},
     "crosswalk_proof": {"type": "array", "items": {"type": "object"}},
     "fact_coverage": {"type": "array", "items": {"type": "object"}},
+    "financing_cost_observations": {"type": "array", "items": {"type": "object"}},
+    "financing_liability_observations": {"type": "array", "items": {"type": "object"}},
+    "leverage_exposure_observations": {"type": "array", "items": {"type": "object"}},
     "flows": {"type": "array", "items": {"type": "object"}},
     "fx_observations": {"type": "array", "items": {"type": "object"}},
     "nav_observations": {

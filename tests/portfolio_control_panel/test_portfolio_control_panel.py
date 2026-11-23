@@ -15790,6 +15790,48 @@ def test_panel_appends_retained_strategy_records_after_the_current_rows(
     assert all("lifecycle_state" in row for row in data["performance"])
 
 
+def test_panel_carries_the_cost_classification_of_a_retained_record(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """F2 item 36: a retained record's classification reaches the panel strategy row."""
+
+    classification = {
+        "classification": "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+        "product_interval_end": "2024-12-12",
+        "reason": "SYNTHETIC owner-approved exclusion from live costs",
+        "ruling_reference": "OWNER_1_COMMENT_2_DEPRECATED",
+        "ruling_url": "https://github.com/dachent/quant_engine/issues/1#issuecomment-2",
+        "source": "contracts/portfolio-financial-mvp-source-v1.json",
+    }
+    report = _report_with_baseline(inputs)
+    report["lifecycle_schema_version"] = 1
+    report["strategy_summary"] = [
+        {**row, **_LIFECYCLE_ACTIVE} for row in report["strategy_summary"]
+    ]
+    report["twr_mwr"] = [{**row, **_LIFECYCLE_ACTIVE} for row in report["twr_mwr"]]
+    report["retained_strategies"] = [
+        _retained_record("fund-retired", cost_classification=classification),
+        _retained_record("sleeve-plain"),
+    ]
+    root = tmp_path / "classified-report"
+    _publish_report(
+        root,
+        tmp_path / "classified-report.json",
+        _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog()),
+    )
+    built = panel.build_candidate(
+        root,
+        inputs["legacy"],
+        tmp_path / "classified-output",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    rows = {row["strategy_id"]: row for row in _candidate_data(built)["strategies"]}
+    assert rows["fund-retired"]["cost_classification"] == classification
+    assert "cost_classification" not in rows["sleeve-plain"]
+
+
 def test_panel_without_the_lifecycle_marker_keeps_the_previous_shape(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -15905,6 +15947,48 @@ def test_model_vs_actual_rides_through_the_real_render_schema_and_pin(
             **base_kwargs,
             model_vs_actual_input=(staged.with_name("absent.json"), pin),
         )
+
+
+def test_the_underwriting_references_use_the_blocks_own_as_of_through_the_real_render(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reference lookup receives the panel's own as-of sources and the pinned input."""
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_mva_synthetic_refs", Path(__file__).with_name("test_model_vs_actual.py")
+    )
+    assert spec is not None and spec.loader is not None
+    mva_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mva_tests)
+    staged = tmp_path / "audit-bridges.json"
+    staged.write_bytes(mva_tests.synthetic_staged_bytes())
+    pin = hashlib.sha256(staged.read_bytes()).hexdigest()
+    seen: list[tuple[Any, bytes, str, Any]] = []
+    real = panel.model_account_gap_references_for
+
+    def spy(panel_like: Any, raw: bytes, sha: str, ids: Any) -> dict[str, Any]:
+        seen.append((panel_like, raw, sha, ids))
+        return real(panel_like, raw, sha, ids)  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(panel, "model_account_gap_references_for", spy)
+    _files, data, _bound = panel._rendered_files(
+        inputs["report"],
+        inputs["legacy"],
+        panel.DEFAULT_TEMPLATE_ROOT,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        model_vs_actual_input=(staged, pin),
+    )
+
+    assert len(seen) == 1
+    panel_like, raw, sha, ids = seen[0]
+    assert (raw, sha) == (staged.read_bytes(), pin)
+    assert tuple(ids) == panel.REPLICA_REFERENCE_STRATEGY_IDS
+    # the as-of the lookup cuts off at is the one the block cuts its own windows at
+    mva = panel._model_vs_actual_module
+    assert mva._as_of(panel_like) == data["model_vs_actual"]["as_of"]  # noqa: SLF001
 
 
 def test_vendor_gap_fills_input_is_pinned_bound_and_closed_against_receipts(

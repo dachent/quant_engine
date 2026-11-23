@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sys
 from typing import Any
 
@@ -60,7 +61,13 @@ def cycle(tmp_path: Path) -> dict[str, Any]:
     for index, provider_id in enumerate(PROVIDERS):
         generation_id = f"gen-{provider_id}-{index}"
         body = json.dumps(
-            {"generation_id": generation_id, "provider": provider_id}
+            {
+                "generation_id": generation_id,
+                "provider": provider_id,
+                "as_of_date": "2026-01-05",
+                "verification": "VERIFIED",
+                "coverage": {"observed_end": "2026-01-05"},
+            }
         ).encode()
         info = _put(
             data
@@ -581,11 +588,20 @@ def test_a_naive_refresh_start_is_refused(cycle: dict[str, Any]) -> None:
     _refused(cycle, "SCHEMA")
 
 
+def _exempt_coverage(cycle: dict[str, Any]) -> None:
+    """These tests move the cutoff; the fixture's data ends 2026-01-05, so declare the exemption."""
+
+    for provider in cycle["manifest"]["providers"].values():
+        provider["cutoff_coverage"] = "NOT_REQUIRED"
+        provider["cutoff_coverage_reason"] = "fixture data ends before the moved cutoff"
+
+
 def test_legacy_manifest_without_refresh_start_resolves_with_unchanged_output(
     cycle: dict[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
     # R2.x style: cutoff 2026-09-17 (a Thursday), no refresh start
     cycle["manifest"].update(cutoff="2026-09-17", evaluated_on="2026-09-18")
+    _exempt_coverage(cycle)
     resolved = _resolve(cycle)
     assert "cutoff_check" not in resolved
     assert resolved["cutoff"] == "2026-09-17"
@@ -606,4 +622,331 @@ def test_a_new_cycle_cannot_skip_the_cutoff_check_by_omitting_the_refresh_start(
         refused.value
     )
     cycle["manifest"]["refresh_started_at_utc"] = "2026-11-07T14:00:00Z"
+    _exempt_coverage(cycle)
     assert _resolve(cycle)["cutoff_check"]["status"] == tool.CUTOFF_OK
+
+
+# ---- late binding (latest_at_or_before) and the cutoff-coverage guard (refs #418) ----
+
+
+def _add_generation(
+    cycle: dict[str, Any],
+    provider_id: str,
+    generation_id: str,
+    *,
+    as_of: str = "2026-01-05",
+    observed_end: str | None = "2026-01-05",
+    verification: str = "VERIFIED",
+) -> None:
+    body: dict[str, Any] = {
+        "generation_id": generation_id,
+        "as_of_date": as_of,
+        "verification": verification,
+        "coverage": {"observed_end": observed_end},
+    }
+    path = (
+        cycle["roots"]["data"]
+        / f"data-{provider_id}"
+        / "generations"
+        / generation_id
+        / "generation.json"
+    )
+    _put(path, json.dumps(body).encode())
+
+
+def _late(cycle: dict[str, Any], provider_id: str = "alpaca") -> dict[str, Any]:
+    provider = cycle["manifest"]["providers"][provider_id]
+    provider["generation"] = {"mode": "latest_at_or_before"}
+    provider.pop("manifest_sha256")
+    # start from an empty root: the fixture's own generation would be one more candidate
+    shutil.rmtree(cycle["roots"]["data"] / f"data-{provider_id}" / "generations")
+    return provider
+
+
+def test_latest_picks_the_newest_verified_generation_that_covers_the_cutoff(
+    cycle: dict[str, Any],
+) -> None:
+    _late(cycle)
+    _add_generation(cycle, "alpaca", "gen-old", as_of="2026-01-03")
+    _add_generation(cycle, "alpaca", "gen-new", as_of="2026-01-05")
+    _add_generation(cycle, "alpaca", "gen-unverified", verification="STAGED")
+    _add_generation(
+        cycle, "alpaca", "gen-short", as_of="2026-01-05", observed_end="2026-01-01"
+    )
+    _add_generation(cycle, "alpaca", "gen-future", as_of="2026-02-01")
+    row = _resolve(cycle)["providers"]["alpaca"]
+    assert tool._resolved_errors(_resolve(cycle)) == ""
+    assert row["generation_id"] == "gen-new"
+    verdicts = {
+        c["generation_id"]: c["verdict"] for c in row["selection"]["candidates"]
+    }
+    assert verdicts["gen-new"] == "SELECTED"
+    assert verdicts["gen-old"] == "ELIGIBLE"
+    assert verdicts["gen-unverified"] == "REJECTED_NOT_VERIFIED"
+    assert verdicts["gen-short"] == "REJECTED_COVERAGE_BEFORE_CUTOFF"
+    assert verdicts["gen-future"] == "REJECTED_AS_OF_AFTER_EVALUATION"
+    # the recorded manifest hash is the file's, not a pin
+    assert row["manifest_sha256"] == _sha(Path(row["manifest_path"]).read_bytes())
+
+
+def test_latest_refuses_a_tie_and_an_empty_choice(cycle: dict[str, Any]) -> None:
+    _late(cycle)
+    _add_generation(cycle, "alpaca", "gen-a")
+    _add_generation(cycle, "alpaca", "gen-b")
+    _refused(cycle, "AMBIGUOUS_GENERATION")
+
+
+def test_latest_with_no_eligible_generation_names_every_verdict(
+    cycle: dict[str, Any],
+) -> None:
+    _late(cycle)
+    _add_generation(cycle, "alpaca", "gen-short", observed_end="2026-01-01")
+    with pytest.raises(tool.CycleManifestError) as info:
+        _resolve(cycle)
+    assert info.value.code == "NO_ELIGIBLE_GENERATION"
+    assert "REJECTED_COVERAGE_BEFORE_CUTOFF" in str(info.value)
+
+
+def test_latest_never_reads_a_pointer_file(cycle: dict[str, Any]) -> None:
+    _late(cycle)
+    _add_generation(cycle, "alpaca", "gen-only")
+    (cycle["roots"]["data"] / "data-alpaca" / "CURRENT.json").write_text("not json")
+    assert _resolve(cycle)["providers"]["alpaca"]["generation_id"] == "gen-only"
+
+
+def test_only_the_late_mode_adds_a_selection_key(cycle: dict[str, Any]) -> None:
+    assert all("selection" not in row for row in _resolve(cycle)["providers"].values())
+
+
+def test_data_that_ends_before_the_cutoff_is_refused_in_every_mode(
+    cycle: dict[str, Any],
+) -> None:
+    # the trial's cutoff-only variant: cutoff moves, data does not
+    cycle["manifest"].update(cutoff="2026-01-05", evaluated_on="2026-01-06")
+    for provider in cycle["manifest"]["providers"].values():
+        if "finalized_through" in provider:
+            provider["finalized_through"] = "2026-01-05"
+    _add_generation(cycle, "ibkr", "gen-ibkr-2", observed_end="2026-01-02")
+    cycle["manifest"]["providers"]["ibkr"]["generation"] = {
+        "mode": "explicit",
+        "generation_id": "gen-ibkr-2",
+    }
+    cycle["manifest"]["providers"]["ibkr"]["manifest_sha256"] = _sha(
+        (
+            cycle["roots"]["data"]
+            / "data-ibkr"
+            / "generations"
+            / "gen-ibkr-2"
+            / "generation.json"
+        ).read_bytes()
+    )
+    _refused(cycle, "COVERAGE_BEFORE_CUTOFF")
+
+
+def test_declared_finality_before_the_cutoff_is_refused(cycle: dict[str, Any]) -> None:
+    cycle["manifest"].update(cutoff="2026-01-05", evaluated_on="2026-01-06")
+    # coverage reaches 2026-01-05 in the fixture, but schwab declares finality through 2026-01-02
+    _refused(cycle, "FINALITY_BEFORE_CUTOFF")
+
+
+def test_finite_providers_are_exempt_and_others_need_a_reason(
+    cycle: dict[str, Any],
+) -> None:
+    _add_generation(cycle, "fidelity", "gen-fidelity-1", observed_end="2024-10-03")
+    fidelity = cycle["manifest"]["providers"]["fidelity"]
+    fidelity["generation"] = {"mode": "explicit", "generation_id": "gen-fidelity-1"}
+    fidelity["manifest_sha256"] = _sha(
+        (
+            cycle["roots"]["data"]
+            / "data-fidelity"
+            / "generations"
+            / "gen-fidelity-1"
+            / "generation.json"
+        ).read_bytes()
+    )
+    assert tool._resolved_errors(_resolve(cycle)) == ""  # FINITE_STATIC passes
+    cycle["manifest"]["providers"]["alpaca"]["cutoff_coverage"] = "NOT_REQUIRED"
+    _refused(cycle, "COVERAGE_EXEMPTION_REASON")
+    cycle["manifest"]["providers"]["alpaca"]["cutoff_coverage_reason"] = (
+        "historical only"
+    )
+    assert tool._resolved_errors(_resolve(cycle)) == ""
+    cycle["manifest"]["providers"]["ibkr"]["cutoff_coverage_reason"] = "stray reason"
+    _refused(cycle, "COVERAGE_EXEMPTION_REASON")
+
+
+def test_only_the_late_mode_may_omit_the_manifest_pin(cycle: dict[str, Any]) -> None:
+    cycle["manifest"]["providers"]["ibkr"].pop("manifest_sha256")
+    _refused(cycle, "MANIFEST_SHA256_REQUIRED")
+
+
+# ---- capture-stage finality records (the late mode takes finality from them) ----
+
+
+def _finality(
+    cycle: dict[str, Any], provider_id: str, generation_id: str, day: str
+) -> None:
+    root = cycle["roots"]["data"] / f"data-{provider_id}"
+    (root / "native").mkdir(exist_ok=True)
+    (root / "native" / f"{generation_id}.txt").write_bytes(
+        f"evidence {generation_id}".encode()
+    )
+    tool.write_finality_record(
+        root, provider_id, generation_id, day, f"native/{generation_id}.txt"
+    )
+
+
+def _late_native(cycle: dict[str, Any]) -> None:
+    provider = cycle["manifest"]["providers"]["schwab"]
+    provider["generation"] = {"mode": "latest_at_or_before"}
+    for key in ("manifest_sha256", "finalized_through", "finality_evidence"):
+        provider.pop(key)
+    shutil.rmtree(cycle["roots"]["data"] / "data-schwab" / "generations")
+
+
+def test_late_mode_takes_finality_from_the_capture_record(
+    cycle: dict[str, Any],
+) -> None:
+    _late_native(cycle)
+    _add_generation(cycle, "schwab", "gen-s1")
+    _finality(cycle, "schwab", "gen-s1", "2026-01-05")
+    row = _resolve(cycle)["providers"]["schwab"]
+    assert tool._resolved_errors(_resolve(cycle)) == ""
+    assert row["generation_id"] == "gen-s1"
+    assert row["finalized_through"] == "2026-01-05"
+    assert row["finality_evidence"]["path"].endswith("native/gen-s1.txt")
+
+
+def test_a_generation_without_a_finality_record_is_not_eligible(
+    cycle: dict[str, Any],
+) -> None:
+    _late_native(cycle)
+    _add_generation(cycle, "schwab", "gen-s1")
+    with pytest.raises(tool.CycleManifestError) as info:
+        _resolve(cycle)
+    assert info.value.code == "NO_ELIGIBLE_GENERATION"
+    assert "REJECTED_NO_FINALITY_RECORD" in str(info.value)
+
+
+def test_a_record_that_is_final_before_the_cutoff_is_not_eligible(
+    cycle: dict[str, Any],
+) -> None:
+    _late_native(cycle)
+    _add_generation(cycle, "schwab", "gen-s1")
+    _finality(cycle, "schwab", "gen-s1", "2026-01-01")
+    with pytest.raises(tool.CycleManifestError) as info:
+        _resolve(cycle)
+    assert "REJECTED_FINALITY_BEFORE_CUTOFF" in str(info.value)
+
+
+def test_a_changed_evidence_file_breaks_the_record(cycle: dict[str, Any]) -> None:
+    _late_native(cycle)
+    _add_generation(cycle, "schwab", "gen-s1")
+    _finality(cycle, "schwab", "gen-s1", "2026-01-05")
+    (cycle["roots"]["data"] / "data-schwab" / "native" / "gen-s1.txt").write_bytes(b"x")
+    with pytest.raises(tool.CycleManifestError):
+        _resolve(cycle)
+
+
+def test_hand_typed_finality_is_refused_in_the_late_mode(cycle: dict[str, Any]) -> None:
+    provider = cycle["manifest"]["providers"]["schwab"]
+    provider["generation"] = {"mode": "latest_at_or_before"}
+    provider.pop("manifest_sha256")
+    _refused(cycle, "FINALITY_HAND_TYPED")
+
+
+def test_the_record_must_name_its_own_provider_and_generation(
+    cycle: dict[str, Any],
+) -> None:
+    _late_native(cycle)
+    _add_generation(cycle, "schwab", "gen-s1")
+    _finality(cycle, "schwab", "gen-s1", "2026-01-05")
+    path = tool.finality_record_path(cycle["roots"]["data"] / "data-schwab", "gen-s1")
+    record = json.loads(path.read_text())
+    record["provider_id"] = "ibkr"
+    path.write_text(json.dumps(record))
+    with pytest.raises(tool.CycleManifestError) as info:
+        _resolve(cycle)
+    assert "REJECTED_NO_FINALITY_RECORD" in str(info.value)
+
+
+def test_write_finality_is_create_only(cycle: dict[str, Any]) -> None:
+    _add_generation(cycle, "schwab", "gen-s9")
+    _finality(cycle, "schwab", "gen-s9", "2026-01-05")
+    with pytest.raises(tool.CycleManifestError) as info:
+        _finality(cycle, "schwab", "gen-s9", "2026-01-05")
+    assert info.value.code == "OUTPUT_EXISTS"
+
+
+# ---- a bad newest generation is never skipped silently ----
+
+
+def _two_generations(cycle: dict[str, Any]) -> None:
+    _late_native(cycle)
+    _add_generation(cycle, "schwab", "gen-s1", as_of="2026-01-04")
+    _finality(cycle, "schwab", "gen-s1", "2026-01-05")
+    _add_generation(cycle, "schwab", "gen-s2", as_of="2026-01-05")
+
+
+def test_newest_generation_without_finality_record_is_refused_not_skipped(
+    cycle: dict[str, Any],
+) -> None:
+    _two_generations(cycle)
+    with pytest.raises(tool.CycleManifestError) as info:
+        _resolve(cycle)
+    assert info.value.code == "FINALITY_RECORD_BAD"
+    assert "gen-s2" in str(info.value) and "gen-s1" in str(info.value)
+
+
+def test_newest_generation_with_unusable_record_is_refused(
+    cycle: dict[str, Any],
+) -> None:
+    _two_generations(cycle)
+    _finality(cycle, "schwab", "gen-s2", "2026-01-05")
+    (cycle["roots"]["data"] / "data-schwab" / "native" / "gen-s2.txt").write_bytes(b"x")
+    with pytest.raises(tool.CycleManifestError) as info:
+        _resolve(cycle)
+    assert info.value.code == "FINALITY_RECORD_BAD"
+
+
+def test_the_flag_accepts_the_older_generation_and_keeps_the_skip_visible(
+    cycle: dict[str, Any],
+) -> None:
+    _two_generations(cycle)
+    manifest_bytes = tool.dumps(cycle["manifest"])
+    resolved = tool.resolve(
+        manifest_bytes, cycle["roots"], allow_older_on_bad_newest=True
+    )
+    row = resolved["providers"]["schwab"]
+    assert row["generation_id"] == "gen-s1"
+    verdicts = {
+        c["generation_id"]: c["verdict"] for c in row["selection"]["candidates"]
+    }
+    assert verdicts == {
+        "gen-s1": "SELECTED",
+        "gen-s2": "REJECTED_NO_FINALITY_RECORD",
+    }
+
+
+def test_a_corrupt_newest_generation_manifest_is_refused(cycle: dict[str, Any]) -> None:
+    _two_generations(cycle)
+    _finality(cycle, "schwab", "gen-s2", "2026-01-05")
+    (
+        cycle["roots"]["data"]
+        / "data-schwab"
+        / "generations"
+        / "gen-s2"
+        / "generation.json"
+    ).write_bytes(b"{not json")
+    with pytest.raises(ValueError):
+        _resolve(cycle)
+    (
+        cycle["roots"]["data"]
+        / "data-schwab"
+        / "generations"
+        / "gen-s2"
+        / "generation.json"
+    ).write_bytes(b"[]")
+    with pytest.raises(tool.CycleManifestError) as info:
+        _resolve(cycle)
+    assert info.value.code == "GENERATION_INVALID"

@@ -58,12 +58,17 @@ def test_the_block_measurement_is_the_scripts_measurement() -> None:
     assert checks.payload_block_bytes(panel) == script.block_sizes(panel)
 
 
-def test_committed_budget_is_measured_plus_one_percent_rounded_up() -> None:
+def test_committed_budget_is_measured_plus_one_to_five_percent_rounded_up() -> None:
+    # the floor is measured + 1 % at least; a block raised for deliberate content growth
+    # (tools/panel_payload_size.py --margin, recorded per entry in the history) may carry
+    # up to 5 %, because a refusal after the build is a new freeze
     budget = json.loads(BUDGET_FILE.read_bytes())
     measured = budget["committed_bytes"]["blocks"]
     assert measured
     for name, size in measured.items():
-        assert budget["blocks"][name] == math.ceil(size * 1.01 / 1000) * 1000, name
+        low = math.ceil(size * 1.01 / 1000) * 1000
+        high = math.ceil(size * 1.05 / 1000) * 1000
+        assert low <= budget["blocks"][name] <= high, name
     assert {"model_vs_actual", "performance", "strategies"} <= set(budget["blocks"])
 
 

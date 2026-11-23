@@ -1676,3 +1676,203 @@ def test_eu_refresh_refuses_a_seed_that_already_has_live_rows(tmp_path: Path) ->
             ),
             as_of_date="2026-11-06",
         )
+
+
+_EU_LIVE_NEWER = [
+    *_EU_LIVE,
+    ("2024-02-21", "0.05", "PROVIDER_MODEL_LIVE"),
+    ("2024-02-22", "0.06", "PROVIDER_MODEL_LIVE"),
+]
+
+
+def _qsi_eu_setup(tmp_path: Path) -> dict[str, Any]:
+    """A seed that already carries EU model-live rows, plus the QSI refresh inputs."""
+
+    inputs = _bundle_inputs(tmp_path)
+    seed = Path(
+        str(
+            history.write_bundle(
+                tmp_path / "seed",
+                **inputs,
+                p123_eu_designer_model_generation=_designer_generation(
+                    tmp_path / "designer-seed", _EU_BACKTEST
+                ),
+                p123_eu_strategy_version=DESIGNER_VERSION,
+                as_of_date="2026-09-17",
+                live_inceptions={"QSI": "2026-01-05"},
+            )["destination"]
+        )
+    )
+    first = _eu_refresh(tmp_path, seed, [*_EU_BACKTEST, *_EU_LIVE], "2026-09-17")
+    current = tmp_path / "qsi-current.zip"
+    extension = tmp_path / "qsi-extension.json"
+    _qsi_current_archive(current, revised=True)
+    _qsi_price_extension(extension, inputs["qsi_price_root"])
+    retained = Path(str(first["destination"]))
+    return {
+        "retained_manifest_path": retained / "manifest.json",
+        "retained_returns_path": retained / "returns.csv",
+        "qsi_subscription_archive": inputs["qsi_subscription_archive"],
+        "qsi_current_subscription_archive": current,
+        "qsi_appendix_workbook": inputs["qsi_appendix_workbook"],
+        "qsi_price_root": inputs["qsi_price_root"],
+        "price_extension_json": extension,
+        "as_of_date": "2026-09-17",
+    }
+
+
+def _qsi_eu_refresh(
+    tmp_path: Path, setup: dict[str, Any], rows: list[tuple[str, str, str]]
+) -> dict[str, object]:
+    return history.write_qsi_refresh_bundle(
+        tmp_path / "combined",
+        **setup,
+        eu_designer_model_generation=_designer_generation(
+            tmp_path / "designer-ext", rows
+        ),
+    )
+
+
+def test_qsi_refresh_extends_eu_model_live_from_a_newer_designer_generation(
+    tmp_path: Path,
+) -> None:
+    """Kill test: one build; the EU prefix is byte for byte, only newer rows append."""
+
+    setup = _qsi_eu_setup(tmp_path)
+    seed_lines = setup["retained_returns_path"].read_text(encoding="utf-8").splitlines()
+    result = _qsi_eu_refresh(tmp_path, setup, [*_EU_BACKTEST, *_EU_LIVE_NEWER])
+    combined = Path(str(result["destination"]))
+    new_lines = (combined / "returns.csv").read_text(encoding="utf-8").splitlines()
+
+    def eu(lines: list[str]) -> list[str]:
+        return [line for line in lines if line.startswith("EU [P123],")]
+
+    assert eu(new_lines)[: len(eu(seed_lines))] == eu(seed_lines)
+    added = eu(new_lines)[len(eu(seed_lines)) :]
+    assert [line.split(",")[:2] for line in added] == [
+        ["EU [P123]", "2024-02-21"],
+        ["EU [P123]", "2024-02-22"],
+    ]
+    assert all(line.split(",")[3] == "MODEL_LIVE" for line in added)
+    manifest = json.loads((combined / "manifest.json").read_text(encoding="utf-8"))
+    block = manifest["eu_model_live_refresh"]
+    assert block["model_live_last"] == "2024-02-22"
+    assert block["extends_model_live"] == {"observations": 2, "last": "2024-02-20"}
+    assert "qsi_source_revision" in manifest
+    eu_definition = next(
+        item for item in manifest["series"] if item["series_id"] == "EU [P123]"
+    )
+    assert eu_definition["model_live_observations"] == 4
+    # the replay re-derives the whole bundle, EU extension included
+    assert _verify_refreshed(combined)["bundle_id"] == result["bundle_id"]
+
+
+def test_qsi_eu_extension_replay_rejects_a_changed_designer_source(
+    tmp_path: Path,
+) -> None:
+    setup = _qsi_eu_setup(tmp_path)
+    result = _qsi_eu_refresh(tmp_path, setup, [*_EU_BACKTEST, *_EU_LIVE_NEWER])
+    sidecar = json.loads(
+        (Path(str(result["destination"])) / "sources.local.json").read_bytes()
+    )
+    designer = Path(sidecar["sources"][history.EU_DESIGNER_RETURNS_SOURCE_ID])
+    designer.write_bytes(designer.read_bytes() + b"\n")
+    with pytest.raises(history.StrategyHistoryError):
+        _verify_refreshed(Path(str(result["destination"])))
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        (
+            [
+                ("2024-02-15", "0.011", "BACKTEST"),
+                _EU_BACKTEST[1],
+                *_EU_LIVE_NEWER,
+            ],
+            "BACKTEST rows",
+        ),
+        (
+            [
+                *_EU_BACKTEST,
+                ("2024-02-19", "0.031", "PROVIDER_MODEL_LIVE"),
+                *_EU_LIVE_NEWER[1:],
+            ],
+            "prefix must stay byte for byte",
+        ),
+        ([*_EU_BACKTEST, *_EU_LIVE], "not newer"),
+        ([*_EU_BACKTEST, *_EU_LIVE_NEWER[:1]], "prefix must stay byte for byte"),
+    ],
+)
+def test_qsi_eu_extension_refuses_a_designer_generation_that_is_not_a_pure_extension(
+    tmp_path: Path, rows: list[tuple[str, str, str]], message: str
+) -> None:
+    setup = _qsi_eu_setup(tmp_path)
+    with pytest.raises(history.StrategyHistoryError, match=message):
+        _qsi_eu_refresh(tmp_path, setup, rows)
+
+
+def test_qsi_eu_extension_refuses_live_rows_past_the_as_of_date(
+    tmp_path: Path,
+) -> None:
+    setup = _qsi_eu_setup(tmp_path)
+    # the seed was cut at 2026-09-17; rows dated after the new cutoff are refused
+    setup["as_of_date"] = "2024-02-21"
+    with pytest.raises(history.StrategyHistoryError, match="pass the as-of"):
+        _qsi_eu_refresh(tmp_path, setup, [*_EU_BACKTEST, *_EU_LIVE_NEWER])
+
+
+def test_eu_designer_arguments_alone_do_not_build_anything(tmp_path: Path) -> None:
+    """The extension exists only inside a QSI refresh; a bare EU argument is a refusal."""
+
+    designer = _designer_generation(tmp_path / "designer", _EU_BACKTEST + _EU_LIVE)
+    with pytest.raises(SystemExit):
+        history.main(
+            [
+                "--p123-eu-designer-model-generation",
+                str(designer),
+                "--qsi-subscription-archive",
+                str(tmp_path / "x"),
+                "--qsi-appendix-workbook",
+                str(tmp_path / "x"),
+                "--qsi-price-root",
+                str(tmp_path),
+                "--as-of-date",
+                "2026-09-17",
+                "--output-root",
+                str(tmp_path / "out"),
+            ]
+        )
+    assert not (tmp_path / "out").exists()
+
+
+def test_qsi_eu_extension_cli_takes_the_designer_generation_and_not_a_version(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    setup = _qsi_eu_setup(tmp_path)
+    designer = _designer_generation(
+        tmp_path / "designer-ext", [*_EU_BACKTEST, *_EU_LIVE_NEWER]
+    )
+    arguments = {
+        "qsi-refresh-retained-manifest": setup["retained_manifest_path"],
+        "qsi-refresh-retained-returns": setup["retained_returns_path"],
+        "qsi-subscription-archive": setup["qsi_subscription_archive"],
+        "qsi-current-subscription-archive": setup["qsi_current_subscription_archive"],
+        "qsi-appendix-workbook": setup["qsi_appendix_workbook"],
+        "qsi-price-root": setup["qsi_price_root"],
+        "price-extension-json": setup["price_extension_json"],
+        "p123-eu-designer-model-generation": designer,
+        "output-root": tmp_path / "output",
+        "as-of-date": setup["as_of_date"],
+    }
+    flags = [
+        part for key, value in arguments.items() for part in (f"--{key}", str(value))
+    ]
+    with pytest.raises(SystemExit):
+        history.main([*flags, "--p123-eu-strategy-version", DESIGNER_VERSION])
+    assert history.main(flags) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert (
+        _verify_refreshed(Path(result["destination"]))["bundle_id"]
+        == result["bundle_id"]
+    )

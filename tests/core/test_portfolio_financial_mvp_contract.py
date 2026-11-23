@@ -1075,7 +1075,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "3afbe33a49105050c3bc80bf4a13dd4bd33de06203ff6d8529eece9d1c572b90"
+        "f385d9ce5de93d3821eeb28fc2891ecacafe396f5b80425778b5646c06d403af"
     )
 
 
@@ -1103,6 +1103,7 @@ def test_quantbase_generation_is_account_live_from_accepted_membership() -> None
         "EXTERNAL_FLOW",
         "CAPITAL_ANCHOR",
         "TRANSACTION",
+        "POSITION",
     ]
     assert admission["dataset_disposition_policy"]["policy_id"] == (
         "PROVIDER_ADMIT_OR_DECLARE_V1"
@@ -1122,21 +1123,21 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
                 "71ef99d46f772c0a90ff69215fba7e3977f6f64741696ce720b7341f610d709a"
             ),
             "upstream_inventory_sha256": (
-                "51625d0726b97c7b2c37518d7c1200d94d99707f13e25f56a2b541ccf5bb23ad"
+                "537ab009526dd238b6f6b705219936f36cc4d5b0fd1ccef1e051e61a937abadf"
             ),
             "product_data_class_set_sha256": (
                 "9f9c5f50e9cc0c9fdbc7123197897e20a4c7ab444cca73caad37aeda88a8943f"
             ),
-            # Moved from 24 to 25 when CAPITAL_ANCHOR materialized: netting
-            # each statement account's capital events on their own recognition
-            # date cancels IBKR's deposit advance against its reversal, which
-            # a per-row rule reads as opening capital that never funded. Only
-            # the opening is an anchor, because every later IBKR capital
-            # movement is already one of the flow rows the anchor was netted
-            # from.
-            "admitted_item_count": 69,
+            # Moved from 24 to 25 when CAPITAL_ANCHOR materialized (netting each
+            # statement account's capital events on their own recognition date
+            # cancels IBKR's deposit advance against its reversal), then to 69
+            # for the B generation ab5774fb, then to 111 (+42) for F1 generation
+            # 662a0318: its manifest lists 107 artifacts against 65, the 42 added
+            # being the January-February 2026 verified statements
+            # (source-runs/r-janfeb-2026-verified-20261117/flex-*/statement.xml).
+            "admitted_item_count": 111,
             "admitted_item_set_sha256": (
-                "487dcf014303a4a658b67f7ca78e57e9730ff2b11bdc558115d8ec48cd95ed7f"
+                "58fad56b0a28909f646ae2a4d8043a3c82269d9fe72ad35d942bfc7f823931cc"
             ),
         },
         "matrixport-account-generation": {
@@ -1147,21 +1148,21 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             # Moved from three items to six when the capital anchor started
             # resting on the owner-selected daily close instead of a
             # provider-reported USD value that no Robuxio holding carries.
-            "admitted_item_count": 6,
+            "admitted_item_count": 7,
             "admitted_item_set_sha256": (
-                "27d6bd4c7afef6c2fd0bf33989693715ac160062a8601484d06b7eadf805801c"
+                "4713806990fa5a318d973b595aea860ed49def484a01d2a6a0cb430736414223"
             ),
         },
         "quantbase-account-generation": {
-            "admitted_item_count": 7,
+            "admitted_item_count": 9,
             "admitted_item_set_sha256": (
-                "f72255e57e89f5641f6d86d22fe0513a172bb4648a18ffe95495e150058fcb2f"
+                "90008612aea6228f6b24dc0ffada33d38ddb2485e2bdc68b67b1bb76d1b72947"
             ),
         },
         "schwab-account-generation": {
-            "admitted_item_count": 24,
+            "admitted_item_count": 25,
             "admitted_item_set_sha256": (
-                "7a5bf445c33877f14d8452538407df7bc838838ee4490bc5211671da11a6ed8a"
+                "0e714f3ebee64575bbf70c36ffdf04adb62e517becf540694892c365d4bc8576"
             ),
         },
         "portfolio123-model-generation": {
@@ -2889,6 +2890,7 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
         "NAV_OBSERVATION",
         "CAPITAL_ANCHOR",
         "EXTERNAL_FLOW",
+        "POSITION",
     ]
     assert admission["transform"] == "provider-ledger"
     assert admission["version"] == "1"
@@ -2918,9 +2920,9 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
         for row in matrix["rows"]
         if row["source_id"] == "matrixport-account-generation"
     ]
-    # Six rows per declared data class; matrixport declares two after the
-    # issue #396 deferral removed three.
-    assert len(rows) == 12
+    # Six rows per declared data class; matrixport declares three (the issue
+    # #396 deferral removed three, POSITION came back with the positions fact).
+    assert len(rows) == 18
     assert all(row["declared_gap_policy"] == policy for row in rows)
     assert all(
         row["declared_gap_policy"] is None
@@ -4456,13 +4458,14 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # correction removes only that consumer from the historical source rows.
     # Moved again by the 2026-10-16 Matrixport NAV gap declaration (#287 V3).
     # Moved again by the R3 FX re-selection (generation ff77af45, through 2026-11-06).
+    # Moved again by the D FX extension (generation 1add4dec, through 2026-11-19).
     # Moved again by the model-live admission (EU strategy-backtests restaged onto
     # the EU model-live seed; AI and EU model-live corrections READY).
     # The affected product-data-class pins are then rederived from those changed
     # source identities, including the four verified source-class bindings;
     # financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "6e591ab1365c0f31ab36f2545b82e5d20f8cb037c1061937203f0007a4e10286"
+        "da91be1557ee6d2f3d0b5b30bd384036ae682cdd1ba477253d6928807484d5c3"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4499,7 +4502,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "6e591ab1365c0f31ab36f2545b82e5d20f8cb037c1061937203f0007a4e10286"
+        "da91be1557ee6d2f3d0b5b30bd384036ae682cdd1ba477253d6928807484d5c3"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json

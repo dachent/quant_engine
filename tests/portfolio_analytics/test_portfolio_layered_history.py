@@ -6810,3 +6810,100 @@ def test_model_live_coverage_refuses_a_short_a_holed_or_late_layer(
         target_series._require_model_live_coverage(
             "p123-ai-factor", days, date(2026, 11, 6), account_start
         )
+
+
+def _eu_live_segment(dates: list[str]) -> list[dict[str, str]]:
+    return [
+        {
+            "series_id": "EU [P123]",
+            "date": day,
+            "return": f"0.00{index + 1}",
+            "evidence_layer": "MODEL_LIVE",
+            "strategy_version": "v",
+            "segment_id": target_series.EU_MODEL_LIVE_SEGMENT_ID,
+        }
+        for index, day in enumerate(dates)
+    ]
+
+
+def _eu_extension(
+    rows: list[dict[str, str]],
+    *,
+    block: object | None = None,
+    as_of: date | None = None,
+) -> dict[str, object] | None:
+    pinned = target_series._row_identity(rows[:2])
+    if block is None:
+        block = {
+            "model_live_observations": len(rows),
+            "model_live_first": rows[0]["date"],
+            "model_live_last": rows[-1]["date"],
+        }
+    return target_series._eu_model_live_extension_identity(
+        block=block,
+        pinned=pinned,
+        segment_rows=rows,
+        accepted_as_of=as_of or date(2026, 11, 19),
+    )
+
+
+def test_eu_model_live_extension_identity_admits_only_a_pure_declared_extension() -> (
+    None
+):
+    rows = _eu_live_segment(["2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09"])
+    identity = _eu_extension(rows)
+    assert identity == {
+        key: target_series._row_identity(rows)[key]
+        for key in ("sha256", "observed_start", "observed_end", "return_observations")
+    }
+    # no declaration: the pin stays frozen and the caller's own comparison refuses
+    assert (
+        target_series._eu_model_live_extension_identity(
+            block=None,
+            pinned=target_series._row_identity(rows[:2]),
+            segment_rows=rows,
+            accepted_as_of=date(2026, 11, 19),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda rows: rows[0].update({"return": "0.9"}), "pinned prefix"),
+        (lambda rows: rows.pop(), "differs from its declaration"),
+    ],
+)
+def test_eu_model_live_extension_identity_refuses_a_changed_prefix_or_count(
+    mutate: Any, message: str
+) -> None:
+    rows = _eu_live_segment(["2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09"])
+    pinned = target_series._row_identity(rows[:2])
+    block = {
+        "model_live_observations": 4,
+        "model_live_first": "2026-11-04",
+        "model_live_last": "2026-11-09",
+    }
+    mutate(rows)
+    with pytest.raises(TargetSeriesError, match=message):
+        target_series._eu_model_live_extension_identity(
+            block=block,
+            pinned=pinned,
+            segment_rows=rows,
+            accepted_as_of=date(2026, 11, 19),
+        )
+
+
+def test_eu_model_live_extension_identity_refuses_rows_past_the_cutoff() -> None:
+    rows = _eu_live_segment(["2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09"])
+    with pytest.raises(TargetSeriesError, match="differs from its declaration"):
+        _eu_extension(rows, as_of=date(2026, 11, 6))
+
+
+def test_eu_model_live_extension_identity_refuses_a_declaration_that_adds_nothing() -> (
+    None
+):
+    rows = _eu_live_segment(["2026-11-04", "2026-11-05"])
+    with pytest.raises(TargetSeriesError, match="differs from its declaration"):
+        _eu_extension(rows)

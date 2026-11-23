@@ -35,13 +35,14 @@ fixture_tab = _load(
 )
 
 
-def test_every_budget_covers_a_committed_figure_within_three_percent_plus_rounding() -> (
+def test_every_budget_covers_a_committed_figure_within_five_percent_plus_rounding() -> (
     None
 ):
+    # carrier 9 re-raised every block to measured + 5 % (F1 derisk); was 3 %
     committed = budget["committed_bytes"]["blocks"]
     assert set(committed) == set(budget["blocks"])
     for name, limit in budget["blocks"].items():
-        assert committed[name] <= limit <= committed[name] * 1.03 + 1000
+        assert committed[name] <= limit <= committed[name] * 1.05 + 1000
 
 
 def test_physical_budgets_cover_the_committed_generation() -> None:

@@ -103,7 +103,13 @@ _AVAILABLE_PREFIXES = (
 AFTER_TAX_NOT_APPLICABLE = "NOT_APPLICABLE_PRE_TAX_REPORTING_SCOPE"
 _NOT_READY_VALUES = frozenset({"REQUIRED_NOT_READY", "NOT_READY"})
 _UNADMITTED_FLOW_PATHS = frozenset(
-    {"NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"}
+    {
+        "NO_ACCEPTED_FACT_PATH",
+        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF",
+        "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF",
+        "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF",
+        "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF",
+    }
 )
 _NUMBER_WORDS = {
     "one": 1,
@@ -3071,6 +3077,13 @@ def _itemized_candidates(
         at_cutoff[
             "sum(current account values at cutoff) + current reserve + retained excluded"
         ] = cutoff_systematic + current_reserve + retained_value
+        # The baseline's own identity record is stamped on the account basis (#624); the
+        # same identity on that lane carries the current reserve and retained balance.
+        for lane_name, lane_value in account_lane.items():
+            at_cutoff[f"{lane_name} + current reserve"] = lane_value + current_reserve
+            at_cutoff[f"{lane_name} + current reserve + retained excluded"] = (
+                lane_value + current_reserve + retained_value
+            )
     strategy = row.get("strategy_id")
     if isinstance(strategy, str):
         for item in rows(ctx.report, "allocation_history"):

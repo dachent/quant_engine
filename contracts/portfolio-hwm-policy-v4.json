@@ -3,8 +3,8 @@
  "policy_id": "PORT-HWM-4",
  "product_authority": {
   "path": "contracts/portfolio-financial-mvp-source-v1.json",
-  "raw_sha256": "c4e3e27302a69dd31539e5a7cf8120138be4c90c4aabf1a23e63b1b3f429025e",
-  "semantic_digest": "3afbe33a49105050c3bc80bf4a13dd4bd33de06203ff6d8529eece9d1c572b90"
+  "raw_sha256": "2a91d2a6bc35551458d3d40d459d7dcf33814dcbf89a69d3f0bf7f10493f194b",
+  "semantic_digest": "f385d9ce5de93d3821eeb28fc2891ecacafe396f5b80425778b5646c06d403af"
  },
  "performance_authority": {
   "path": "contracts/portfolio-performance-policy-v1.json",

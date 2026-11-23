@@ -2971,6 +2971,7 @@ def _build_qsi_refresh_bundle(
     qsi_price_root: Path,
     price_extension_json: Path,
     as_of_date: str,
+    eu_designer_model_generation: Path | None = None,
 ) -> tuple[bytes, bytes]:
     seed_content = _bundle_bytes(retained_manifest_path)
     seed_returns = _bundle_bytes(retained_returns_path)
@@ -3052,6 +3053,21 @@ def _build_qsi_refresh_bundle(
             "qsi-yahoo-price-extension": price_extension_json,
         }
     )
+    eu_extension: tuple[list[dict[str, str]], dict[str, Any], dict[str, Any]] | None = (
+        None
+    )
+    if eu_designer_model_generation is not None:
+        eu_extension = _extend_eu_model_live(
+            seed,
+            seed_content,
+            seed_returns,
+            retained_rows,
+            eu_designer_model_generation,
+            accepted_as_of,
+        )
+        paths[EU_DESIGNER_RETURNS_SOURCE_ID] = (
+            eu_designer_model_generation / "returns.csv"
+        )
     receipt = {
         # 2: locator-free. Version 1 carried absolute paths for the predecessor and every
         # source, which a portable artifact must not, and a portable verifier could not
@@ -3092,8 +3108,9 @@ def _build_qsi_refresh_bundle(
             "daily_reconstruction_validation"
         ],
     }
+    carried_rows = eu_extension[0] if eu_extension is not None else retained_rows
     all_rows = sorted(
-        [*[row for row in retained_rows if row["series_id"] != "QSI"], *admitted],
+        [*[row for row in carried_rows if row["series_id"] != "QSI"], *admitted],
         key=lambda row: (row["series_id"], row["date"]),
     )
     if any(row["date"] > as_of_date for row in all_rows):
@@ -3109,7 +3126,11 @@ def _build_qsi_refresh_bundle(
         **seed,
         "as_of_date": accepted_as_of.isoformat(),
         "series": [
-            definition if item["series_id"] == "QSI" else item
+            definition
+            if item["series_id"] == "QSI"
+            else eu_extension[1]
+            if eu_extension is not None and item["series_id"] == "EU [P123]"
+            else item
             for item in seed["series"]
         ],
         "returns_artifact": {
@@ -3119,9 +3140,98 @@ def _build_qsi_refresh_bundle(
         },
         "qsi_source_revision": receipt,
     }
+    if eu_extension is not None:
+        manifest["eu_model_live_refresh"] = eu_extension[2]
     manifest.pop("bundle_id")
     manifest["bundle_id"] = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
-    return returns_content, canonical_json_bytes(manifest)
+    manifest_content = canonical_json_bytes(manifest)
+    if eu_extension is not None:
+        # the extended bundle must itself be an admissible seed
+        _validated_retained_bundle(manifest_content, returns_content)
+    return returns_content, manifest_content
+
+
+EU_DESIGNER_RETURNS_SOURCE_ID = "p123-eu-designer-model-returns"
+
+
+def _extend_eu_model_live(
+    seed: Mapping[str, Any],
+    seed_content: bytes,
+    seed_returns: bytes,
+    retained_rows: Sequence[dict[str, str]],
+    designer_model_generation: Path,
+    accepted_as_of: date,
+) -> tuple[list[dict[str, str]], dict[str, Any], dict[str, Any]]:
+    """Append the newer designer generation's live rows to the seed's EU model-live.
+
+    Every seed EU row stays byte for byte: the BACKTEST rows and the existing MODEL_LIVE
+    rows must be a prefix of the designer generation's, and only the rows after the
+    seed's last model-live date are new. Returns the full retained rows with the EU
+    series replaced, the EU series definition and the manifest block recording it.
+    """
+
+    seed_definition = next(
+        (item for item in seed["series"] if item["series_id"] == "EU [P123]"), None
+    )
+    if seed_definition is None:
+        raise StrategyHistoryError("EU extension seed carries no EU series")
+    eu_rows, eu_definition = _p123_eu_designer_curve(
+        designer_model_generation, str(seed_definition["strategy_version"])
+    )
+    seed_backtest = [
+        row
+        for row in retained_rows
+        if row["series_id"] == "EU [P123]" and row["evidence_layer"] == "BACKTEST"
+    ]
+    seed_live = [
+        row
+        for row in retained_rows
+        if row["series_id"] == "EU [P123]" and row["evidence_layer"] == "MODEL_LIVE"
+    ]
+    new_backtest = [row for row in eu_rows if row["evidence_layer"] == "BACKTEST"]
+    new_live = [row for row in eu_rows if row["evidence_layer"] == "MODEL_LIVE"]
+    if seed_backtest != new_backtest:
+        raise StrategyHistoryError(
+            "EU extension changes the seed's EU BACKTEST rows; the pinned identity would move"
+        )
+    if new_live[: len(seed_live)] != seed_live:
+        raise StrategyHistoryError(
+            "EU extension changes the seed's EU model-live rows; the prefix must stay byte for byte"
+        )
+    if len(new_live) <= len(seed_live):
+        raise StrategyHistoryError(
+            "EU extension designer generation is not newer than the seed's model-live rows"
+        )
+    if new_live[-1]["date"] > accepted_as_of.isoformat():
+        raise StrategyHistoryError("EU extension live rows pass the as-of date")
+    definition = {
+        **seed_definition,
+        "model_live_observations": eu_definition["model_live_observations"],
+        "model_live_start": eu_definition["model_live_start"],
+        "model_live_end": eu_definition["model_live_end"],
+        "segment_labels": eu_definition["segment_labels"],
+        "source_artifacts": eu_definition["source_artifacts"],
+    }
+    designer_artifact = cast(list[dict[str, str]], eu_definition["source_artifacts"])[0]
+    block = {
+        "schema_version": 1,
+        "accepted_predecessor": {
+            "bundle_id": seed["bundle_id"],
+            "manifest_sha256": hashlib.sha256(seed_content).hexdigest(),
+            "returns_sha256": hashlib.sha256(seed_returns).hexdigest(),
+        },
+        "designer_model_generation_id": designer_model_generation.name,
+        "designer_model_returns_sha256": designer_artifact["sha256"],
+        "model_live_observations": len(new_live),
+        "model_live_first": new_live[0]["date"],
+        "model_live_last": new_live[-1]["date"],
+        "extends_model_live": {
+            "observations": len(seed_live),
+            "last": seed_live[-1]["date"] if seed_live else None,
+        },
+    }
+    carried = [row for row in retained_rows if row["series_id"] != "EU [P123]"]
+    return [*carried, *eu_rows], definition, block
 
 
 def _build_eu_model_live_refresh_bundle(
@@ -3337,6 +3447,11 @@ def verify_qsi_refresh_bundle(
             qsi_price_root=prices[0],
             price_extension_json=sources["qsi-yahoo-price-extension"],
             as_of_date=receipt["financial_cutoff"],
+            eu_designer_model_generation=(
+                sources[EU_DESIGNER_RETURNS_SOURCE_ID].parent
+                if EU_DESIGNER_RETURNS_SOURCE_ID in sources
+                else None
+            ),
         )
     except (
         OSError,
@@ -3369,8 +3484,13 @@ def write_qsi_refresh_bundle(
     qsi_price_root: Path,
     price_extension_json: Path,
     as_of_date: str,
+    eu_designer_model_generation: Path | None = None,
 ) -> dict[str, object]:
-    """Create a QSI-only source revision; retain every other seed fact exactly."""
+    """Create a QSI source revision; retain every other seed fact exactly.
+
+    With ``eu_designer_model_generation`` the EU model-live layer is also extended from
+    that newer designer generation, in the same single bundle.
+    """
     returns_content, manifest_content = _build_qsi_refresh_bundle(
         retained_manifest_path=retained_manifest_path,
         retained_returns_path=retained_returns_path,
@@ -3380,6 +3500,7 @@ def write_qsi_refresh_bundle(
         qsi_price_root=qsi_price_root,
         price_extension_json=price_extension_json,
         as_of_date=as_of_date,
+        eu_designer_model_generation=eu_designer_model_generation,
     )
     result = _write_bundle_contents(output_root, returns_content, manifest_content)
     # The receipt is embedded in a portable artifact and must not name this filesystem, but
@@ -3392,6 +3513,10 @@ def write_qsi_refresh_bundle(
         "qsi-current-3x-appendix": qsi_appendix_workbook,
         "qsi-yahoo-price-extension": price_extension_json,
     }
+    if eu_designer_model_generation is not None:
+        sources[EU_DESIGNER_RETURNS_SOURCE_ID] = (
+            eu_designer_model_generation / "returns.csv"
+        )
     manifest = json.loads(manifest_content)
     for item in manifest["qsi_source_revision"]["sources"]:
         source_id = item["source_id"]
@@ -3624,7 +3749,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "portfolio123_generation_root",
         "robuxio_track_record_generation",
         "robuxio_strategy_version",
-        "p123_eu_designer_model_generation",
         "p123_eu_strategy_version",
         "live_inception",
     )
@@ -3657,6 +3781,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 qsi_price_root=args.qsi_price_root,
                 price_extension_json=args.price_extension_json,
                 as_of_date=args.as_of_date,
+                eu_designer_model_generation=args.p123_eu_designer_model_generation,
             )
         except StrategyHistoryError as exc:
             raise SystemExit(str(exc)) from exc
