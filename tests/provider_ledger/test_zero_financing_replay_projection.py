@@ -181,9 +181,26 @@ def test_a_staged_candidate_projects_replay_rows_beside_the_statement_rows(
         ),
     )
     spec = {**pins.spec(), "replays": [{}]}
+    seen: list[list[dict[str, Any]]] = []
+
+    def gross(*args: Any, **_kw: Any) -> tuple[list[Any], list[Any]]:
+        seen.append(
+            list(args[4])
+        )  # the zero-financing rows the Schwab producer is given
+        return [], []
+
+    monkeypatch.setattr(ledger, "_schwab_gross_exposure_rows", gross)
     _a, _b, staged, _spec_path, _c = admit._stage_world(
-        tmp_path, monkeypatch, {"zero_financing_observations": spec}
+        tmp_path,
+        monkeypatch,
+        {
+            "zero_financing_observations": spec,
+            "schwab_gross_exposure": {"provider_id": projection.PROVIDER},
+        },
     )
+    # the Schwab gross-exposure producer sees BOTH the statement-derived and the derived rows
+    assert len(seen) == 1
+    assert sorted(r["as_of_date"] for r in seen[0]) == ["2026-01-05", "2026-01-06"]
     generation = tmp_path / "staged" / "generations" / str(staged["generation_id"])
     catalog = json.loads((generation / "provider-ledger.json").read_bytes())
     zero = [

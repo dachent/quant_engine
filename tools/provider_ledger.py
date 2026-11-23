@@ -34,6 +34,8 @@ from zoneinfo import ZoneInfo
 import account_financing
 import event_completeness
 import quantbase_fund_days
+import schwab_leverage_observations
+import schwab_margin_interest
 import zero_financing_replay
 import zero_financing_statements
 
@@ -3677,6 +3679,8 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "quantbase_position_closes",
             "quantbase_rollback",
             "zero_financing_observations",
+            "schwab_gross_exposure",
+            "schwab_margin_interest",
             "event_completeness_declaration",
         )
         allowed.update(
@@ -5400,6 +5404,291 @@ def _zero_financing_replay_rows(
             }
         )
     return provider_id, out, artifacts
+
+
+_GROSS_EXPOSURE_KEYS: Final = frozenset({"accounts", "closes", "provider_id"})
+_ZERO_HOLDINGS_KEYS: Final = frozenset({"account_id", "balances", "last3"})
+
+
+def _schwab_gross_exposure_rows(
+    value: object,
+    providers: set[str],
+    as_of: date,
+    combined: Mapping[str, Sequence[Mapping[str, Any]]],
+    zero_rows: Sequence[Mapping[str, Any]],
+    manifests: Mapping[str, Any],
+    empty_position_accounts: Sequence[str] = (),
+) -> tuple[list[dict[str, Any]], list[SourceArtifact]]:
+    """Gross position value at the cutoff for the named accounts (#894 F2 part a).
+
+    The spec names the provider, the accounts and the hash-pinned vendor close files; the
+    rows come from ``schwab_leverage_observations`` (two closures, or a refusal row).  An
+    optional ``zero_holdings`` list pins, per account that holds nothing, the live balances
+    capture its zero gross is closed against."""
+
+    ref = _object(value, "schwab_gross_exposure")
+    if set(ref) not in (_GROSS_EXPOSURE_KEYS, _GROSS_EXPOSURE_KEYS | {"zero_holdings"}):
+        raise ProviderLedgerError("schwab_gross_exposure keys differ")
+    provider_id = _text(ref["provider_id"], "schwab_gross_exposure.provider_id")
+    if provider_id not in providers or provider_id not in manifests:
+        raise ProviderLedgerError(
+            "schwab_gross_exposure names a provider the spec does not declare"
+        )
+    if not isinstance(ref["accounts"], list):
+        raise ProviderLedgerError("schwab_gross_exposure accounts differ")
+    accounts = [
+        _text(item, "schwab_gross_exposure.accounts item") for item in ref["accounts"]
+    ]
+    observed = {
+        str(r["account_id"])
+        for r in combined.get("nav_observations", [])
+        if r.get("provider_id") == provider_id
+    }
+    if not accounts or len(set(accounts)) != len(accounts) or set(accounts) - observed:
+        raise ProviderLedgerError(
+            "schwab_gross_exposure accounts differ from the provider's observed accounts"
+        )
+    closes: dict[tuple[str, str], Decimal] = {}
+    close_source_index: dict[tuple[str, str], int] = {}
+    artifacts: list[SourceArtifact] = []
+    digests: list[str] = []
+    for item in _objects(ref["closes"], "schwab_gross_exposure.closes"):
+        file_ref = _object(item, "schwab_gross_exposure close file")
+        if set(file_ref) != {"path", "sha256", "size_bytes"}:
+            raise ProviderLedgerError("schwab_gross_exposure close file keys differ")
+        raw = _pinned_file(file_ref["path"], file_ref["sha256"], "close file")
+        if len(raw) != file_ref["size_bytes"]:
+            raise ProviderLedgerError("close file size differs")
+        try:
+            for key, close in schwab_leverage_observations.load_closes(raw).items():
+                if closes.setdefault(key, close) != close:
+                    raise ProviderLedgerError("close files disagree on a close")
+                close_source_index.setdefault(key, len(artifacts))
+        except (
+            UnicodeDecodeError,
+            schwab_leverage_observations.SchwabExposureError,
+        ) as exc:
+            raise ProviderLedgerError(f"schwab_gross_exposure: {exc}") from exc
+        digest = hashlib.sha256(raw).hexdigest()
+        digests.append(digest)
+        artifacts.append(
+            SourceArtifact(
+                artifact_id=f"gross-exposure/{provider_id}/closes-{digest[:16]}.csv",
+                sha256=digest,
+                size_bytes=len(raw),
+                as_of_date=as_of,
+                schema_name="vendor-daily-closes",
+                schema_version="1",
+            )
+        )
+    if not artifacts:
+        raise ProviderLedgerError("schwab_gross_exposure names no close file")
+    closes_sources = [
+        {"artifact_id": a.artifact_id, "sha256": a.sha256} for a in artifacts
+    ]
+    zero_holdings: dict[str, dict[str, Any]] = {}
+    if "zero_holdings" in ref:
+        if not isinstance(ref["zero_holdings"], list):
+            raise ProviderLedgerError("schwab_gross_exposure zero_holdings differ")
+        for item in _objects(
+            ref["zero_holdings"], "schwab_gross_exposure.zero_holdings"
+        ):
+            held = _object(item, "schwab_gross_exposure zero holding")
+            if set(held) != _ZERO_HOLDINGS_KEYS:
+                raise ProviderLedgerError(
+                    "schwab_gross_exposure zero holding keys differ"
+                )
+            account = _text(held["account_id"], "zero holding account_id")
+            if account not in accounts or account in zero_holdings:
+                raise ProviderLedgerError(
+                    "schwab_gross_exposure zero holding names an unlisted or repeated account"
+                )
+            file_ref = _object(held["balances"], "zero holding balances")
+            if set(file_ref) != {"path", "sha256", "size_bytes"}:
+                raise ProviderLedgerError("zero holding balances keys differ")
+            raw = _pinned_file(file_ref["path"], file_ref["sha256"], "balances capture")
+            if len(raw) != file_ref["size_bytes"]:
+                raise ProviderLedgerError("balances capture size differs")
+            try:
+                balances = schwab_leverage_observations.load_balances(
+                    raw, _text(held["last3"], "zero holding last3")
+                )
+            except schwab_leverage_observations.SchwabExposureError as exc:
+                raise ProviderLedgerError(f"schwab_gross_exposure: {exc}") from exc
+            digest = hashlib.sha256(raw).hexdigest()
+            digests.append(digest)
+            artifact = SourceArtifact(
+                artifact_id=f"gross-exposure/{provider_id}/balances-{digest[:16]}.json",
+                sha256=digest,
+                size_bytes=len(raw),
+                as_of_date=as_of,
+                schema_name="live-balances-capture",
+                schema_version="1",
+            )
+            artifacts.append(artifact)
+            zero_holdings[account] = {
+                "balances": balances,
+                "source": {"artifact_id": artifact.artifact_id, "sha256": digest},
+            }
+    cutoff = as_of.isoformat()
+    observation = (
+        "gross-exposure-"
+        + hashlib.sha256(
+            "\n".join([*sorted(digests), cutoff, *sorted(accounts)]).encode()
+        ).hexdigest()[:24]
+    )
+    rows = schwab_leverage_observations.gross_exposure_rows(
+        accounts=accounts,
+        positions=[
+            r
+            for r in combined.get("positions", [])
+            if r.get("provider_id") == provider_id
+        ],
+        nav_rows=[
+            r
+            for r in combined.get("nav_observations", [])
+            if r.get("provider_id") == provider_id
+        ],
+        zero_financing_rows=zero_rows,
+        transactions=[
+            r
+            for r in combined.get("transactions", [])
+            if r.get("provider_id") == provider_id
+        ],
+        closes=closes,
+        closes_sources=closes_sources,
+        close_source_index=close_source_index,
+        empty_position_accounts=empty_position_accounts,
+        zero_holdings=zero_holdings,
+        cutoff=cutoff,
+        provider_id=provider_id,
+        generation_id=manifests[provider_id].generation_id,
+    )
+    return (
+        [{**row, "observation_generation_id": observation} for row in rows],
+        artifacts,
+    )
+
+
+_MARGIN_INTEREST_KEYS: Final = _ZERO_FINANCING_KEYS | {"accounts"}
+
+
+def _schwab_margin_interest_rows(
+    value: object,
+    providers: set[str],
+    as_of: date,
+    combined: Mapping[str, Sequence[Mapping[str, Any]]],
+    manifests: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[SourceArtifact]]:
+    """Statement evidence of the named margin accounts' interest (#894 F2 part b).
+
+    The spec pins the statement directory's SHA256SUMS and the local-only account mapping
+    exactly as ``zero_financing_observations`` does; the ledger re-hashes every statement
+    and reads the margin-interest tables, charged periods and interest-paid columns itself
+    (``schwab_margin_interest``)."""
+
+    ref = _object(value, "schwab_margin_interest")
+    if set(ref) != _MARGIN_INTEREST_KEYS:
+        raise ProviderLedgerError("schwab_margin_interest keys differ")
+    provider_id = _text(ref["provider_id"], "schwab_margin_interest.provider_id")
+    if provider_id not in providers or provider_id not in manifests:
+        raise ProviderLedgerError(
+            "schwab_margin_interest names a provider the spec does not declare"
+        )
+    if not isinstance(ref["accounts"], list):
+        raise ProviderLedgerError("schwab_margin_interest accounts differ")
+    accounts = {
+        _text(item, "schwab_margin_interest.accounts item") for item in ref["accounts"]
+    }
+    observed = {
+        str(r["account_id"])
+        for r in combined.get("nav_observations", [])
+        if r.get("provider_id") == provider_id
+    }
+    if not accounts or len(accounts) != len(ref["accounts"]) or accounts - observed:
+        raise ProviderLedgerError(
+            "schwab_margin_interest accounts differ from the provider's observed accounts"
+        )
+    sums_raw = _pinned_file(ref["sums_path"], ref["sums_sha256"], "statement sums")
+    mapping_raw = _pinned_file(
+        ref["mapping_path"], ref["mapping_sha256"], "statement account mapping"
+    )
+    directory = _absolute_path(ref["statements_dir"], "statements_dir")
+    if not directory.is_dir() or directory.is_symlink():
+        raise ProviderLedgerError("schwab_margin_interest statements_dir differs")
+    prefix = f"margin-interest/{provider_id}"
+    try:
+        rows, manifest = schwab_margin_interest.statement_rows(
+            directory,
+            zero_financing_statements.load_sums(sums_raw),
+            zero_financing_statements.load_mapping(mapping_raw, provider_id),
+            provider_id=provider_id,
+            accounts=accounts,
+            prefix=prefix,
+        )
+    except (OSError, ValueError, zero_financing_statements.ZeroFinancingError) as exc:
+        raise ProviderLedgerError(f"schwab_margin_interest: {exc}") from exc
+    if not rows:
+        raise ProviderLedgerError("schwab_margin_interest found no margin statement")
+    artifacts = [
+        SourceArtifact(
+            artifact_id=f"{prefix}/{item['name']}",
+            sha256=item["sha256"],
+            size_bytes=item["size_bytes"],
+            as_of_date=as_of,
+            schema_name=f"{provider_id}-statement-pdf",
+            schema_version="1",
+        )
+        for item in manifest
+        if any(r["source_artifact_id"] == f"{prefix}/{item['name']}" for r in rows)
+    ] + [
+        SourceArtifact(
+            artifact_id=f"{prefix}/SHA256SUMS",
+            sha256=hashlib.sha256(sums_raw).hexdigest(),
+            size_bytes=len(sums_raw),
+            as_of_date=as_of,
+            schema_name="statement-sums",
+            schema_version="1",
+        ),
+        SourceArtifact(
+            artifact_id=f"{prefix}/account-mapping",
+            sha256=hashlib.sha256(mapping_raw).hexdigest(),
+            size_bytes=len(mapping_raw),
+            as_of_date=as_of,
+            schema_name="statement-account-mapping",
+            schema_version="1",
+        ),
+    ]
+    ids = {a.artifact_id for a in artifacts}
+    if any(r["source_artifact_id"] not in ids for r in rows):
+        raise ProviderLedgerError(
+            "schwab_margin_interest: a row names a source the manifest lacks"
+        )
+    observation = (
+        "margin-interest-"
+        + hashlib.sha256(
+            "\n".join(
+                [
+                    hashlib.sha256(sums_raw).hexdigest(),
+                    hashlib.sha256(mapping_raw).hexdigest(),
+                    as_of.isoformat(),
+                    *sorted(accounts),
+                ]
+            ).encode()
+        ).hexdigest()[:24]
+    )
+    return (
+        [
+            {
+                **row,
+                "generation_id": manifests[provider_id].generation_id,
+                "observation_generation_id": observation,
+            }
+            for row in rows
+            if row["as_of_date"] <= as_of.isoformat()
+        ],
+        artifacts,
+    )
 
 
 def _quantbase_fill_closes(
@@ -12624,6 +12913,7 @@ def build_catalog(
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
     zero_sets: list[tuple[str, list[dict[str, Any]], list[SourceArtifact]]] = []
+    zero_projected: list[dict[str, Any]] = []
     if "zero_financing_observations" in spec:
         # the account type rule reaches back to each account's first NAV day
         first_nav: dict[str, date] = {}
@@ -12688,6 +12978,7 @@ def build_catalog(
             for row in zero_rows
             if date.fromisoformat(row["as_of_date"]) <= zero_cutoff
         ]
+        zero_projected.extend(projected)
         if projected:  # never create an empty fact collection (ids must not move)
             combined["financing_liability_observations"].extend(projected)
             exceptions.extend(
@@ -12703,6 +12994,45 @@ def build_catalog(
                 for row in projected
             )
         provider_artifacts.extend(zero_artifacts)
+    if "schwab_gross_exposure" in spec:
+        exposure_rows, exposure_artifacts = _schwab_gross_exposure_rows(
+            spec["schwab_gross_exposure"],
+            set(spec["providers"]),
+            as_of,
+            combined,
+            zero_projected,
+            manifests,
+            [
+                str(item)
+                for item in catalogs.get(
+                    spec["schwab_gross_exposure"]["provider_id"], {}
+                ).get("empty_position_account_ids", [])
+            ],
+        )
+        combined["leverage_exposure_observations"].extend(exposure_rows)
+        provider_artifacts.extend(exposure_artifacts)
+    if "schwab_margin_interest" in spec:
+        interest_rows, interest_artifacts = _schwab_margin_interest_rows(
+            spec["schwab_margin_interest"],
+            set(spec["providers"]),
+            as_of,
+            combined,
+            manifests,
+        )
+        combined["financing_cost_observations"].extend(interest_rows)
+        exceptions.extend(
+            {
+                "account_in_provenance": row["account_id"] in accounts,
+                "effective_date": row["as_of_date"],
+                "fact_type": "financing_cost_observations",
+                "mapping_reason": row["mapping_reason"],
+                "provider_id": row["provider_id"],
+                "record_id": row["record_id"],
+                "status": "UNMAPPED",
+            }
+            for row in interest_rows
+        )
+        provider_artifacts.extend(interest_artifacts)
 
     completeness_rows: list[dict[str, Any]] | None = None
     if "event_completeness_declaration" in spec:
