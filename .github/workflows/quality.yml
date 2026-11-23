@@ -284,6 +284,7 @@ jobs:
           tools/portfolio_cash_drag.py
           tools/portfolio_cash_drag_spec.py
           tools/zero_financing_statements.py
+          tools/zero_financing_replay.py
           tools/ibkr_overlap_equivalences.py
           tools/event_completeness.py
           tools/check_new_commit_owner_shapes.py
