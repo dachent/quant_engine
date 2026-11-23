@@ -1041,6 +1041,9 @@ def _recompute_capture(
                 Decimal(str(info[key]))
                 for key in ("balanceSubjectInterest", "tradeDateBalance")
             ]
+            if not all(v.is_finite() for v in raw_loan):
+                # an unreadable loan figure fails closed: a loan, never a credit
+                raw_loan = [Decimal(1), Decimal(0)]
     except (KeyError, TypeError, ArithmeticError, ValueError) as exc:
         raise ZeroFinancingError("capture raw balances are unreadable") from exc
     if raw_margin is None:
@@ -1159,6 +1162,10 @@ def _live_credit(margin_balance: Decimal, bank_sweep: Decimal) -> Decimal:
     bank-sweep credit it does not carry.  A margin balance at or below zero is never offset
     (a debit stays a debit) and a negative sweep is not a credit."""
 
+    if not margin_balance.is_finite():
+        return (
+            margin_balance  # never equal to a page total: the credit is not explained
+        )
     if margin_balance > 0 and bank_sweep > 0:
         return margin_balance + bank_sweep
     return margin_balance

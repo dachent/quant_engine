@@ -432,3 +432,40 @@ def test_a_trade_date_credit_without_the_page_still_borrows(tmp_path: Path) -> N
         with_page=False,
     )
     assert _verdict(raw, tmp_path) == (False, "RETIREMENT_ACCOUNT_SHOWS_BORROWING")
+
+
+def _rewrite_response(tmp_path: Path, raw: bytes, edit: Any) -> bytes:
+    path = tmp_path / "balances.json"
+    response = json.loads(path.read_text())
+    edit(response["brokerageAccountList"][0])
+    content = json.dumps(response).encode()
+    path.write_bytes(content)
+    top = json.loads(raw)
+    for item in top["raw_files"]:
+        if item["name"] == "balances.json":
+            item["sha256"] = hashlib.sha256(content).hexdigest()
+            item["size_bytes"] = len(content)
+    return json.dumps(top).encode()
+
+
+def test_an_unreadable_trade_date_balance_or_margin_balance_fails_closed(
+    tmp_path: Path,
+) -> None:
+    for field in ("tradeDateBalance", "marginBalance"):
+        raw = _capture(
+            tmp_path,
+            page_total="640.20",
+            trade_date_balance=640.20,
+            raw_total=640.20,
+        )
+
+        def edit(entry: dict[str, Any], field: str = field) -> None:
+            holder = (
+                entry["marginsInfo"]
+                if field == "tradeDateBalance"
+                else entry["cashInvestments"]
+            )
+            holder[field] = "NaN"
+
+        verdict = _verdict(_rewrite_response(tmp_path, raw, edit), tmp_path)
+        assert verdict == (False, "RETIREMENT_ACCOUNT_SHOWS_BORROWING"), field
