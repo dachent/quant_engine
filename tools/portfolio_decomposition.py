@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import sys
 import tempfile
 from typing import Any, Final, Mapping, Sequence, cast
 
@@ -2043,6 +2044,101 @@ def _consumed_producer_identity() -> dict[str, str]:
     }
 
 
+# The retained fit cache stores exactly what these functions produce and read back.
+_FIT_CACHE_ROOTS: Final = (
+    "_dynamic_fit",
+    "_dynamic_loo_score",
+    "_fit",
+    "_dynamic_fit_to_cache",
+    "_dynamic_fit_from_cache",
+    "_fit_to_cache",
+    "_fit_from_cache",
+)
+_NUMERIC_STACK: Final = ("numpy", "scipy", "scikit-learn")
+
+
+def _fit_source_identity(source: str) -> str:
+    """Hash the parsed code of the functions a cached fit is computed by.
+
+    Follows every module-level name reachable from ``_FIT_CACHE_ROOTS`` and hashes
+    the syntax trees (comments, docstrings and layout are not code), so an edit
+    elsewhere in this module -- a loader, a report field, a guard -- keeps the
+    retained fits valid while any edit to the fit code or a constant, helper or
+    class it uses changes the identity.
+    """
+
+    import ast
+
+    tree = ast.parse(source)
+    definitions: dict[str, ast.stmt] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            definitions[node.name] = node
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    definitions[target.id] = node
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            definitions[node.target.id] = node
+    reached: set[str] = set()
+    pending = list(_FIT_CACHE_ROOTS)
+    while pending:
+        name = pending.pop()
+        if name in reached:
+            continue
+        if name not in definitions:
+            raise DecompositionError(f"fit cache identity root {name} is missing")
+        reached.add(name)
+        pending.extend(
+            item.id
+            for item in ast.walk(definitions[name])
+            if isinstance(item, ast.Name) and item.id in definitions
+        )
+    digest = hashlib.sha256()
+    for name in sorted(reached):
+        node = definitions[name]
+        for item in ast.walk(node):
+            body = getattr(item, "body", None)
+            if (
+                isinstance(item, (ast.FunctionDef, ast.ClassDef))
+                and body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                item.body = body[1:] or [ast.Pass()]
+        digest.update(name.encode())
+        digest.update(ast.dump(node).encode())
+    return digest.hexdigest()
+
+
+def _numeric_stack_identity() -> dict[str, str]:
+    """Interpreter minor version and the installed numeric libraries."""
+
+    from importlib import metadata
+
+    versions = {"python": f"{sys.version_info[0]}.{sys.version_info[1]}"}
+    for package in _NUMERIC_STACK:
+        try:
+            versions[package] = metadata.version(package)
+        except metadata.PackageNotFoundError:
+            versions[package] = "absent"
+    return versions
+
+
+def _fit_producer_identity() -> dict[str, object]:
+    """What a retained fit depends on: not the whole producer file or the lock."""
+
+    return {
+        "canonical_json": hashlib.sha256(
+            Path(canonical_json_bytes.__code__.co_filename).resolve().read_bytes()
+        ).hexdigest(),
+        "fit_source": _fit_source_identity(Path(__file__).read_text(encoding="utf-8")),
+        "methodology": hashlib.sha256(METHODOLOGY_PATH.read_bytes()).hexdigest(),
+        "numeric_stack": _numeric_stack_identity(),
+    }
+
+
 def _training_identity(
     model: ModelDefinition,
     target_rows: Sequence[TargetRow],
@@ -2066,7 +2162,7 @@ def _training_identity(
         if key in interval_association
     }
     payload = {
-        "consumed_producer_identity": _consumed_producer_identity(),
+        "fit_producer_identity": _fit_producer_identity(),
         "interval_association": policy_identity,
         "model": {
             "constraint": model.constraint,
