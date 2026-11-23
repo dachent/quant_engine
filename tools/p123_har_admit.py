@@ -379,7 +379,8 @@ def _corroboration_error(
         market = float(row["mktVal"])
     except (TypeError, ValueError, KeyError):
         return "cannot be compared with the list's market value"
-    if abs(value - market) > 0.011:
+    # N values each rounded to 0.01 plus the rounded total: at most 0.005*(N+1), plus 0.001 slack
+    if abs(value - market) > 0.005 * (len(positions) + 1) + 0.001:
         return "market value differs from the list's mktVal"
     return None
 

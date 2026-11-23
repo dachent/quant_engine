@@ -19,6 +19,8 @@ python tools/release_driver.py stop   --config run.json
 
 Exit 0 succeeded, 1 a stage failed, 2 a refusal or usage error.
 
+Measured stage times of real runs, what each stage is for and the known slow spots: `docs/release-run-times.md`.
+
 ## Run configuration
 
 `run.json` holds absolute paths and the frozen code identity: `repo_root`, `python`,

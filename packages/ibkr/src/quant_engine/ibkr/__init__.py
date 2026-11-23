@@ -16,6 +16,8 @@ from quant_engine.ibkr.flex import (
 from quant_engine.ibkr.generation import (
     IbkrGenerationError,
     build_generation,
+    derive_overlap_equivalence_entries,
+    derive_overlap_equivalence_entries_for_spec,
     declared_exclusion,
     publish_generation_candidate,
     stage_generation_candidate,
@@ -52,6 +54,8 @@ __all__ = [
     "TwsReconciliation",
     "TwsSnapshot",
     "build_generation",
+    "derive_overlap_equivalence_entries",
+    "derive_overlap_equivalence_entries_for_spec",
     "declared_exclusion",
     "load_tws_snapshot",
     "parse_flex_file",

@@ -175,6 +175,90 @@ def parse_audit_input(raw: bytes, expected_sha256: str) -> Mapping[str, Any]:
     return top
 
 
+def model_account_gap_reference(
+    audit_input_raw: bytes,
+    audit_input_sha256: str,
+    strategy_id: str,
+    cutoff: str,
+) -> dict[str, Any] | None:
+    """The primary-window model return of one strategy, for the underwriting gap.
+
+    The underwriting row must publish the same model figure the model-versus-actual block
+    shows for the strategy's primary window, not a second estimate of its own.  The window
+    must end on or before the panel cutoff and carry both returns; otherwise the strategy
+    has no such reference and the caller keeps its own labelled comparator.
+    """
+
+    audit = parse_audit_input(audit_input_raw, audit_input_sha256)
+    for item in audit["strategies"]:
+        if item.get("strategy_id") != strategy_id:
+            continue
+        primary = item.get("primary_window_id")
+        for w in item["windows"]:
+            if w.get("window_id") != primary:
+                continue
+            start, end = _day(w.get("start"), "start"), _day(w.get("end"), "end")
+            if end.isoformat() > cutoff:
+                return None
+            model = _num(w.get("model_return_pct"), "model_return_pct")
+            account = _num(w.get("account_return_pct"), "account_return_pct")
+            comparator = _mapping(item.get("comparator"), "comparator")
+            if comparator.get("provider_published") is not False:
+                # an incomplete comparator never becomes a replica reference
+                return None
+            ranges = [
+                float(m.group(1))
+                for note in item.get("notes") or []
+                for m in re.finditer(r"\+/-(\d+(?:\.\d+)?) pp", str(note))
+            ]
+            return {
+                "window_id": _text(w.get("window_id"), "window_id"),
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "view": _text(w.get("view"), "view"),
+                "model_return_pct": _round(model),
+                "account_return_pct": _round(account),
+                "model_return": _round(model / 100.0, 8),
+                "account_return": _round(account / 100.0, 8),
+                "gap": _round((account - model) / 100.0, 8),
+                "comparator_description": _text(
+                    comparator.get("description"), "comparator description"
+                ),
+                "provider_published": False,
+                "uncertainty_pp": max(ranges) if ranges else None,
+            }
+    return None
+
+
+def model_account_gap_references(
+    panel: Mapping[str, Any],
+    audit_input_raw: bytes,
+    audit_input_sha256: str,
+    strategy_ids: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    """The references of the named strategies, cut off exactly as the block cuts its windows.
+
+    The cutoff is the block's own ``_as_of(panel)`` (invested-capital completeness date,
+    else the weekly-returns as-of), so a window the block withholds can never drive an
+    underwriting row.  Only the named strategies are looked up: a strategy joins the list
+    deliberately, never because its audit comparator happens to say not provider-published.
+    """
+
+    cutoff = _as_of(panel)
+    audit = parse_audit_input(audit_input_raw, audit_input_sha256)
+    present = {str(item.get("strategy_id")) for item in audit["strategies"]}
+    found: dict[str, dict[str, Any]] = {}
+    for strategy_id in strategy_ids:
+        if strategy_id not in present:
+            continue
+        reference = model_account_gap_reference(
+            audit_input_raw, audit_input_sha256, strategy_id, cutoff
+        )
+        if reference is not None:
+            found[strategy_id] = reference
+    return found
+
+
 # ------------------------------------------------------------- governed context
 
 

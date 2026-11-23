@@ -32,9 +32,14 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import account_financing
+import event_completeness
 import quantbase_fund_days
+import schwab_leverage_observations
+import schwab_margin_interest
+import zero_financing_replay
 import zero_financing_statements
 
+import quant_engine.schwab as schwab
 from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
     AdapterIdentity,
@@ -128,7 +133,7 @@ for _descriptor in (
         provider_id="matrixport",
         catalog_filename="catalog.json",
         catalog_schema_versions=frozenset({1, 2}),
-        account_facts=("capital_anchors", "nav_observations"),
+        account_facts=("capital_anchors", "nav_observations", "positions"),
         source_segment="matrixport-account-generation",
     ),
     ProviderDescriptor(
@@ -142,7 +147,13 @@ for _descriptor in (
         provider_id="quantbase",
         catalog_filename="quantbase-generation.json",
         catalog_schema_versions=frozenset({1}),
-        account_facts=("capital_anchors", "flows", "nav_observations", "transactions"),
+        account_facts=(
+            "capital_anchors",
+            "flows",
+            "nav_observations",
+            "positions",
+            "transactions",
+        ),
         source_segment="quantbase-account-generation",
     ),
     ProviderDescriptor(
@@ -844,6 +855,87 @@ def _daily_fx_evidence(
     }
 
 
+#: Provider conversion-rate evidence: the provider's own dated rate, not an independent one.
+PROVIDER_CONVERSION_METHOD: Final = "PROVIDER_REPORTED_CONVERSION_RATE"
+
+
+def _attach_provider_conversion_evidence(
+    projections: Mapping[str, list[dict[str, Any]]],
+    catalog: Mapping[str, Any],
+    generation_id: str,
+    provider_id: str,
+) -> None:
+    """Price an IBKR non-USD flow/transaction row with the statement's own rate.
+
+    The IBKR generation publishes its daily conversion rate to the account base
+    currency (USD for every account, checked) as ``fx_observations``.  A row gets
+    the rate dated its own event date, labelled as the provider's, bound to the
+    provider generation it came from.  Where the row also states the rate IBKR
+    booked it at (``fx_rate_to_base``), the USD amount at that rate is carried as
+    ``provider_usd_amount`` so the baseline can close the daily rate against it.
+    A row with no observation for its currency and date stays unpriced.
+    """
+
+    base = {
+        str(a.get("account_id")): a.get("base_currency")
+        for a in _objects(catalog.get("accounts", []), "ibkr.accounts")
+    }
+    rates: dict[tuple[str, str], tuple[str, str]] = {}
+    for obs in _objects(catalog.get("fx_observations", []), "ibkr.fx_observations"):
+        if obs.get("to_currency") != "USD":
+            continue
+        key = (str(obs.get("from_currency")), str(obs.get("as_of_date")))
+        rate = _observed_decimal(obs.get("rate"), "ibkr fx observation rate")
+        if rate is None or rate <= 0:
+            raise ProviderLedgerError("ibkr fx observation rate is invalid")
+        text = format(rate, "f")
+        prior = rates.get(key)
+        if prior is not None and prior[0] != text:
+            raise ProviderLedgerError("ibkr fx observations conflict on a day")
+        rates[key] = (text, str(obs.get("source_artifact_id") or ""))
+    for fact_type in ("flows", "transactions"):
+        for row in projections.get(fact_type, ()):
+            amount = row.get("amount")
+            if (
+                row.get("event_time_fx") is not None
+                or not isinstance(amount, Mapping)
+                or amount.get("status") != "AVAILABLE"
+                or amount.get("currency") in (None, "USD")
+                or base.get(str(row.get("account_id"))) != "USD"
+            ):
+                continue
+            found = rates.get((str(amount["currency"]), str(row.get("event_date"))))
+            if found is None:
+                continue
+            rate_text, artifact = found
+            row["event_time_fx"] = {
+                "base_currency": "USD",
+                "currency": str(amount["currency"]),
+                "date": str(row["event_date"]),
+                "field": "ConversionRate",
+                "generation_id": generation_id,
+                "method": PROVIDER_CONVERSION_METHOD,
+                "provider": provider_id,
+                "rate": rate_text,
+                "source_artifact_id": artifact or "ibkr-catalog.json",
+                "timing": "PROVIDER_DAILY_CONVERSION_RATE",
+            }
+            booked = row.get("fx_rate_to_base")
+            booked_rate = (
+                _observed_decimal(booked, "ibkr fx_rate_to_base")
+                if booked not in (None, "")
+                else None
+            )
+            native = _observed_decimal(amount.get("value"), "ibkr native amount")
+            if booked_rate is not None and booked_rate > 0 and native is not None:
+                row["provider_usd_amount"] = {
+                    "basis": "PROVIDER_FX_RATE_TO_BASE",
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": format(native * booked_rate, "f"),
+                }
+
+
 def _excluded_source_row(
     findings: list[dict[str, Any]] | None,
     provider_id: str,
@@ -1395,6 +1487,491 @@ def _matrixport_nav_observations(
     return observations
 
 
+def _security_id(product_id: str) -> str:
+    return (
+        "security-matrixport-"
+        + hashlib.sha256(product_id.encode("utf-8")).hexdigest()[:24]
+    )
+
+
+def _product_name(names: Mapping[str, str], product_id: str) -> str:
+    try:
+        return names[product_id]
+    except KeyError as exc:
+        raise ProviderLedgerError(
+            f"MATRIXPORT_POSITIONS_PRODUCT_UNNAMED: no product record for {product_id}"
+        ) from exc
+
+
+# Closure between a day's position rows and the same day's account NAV: both are built from the
+# same hash-bound daily_holdings.csv rows and the same admitted daily FX, so they must agree to
+# the cent; a difference beyond this half cent is a builder or source defect and is refused.
+MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD: Final = Decimal("0.005")
+# The API-reported current holding value is an independent endpoint; it need not equal the derived
+# value to the cent (the real run differs by well under 1%) but a gross difference (a consistent
+# NAV forgery) is refused.
+MATRIXPORT_POSITIONS_API_VALUE_TOLERANCE: Final = Decimal("0.02")
+
+
+def _matrixport_positions(
+    generation_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ]
+    | None = None,
+    financial_cutoff: date | None = None,
+    cutoff_findings: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Admit Matrixport's daily NAV-share holding rows as account positions.
+
+    One row per day and product from ``csv/daily_holdings.csv`` (the account holds a single
+    NAV-share product valued in USDT): ``quantity`` is the share count, ``market_value`` the
+    native value converted with the admitted daily FX, the same conversion the account NAV
+    uses.  Positions exist only on the contract-FX path that admits the USD NAV.  Every day
+    that has a NAV observation must close against its position rows to within
+    ``MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD`` or the build refuses.
+
+    What is checked (and what is not).  ``native_value`` is derived as share x unit NAV and the
+    published NAV in csv/nav_daily.csv is the same endpoint's value, so the per-day NAV
+    comparison is a CONSISTENCY check (``CONSISTENT_WITH_PUBLISHED_NAV``), not an independent
+    valuation: it catches inconsistent edits, not a consistent forgery.  The only quantity the
+    daily files cannot derive from each other is the share count, so it is anchored to the
+    API-reported holding (``csv/holdings.csv`` shares) and the reconciled subscription events
+    (``csv/holding_reconciliation.csv``): the last day's share must equal both, with no
+    unexplained opening share.  The API-reported current value (``holding_balance``) is carried
+    as ``api_reported_value_gap_usd`` on the last row (disclosed, not a refusal).  A day with no
+    ``nav_daily`` row and a native value is refused (``MATRIXPORT_POSITIONS_NAV_DAILY_ABSENT``);
+    an active day with no native value (a provider gap) is typed ``NATIVE_VALUE_ABSENT``
+    (``UNAVAILABLE``), more than max(3, 1% of days) of them is refused, as are unexplained calendar gaps
+    (including a tail short of the declared boundary), a NAV day without positions and the
+    reverse, and an API holding value that differs from the last derived value by over 2%.
+    ``symbol`` is the product name from ``csv/holdings.csv`` (the unit is the share).
+
+    Scope, stated plainly: the SHARE series is checked on every day against the cumulative
+    subscription/redemption events of ``csv/position_events.csv`` (events are extractor-derived
+    and NOT independent of the extractor: only their total is tied to the API holding, so a
+    consistent rewrite of holdings and events that preserves the total is not detected), and the
+    first held day must be the first event day.
+    The VALUE is checked per day only for consistency with the published unit NAV, and against
+    the API-reported holding value on the LAST day only (2%); there is no independent per-day
+    value source, so a value scaled under 2% consistently across all days is not detected.
+    """
+
+    if fx_rates is None:
+        return []
+    account_id = _CSV_FACT_ACCOUNT[_MATRIXPORT]
+    source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
+    run_root = root / "output" / source_run_id
+    artifact_id = "csv/daily_holdings.csv"
+    artifact = _find_manifest_artifact(
+        manifest, artifact_id, "matrixport daily holdings"
+    )
+    rows = _verified_csv_rows(
+        _exact_file(run_root, Path(artifact_id), "matrixport daily holdings"),
+        artifact.sha256,
+        {"currency", "native_value", "nav", "product_id", "share", "utc_date"},
+        "matrixport daily holdings",
+    )
+    nav_artifact = _find_manifest_artifact(
+        manifest, "csv/nav_daily.csv", "matrixport published unit NAV"
+    )
+    published_nav: dict[tuple[str, date], Decimal] = {}
+    for nav_row in _verified_csv_rows(
+        _exact_file(
+            run_root, Path("csv/nav_daily.csv"), "matrixport published unit NAV"
+        ),
+        nav_artifact.sha256,
+        {"day_timestamp_utc", "nav", "product_id"},
+        "matrixport published unit NAV",
+    ):
+        published = _observed_decimal(nav_row.get("nav"), "matrixport published nav")
+        if published is None:
+            continue
+        published_nav[
+            (
+                _text(nav_row.get("product_id"), "matrixport nav product_id"),
+                _day(
+                    str(nav_row.get("day_timestamp_utc"))[:10],
+                    "matrixport nav_daily day",
+                ),
+            )
+        ] = published
+    holding_rows = _verified_csv_rows(
+        _exact_file(run_root, Path("csv/holdings.csv"), "matrixport holdings"),
+        _find_manifest_artifact(
+            manifest, "csv/holdings.csv", "matrixport holdings"
+        ).sha256,
+        {"display_name", "holding_balance", "product_id", "shares"},
+        "matrixport holdings",
+    )
+    reconciliation_rows = _verified_csv_rows(
+        _exact_file(
+            run_root,
+            Path("csv/holding_reconciliation.csv"),
+            "matrixport holding reconciliation",
+        ),
+        _find_manifest_artifact(
+            manifest,
+            "csv/holding_reconciliation.csv",
+            "matrixport holding reconciliation",
+        ).sha256,
+        {
+            "current_share",
+            "event_share_sum",
+            "product_id",
+            "unexplained_opening_share",
+        },
+        "matrixport holding reconciliation",
+    )
+    event_rows = _verified_csv_rows(
+        _exact_file(
+            run_root, Path("csv/position_events.csv"), "matrixport position events"
+        ),
+        _find_manifest_artifact(
+            manifest, "csv/position_events.csv", "matrixport position events"
+        ).sha256,
+        {"product_id", "share_delta", "utc_date"},
+        "matrixport position events",
+    )
+    events: dict[str, list[tuple[date, Decimal]]] = defaultdict(list)
+    for event in event_rows:
+        delta = _observed_decimal(event.get("share_delta"), "matrixport share_delta")
+        if delta is None:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_SHARE_ANCHOR: a position event has no share delta"
+            )
+        events[_text(event.get("product_id"), "matrixport event product_id")].append(
+            (_day(event.get("utc_date"), "matrixport event utc_date"), delta)
+        )
+    day_share: dict[tuple[str, date], Decimal] = {}
+    product_names: dict[str, str] = {}
+    api_share: dict[str, Decimal] = {}
+    api_value: dict[str, Decimal] = {}
+    for holding in holding_rows:
+        key = _text(holding.get("product_id"), "matrixport holdings product_id")
+        try:
+            names = json.loads(str(holding.get("display_name")))
+            name = next(str(n["text"]) for n in names if n.get("language") == "en-US")
+        except (ValueError, StopIteration, TypeError, KeyError) as exc:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_PRODUCT_UNNAMED: holdings.csv has no en-US "
+                f"display_name for product {key}"
+            ) from exc
+        product_names[key] = name
+        shares_value = _observed_decimal(holding.get("shares"), "matrixport api share")
+        balance_value = _observed_decimal(
+            holding.get("holding_balance"), "matrixport api holding balance"
+        )
+        if shares_value is None or balance_value is None:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_API_ANCHOR_ABSENT: holdings.csv has no API "
+                f"share or balance for product {key}"
+            )
+        api_share[key], api_value[key] = shares_value, balance_value
+    for rec in reconciliation_rows:
+        key = _text(rec.get("product_id"), "matrixport reconciliation product_id")
+        current = _observed_decimal(
+            rec.get("current_share"), "matrixport current_share"
+        )
+        event_sum = _observed_decimal(
+            rec.get("event_share_sum"), "matrixport event_share"
+        )
+        opening = _observed_decimal(
+            rec.get("unexplained_opening_share"), "matrixport opening share"
+        )
+        if (
+            current is None
+            or event_sum is None
+            or opening is None
+            or current != event_sum
+            or opening != 0
+            or current != api_share.get(key)
+        ):
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_SHARE_ANCHOR: the API share, the reconciled "
+                f"event shares and the opening share disagree for product {key}"
+            )
+    fx_end = _admitted_fx_end(fx_rates)
+    positions: list[dict[str, Any]] = []
+    totals: dict[date, Decimal] = defaultdict(Decimal)
+    independent: dict[date, Decimal] = defaultdict(Decimal)
+    last_row: dict[str, tuple[date, Decimal, Decimal]] = {}
+    unclosed: set[date] = set()
+    native_absent: set[date] = set()
+    held_days: set[tuple[str, date]] = set()
+    active_days: set[date] = set()
+    seen: set[tuple[date, str]] = set()
+    with localcontext() as context:
+        context.prec = 80
+        for row in rows:
+            day = _day(row.get("utc_date"), "matrixport daily holdings utc_date")
+            if financial_cutoff is not None and day > financial_cutoff:
+                continue
+            held_days.add(
+                (_text(row.get("product_id"), "matrixport holding product_id"), day)
+            )
+            share = _observed_decimal(
+                row.get("share"), "matrixport daily holdings share"
+            )
+            if share is None:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_ACCOUNT_COMPONENT_INVALID: active share is absent"
+                )
+            if share == 0:
+                continue
+            native = _observed_decimal(
+                row.get("native_value"), "matrixport native holding value"
+            )
+            if day > fx_end:
+                # No admitted USD conversion: outside the position window.
+                continue
+            product_id = _text(row.get("product_id"), "matrixport holding product_id")
+            active_days.add(day)
+            day_share[(product_id, day)] = share
+            if native is None:
+                # Active share but no native value: the NAV builder has no day here either.
+                # The position is typed UNAVAILABLE (never dropped, never valued).
+                native_absent.add(day)
+                strategy_id, mapping_status = _mapped_strategy_for_account(
+                    account_id, day, accounts, strategies, assignments
+                )
+                source_id = f"{day.isoformat()}:{product_id}"
+                positions.append(
+                    {
+                        "account_id": account_id,
+                        "as_of_date": day.isoformat(),
+                        "closure_status": "NATIVE_VALUE_ABSENT",
+                        "evidence_layer": "ACCOUNT_LIVE",
+                        "generation_id": generation_id,
+                        "mapping_status": mapping_status,
+                        "market_value": {
+                            "currency": "USD",
+                            "status": "UNAVAILABLE",
+                            "value": None,
+                        },
+                        "provider_id": _MATRIXPORT,
+                        "quantity": format(share.normalize(), "f"),
+                        "record_id": f"matrixport:position:{source_id}",
+                        "security_id": "security-matrixport-"
+                        + hashlib.sha256(product_id.encode("utf-8")).hexdigest()[:24],
+                        "source_artifact_id": artifact_id,
+                        "source_record_id": source_id,
+                        "strategy_id": strategy_id,
+                        "symbol": _product_name(product_names, product_id),
+                        "value_basis": "NAV_SHARE_PRODUCT",
+                    }
+                )
+                continue
+            if (day, product_id) in seen:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_POSITIONS_DUPLICATE: more than one holding row exists "
+                    "for a product and date"
+                )
+            seen.add((day, product_id))
+            currency = _text(row.get("currency"), "matrixport holding currency")
+            unit_nav = _observed_decimal(row.get("nav"), "matrixport holding unit nav")
+            if unit_nav is None:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_POSITIONS_UNIT_NAV_ABSENT: an active holding has no "
+                    f"unit NAV on {day.isoformat()}"
+                )
+            if currency == "USD":
+                rate, fx_evidence = Decimal(1), []
+            else:
+                fx = _daily_fx_evidence(currency, day, fx_rates)
+                rate, fx_evidence = Decimal(str(fx["rate"])), [fx]
+            value = share * unit_nav * rate
+            totals[day] += value
+            if product_id not in last_row or day > last_row[product_id][0]:
+                last_row[product_id] = (day, share, value)
+            published = published_nav.get((product_id, day))
+            if published is None:
+                unclosed.add(day)
+            else:
+                independent[day] += share * published * rate
+            strategy_id, mapping_status = _mapped_strategy_for_account(
+                account_id, day, accounts, strategies, assignments
+            )
+            source_id = f"{day.isoformat()}:{product_id}"
+            positions.append(
+                {
+                    "account_id": account_id,
+                    "as_of_date": day.isoformat(),
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "generation_id": generation_id,
+                    "mapping_status": mapping_status,
+                    "market_value": {
+                        "currency": "USD",
+                        "status": "AVAILABLE",
+                        "value": format(value.normalize(), "f"),
+                    },
+                    "closure_status": "CONSISTENT_WITH_PUBLISHED_NAV",
+                    "native_value": {
+                        "currency": currency,
+                        "status": "AVAILABLE",
+                        "value": format(native.normalize(), "f"),
+                    },
+                    "provider_id": _MATRIXPORT,
+                    "quantity": format(share.normalize(), "f"),
+                    "unit_nav": format(unit_nav.normalize(), "f"),
+                    "record_id": f"matrixport:position:{source_id}",
+                    "security_id": "security-matrixport-"
+                    + hashlib.sha256(product_id.encode("utf-8")).hexdigest()[:24],
+                    "source_artifact_id": artifact_id,
+                    "source_record_id": source_id,
+                    "strategy_id": strategy_id,
+                    "symbol": _product_name(product_names, product_id),
+                    "valuation_fx": fx_evidence,
+                    "value_basis": "NAV_SHARE_PRODUCT",
+                }
+            )
+    for (key, day), share_on_day in sorted(day_share.items()):
+        cumulative = sum(
+            (delta for event_day, delta in events.get(key, []) if event_day <= day),
+            Decimal(0),
+        )
+        if share_on_day != cumulative:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_SHARE_ANCHOR: the share on "
+                f"{day.isoformat()} differs from the cumulative subscription events"
+            )
+    for key in {key for (key, _day_value) in day_share}:
+        first_event = min(
+            (event_day for event_day, delta in events.get(key, []) if delta > 0),
+            default=None,
+        )
+        first_held = min(day for (k, day) in day_share if k == key)
+        if first_event is None or first_held != first_event:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_GAP: the first held day "
+                f"{first_held.isoformat()} is not the first subscription event day"
+            )
+    for key, (last_day, last_share, last_value) in last_row.items():
+        if last_share != api_share.get(key):
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_SHARE_ANCHOR: the last position share on "
+                f"{last_day.isoformat()} differs from the API-reported holding"
+            )
+        for row_out in reversed(positions):
+            if row_out["security_id"] == _security_id(key) and (
+                row_out["as_of_date"] == last_day.isoformat()
+            ):
+                row_out["api_reported_value_gap_usd"] = format(
+                    (api_value[key] - last_value).normalize(), "f"
+                )
+                break
+        if api_value[key] != 0 and (
+            abs(api_value[key] - last_value) / abs(api_value[key])
+            > MATRIXPORT_POSITIONS_API_VALUE_TOLERANCE
+        ):
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_API_VALUE_ANCHOR: the last derived value differs "
+                f"from the API-reported holding value by over "
+                f"{MATRIXPORT_POSITIONS_API_VALUE_TOLERANCE:.0%}"
+            )
+    if unclosed:
+        raise ProviderLedgerError(
+            "MATRIXPORT_POSITIONS_NAV_DAILY_ABSENT: valued days with no published unit "
+            "NAV: " + ", ".join(d.isoformat() for d in sorted(unclosed))
+        )
+    typed = sum(
+        1
+        for row_out in positions
+        if row_out["closure_status"] != "CONSISTENT_WITH_PUBLISHED_NAV"
+    )
+    if typed > max(3, len(positions) // 100):
+        raise ProviderLedgerError(
+            "MATRIXPORT_POSITIONS_TOO_MANY_GAPS: more provider-gap position days "
+            f"than the allowance (3 or 1%): {typed} of {len(positions)}"
+        )
+    navs = _matrixport_nav_observations(
+        generation_id,
+        manifest,
+        catalog,
+        root,
+        accounts,
+        strategies,
+        assignments,
+        fx_rates=fx_rates,
+        financial_cutoff=financial_cutoff,
+        cutoff_findings=None,
+    )
+    nav_days: dict[date, Decimal] = {}
+    for observation in navs:
+        nav_value = _observed_decimal(observation["nav"], "matrixport account NAV")
+        if nav_value is None:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_NAV_CLOSURE: an account NAV is unavailable"
+            )
+        nav_days[date.fromisoformat(str(observation["as_of_date"]))] = nav_value
+    # Gap detection against the independent published-NAV calendar: every published day
+    # between the first and last held day (bounded by the declared boundary, the cutoff and the
+    # admitted FX end) must have a holdings row; a missing run of days is refused, not passed.
+    if active_days:
+        window_end = min(
+            _day(
+                catalog.get("observed_boundary_date"),
+                "matrixport observed_boundary_date",
+            ),
+            fx_end,
+            financial_cutoff if financial_cutoff is not None else fx_end,
+        )
+        if max(day for (_product, day) in held_days) < window_end:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_GAP: the holdings end before the declared "
+                f"boundary {window_end.isoformat()}"
+            )
+        missing = sorted(
+            {
+                day
+                for (_product, day) in published_nav
+                if min(active_days) <= day <= window_end
+            }
+            - {day for (_product, day) in held_days}
+        )
+        if missing:
+            raise ProviderLedgerError(
+                "MATRIXPORT_POSITIONS_GAP: published unit NAV days with no holdings "
+                "row inside the held window: "
+                + ", ".join(d.isoformat() for d in missing)
+            )
+    for label, days in (
+        (
+            "a NAV day has no position rows",
+            sorted(set(nav_days) - set(totals) - native_absent),
+        ),
+        (
+            "a position day has no NAV observation",
+            sorted(set(totals) - set(nav_days)),
+        ),
+    ):
+        if days:
+            raise ProviderLedgerError(
+                f"MATRIXPORT_POSITIONS_NAV_CLOSURE: {label}: "
+                + ", ".join(d.isoformat() for d in days)
+            )
+    for day in sorted(nav_days):
+        # The position value and the independent published-NAV value must both close
+        # to the account NAV.  A valued day with no published unit NAV was refused above
+        # (MATRIXPORT_POSITIONS_NAV_DAILY_ABSENT), so every day here has both.
+        for amount in (totals[day], independent[day]):
+            if abs(amount - nav_days[day]) > MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_POSITIONS_NAV_CLOSURE: position rows differ from the "
+                    f"account NAV on {day.isoformat()} by more than "
+                    f"{MATRIXPORT_POSITIONS_NAV_TOLERANCE_USD} USD"
+                )
+    return positions
+
+
 def _matrixport_capital_anchors(
     generation_id: str,
     manifest: GenerationManifest,
@@ -1679,6 +2256,10 @@ def _matrixport_capital_anchors(
     return anchors
 
 
+# real fills run 13:00-22:59 UTC (the fund trades a few minutes before the US close)
+_QUANTBASE_LATEST_FILL_UTC_HOUR: Final = 23
+
+
 def _quantbase_restated_days(
     manifest: GenerationManifest,
     root: Path,
@@ -1714,6 +2295,14 @@ def _quantbase_restated_days(
         if quantity is None:
             continue
         stamp = _utc_timestamp(filled_at, "quantbase order filled_at")
+        if int(stamp[11:13]) >= _QUANTBASE_LATEST_FILL_UTC_HOUR:
+            # the fill day is the UTC calendar day while the dashboard is dated by the US calendar
+            # day: a fill this late could belong to the next dashboard day
+            raise ProviderLedgerError(
+                f"quantbase order filled_at {filled_at} is at or after "
+                f"{_QUANTBASE_LATEST_FILL_UTC_HOUR}:00 UTC: its calendar day is ambiguous against "
+                "the dashboard day"
+            )
         legs.append(
             (date.fromisoformat(stamp[:10]), str(row.get("symbol") or ""), quantity)
         )
@@ -1724,7 +2313,22 @@ def _quantbase_restated_days(
             dashboard[_quantbase_day(price_row["time"], "quantbase Volatis time")] = (
                 value
             )
-    return quantbase_fund_days.corrected_values(dashboard, legs, fill_closes)
+    corrected = quantbase_fund_days.corrected_values(dashboard, legs, fill_closes)
+    if not quantbase_fund_days.closes_reproduce_the_dashboard(corrected, legs):
+        valued, failed = quantbase_fund_days.non_fill_closure_failures(corrected, legs)
+        if valued < quantbase_fund_days.MIN_NON_FILL_DAYS:
+            raise ProviderLedgerError(
+                "quantbase_fill_closes cannot be trusted: only "
+                f"{valued} non-fill days are valued (at least "
+                f"{quantbase_fund_days.MIN_NON_FILL_DAYS} are needed to show that the closes "
+                "reproduce the dashboard)"
+            )
+        raise ProviderLedgerError(
+            "quantbase_fill_closes do not reproduce the dashboard on non-fill days "
+            f"({failed} of {valued} valued days fail the holdings x close rebuild): the "
+            "close series is in other units than the order quantities (split-adjusted?)"
+        )
+    return corrected
 
 
 def _quantbase_nav_observations(
@@ -1830,6 +2434,603 @@ def _quantbase_nav_observations(
             }
         )
     return observations
+
+
+#: The snapshot's lines must sum to the strategy NAV of its day to the cent.
+_QUANTBASE_SNAPSHOT_CENT: Final = Decimal("0.01")
+#: A holding valued at an earlier cutoff from the NAV must imply a price within this
+#: relative distance of the snapshot price (an independent test of the share count).
+_QUANTBASE_IMPLIED_PRICE_TOLERANCE: Final = Decimal("0.01")
+_QUANTBASE_HOLDINGS: Final = "csv/dashboard_Volatis_Strategy_holdings.csv"
+_QUANTBASE_REBALANCES: Final = "csv/volatis_strategy_rebalance_history.csv"
+_QUANTBASE_ACTIVITY_DATES: Final = (
+    "filled_at",
+    "completed_at",
+    "date",
+    "time",
+    "created_at",
+)
+
+
+def _quantbase_snapshot_day(catalog: Mapping[str, Any]) -> date:
+    """The New York day the holdings snapshot was captured, from the capture itself.
+
+    Not the generation's as-of date: a generation can carry an earlier as-of than the
+    moment its holdings file was captured.
+    """
+
+    for dataset in _objects(catalog.get("datasets", []), "quantbase.datasets"):
+        if dataset.get("relative_path") != _QUANTBASE_HOLDINGS:
+            continue
+        if dataset.get("snapshot_kind") != "CAPTURE_TIME_SNAPSHOT":
+            raise ProviderLedgerError(
+                "quantbase holdings are not a capture-time snapshot"
+            )
+        captured = datetime.fromisoformat(
+            _utc_timestamp(
+                dataset.get("captured_at"), "quantbase holdings captured_at"
+            ).replace("Z", "+00:00")
+        )
+        return captured.astimezone(ZoneInfo("America/New_York")).date()
+    raise ProviderLedgerError(
+        "quantbase holdings capture time is absent from the catalog"
+    )
+
+
+_QUANTBASE_CASH_SYMBOL: Final = "$USD"
+# the vendor's NAV of a day values the holdings it opened the day with at that day's official
+# close; the replayed opening holdings must reproduce it within a hundredth of a percent
+_QUANTBASE_OPENING_TOLERANCE: Final = Decimal("0.0001")
+_QUANTBASE_ROLLBACK_SCALE_TOLERANCE: Final = Decimal("0.001")
+# holdings snapshots print shares to two places, replayed orders carry nine
+_QUANTBASE_REPLAY_QUANTITY_TOLERANCE: Final = Decimal("0.005")
+
+
+def _quantbase_rollback_decimal(value: object) -> Decimal:
+    """A quantity or proportion cell: blank is zero, anything else a finite decimal."""
+
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return Decimal(0)
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation as exc:
+        raise ProviderLedgerError("quantbase roll-back amount is not a number") from exc
+    if not parsed.is_finite():
+        raise ProviderLedgerError("quantbase roll-back amount is not finite")
+    return parsed
+
+
+def _quantbase_rollback(value: object) -> dict[str, Any]:
+    """The declared roll-back set (spec key ``quantbase_rollback``): the cutoff, the
+    snapshot day, the strategy fund's title and EXACTLY the rebalance rows and account
+    activity rows the snapshot holds after the cutoff."""
+
+    top = _object(value, "quantbase_rollback")
+    if set(top) != {"cutoff", "snapshot_day", "fund_title", "rebalances", "activity"}:
+        raise ProviderLedgerError("quantbase_rollback keys differ")
+    rebalances: list[tuple[date, str, Decimal]] = []
+    for item in _objects(top["rebalances"], "quantbase_rollback.rebalances"):
+        if set(item) != {"date", "symbol", "proportion"}:
+            raise ProviderLedgerError("quantbase_rollback rebalance keys differ")
+        rebalances.append(
+            (
+                _day(item["date"], "quantbase_rollback rebalance date"),
+                _text(item["symbol"], "quantbase_rollback rebalance symbol"),
+                _quantbase_rollback_decimal(item["proportion"]),
+            )
+        )
+    activity: list[tuple[str, str, str, Decimal]] = []
+    for item in _objects(top["activity"], "quantbase_rollback.activity"):
+        if set(item) != {"id", "activity_type", "symbol", "quantity"}:
+            raise ProviderLedgerError("quantbase_rollback activity keys differ")
+        activity.append(
+            (
+                _text(item["id"], "quantbase_rollback activity id"),
+                _text(item["activity_type"], "quantbase_rollback activity type"),
+                str(item["symbol"]).strip(),
+                _quantbase_rollback_decimal(item["quantity"]),
+            )
+        )
+    if not rebalances and not activity:
+        raise ProviderLedgerError("quantbase_rollback declares nothing to roll back")
+    return {
+        "cutoff": _day(top["cutoff"], "quantbase_rollback.cutoff"),
+        "snapshot_day": _day(top["snapshot_day"], "quantbase_rollback.snapshot_day"),
+        "fund_title": _text(top["fund_title"], "quantbase_rollback.fund_title"),
+        "rebalances": sorted(rebalances),
+        "activity": sorted(activity),
+    }
+
+
+def _quantbase_check_rollback_set(
+    rollback: Mapping[str, Any],
+    cutoff_day: date,
+    snapshot_day: date,
+    later_rebalances: list[tuple[date, str, Decimal]],
+    later_activity: list[tuple[str, str, str, Decimal]],
+) -> None:
+    """The rows after the cutoff must be exactly the declared set: no extra row, no
+    missing row, no changed amount (multiset equality)."""
+
+    if rollback["cutoff"] != cutoff_day or rollback["snapshot_day"] != snapshot_day:
+        raise ProviderLedgerError(
+            "quantbase roll-back is declared for another cutoff or snapshot day"
+        )
+    if sorted(later_rebalances) != rollback["rebalances"]:
+        raise ProviderLedgerError(
+            "quantbase rebalance rows after the cutoff differ from the declared "
+            "roll-back set"
+        )
+    if sorted(later_activity) != rollback["activity"]:
+        raise ProviderLedgerError(
+            "quantbase account activity after the cutoff differs from the declared "
+            "roll-back set"
+        )
+
+
+def _quantbase_roll_back(
+    rollback: Mapping[str, Any],
+    *,
+    orders: Sequence[tuple[str, date, str, Decimal]],
+    fund_ids: set[str],
+    snapshot_holdings: Sequence[tuple[str, Decimal]],
+    snapshot_cash: Decimal,
+    cutoff_day: date,
+    cutoff_nav: Decimal | None,
+    closes: Mapping[str, Mapping[date, Decimal]],
+) -> tuple[
+    Decimal,
+    list[tuple[str, Decimal, Decimal, Decimal]],
+    dict[str, Decimal],
+    dict[str, Any],
+]:
+    """The holdings at the cutoff by replaying the strategy fund's filled orders.
+
+    Returns the cash, the risky holdings as (symbol, shares, value, official close of the
+    cutoff), their values and the evidence.  Refuses unless the replay of ALL orders
+    reproduces the snapshot, the holdings before the cutoff day close to the vendor NAV at
+    the official closes, and every held symbol has an official close of the cutoff."""
+
+    del rollback  # the declared set was already matched against the rows
+    if len(fund_ids) != 1 or "" in fund_ids:
+        raise ProviderLedgerError(
+            "quantbase roll-back needs exactly one fund id for the strategy title"
+        )
+    (fund_id,) = fund_ids
+    mine = [(day, sym, qty) for fund, day, sym, qty in orders if fund == fund_id]
+    everything: dict[str, Decimal] = defaultdict(Decimal)
+    opening: dict[str, Decimal] = defaultdict(Decimal)
+    at_cutoff: dict[str, Decimal] = defaultdict(Decimal)
+    for day, sym, qty in mine:
+        everything[sym] += qty
+        if day < cutoff_day:
+            opening[sym] += qty
+        if day <= cutoff_day:
+            at_cutoff[sym] += qty
+    snapshot = dict(snapshot_holdings)
+    snapshot[_QUANTBASE_CASH_SYMBOL] = (
+        snapshot.get(_QUANTBASE_CASH_SYMBOL, Decimal(0)) + snapshot_cash
+    )
+    for sym in set(everything) | set(snapshot):
+        if (
+            abs(everything.get(sym, Decimal(0)) - snapshot.get(sym, Decimal(0)))
+            > _QUANTBASE_REPLAY_QUANTITY_TOLERANCE
+        ):
+            raise ProviderLedgerError(
+                f"quantbase order replay does not reproduce the snapshot for {sym}"
+            )
+    if cutoff_nav is None or cutoff_nav <= 0:
+        raise ProviderLedgerError("quantbase holdings cannot be valued at the cutoff")
+    opening_value = opening.get(_QUANTBASE_CASH_SYMBOL, Decimal(0))
+    for sym, qty in opening.items():
+        if sym == _QUANTBASE_CASH_SYMBOL or qty == 0:
+            continue
+        close = closes.get(sym, {}).get(cutoff_day)
+        if close is None:
+            raise ProviderLedgerError(
+                f"quantbase roll-back needs the official close of {sym} on the cutoff"
+            )
+        opening_value += qty * close
+    opening_residual = opening_value - cutoff_nav
+    if abs(opening_residual) > _QUANTBASE_OPENING_TOLERANCE * cutoff_nav:
+        raise ProviderLedgerError(
+            "quantbase holdings before the cutoff day do not close to the strategy NAV "
+            "of the cutoff at the official closes"
+        )
+    cash = at_cutoff.get(_QUANTBASE_CASH_SYMBOL, Decimal(0))
+    held = sorted(
+        (sym, qty)
+        for sym, qty in at_cutoff.items()
+        if sym != _QUANTBASE_CASH_SYMBOL and qty != 0
+    )
+    if not held or cash < 0 or cutoff_nav <= cash:
+        raise ProviderLedgerError("quantbase holdings cannot be valued at the cutoff")
+    raw: dict[str, Decimal] = {}
+    for sym, qty in held:
+        close = closes.get(sym, {}).get(cutoff_day)
+        if close is None or qty < 0:
+            raise ProviderLedgerError(
+                "quantbase roll-back needs a long holding and the official close of "
+                f"{sym} on the cutoff"
+            )
+        raw[sym] = qty * close
+    total = cutoff_nav - cash
+    scale = total / sum(raw.values(), Decimal(0))
+    if abs(scale - 1) > _QUANTBASE_ROLLBACK_SCALE_TOLERANCE:
+        raise ProviderLedgerError(
+            "quantbase rolled-back holdings at the official closes differ from the "
+            "strategy NAV by more than the tolerance"
+        )
+    values: dict[str, Decimal] = {}
+    for sym, _qty in held[:-1]:
+        values[sym] = (raw[sym] * scale).quantize(Decimal("0.000001"))
+    values[held[-1][0]] = total - sum(values.values(), Decimal(0))
+    risky = [(sym, qty, values[sym], closes[sym][cutoff_day]) for sym, qty in held]
+    evidence = {
+        "fund_id": fund_id,
+        "replay_order_rows": len(mine),
+        "replay_reproduces_snapshot": True,
+        "opening_value_at_official_closes_usd": format(opening_value, "f"),
+        "opening_residual_to_nav_usd": format(opening_residual, "f"),
+        "official_close_value_usd": format(sum(raw.values(), Decimal(0)), "f"),
+        "value_scale_to_nav": format(scale, "f"),
+        "opening_tolerance": str(_QUANTBASE_OPENING_TOLERANCE),
+        "scale_tolerance": str(_QUANTBASE_ROLLBACK_SCALE_TOLERANCE),
+    }
+    return cash, risky, values, evidence
+
+
+def _quantbase_positions(
+    generation_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+    financial_cutoff: date | None = None,
+    fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None,
+    rollback: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """The Volatis strategy's holdings at the cutoff, from the capture-time snapshot.
+
+    Quantbase publishes holdings only as the snapshot taken when the run was captured
+    (the New York day of the holdings dataset's ``captured_at``), not as a daily series.
+    The snapshot stands for the cutoff holdings only when nothing happened in the
+    account between the cutoff and the capture: any rebalance row, and any account
+    activity of any type (a fill, a dividend, a journal, a fee), dated after the cutoff
+    and not after the snapshot day refuses the build.  The snapshot's lines must sum to
+    the strategy NAV of its day to the cent.  When the cutoff precedes the snapshot the
+    single risky holding is valued as the strategy NAV of the cutoff less the exact cash
+    line, labelled derived, and that value must imply a price within one percent of the
+    snapshot price (so a wrong share count cannot pass); more than one risky holding
+    cannot be valued that way and refuses.
+
+    The share count is tested against an INDEPENDENT price when the governed closes
+    (``fill_closes``) hold the symbol's official close of the day the position is valued:
+    shares times that close must match the value within 0.1 percent, else the build
+    refuses.  Without such a close the row says ``independent_price_check`` is
+    ``UNAVAILABLE``, so a closure that declares completeness can require ``PASSED``.
+
+    With a declared ``rollback`` (spec key ``quantbase_rollback``) the snapshot may postdate
+    the cutoff by exactly the declared rows: the rebalance rows and account-activity rows
+    dated after the cutoff must EQUAL the declared set (multiset equality: no extra, no
+    missing, no changed amount), else the build refuses as above.  The holdings at the
+    cutoff are then the replay of the strategy fund's filled orders up to the cutoff; the
+    replay of ALL orders must reproduce the snapshot quantities (so it is complete), the
+    holdings before the cutoff day valued at the official closes of the cutoff must close
+    to the vendor NAV of the cutoff (the vendor's own start-of-day convention), and every
+    held symbol needs an official close of the cutoff (the independent check is required).
+    Any number of risky holdings is allowed; their values are the official-close values
+    scaled pro rata to the vendor NAV less the cash.
+    """
+
+    if not any(
+        item.artifact_id == f"source/{_QUANTBASE_HOLDINGS}"
+        for item in manifest.artifacts
+    ):
+        # An earlier capture carries no holdings file: no positions fact, not an error.
+        return []
+    snapshot_day = _quantbase_snapshot_day(catalog)
+    account_id = _CSV_FACT_ACCOUNT[_QUANTBASE]
+    run_id = _run_id(
+        _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
+            "run_id"
+        ),
+        "quantbase.legacy_lineage.run_id",
+    )
+    artifacts_root = root / "source-runs" / run_id / "artifacts"
+
+    def read(relative: str, columns: set[str], name: str) -> list[dict[str, Any]]:
+        artifact = _find_manifest_artifact(manifest, f"source/{relative}", name)
+        return _verified_csv_rows(
+            _exact_file(artifacts_root, Path(relative), name),
+            artifact.sha256,
+            columns,
+            name,
+        )
+
+    cutoff_day = (
+        snapshot_day
+        if financial_cutoff is None
+        else min(financial_cutoff, snapshot_day)
+    )
+    holdings = read(
+        _QUANTBASE_HOLDINGS,
+        {"symbol", "quantity", "value", "latest_price", "percentage"},
+        "quantbase Volatis holdings",
+    )
+    rebalances = read(
+        _QUANTBASE_REBALANCES,
+        {"date", "symbol", "proportion"},
+        "quantbase Volatis rebalance history",
+    )
+    activity = read(
+        "csv/account_activity.csv",
+        {"activity_type", "amount", "created_at", "fund", "id", "time", "type"},
+        "quantbase account activity",
+    )
+    navs = {
+        _quantbase_day(row["time"], "quantbase Volatis time"): _observed_decimal(
+            row.get("value"), "quantbase Volatis value"
+        )
+        for row in read(
+            _QUANTBASE_PRICEHISTORY,
+            {"time", "value"},
+            "quantbase Volatis pricehistory",
+        )
+    }
+    last_rebalance: date | None = None
+    later_rebalances: list[tuple[date, str, Decimal]] = []
+    for row in rebalances:
+        day = _day(row["date"], "quantbase rebalance date")
+        if cutoff_day < day <= snapshot_day:
+            if rollback is None:
+                raise ProviderLedgerError(
+                    "quantbase holdings snapshot postdates a rebalance after the cutoff"
+                )
+            later_rebalances.append(
+                (
+                    day,
+                    str(row["symbol"]).strip(),
+                    _quantbase_rollback_decimal(row["proportion"]),
+                )
+            )
+        if day <= cutoff_day and (last_rebalance is None or day > last_rebalance):
+            last_rebalance = day
+    last_activity: date | None = None
+    later_activity: list[tuple[str, str, str, Decimal]] = []
+    orders: list[tuple[str, date, str, Decimal]] = []
+    fund_ids: set[str] = set()
+    for row in activity:
+        # An activity's effective day is the latest of the dates it carries: an order is
+        # filled_at, a dividend date, a journal completed_at, anything else created_at.
+        days = [
+            datetime.fromisoformat(
+                _utc_timestamp(
+                    str(row[column]).strip(), f"quantbase activity {column}"
+                ).replace("Z", "+00:00")
+            )
+            .astimezone(ZoneInfo("America/New_York"))
+            .date()
+            for column in _QUANTBASE_ACTIVITY_DATES
+            if str(row.get(column) or "").strip()
+        ]
+        if not days:
+            raise ProviderLedgerError("quantbase account activity row has no date")
+        activity_day = max(days)
+        if rollback is not None:
+            title = str(row.get("fund_title") or "").strip()
+            if title == rollback["fund_title"]:
+                fund_ids.add(str(row.get("fund") or "").strip())
+        if cutoff_day < activity_day <= snapshot_day:
+            if rollback is None:
+                raise ProviderLedgerError(
+                    "quantbase account has activity after the cutoff "
+                    f"({row.get('activity_type')}): the snapshot is not the cutoff "
+                    "holdings"
+                )
+            later_activity.append(
+                (
+                    str(row.get("id") or "").strip(),
+                    str(row.get("activity_type") or "").strip(),
+                    str(row.get("symbol") or "").strip(),
+                    _quantbase_rollback_decimal(row.get("quantity")),
+                )
+            )
+        if (
+            rollback is not None
+            and str(row.get("activity_type") or "").strip() == "order"
+            and str(row.get("executed") or "").strip() == "Y"
+        ):
+            orders.append(
+                (
+                    str(row.get("fund") or "").strip(),
+                    activity_day,
+                    str(row.get("symbol") or "").strip(),
+                    _quantbase_rollback_decimal(row.get("quantity")),
+                )
+            )
+        if activity_day <= cutoff_day and (
+            last_activity is None or activity_day > last_activity
+        ):
+            last_activity = activity_day
+    if rollback is not None:
+        _quantbase_check_rollback_set(
+            rollback, cutoff_day, snapshot_day, later_rebalances, later_activity
+        )
+    cash = Decimal(0)
+    risky: list[tuple[str, Decimal, Decimal, Decimal]] = []
+    for row in holdings:
+        symbol = _text(row.get("symbol"), "quantbase holding symbol")
+        value = _observed_decimal(row.get("value"), "quantbase holding value")
+        quantity = _observed_decimal(row.get("quantity"), "quantbase holding quantity")
+        price = _observed_decimal(row.get("latest_price"), "quantbase holding price")
+        if value is None or quantity is None or price is None:
+            raise ProviderLedgerError("quantbase holding amount is unavailable")
+        if symbol == "$USD":
+            cash += value
+        else:
+            risky.append((symbol, quantity, value, price))
+    snapshot_nav = navs.get(snapshot_day)
+    if snapshot_nav is None or snapshot_nav <= 0:
+        raise ProviderLedgerError(
+            "quantbase strategy NAV is absent on the snapshot day"
+        )
+    snapshot_total = cash + sum((v for _s, _q, v, _p in risky), Decimal(0))
+    if abs(snapshot_total - snapshot_nav) > _QUANTBASE_SNAPSHOT_CENT:
+        raise ProviderLedgerError(
+            "quantbase holdings do not close against the strategy NAV"
+        )
+    for symbol, quantity, value, price in risky:
+        # a price printed to the cent is rounded by up to half a cent a share: allow that
+        # rounding, never more (a share count that is wrong stays far outside it)
+        rounding = (
+            abs(quantity) * Decimal("0.005")
+            if price == price.quantize(Decimal("0.01"))
+            else Decimal(0)
+        )
+        if abs(quantity * price - value) > _QUANTBASE_SNAPSHOT_CENT * 2 + rounding:
+            raise ProviderLedgerError(
+                f"quantbase holding {symbol} quantity times price differs from its value"
+            )
+    derived = cutoff_day != snapshot_day
+    cutoff_nav = navs.get(cutoff_day)
+    rolled_evidence: dict[str, Any] | None = None
+    if derived and rollback is not None:
+        # The snapshot is rolled back to the cutoff by replaying the fund's orders.
+        cash, risky, values, rolled_evidence = _quantbase_roll_back(
+            rollback,
+            orders=orders,
+            fund_ids=fund_ids,
+            snapshot_holdings=[(sym, q) for sym, q, _v, _p in risky],
+            snapshot_cash=cash,
+            cutoff_day=cutoff_day,
+            cutoff_nav=cutoff_nav,
+            closes=fill_closes or {},
+        )
+        rolled_evidence["rollback_rebalance_count"] = len(later_rebalances)
+        rolled_evidence["rollback_activity_count"] = len(later_activity)
+    elif derived:
+        if len(risky) != 1 or cutoff_nav is None or cutoff_nav <= cash:
+            raise ProviderLedgerError(
+                "quantbase holdings cannot be valued at the cutoff"
+            )
+        symbol, quantity, _value, snapshot_price = risky[0]
+        derived_value = cutoff_nav - cash
+        implied = derived_value / quantity
+        if (
+            abs(implied - snapshot_price)
+            > _QUANTBASE_IMPLIED_PRICE_TOLERANCE * snapshot_price
+        ):
+            raise ProviderLedgerError(
+                "quantbase cutoff value implies a price far from the snapshot price: "
+                "the share count or the cutoff NAV is wrong"
+            )
+        values = {symbol: derived_value}
+    else:
+        values = {symbol: value for symbol, _q, value, _p in risky}
+    independent: dict[str, dict[str, str]] = {}
+    for symbol, quantity, _value, _price in risky:
+        close = (fill_closes or {}).get(symbol, {}).get(cutoff_day)
+        if close is None:
+            independent[symbol] = {"status": "UNAVAILABLE"}
+            continue
+        if abs(quantity * close - values[symbol]) > Decimal("0.001") * values[symbol]:
+            raise ProviderLedgerError(
+                f"quantbase holding {symbol} differs from its shares times the "
+                "official close of the cutoff"
+            )
+        independent[symbol] = {
+            "status": "PASSED",
+            "close": format(close, "f"),
+            "close_date": cutoff_day.isoformat(),
+        }
+    strategy_id, mapping_status = _mapped_strategy_for_account(
+        account_id, cutoff_day, accounts, strategies, assignments
+    )
+    artifact_id = f"source/{_QUANTBASE_HOLDINGS}"
+    # The proofs: the snapshot lines sum to the snapshot NAV to the cent, quantity times
+    # price equals each value, nothing happened after the cutoff, and (when derived) the
+    # value implies a price near the snapshot price.
+    closure = {
+        "cash_usd": format(cash, "f"),
+        "usd_cash": format(cash, "f"),
+        "nav_usd": format(cutoff_nav if derived else snapshot_nav, "f"),
+        "nav_date": cutoff_day.isoformat(),
+        "snapshot_day": snapshot_day.isoformat(),
+        "snapshot_nav_usd": format(snapshot_nav, "f"),
+        "snapshot_total_usd": format(snapshot_total, "f"),
+        "snapshot_difference_usd": format(snapshot_total - snapshot_nav, "f"),
+        "last_rebalance_date": (
+            last_rebalance.isoformat() if last_rebalance is not None else None
+        ),
+        "last_activity_date": (
+            last_activity.isoformat() if last_activity is not None else None
+        ),
+        "activity_after_cutoff_count": 0,
+        "cent_tolerance": str(_QUANTBASE_SNAPSHOT_CENT),
+        "implied_price_tolerance": str(_QUANTBASE_IMPLIED_PRICE_TOLERANCE),
+        **({"rollback": rolled_evidence} if rolled_evidence is not None else {}),
+    }
+    rows: list[dict[str, Any]] = []
+    for symbol, quantity, _value, price in risky:
+        source_id = f"{cutoff_day.isoformat()}:{symbol}"
+        rows.append(
+            {
+                "account_id": account_id,
+                "as_of_date": cutoff_day.isoformat(),
+                "as_of_basis": (
+                    "CAPTURE_TIME_SNAPSHOT_ROLLED_BACK_TO_CUTOFF"
+                    if rolled_evidence is not None
+                    else "CAPTURE_TIME_SNAPSHOT_NO_ACTIVITY_SINCE_CUTOFF"
+                ),
+                "capture_date": snapshot_day.isoformat(),
+                "closure": {
+                    **closure,
+                    "independent_price_check": independent[symbol]["status"],
+                    **(
+                        {
+                            "independent_close": independent[symbol]["close"],
+                            "independent_close_date": independent[symbol]["close_date"],
+                        }
+                        if independent[symbol]["status"] == "PASSED"
+                        else {}
+                    ),
+                },
+                "evidence_class": "CAPTURE_TIME_SNAPSHOT",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": generation_id,
+                "mapping_status": mapping_status,
+                "mark_price": format(price, "f"),
+                "market_value": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": format(values[symbol], "f"),
+                },
+                "provider_id": _QUANTBASE,
+                "quantity": format(quantity, "f"),
+                "record_id": f"quantbase:position:{source_id}",
+                "security_id": "security-quantbase-"
+                + hashlib.sha256(f"quantbase:{symbol}".encode()).hexdigest()[:24],
+                "snapshot_price": (
+                    None if rolled_evidence is not None else format(price, "f")
+                ),
+                "source_artifact_id": artifact_id,
+                "source_record_id": source_id,
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "value_basis": (
+                    "ROLLED_BACK_ORDER_REPLAY_SCALED_TO_STRATEGY_NAV_AT_CUTOFF"
+                    if rolled_evidence is not None
+                    else "DERIVED_FROM_STRATEGY_NAV_AT_CUTOFF"
+                    if derived
+                    else "CAPTURE_TIME_SNAPSHOT_VALUE"
+                ),
+            }
+        )
+    return rows
 
 
 def _quantbase_capital_anchors(
@@ -2556,7 +3757,12 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "run_observation",
             "account_roles",
             "quantbase_fill_closes",
+            "quantbase_position_closes",
+            "quantbase_rollback",
             "zero_financing_observations",
+            "schwab_gross_exposure",
+            "schwab_margin_interest",
+            "event_completeness_declaration",
         )
         allowed.update(
             frozenset({*expected, *subset})
@@ -4190,25 +5396,421 @@ def _zero_financing_rows(
     return provider_id, out, artifacts
 
 
-def _quantbase_fill_closes(value: object) -> dict[str, dict[date, Decimal]]:
+def _zero_financing_replay_rows(
+    ref: Mapping[str, Any],
+    providers: set[str],
+    provider_facts: Mapping[str, Mapping[str, Any]],
+    as_of: date,
+    first_nav: Mapping[str, date],
+) -> tuple[str, list[dict[str, Any]], list[SourceArtifact]]:
+    """Zero-financing days DERIVED from a provider's pinned wallet ledger (F2).
+
+    Every input is a pinned file the ledger re-hashes from disk; the reader
+    (``zero_financing_replay.build``) refuses, with a named reason, anything that does not
+    close.  The provider must have exactly one observed account; rows run from its first
+    NAV day to the as-of date, so a day without a published NAV is still covered."""
+
+    if set(ref) != {"provider_id", "files", "credit_response_sha256"}:
+        raise ProviderLedgerError("zero_financing replay keys differ")
+    provider_id = _text(ref["provider_id"], "zero_financing replay provider_id")
+    if provider_id not in providers:
+        raise ProviderLedgerError("zero_financing replay names an undeclared provider")
+    pinned = _object(ref["files"], "zero_financing replay files")
+    if set(pinned) != set(zero_financing_replay.FILES):
+        raise ProviderLedgerError("zero_financing replay files differ")
+    contents: dict[str, bytes] = {}
+    artifacts: list[SourceArtifact] = []
+    for name in zero_financing_replay.FILES:
+        item = _object(pinned[name], f"zero_financing replay {name}")
+        if set(item) != {"path", "sha256"}:
+            raise ProviderLedgerError("zero_financing replay file keys differ")
+        raw = _pinned_file(item["path"], item["sha256"], f"replay {name}")
+        contents[name] = raw
+        artifacts.append(
+            SourceArtifact(
+                artifact_id=f"zero-financing/{provider_id}/replay/{name}",
+                sha256=hashlib.sha256(raw).hexdigest(),
+                size_bytes=len(raw),
+                as_of_date=as_of,
+                schema_name=f"{provider_id}-wallet-replay-input",
+                schema_version="1",
+            )
+        )
+    observed = {
+        str(row["account_id"])
+        for row in provider_facts.get(provider_id, {}).get("nav_observations", [])
+    }
+    if len(observed) != 1:
+        raise ProviderLedgerError(
+            "zero_financing replay needs exactly one observed account"
+        )
+    account = next(iter(observed))
+    try:
+        artifact = zero_financing_replay.build(
+            contents,
+            provider_id=provider_id,
+            account_id=account,
+            first_day=first_nav[account],
+            cutoff=as_of,
+            credit_response_sha256=_text(
+                ref["credit_response_sha256"], "credit_response_sha256"
+            ),
+        )
+        rows = zero_financing_statements.validate_rows(artifact, {account})
+    except (
+        KeyError,
+        ValueError,
+        zero_financing_replay.ReplayError,
+        zero_financing_statements.ZeroFinancingError,
+    ) as exc:
+        raise ProviderLedgerError(f"zero_financing replay: {exc}") from exc
+    identity = "\n".join(
+        [hashlib.sha256(contents[n]).hexdigest() for n in zero_financing_replay.FILES]
+        + [str(ref["credit_response_sha256"]), as_of.isoformat()]
+    )
+    generation = f"zero-financing-{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
+    out = []
+    for row in rows:
+        source_id = f"zero-financing:{row['account_id']}:{row['as_of_date']}"
+        out.append(
+            {
+                **row,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": generation,
+                "mapping_status": "UNMAPPED",
+                "mapping_reason": "ACCOUNT_LEVEL_OBSERVATION",
+                "record_id": f"{provider_id}:{source_id}",
+                "source_record_id": source_id,
+                "strategy_id": None,
+            }
+        )
+    return provider_id, out, artifacts
+
+
+_GROSS_EXPOSURE_KEYS: Final = frozenset({"accounts", "closes", "provider_id"})
+_ZERO_HOLDINGS_KEYS: Final = frozenset(
+    {"account_id", "balances", "capture_date", "last3"}
+)
+
+
+def _schwab_gross_exposure_rows(
+    value: object,
+    providers: set[str],
+    as_of: date,
+    combined: Mapping[str, Sequence[Mapping[str, Any]]],
+    zero_rows: Sequence[Mapping[str, Any]],
+    manifests: Mapping[str, Any],
+    empty_position_accounts: Sequence[str] = (),
+) -> tuple[list[dict[str, Any]], list[SourceArtifact]]:
+    """Gross position value at the cutoff for the named accounts (#894 F2 part a).
+
+    The spec names the provider, the accounts and the hash-pinned vendor close files; the
+    rows come from ``schwab_leverage_observations`` (two closures, or a refusal row).  An
+    optional ``zero_holdings`` list pins, per account that holds nothing, the live balances
+    capture its zero gross is closed against."""
+
+    ref = _object(value, "schwab_gross_exposure")
+    if set(ref) not in (_GROSS_EXPOSURE_KEYS, _GROSS_EXPOSURE_KEYS | {"zero_holdings"}):
+        raise ProviderLedgerError("schwab_gross_exposure keys differ")
+    provider_id = _text(ref["provider_id"], "schwab_gross_exposure.provider_id")
+    if provider_id not in providers or provider_id not in manifests:
+        raise ProviderLedgerError(
+            "schwab_gross_exposure names a provider the spec does not declare"
+        )
+    if not isinstance(ref["accounts"], list):
+        raise ProviderLedgerError("schwab_gross_exposure accounts differ")
+    accounts = [
+        _text(item, "schwab_gross_exposure.accounts item") for item in ref["accounts"]
+    ]
+    observed = {
+        str(r["account_id"])
+        for r in combined.get("nav_observations", [])
+        if r.get("provider_id") == provider_id
+    }
+    if not accounts or len(set(accounts)) != len(accounts) or set(accounts) - observed:
+        raise ProviderLedgerError(
+            "schwab_gross_exposure accounts differ from the provider's observed accounts"
+        )
+    closes: dict[tuple[str, str], Decimal] = {}
+    close_source_index: dict[tuple[str, str], int] = {}
+    artifacts: list[SourceArtifact] = []
+    digests: list[str] = []
+    for item in _objects(ref["closes"], "schwab_gross_exposure.closes"):
+        file_ref = _object(item, "schwab_gross_exposure close file")
+        if set(file_ref) != {"path", "sha256", "size_bytes"}:
+            raise ProviderLedgerError("schwab_gross_exposure close file keys differ")
+        raw = _pinned_file(file_ref["path"], file_ref["sha256"], "close file")
+        if len(raw) != file_ref["size_bytes"]:
+            raise ProviderLedgerError("close file size differs")
+        try:
+            for key, close in schwab_leverage_observations.load_closes(raw).items():
+                if closes.setdefault(key, close) != close:
+                    raise ProviderLedgerError("close files disagree on a close")
+                close_source_index.setdefault(key, len(artifacts))
+        except (
+            UnicodeDecodeError,
+            schwab_leverage_observations.SchwabExposureError,
+        ) as exc:
+            raise ProviderLedgerError(f"schwab_gross_exposure: {exc}") from exc
+        digest = hashlib.sha256(raw).hexdigest()
+        digests.append(digest)
+        artifacts.append(
+            SourceArtifact(
+                artifact_id=f"gross-exposure/{provider_id}/closes-{digest[:16]}.csv",
+                sha256=digest,
+                size_bytes=len(raw),
+                as_of_date=as_of,
+                schema_name="vendor-daily-closes",
+                schema_version="1",
+            )
+        )
+    if not artifacts:
+        raise ProviderLedgerError("schwab_gross_exposure names no close file")
+    closes_sources = [
+        {"artifact_id": a.artifact_id, "sha256": a.sha256} for a in artifacts
+    ]
+    zero_holdings: dict[str, dict[str, Any]] = {}
+    if "zero_holdings" in ref:
+        if not isinstance(ref["zero_holdings"], list):
+            raise ProviderLedgerError("schwab_gross_exposure zero_holdings differ")
+        for item in _objects(
+            ref["zero_holdings"], "schwab_gross_exposure.zero_holdings"
+        ):
+            held = _object(item, "schwab_gross_exposure zero holding")
+            if set(held) != _ZERO_HOLDINGS_KEYS:
+                raise ProviderLedgerError(
+                    "schwab_gross_exposure zero holding keys differ"
+                )
+            account = _text(held["account_id"], "zero holding account_id")
+            if account not in accounts or account in zero_holdings:
+                raise ProviderLedgerError(
+                    "schwab_gross_exposure zero holding names an unlisted or repeated account"
+                )
+            file_ref = _object(held["balances"], "zero holding balances")
+            if set(file_ref) != {"path", "sha256", "size_bytes"}:
+                raise ProviderLedgerError("zero holding balances keys differ")
+            raw = _pinned_file(file_ref["path"], file_ref["sha256"], "balances capture")
+            if len(raw) != file_ref["size_bytes"]:
+                raise ProviderLedgerError("balances capture size differs")
+            try:
+                balances = schwab_leverage_observations.load_balances(
+                    raw, _text(held["last3"], "zero holding last3")
+                )
+                stamp = schwab_leverage_observations.capture_stamp(raw)
+                capture_date = schwab_leverage_observations.check_capture_date(
+                    _text(held["capture_date"], "zero holding capture_date"), stamp
+                )
+            except schwab_leverage_observations.SchwabExposureError as exc:
+                raise ProviderLedgerError(f"schwab_gross_exposure: {exc}") from exc
+            digest = hashlib.sha256(raw).hexdigest()
+            digests.append(digest)
+            artifact = SourceArtifact(
+                artifact_id=f"gross-exposure/{provider_id}/balances-{digest[:16]}.json",
+                sha256=digest,
+                size_bytes=len(raw),
+                as_of_date=as_of,
+                schema_name="live-balances-capture",
+                schema_version="1",
+            )
+            artifacts.append(artifact)
+            zero_holdings[account] = {
+                "balances": balances,
+                "capture_date": capture_date,
+                "capture_stamp": stamp,
+                "source": {"artifact_id": artifact.artifact_id, "sha256": digest},
+            }
+    cutoff = as_of.isoformat()
+    observation = (
+        "gross-exposure-"
+        + hashlib.sha256(
+            "\n".join(
+                [
+                    *sorted(digests),
+                    cutoff,
+                    *sorted(accounts),
+                    *(
+                        f"{a}:{zero_holdings[a]['capture_date']}"
+                        for a in sorted(zero_holdings)
+                    ),
+                ]
+            ).encode()
+        ).hexdigest()[:24]
+    )
+    rows = schwab_leverage_observations.gross_exposure_rows(
+        accounts=accounts,
+        positions=[
+            r
+            for r in combined.get("positions", [])
+            if r.get("provider_id") == provider_id
+        ],
+        nav_rows=[
+            r
+            for r in combined.get("nav_observations", [])
+            if r.get("provider_id") == provider_id
+        ],
+        zero_financing_rows=zero_rows,
+        transactions=[
+            r
+            for r in combined.get("transactions", [])
+            if r.get("provider_id") == provider_id
+        ],
+        closes=closes,
+        closes_sources=closes_sources,
+        close_source_index=close_source_index,
+        empty_position_accounts=empty_position_accounts,
+        zero_holdings=zero_holdings,
+        cutoff=cutoff,
+        provider_id=provider_id,
+        generation_id=manifests[provider_id].generation_id,
+    )
+    return (
+        [{**row, "observation_generation_id": observation} for row in rows],
+        artifacts,
+    )
+
+
+_MARGIN_INTEREST_KEYS: Final = _ZERO_FINANCING_KEYS | {"accounts"}
+
+
+def _schwab_margin_interest_rows(
+    value: object,
+    providers: set[str],
+    as_of: date,
+    combined: Mapping[str, Sequence[Mapping[str, Any]]],
+    manifests: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[SourceArtifact]]:
+    """Statement evidence of the named margin accounts' interest (#894 F2 part b).
+
+    The spec pins the statement directory's SHA256SUMS and the local-only account mapping
+    exactly as ``zero_financing_observations`` does; the ledger re-hashes every statement
+    and reads the margin-interest tables, charged periods and interest-paid columns itself
+    (``schwab_margin_interest``)."""
+
+    ref = _object(value, "schwab_margin_interest")
+    if set(ref) != _MARGIN_INTEREST_KEYS:
+        raise ProviderLedgerError("schwab_margin_interest keys differ")
+    provider_id = _text(ref["provider_id"], "schwab_margin_interest.provider_id")
+    if provider_id not in providers or provider_id not in manifests:
+        raise ProviderLedgerError(
+            "schwab_margin_interest names a provider the spec does not declare"
+        )
+    if not isinstance(ref["accounts"], list):
+        raise ProviderLedgerError("schwab_margin_interest accounts differ")
+    accounts = {
+        _text(item, "schwab_margin_interest.accounts item") for item in ref["accounts"]
+    }
+    observed = {
+        str(r["account_id"])
+        for r in combined.get("nav_observations", [])
+        if r.get("provider_id") == provider_id
+    }
+    if not accounts or len(accounts) != len(ref["accounts"]) or accounts - observed:
+        raise ProviderLedgerError(
+            "schwab_margin_interest accounts differ from the provider's observed accounts"
+        )
+    sums_raw = _pinned_file(ref["sums_path"], ref["sums_sha256"], "statement sums")
+    mapping_raw = _pinned_file(
+        ref["mapping_path"], ref["mapping_sha256"], "statement account mapping"
+    )
+    directory = _absolute_path(ref["statements_dir"], "statements_dir")
+    if not directory.is_dir() or directory.is_symlink():
+        raise ProviderLedgerError("schwab_margin_interest statements_dir differs")
+    prefix = f"margin-interest/{provider_id}"
+    try:
+        rows, manifest = schwab_margin_interest.statement_rows(
+            directory,
+            zero_financing_statements.load_sums(sums_raw),
+            zero_financing_statements.load_mapping(mapping_raw, provider_id),
+            provider_id=provider_id,
+            accounts=accounts,
+            prefix=prefix,
+        )
+    except (OSError, ValueError, zero_financing_statements.ZeroFinancingError) as exc:
+        raise ProviderLedgerError(f"schwab_margin_interest: {exc}") from exc
+    if not rows:
+        raise ProviderLedgerError("schwab_margin_interest found no margin statement")
+    artifacts = [
+        SourceArtifact(
+            artifact_id=f"{prefix}/{item['name']}",
+            sha256=item["sha256"],
+            size_bytes=item["size_bytes"],
+            as_of_date=as_of,
+            schema_name=f"{provider_id}-statement-pdf",
+            schema_version="1",
+        )
+        for item in manifest
+        if any(r["source_artifact_id"] == f"{prefix}/{item['name']}" for r in rows)
+    ] + [
+        SourceArtifact(
+            artifact_id=f"{prefix}/SHA256SUMS",
+            sha256=hashlib.sha256(sums_raw).hexdigest(),
+            size_bytes=len(sums_raw),
+            as_of_date=as_of,
+            schema_name="statement-sums",
+            schema_version="1",
+        ),
+        SourceArtifact(
+            artifact_id=f"{prefix}/account-mapping",
+            sha256=hashlib.sha256(mapping_raw).hexdigest(),
+            size_bytes=len(mapping_raw),
+            as_of_date=as_of,
+            schema_name="statement-account-mapping",
+            schema_version="1",
+        ),
+    ]
+    ids = {a.artifact_id for a in artifacts}
+    if any(r["source_artifact_id"] not in ids for r in rows):
+        raise ProviderLedgerError(
+            "schwab_margin_interest: a row names a source the manifest lacks"
+        )
+    observation = (
+        "margin-interest-"
+        + hashlib.sha256(
+            "\n".join(
+                [
+                    hashlib.sha256(sums_raw).hexdigest(),
+                    hashlib.sha256(mapping_raw).hexdigest(),
+                    as_of.isoformat(),
+                    *sorted(accounts),
+                ]
+            ).encode()
+        ).hexdigest()[:24]
+    )
+    return (
+        [
+            {
+                **row,
+                "generation_id": manifests[provider_id].generation_id,
+                "observation_generation_id": observation,
+            }
+            for row in rows
+            if row["as_of_date"] <= as_of.isoformat()
+        ],
+        artifacts,
+    )
+
+
+def _quantbase_fill_closes(
+    value: object, key: str = "quantbase_fill_closes"
+) -> dict[str, dict[date, Decimal]]:
     """Governed daily closes of the Volatis fund's symbols (#909): hash-pinned CSVs
     (``date,close,...``), one per symbol, used to value a fill day after its fills."""
 
     out: dict[str, dict[date, Decimal]] = {}
-    for item in _objects(value, "quantbase_fill_closes"):
-        ref = _object(item, "quantbase_fill_closes item")
+    for item in _objects(value, key):
+        ref = _object(item, f"{key} item")
         if set(ref) != {"symbol", "path", "sha256", "size_bytes"}:
-            raise ProviderLedgerError("quantbase_fill_closes reference keys differ")
-        symbol = _text(ref["symbol"], "quantbase_fill_closes.symbol")
+            raise ProviderLedgerError(f"{key} reference keys differ")
+        symbol = _text(ref["symbol"], f"{key}.symbol")
         if symbol in out:
-            raise ProviderLedgerError("quantbase_fill_closes symbol is duplicated")
-        path = _absolute_regular_path(ref["path"], "quantbase_fill_closes.path")
+            raise ProviderLedgerError(f"{key} symbol is duplicated")
+        path = _absolute_regular_path(ref["path"], f"{key}.path")
         raw = path.read_bytes()
         if (
             hashlib.sha256(raw).hexdigest() != ref["sha256"]
             or len(raw) != ref["size_bytes"]
         ):
-            raise ProviderLedgerError("quantbase_fill_closes identity differs")
+            raise ProviderLedgerError(f"{key} identity differs")
         series: dict[date, Decimal] = {}
         for row in csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))):
             close = _observed_decimal(row.get("close"), "quantbase fill close")
@@ -4216,9 +5818,48 @@ def _quantbase_fill_closes(value: object) -> dict[str, dict[date, Decimal]]:
                 raise ProviderLedgerError("quantbase fill close is not positive")
             series[date.fromisoformat(str(row["date"]))] = close
         if not series:
-            raise ProviderLedgerError("quantbase_fill_closes is empty")
+            raise ProviderLedgerError(f"{key} is empty")
         out[symbol] = series
     return out
+
+
+def _event_completeness_declaration(
+    value: object, as_of: date
+) -> tuple[tuple[event_completeness.Declaration, ...], SourceArtifact]:
+    """The pinned governed completeness declaration and its manifest artifact."""
+
+    ref = _object(value, "event_completeness_declaration")
+    if set(ref) != {"path", "sha256", "size_bytes"}:
+        raise ProviderLedgerError("event_completeness_declaration keys differ")
+    path = _absolute_regular_path(ref["path"], "event_completeness_declaration.path")
+    raw = path.read_bytes()
+    if (
+        hashlib.sha256(raw).hexdigest() != ref["sha256"]
+        or len(raw) != ref["size_bytes"]
+    ):
+        raise ProviderLedgerError("event_completeness_declaration identity differs")
+    try:
+        declarations = event_completeness.load_declaration(raw)
+    except event_completeness.EventCompletenessError as exc:
+        raise ProviderLedgerError(
+            f"event_completeness_declaration is invalid: {exc}"
+        ) from exc
+    for declaration in declarations:
+        # every cited evidence file must exist with exactly the cited bytes
+        for evidence_path, evidence_sha in declaration.evidence_refs:
+            cited = _absolute_regular_path(evidence_path, "declaration evidence")
+            if hashlib.sha256(cited.read_bytes()).hexdigest() != evidence_sha:
+                raise ProviderLedgerError(
+                    "event_completeness_declaration evidence differs from its cited bytes"
+                )
+    return declarations, SourceArtifact(
+        artifact_id="event-completeness/declaration",
+        sha256=hashlib.sha256(raw).hexdigest(),
+        size_bytes=len(raw),
+        as_of_date=as_of,
+        schema_name="event-completeness-declaration",
+        schema_version=str(event_completeness.SCHEMA_VERSION),
+    )
 
 
 def _reserve_nav_windows(value: object) -> dict[str, list[tuple[date, date, str]]]:
@@ -5161,6 +6802,8 @@ class _SchwabPositionObservation(NamedTuple):
     artifact: SourceArtifact
     record_ids: frozenset[str]
     valuation_cutoff: date | None = None
+    # position rows derived at the cutoff from a later snapshot, re-verified here
+    derived_record_ids: frozenset[str] = frozenset()
 
 
 def _schwab_position_observation(
@@ -5274,7 +6917,11 @@ def _schwab_position_observation(
         raise ProviderLedgerError(f"{label} account/clock scope differs")
     record_ids: set[str] = set()
     position_accounts: set[str] = set()
+    derived_rows: list[Mapping[str, Any]] = []
     for row in _objects(catalog.get("positions"), label):
+        if "as_of_basis" in row or row.get("evidence_class") == schwab.DERIVED_BASIS:
+            derived_rows.append(row)
+            continue
         account_id = _text(row.get("account_id"), label)
         security_id = _text(row.get("security_id"), label)
         symbol = _text(row.get("symbol"), label)
@@ -5312,6 +6959,38 @@ def _schwab_position_observation(
         position_accounts.add(account_id)
     if catalog.get("current_position_account_count") != len(position_accounts):
         raise ProviderLedgerError(f"{label} position account count differs")
+    derived_ids: frozenset[str] = frozenset()
+    if derived_rows:
+        if valuation_cutoff is None:
+            raise ProviderLedgerError(
+                f"{label} derived positions need an explicit valuation cutoff"
+            )
+        try:
+            derived_ids = frozenset(
+                schwab.admit_derived_position_rows(
+                    derived_rows,
+                    accepted_accounts=account_ids,
+                    transactions=_objects(catalog.get("transactions"), label),
+                    valuation_cutoff=valuation_cutoff,
+                    snapshot_day=day,
+                    artifact_schemas={a.artifact_id: a.schema_name for a in artifacts},
+                    transaction_history=_object(
+                        _object(catalog.get("coverage"), label).get(
+                            "transaction_history"
+                        ),
+                        label,
+                    ),
+                    nav_observations=_objects(
+                        catalog.get("nav_observations", []), label
+                    ),
+                )
+            )
+        except schwab.SchwabDerivedPositionError as exc:
+            raise ProviderLedgerError(
+                f"{label} derived position refused: {exc}"
+            ) from exc
+        if derived_ids & record_ids:
+            raise ProviderLedgerError(f"{label} position record identifiers collide")
     if financial_observation_date > requested_as_of:
         return None
     return _SchwabPositionObservation(
@@ -5320,6 +6999,7 @@ def _schwab_position_observation(
         artifact,
         frozenset(record_ids),
         valuation_cutoff,
+        derived_ids,
     )
 
 
@@ -5345,6 +7025,8 @@ class _CsvFactContext(NamedTuple):
     financial_cutoff: date | None
     exceptions: list[dict[str, Any]]
     fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None
+    position_closes: Mapping[str, Mapping[date, Decimal]] | None = None
+    rollback: Mapping[str, Any] | None = None
 
 
 def _csv_matrixport_capital_anchors(ctx: _CsvFactContext) -> list[dict[str, Any]]:
@@ -5364,6 +7046,21 @@ def _csv_matrixport_capital_anchors(ctx: _CsvFactContext) -> list[dict[str, Any]
 
 def _csv_matrixport_nav_observations(ctx: _CsvFactContext) -> list[dict[str, Any]]:
     return _matrixport_nav_observations(
+        ctx.generation_id,
+        ctx.manifest,
+        ctx.catalog,
+        ctx.root,
+        ctx.accounts,
+        ctx.strategies,
+        ctx.assignments,
+        fx_rates=ctx.fx_rates,
+        financial_cutoff=ctx.financial_cutoff,
+        cutoff_findings=ctx.exceptions,
+    )
+
+
+def _csv_matrixport_positions(ctx: _CsvFactContext) -> list[dict[str, Any]]:
+    return _matrixport_positions(
         ctx.generation_id,
         ctx.manifest,
         ctx.catalog,
@@ -5420,6 +7117,21 @@ def _csv_quantbase_nav_observations(ctx: _CsvFactContext) -> list[dict[str, Any]
     )
 
 
+def _csv_quantbase_positions(ctx: _CsvFactContext) -> list[dict[str, Any]]:
+    return _quantbase_positions(
+        ctx.generation_id,
+        ctx.manifest,
+        ctx.catalog,
+        ctx.root,
+        ctx.accounts,
+        ctx.strategies,
+        ctx.assignments,
+        financial_cutoff=ctx.financial_cutoff,
+        fill_closes=ctx.position_closes,
+        rollback=ctx.rollback,
+    )
+
+
 def _csv_quantbase_cash_activity(ctx: _CsvFactContext) -> list[dict[str, Any]]:
     return _quantbase_cash_activity(
         ctx.provider_id,
@@ -5438,9 +7150,11 @@ def _csv_quantbase_cash_activity(ctx: _CsvFactContext) -> list[dict[str, Any]]:
 _CSV_FACT_BUILDERS: Final = {
     (_MATRIXPORT, "capital_anchors"): _csv_matrixport_capital_anchors,
     (_MATRIXPORT, "nav_observations"): _csv_matrixport_nav_observations,
+    (_MATRIXPORT, "positions"): _csv_matrixport_positions,
     (_QUANTBASE, "capital_anchors"): _csv_quantbase_capital_anchors,
     (_QUANTBASE, "flows"): _csv_quantbase_flows,
     (_QUANTBASE, "nav_observations"): _csv_quantbase_nav_observations,
+    (_QUANTBASE, "positions"): _csv_quantbase_positions,
     (_QUANTBASE, "transactions"): _csv_quantbase_cash_activity,
 }
 
@@ -5464,6 +7178,8 @@ def _project_account_facts(
     *,
     requested_as_of: date | None = None,
     fill_closes: Mapping[str, Mapping[date, Decimal]] | None = None,
+    position_closes: Mapping[str, Mapping[date, Decimal]] | None = None,
+    rollback: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     projections: dict[str, list[dict[str, Any]]] = defaultdict(list)
     exceptions: list[dict[str, Any]] = []
@@ -5536,6 +7252,7 @@ def _project_account_facts(
             "capital_anchors",
             "flows",
             "nav_observations",
+            "positions",
             "transactions",
         }:
             if manifest is None or root is None:
@@ -5561,6 +7278,8 @@ def _project_account_facts(
                     financial_cutoff,
                     exceptions,
                     fill_closes,
+                    position_closes,
+                    rollback,
                 )
             )
             projections[target_fact].extend(rows)
@@ -5751,6 +7470,7 @@ def _project_account_facts(
                     "mark_price",
                     "multiplier",
                     "order_reference",
+                    "fx_rate_to_base",
                     "put_call",
                     "strike",
                     "sub_category",
@@ -5760,7 +7480,22 @@ def _project_account_facts(
                 ):
                     if row.get(field) is not None:
                         record[field] = row[field]
-            if source_fact == "positions" and position_observation is not None:
+            if (
+                source_fact == "positions"
+                and position_observation is not None
+                and source_id in position_observation.derived_record_ids
+            ):
+                # derived at the cutoff from a later snapshot: never an observed row
+                record.update(
+                    as_of_basis=row["as_of_basis"],
+                    capture_date=row["capture_date"],
+                    closure=row["closure"],
+                    evidence_class=row["evidence_class"],
+                    residual_reallocation_window_days=schwab.residual_window_days(row),
+                    source_artifact_id=row["source_artifact_id"],
+                    valuation_cutoff=row["as_of_date"],
+                )
+            elif source_fact == "positions" and position_observation is not None:
                 record.update(
                     observed_at=row["observed_at"],
                     average_price=row["average_price"],
@@ -5946,6 +7681,11 @@ def _project_account_facts(
                     }
                 )
             projections[fact_type] = retained
+    # Only a catalog that publishes its own daily rates (the IBKR one) is priced here.
+    if catalog.get("fx_observations"):
+        _attach_provider_conversion_evidence(
+            projections, catalog, generation_id, provider_id
+        )
     for rows in projections.values():
         rows.sort(
             key=lambda item: (
@@ -11135,6 +12875,31 @@ def _generation_as_of_date(
     return max(financial_cutoff, *(artifact.as_of_date for artifact in artifacts))
 
 
+def _own_account_items(
+    provider_id: str,
+    catalog: Mapping[str, Any],
+    items: Sequence[Any],
+    key: str | None,
+) -> list[Any]:
+    """Catalog-level account facts (closure dates, empty position sets) of one provider.
+
+    Each item must name an account of the same provider catalog: a provider cannot assert a
+    closure or an empty position set for another provider's account.
+    """
+
+    own = {
+        str(account["account_id"])
+        for account in _objects(catalog.get("accounts", []), f"{provider_id}.accounts")
+    }
+    for item in items:
+        account_id = str(item[key] if key is not None else item)
+        if account_id not in own:
+            raise ProviderLedgerError(
+                f"{provider_id} catalog names an account outside its own accounts: {account_id}"
+            )
+    return list(items)
+
+
 @_catalog_decimal_context
 def build_catalog(
     spec_path: Path,
@@ -11160,6 +12925,20 @@ def build_catalog(
     fill_closes = (
         _quantbase_fill_closes(spec["quantbase_fill_closes"])
         if "quantbase_fill_closes" in spec
+        else None
+    )
+    # Governed official closes that only test a position's share count; unlike
+    # ``quantbase_fill_closes`` they never restate a NAV day.
+    position_closes = (
+        _quantbase_fill_closes(
+            spec["quantbase_position_closes"], "quantbase_position_closes"
+        )
+        if "quantbase_position_closes" in spec
+        else None
+    )
+    rollback = (
+        _quantbase_rollback(spec["quantbase_rollback"])
+        if "quantbase_rollback" in spec
         else None
     )
     provenance, provenance_artifact = _provenance(spec)
@@ -11216,6 +12995,8 @@ def build_catalog(
             root=root,
             fx_rates=fx_rates if provider_id == "matrixport" else None,
             fill_closes=fill_closes,
+            position_closes=position_closes,
+            rollback=rollback,
             requested_as_of=as_of if run_observation is not None else None,
             financial_cutoff=(
                 min(
@@ -11236,7 +13017,8 @@ def build_catalog(
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
-    zero_financing = None
+    zero_sets: list[tuple[str, list[dict[str, Any]], list[SourceArtifact]]] = []
+    zero_projected: list[dict[str, Any]] = []
     if "zero_financing_observations" in spec:
         # the account type rule reaches back to each account's first NAV day
         first_nav: dict[str, date] = {}
@@ -11246,15 +13028,26 @@ def build_catalog(
                 account_ = str(nav_row["account_id"])
                 if account_ not in first_nav or day_ < first_nav[account_]:
                     first_nav[account_] = day_
+        pin = spec["zero_financing_observations"]
         zero_financing = _zero_financing_rows(
-            spec["zero_financing_observations"],
+            {k: v for k, v in pin.items() if k != "replays"},
             accounts,
             set(spec["providers"]),
             as_of,
             first_nav,
         )
-    if zero_financing is not None:
-        zero_provider, zero_rows, zero_artifacts = zero_financing
+        zero_sets.append(zero_financing)
+        for replay_ref in _objects(pin.get("replays", []), "zero_financing replays"):
+            zero_sets.append(
+                _zero_financing_replay_rows(
+                    replay_ref,
+                    set(spec["providers"]),
+                    provider_facts,
+                    as_of,
+                    first_nav,
+                )
+            )
+    for zero_provider, zero_rows, zero_artifacts in zero_sets:
         # each row must belong to an account this provider's own generation observes, and
         # rows past the provider's financial cutoff are not projected
         observed_accounts = {
@@ -11290,6 +13083,7 @@ def build_catalog(
             for row in zero_rows
             if date.fromisoformat(row["as_of_date"]) <= zero_cutoff
         ]
+        zero_projected.extend(projected)
         if projected:  # never create an empty fact collection (ids must not move)
             combined["financing_liability_observations"].extend(projected)
             exceptions.extend(
@@ -11305,6 +13099,108 @@ def build_catalog(
                 for row in projected
             )
         provider_artifacts.extend(zero_artifacts)
+    if "schwab_gross_exposure" in spec:
+        exposure_rows, exposure_artifacts = _schwab_gross_exposure_rows(
+            spec["schwab_gross_exposure"],
+            set(spec["providers"]),
+            as_of,
+            combined,
+            zero_projected,
+            manifests,
+            [
+                str(item)
+                for item in catalogs.get(
+                    spec["schwab_gross_exposure"]["provider_id"], {}
+                ).get("empty_position_account_ids", [])
+            ],
+        )
+        combined["leverage_exposure_observations"].extend(exposure_rows)
+        provider_artifacts.extend(exposure_artifacts)
+    if "schwab_margin_interest" in spec:
+        interest_rows, interest_artifacts = _schwab_margin_interest_rows(
+            spec["schwab_margin_interest"],
+            set(spec["providers"]),
+            as_of,
+            combined,
+            manifests,
+        )
+        combined["financing_cost_observations"].extend(interest_rows)
+        exceptions.extend(
+            {
+                "account_in_provenance": row["account_id"] in accounts,
+                "effective_date": row["as_of_date"],
+                "fact_type": "financing_cost_observations",
+                "mapping_reason": row["mapping_reason"],
+                "provider_id": row["provider_id"],
+                "record_id": row["record_id"],
+                "status": "UNMAPPED",
+            }
+            for row in interest_rows
+        )
+        provider_artifacts.extend(interest_artifacts)
+
+    completeness_rows: list[dict[str, Any]] | None = None
+    if "event_completeness_declaration" in spec:
+        declarations, declaration_artifact = _event_completeness_declaration(
+            spec["event_completeness_declaration"], as_of
+        )
+        nav_values: dict[str, dict[date, Decimal | None]] = defaultdict(dict)
+        account_provider: dict[str, str] = {}
+        for nav_row in combined.get("nav_observations", []):
+            account_ = str(nav_row["account_id"])
+            amount_ = nav_row.get("nav")
+            nav_values[account_][_day(nav_row["as_of_date"], "nav as_of_date")] = (
+                _decimal(amount_["value"], "nav value")
+                if isinstance(amount_, Mapping) and amount_.get("status") == "AVAILABLE"
+                else None
+            )
+            account_provider[account_] = str(nav_row["provider_id"])
+        try:
+            completeness_rows = event_completeness.evaluate(
+                declarations,
+                flows=combined.get("flows", []),
+                change_in_nav_by_provider={
+                    provider_id_: _objects(
+                        catalog_.get("change_in_nav_observations", []),
+                        f"{provider_id_}.change_in_nav_observations",
+                    )
+                    for provider_id_, catalog_ in catalogs.items()
+                },
+                nav_values_by_account=nav_values,
+                account_provider=account_provider,
+                as_of_date=as_of,
+                positions=combined.get("positions", []),
+                transactions=combined.get("transactions", []),
+                closed_dates={
+                    str(item["account_id"]): _day(
+                        item["closed_date"], "closed_accounts.closed_date"
+                    )
+                    for provider_id_, catalog_ in catalogs.items()
+                    for item in _own_account_items(
+                        provider_id_,
+                        catalog_,
+                        _objects(
+                            catalog_.get("closed_accounts", []), "closed_accounts"
+                        ),
+                        "account_id",
+                    )
+                },
+                empty_position_accounts=sorted(
+                    {
+                        str(account_id)
+                        for provider_id_, catalog_ in catalogs.items()
+                        for account_id in _own_account_items(
+                            provider_id_,
+                            catalog_,
+                            list(catalog_.get("empty_position_account_ids", [])),
+                            None,
+                        )
+                    }
+                ),
+            )
+        except event_completeness.EventCompletenessError as exc:
+            raise ProviderLedgerError(f"event_completeness: {exc}") from exc
+        provider_artifacts.append(declaration_artifact)
 
     authoritative_strategy_ids = {
         str(row.get("strategy_id"))
@@ -11706,6 +13602,10 @@ def build_catalog(
         "strategy_returns": strategy_returns,
         "transactions": combined.get("transactions", []),
     }
+    if (
+        completeness_rows is not None
+    ):  # absent otherwise: ids of other specs do not move
+        catalog["event_completeness"] = completeness_rows
     if fx_rates is not None:
         catalog["portfolio_fx_generation"] = {
             "generation_id": fx_rates[0],

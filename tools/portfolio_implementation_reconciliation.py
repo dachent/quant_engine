@@ -1256,6 +1256,61 @@ def tt_capture_bound_utc(cutoff: date) -> datetime:
     return datetime.combine(day, time(13, 30), tzinfo=timezone.utc)
 
 
+# a post-bound override capture is accepted only this long after the bound: the marker proof
+# (no rebalance after the as-of date) does not weaken with time, but the live weights are
+# marked to market at the read instant and their gap to the dated row grows with it (measured
+# up to 2 pp within one day); three days covers a weekend or a one-day holiday and no more
+POST_BOUND_MAX_LATENESS: Final = timedelta(days=3)
+_STRICT_MARKER_DAY: Final = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _marker_excludes_later_rebalance(
+    fallback: Mapping[str, Any],
+    capture_instants: Mapping[str, Sequence[datetime]],
+    accepted_as_of: date,
+    observed: date,
+    capture_bound: datetime,
+) -> str | None:
+    """Label when the capture's own last-rebalance marker proves the live holdings are the as-of state.
+
+    Only the override fallback carries a marker.  The marker is the date of the strategy's last
+    rebalance.  Read on or after the flagged row's date (``observed``) and on or before
+    ``accepted_as_of``, it says the last rebalance was the one that produced the flagged row or a
+    later one not after the as-of date, so no rebalance happened after the as-of date up to the
+    instant the marker was read.  The holdings are then the as-of book only if the marker was read
+    no earlier than the holdings (a rebalance between the two reads would otherwise be invisible):
+    every marker read must be at or after every holdings read.  The marker must be a string in
+    strict YYYY-MM-DD.  The live weights are market weights at the holdings read, not target
+    proportions; the caller records that instant and the gap to the dated row.  A capture later
+    than ``POST_BOUND_MAX_LATENESS`` after the bound is not accepted: the rebalance exclusion does
+    not weaken with time, the mark-to-market gap does.  Anything else (a later, earlier-than-row,
+    unreadable or non-strict marker, a missing capture role, a marker read before the holdings, a
+    capture too late) returns ``None`` and the strict bound applies.
+    """
+
+    if fallback.get("kind") != "LIVE_HOLDINGS_OVERRIDE":
+        return None
+    json_at, txt_at = capture_instants.get("json"), capture_instants.get("txt")
+    if not json_at or not txt_at or min(txt_at) < max(json_at):
+        return None
+    if max(max(json_at), max(txt_at)) > capture_bound + POST_BOUND_MAX_LATENESS:
+        return None
+    sources = fallback.get("sources")
+    marker = sources.get("last_rebalance_marker") if isinstance(sources, dict) else None
+    if not isinstance(marker, dict):
+        return None
+    value = marker.get("value")
+    if not isinstance(value, str) or not _STRICT_MARKER_DAY.fullmatch(value):
+        return None
+    try:
+        marker_day = date.fromisoformat(value)
+    except ValueError:
+        return None
+    if marker_day > accepted_as_of or marker_day < observed:
+        return None
+    return f"LAST_REBALANCE_MARKER_{marker_day.isoformat()}_NOT_AFTER_AS_OF"
+
+
 def with_truncated_row_fallbacks(
     manifest: Mapping[str, Any], accepted_as_of: date
 ) -> Mapping[str, Any]:
@@ -1287,6 +1342,17 @@ def with_truncated_row_fallbacks(
     no instant for it, refuses them, because a rebalance after the next open
     would otherwise be read as the cutoff state.  The bound applied is recorded
     on each applied live fallback.  A later market-vane capture does not matter.
+    One exception, for the override only: a capture at or after the bound is accepted when the
+    capture's own last-rebalance marker is a strict YYYY-MM-DD string dated from the flagged row's
+    date to ``accepted_as_of`` and every marker read was at or after every holdings read
+    (``_marker_excludes_later_rebalance``): no rebalance can then have happened after the as-of
+    date, so the live holdings are the as-of book.  The live weights are market weights at the read
+    instant, not target proportions: the applied record carries ``post_bound_capture_accepted_by``,
+    ``live_holdings_read_at_utc`` and the largest absolute weight gap to the dated row it replaces.
+    LIMIT: a capture more than ``POST_BOUND_MAX_LATENESS`` (three days) after the bound is refused,
+    because the mark-to-market gap grows with time even though the rebalance exclusion does not
+    weaken.  A later, earlier-than-row, unreadable or non-strict marker, a missing role, a marker
+    read before the holdings, or a capture past the limit keeps the strict refusal.
     The dated fallbacks and rows that are complete are not affected.
     """
     provenance = manifest.get("capture_provenance")
@@ -1328,7 +1394,7 @@ def with_truncated_row_fallbacks(
             f"before {capture_bound.isoformat()} (the next open after the as-of date)"
         )
 
-    applied: list[dict[str, str]] = []
+    applied: list[dict[str, Any]] = []
     for flag in flags:
         if not isinstance(flag, dict) or flag.get("flag") != "TRUNCATED_ROW":
             continue
@@ -1339,6 +1405,7 @@ def with_truncated_row_fallbacks(
         fallback = flag.get("fallback")
         if component is None or not isinstance(fallback, dict):
             raise refuse()
+        marker_proof: str | None = None
         if fallback.get("kind") in _LIVE_FALLBACK_CAPTURE_ROLES:
             roles = _LIVE_FALLBACK_CAPTURE_ROLES[str(fallback.get("kind"))]
             instants = [
@@ -1348,7 +1415,15 @@ def with_truncated_row_fallbacks(
                 not all(role in capture_instants for role in roles)
                 or max(instants) >= capture_bound
             ):
-                raise live_capture_after_cutoff()
+                marker_proof = _marker_excludes_later_rebalance(
+                    fallback,
+                    capture_instants,
+                    accepted_as_of,
+                    date.fromisoformat(observed),
+                    capture_bound,
+                )
+                if marker_proof is None:
+                    raise live_capture_after_cutoff()
         snapshots = component["dated_holdings"]["snapshots"]
         target = next(
             (s for s in snapshots if s.get("observed_date") == observed), None
@@ -1410,6 +1485,7 @@ def with_truncated_row_fallbacks(
                 weights = dict(source["weights"])
         if not weights:
             raise refuse()
+        dated_weights = dict(target["weights"])
         target["weights"] = dict(sorted(weights.items()))
         applied.append(
             {
@@ -1419,6 +1495,30 @@ def with_truncated_row_fallbacks(
                 **(
                     {"capture_bound_utc": capture_bound.isoformat()}
                     if kind in _LIVE_FALLBACK_CAPTURE_ROLES
+                    else {}
+                ),
+                **(
+                    {
+                        "post_bound_capture_accepted_by": marker_proof,
+                        # the live weights are market weights at the capture instant, not
+                        # target proportions: state when they were read and how far they sit
+                        # from the dated row they replace (shared symbols only)
+                        "live_holdings_read_at_utc": max(
+                            capture_instants["json"]
+                        ).isoformat(),
+                        "max_abs_weight_drift_vs_dated_row": max(
+                            (
+                                abs(
+                                    float(weights[symbol])
+                                    - float(dated_weights[symbol])
+                                )
+                                for symbol in dated_weights
+                                if symbol in weights
+                            ),
+                            default=None,
+                        ),
+                    }
+                    if marker_proof is not None
                     else {}
                 ),
             }

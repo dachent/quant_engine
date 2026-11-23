@@ -62,7 +62,9 @@ from quant_engine.core import (
 from quant_engine.core import InterpreterRefusal, require_interpreter
 from quant_engine.core import (
     RECEIPT_MODE_ENV,
+    RENDER_REUSE_ENV,
     STAGE_TIMING_LOG_ENV,
+    stage_render_env,
     summarize_stage_timing,
 )
 import release_cycle_manifest
@@ -927,12 +929,35 @@ def _check_replica_agrees(
             )
 
 
+def refuse_provisional_cycle(run: Run) -> None:
+    """A cycle (or release-inputs root) stamped PROVISIONAL is never committed or preflighted."""
+
+    import decision_refresh
+
+    reused = sorted(
+        stage_id
+        for stage_id, stage_record in run.state["stages"].items()
+        if stage_record.get("render_reuse") is True
+    )
+    if reused:  # independent of the stamp: these outputs were built with render reuse
+        raise Refusal(
+            f"stages {reused} ran with provisional render reuse; this cycle cannot become a release"
+        )
+    for key in ("cycle", "release_inputs_root"):
+        if key in run.values:
+            try:
+                decision_refresh.check_not_release(Path(run.values[key]))
+            except decision_refresh.RefreshError as exc:
+                raise Refusal(str(exc)) from exc
+
+
 def check_commit_gate(run: Run, stage: Mapping[str, Any]) -> None:
     """``execute --commit`` runs only for the exact release the owner confirmed, from a prepared, unmoved state."""
 
     gate = stage.get("commit_gate")
     if gate is None:
         return
+    refuse_provisional_cycle(run)
     if run.values["mode"] != "release":
         raise Refusal(f"{stage['id']}: a commit needs mode 'release'")
     release_id = run.derive("release_id")
@@ -1790,6 +1815,12 @@ def _execute_stage(
         # operator's own value (persist/refresh) wins.
         env.setdefault(RECEIPT_MODE_ENV, DEFAULT_RECEIPT_MODE)
         record["receipts_mode"] = env[RECEIPT_MODE_ENV]
+        stage_render_env(env, run.cycle)
+        if RENDER_REUSE_ENV in env:
+            # recorded in the run state, so deleting the stamp later cannot promote this cycle
+            with run.lock:
+                record["render_reuse"] = True
+                run.save()
         if stdout_to is not None:
             stdout_to.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("wb") as log:

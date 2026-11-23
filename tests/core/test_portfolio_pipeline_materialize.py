@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping, Sequence
 import copy
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -8184,3 +8185,627 @@ def test_execute_pipeline_commit_path_promotes_through_the_orchestration_gate() 
     call = "_validate_portfolio_orchestration(spec, verify_runtime=True, promote=True)"
     assert call in source
     assert source.index("if commit:") < source.index(call)
+
+
+def _cold_attended_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict[str, object], Path]:
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+    return preflight, output_root
+
+
+def _count_completed_stage_verifications(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, ...]]:
+    calls: list[tuple[str, ...]] = []
+    real = materializer._attended_completed_stages
+
+    def counting(
+        output_root: Path, required_stages: Sequence[str], **kwargs: object
+    ) -> list[str]:
+        calls.append(tuple(required_stages))
+        return real(output_root, required_stages, **kwargs)
+
+    monkeypatch.setattr(materializer, "_attended_completed_stages", counting)
+    return calls
+
+
+def test_attended_resume_verifies_completed_stages_once_before_it_runs_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate, the resume check and the execute start share ONE verification.
+
+    Before: three identical passes (qa gate, start-or-resume, execute start) plus the final view.
+    """
+
+    preflight, output_root = _cold_attended_run(tmp_path, monkeypatch)
+    # a real preflight plans every attended stage, so the gate and the resume ask the same question
+    monkeypatch.setattr(materializer, "ATTENDED_STAGES", ("ledger", "baseline"))
+    calls = _count_completed_stage_verifications(monkeypatch)
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a verified completed stage must be skipped")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 0
+    )
+    assert len(calls) == 2  # one verification before the run + the final view
+
+
+def test_attended_resume_still_fails_closed_at_the_single_verification_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each removed duplicate pass left its tamper cases to the one pass that remains."""
+
+    for tamper in ("receipt", "generation", "stage-root"):
+        run_dir = tmp_path / tamper
+        run_dir.mkdir()
+        preflight, output_root = _cold_attended_run(run_dir, monkeypatch)
+        if tamper == "receipt":
+            (output_root / "stage-results" / "ledger.json").write_bytes(b"not-json")
+        elif tamper == "generation":
+            baseline = (
+                next((output_root / "stages" / "baseline" / "generations").iterdir())
+                / "portfolio-baseline.json"
+            )
+            baseline.write_bytes(baseline.read_bytes() + b"\n")
+        else:
+            shutil.rmtree(output_root / "stages" / "ledger")
+        calls = _count_completed_stage_verifications(monkeypatch)
+
+        def no_child(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("a tampered completed stage must stop before a child")
+
+        monkeypatch.setattr(materializer.subprocess, "run", no_child)
+        assert (
+            materializer.main(
+                _attended_argv(preflight, output_root, execute=True, resume=True)
+            )
+            == 1
+        ), tamper
+        assert len(calls) <= 2, tamper
+
+
+def test_attended_run_verifies_each_new_stage_once_and_every_stage_at_the_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a child only the stage it wrote is read natively; the run ends with one full pass."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+    calls = _count_completed_stage_verifications(monkeypatch)
+    new_roles: list[str] = []
+    real_new = materializer._attended_verify_new_role
+
+    def counting_new(root: Path, role: str) -> None:
+        new_roles.append(role)
+        real_new(root, role)
+
+    monkeypatch.setattr(materializer, "_attended_verify_new_role", counting_new)
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+    assert new_roles == ["ledger", "baseline"]
+    # the verification before the first child + the mandatory final pass over every stage
+    assert calls == [("ledger", "baseline"), ("ledger", "baseline")]
+
+
+def test_verified_stages_memo_reuses_only_an_identical_unchanged_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[tuple[str, ...], str | None]] = []
+    # the memo snapshots a stage before it is verified, so the stage must exist on disk
+    (tmp_path / "stage-results").mkdir()
+    (tmp_path / "stage-results" / "ledger.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "stages" / "ledger").mkdir(parents=True)
+
+    def fake(
+        _root: Path, required: Sequence[str], *, failed_stage: str | None = None
+    ) -> list[str]:
+        calls.append((tuple(required), failed_stage))
+        return list(required)[:1]
+
+    monkeypatch.setattr(materializer, "_attended_completed_stages", fake)
+    memo = materializer._VerifiedStages()
+    first = memo.completed(tmp_path, ("ledger", "baseline"), label="a")
+    first.append("mutated by the caller")  # a caller cannot corrupt the stored answer
+    assert memo.completed(tmp_path, ("ledger", "baseline"), label="b") == ["ledger"]
+    assert len(calls) == 1
+    memo.completed(tmp_path, ("ledger", "baseline"), label="c", failed_stage="baseline")
+    memo.completed(tmp_path, ("ledger",), label="d")
+    assert (
+        len(calls) == 3
+    )  # another failed stage or another stage list is a new question
+    memo.invalidate()
+    memo.completed(tmp_path, ("ledger", "baseline"), label="e")
+    assert len(calls) == 4  # nothing survives an invalidation
+
+
+def test_verified_stages_memo_never_caches_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts: list[int] = []
+
+    def refuse(*_args: object, **_kwargs: object) -> list[str]:
+        attempts.append(1)
+        raise materializer.MaterializationError("tampered")
+
+    monkeypatch.setattr(materializer, "_attended_completed_stages", refuse)
+    memo = materializer._VerifiedStages()
+    for _ in range(2):
+        with pytest.raises(materializer.MaterializationError, match="tampered"):
+            memo.completed(tmp_path, ("ledger",), label="x")
+    assert len(attempts) == 2
+
+
+def test_attended_children_stream_their_output_instead_of_being_captured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger",)
+    output_root = tmp_path / "output"
+    seen: list[dict[str, object]] = []
+
+    def complete(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(dict(kwargs))
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, None, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+    assert len(seen) == 1
+    assert "capture_output" not in seen[0]
+    assert "stdout" not in seen[0] and "stderr" not in seen[0]
+
+
+def test_attended_run_writes_phase_timers_to_the_timing_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "timing.jsonl"
+    monkeypatch.setenv("QE_STAGE_TIMING_LOG", str(log))
+    preflight, output_root = _cold_attended_run(tmp_path, monkeypatch)
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a verified completed stage must be skipped")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 0
+    )
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    names = [row["stage"] for row in rows]
+    assert names.count("attended_preflight") == 2  # the cold run and the resume
+    assert {row["role"] for row in rows if row["stage"] == "attended_role"} == {
+        "ledger",
+        "baseline",
+    }
+    labels = {
+        row["label"] for row in rows if row["stage"] == "attended_completed_stages"
+    }
+    assert {"execute_start", "qa_gate"} <= labels
+    assert {
+        row["role"] for row in rows if row["stage"] == "attended_verify_new_role"
+    } == {"ledger", "baseline"}
+    assert "attended_tripwire_roots" in names and "attended_tripwire_receipts" in names
+    assert "attended_completed_stages_reused" in names  # the resume reused its one pass
+    assert all(isinstance(row["seconds"], float) for row in rows)
+
+
+def test_attended_resume_verifies_again_after_preparation_has_rewritten_stage_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preparation builds stage roots after the gate ran: the gate's answer must not be reused.
+
+    The stub preparation corrupts a completed stage the way a faulty rebuild would. If the
+    verification memo survived the preparation call, the resume pass would reuse the gate's
+    pre-preparation answer and miss it.
+    """
+
+    preflight, output_root = _cold_attended_run(tmp_path, monkeypatch)
+    # an interrupted run: the baseline never completed, so a child WOULD start after the gate
+    (output_root / "stage-results" / "baseline.json").unlink()
+    shutil.rmtree(output_root / "stages" / "baseline")
+    monkeypatch.setattr(materializer, "ATTENDED_STAGES", ("ledger", "baseline"))
+    monkeypatch.setattr(materializer, "_attended_basic_preflight", lambda _args: None)
+    monkeypatch.setattr(materializer, "_git", lambda *_args: "0" * 40)
+    spec = tmp_path / "preparation-spec.json"
+    spec.write_text("{}", encoding="utf-8")
+
+    def plan(**_kwargs: object) -> dict[str, object]:
+        return {"source_phase": {}}
+
+    def prepare(**_kwargs: object) -> dict[str, object]:
+        (output_root / "stage-results" / "ledger.json").write_bytes(b"not-json")
+        return {"source_run": preflight["source_run"], "financial_stage_inputs": {}}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "portfolio_attended_preparation",
+        SimpleNamespace(plan_attended_inputs=plan, prepare_attended_inputs=prepare),
+    )
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a stage corrupted by preparation must stop the run")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    argv = _attended_argv(preflight, output_root, execute=True, resume=True)
+    at = argv.index("--source-run")
+    del argv[at : at + 2]  # preparation supplies the source run itself
+    argv += ["--preparation-spec", str(spec), "--evaluated-on", "2026-09-20"]
+    assert materializer.main(argv) == 1
+
+
+def _two_stage_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    baseline_child: Callable[[Path], None] | None = None,
+    ledger_child: Callable[[Path], None] | None = None,
+) -> tuple[dict[str, object], Path, list[str]]:
+    """A cold ledger -> baseline run; the hooks act inside the matching child."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+    launched: list[str] = []
+
+    def child(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        launched.append(role)
+        if role == "baseline" and baseline_child is not None:
+            baseline_child(output_root)
+        _record_attended_stage(output_root, role)
+        if role == "ledger" and ledger_child is not None:
+            ledger_child(output_root)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", child)
+    return preflight, output_root, launched
+
+
+def test_a_byte_flipped_in_an_earlier_stage_after_a_child_never_ends_in_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A same-size, same-mtime edit evades the tripwire; the mandatory final pass catches it."""
+
+    def flip(output_root: Path) -> None:
+        target = next((output_root / "stages" / "ledger" / "generations").iterdir())
+        target = target / "provider-ledger.json"
+        before = target.stat()
+        data = bytearray(target.read_bytes())
+        data[-2] ^= 0x01
+        target.write_bytes(bytes(data))
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    preflight, output_root, launched = _two_stage_run(
+        tmp_path, monkeypatch, baseline_child=flip
+    )
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 1
+    assert launched == ["ledger", "baseline"]
+    assert "FAIL" in capsys.readouterr().err
+    # the attempt must not have been recorded as PASSED before the final pass refused it
+    observations = (output_root / "attended-execution-observations.json").read_text(
+        encoding="utf-8"
+    )
+    assert "PASSED" not in observations and "FAILED" in observations
+
+
+def test_a_child_that_appends_to_an_earlier_stage_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def append(output_root: Path) -> None:
+        target = next((output_root / "stages" / "ledger" / "generations").iterdir())
+        with (target / "provider-ledger.json").open("ab") as handle:
+            handle.write(b" ")
+
+    preflight, output_root, launched = _two_stage_run(
+        tmp_path, monkeypatch, baseline_child=append
+    )
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 1
+    error = capsys.readouterr().err
+    assert "attended child baseline modified completed stage ledger" in error
+    assert launched == ["ledger", "baseline"]
+
+
+def test_an_edited_stage_receipt_is_refused_before_the_next_child_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    preflight, output_root, launched = _two_stage_run(tmp_path, monkeypatch)
+    real_command = materializer._attended_stage_command
+
+    def tamper_then_command(pre: Mapping[str, Any], root: Path, role: str) -> list[str]:
+        if role == "baseline":
+            receipt = root / "stage-results" / "ledger.json"
+            receipt.write_bytes(receipt.read_bytes() + b"\n")
+        return real_command(pre, root, role)
+
+    monkeypatch.setattr(materializer, "_attended_stage_command", tamper_then_command)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 1
+    assert launched == ["ledger"]  # the baseline child never started
+    assert (
+        "attended ledger stage receipt changed before child baseline started"
+        in capsys.readouterr().err
+    )
+
+
+def test_a_crashed_run_with_a_corrupt_earlier_stage_is_refused_by_the_resume_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def crash(_output_root: Path) -> None:
+        raise OSError("simulated crash inside the baseline child")
+
+    preflight, output_root, launched = _two_stage_run(
+        tmp_path, monkeypatch, baseline_child=crash
+    )
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 1
+    assert launched == ["ledger", "baseline"]
+    (output_root / "stage-results" / "ledger.json").write_bytes(b"not-json")
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a corrupt earlier stage must stop the resume first")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 1
+    )
+
+
+def test_a_child_that_writes_an_unreadable_stage_stops_the_run_before_the_next_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def corrupt(output_root: Path) -> None:
+        (output_root / "stage-results" / "ledger.json").write_bytes(b"not-json")
+
+    preflight, output_root, launched = _two_stage_run(
+        tmp_path, monkeypatch, ledger_child=corrupt
+    )
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 1
+    assert launched == ["ledger"]
+
+
+def test_the_failed_child_view_does_not_claim_verified_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+    seen: list[object] = []
+    real_view = materializer._attended_view
+
+    def view(*args: object, **kwargs: object) -> dict[str, Any]:
+        seen.append(
+            args[3] if len(args) > 3 else kwargs.get("verified_completed_stages")
+        )
+        return real_view(*args, **kwargs)  # type: ignore[arg-type]
+
+    def child(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        _record_attended_stage(output_root, "ledger") if role == "ledger" else None
+        return subprocess.CompletedProcess(argv, 0 if role == "ledger" else 83, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_view", view)
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", child)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 83
+    assert seen == [
+        []
+    ]  # claims no verified stage, and never re-reads on the failure path
+
+
+def test_a_stage_changed_between_the_shared_verification_and_the_first_child_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The verification is shared by the gate and the execute start, which run well apart.
+
+    The stat inventory must be taken BEFORE that verification: a stage that changes in the window
+    (attempt start, cache open, storage measurement) is then seen by the tripwires, not
+    fingerprinted as already changed.
+    """
+
+    preflight, output_root = _cold_attended_run(tmp_path, monkeypatch)
+    # an interrupted run: the baseline never completed, so a child WOULD start after the gate
+    (output_root / "stage-results" / "baseline.json").unlink()
+    shutil.rmtree(output_root / "stages" / "baseline")
+    monkeypatch.setattr(materializer, "ATTENDED_STAGES", ("ledger", "baseline"))
+    real_attempt = materializer._attended_start_execution_attempt
+
+    def attempt_then_tamper(root: Path) -> int:
+        number = real_attempt(root)
+        target = next((root / "stages" / "ledger" / "generations").iterdir())
+        with (target / "provider-ledger.json").open("ab") as handle:
+            handle.write(b" ")  # a new size, after the memo was filled
+        return number
+
+    monkeypatch.setattr(
+        materializer, "_attended_start_execution_attempt", attempt_then_tamper
+    )
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a changed verified stage must stop the run first")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 1
+    )
+    assert (
+        "attended ledger stage changed after it was verified, before child baseline"
+        in capsys.readouterr().err
+    )
+
+
+def _write_candidate_stage(output_root: Path) -> None:
+    candidate = output_root / "stages" / "panel" / "candidates" / "c1"
+    candidate.mkdir(parents=True)
+    (candidate / "index.html").write_text("<html></html>", encoding="utf-8")
+    receipts = output_root / "stage-results"
+    receipts.mkdir(parents=True, exist_ok=True)
+    (receipts / "panel-candidate.json").write_text("{}", encoding="utf-8")
+
+
+def test_the_panel_child_may_not_start_over_a_changed_panel_candidate(
+    tmp_path: Path,
+) -> None:
+    """Before a child starts nothing writes, so a role sharing the child's root is checked too."""
+
+    _write_candidate_stage(tmp_path)
+    fingerprints = materializer._StageFingerprints()  # noqa: SLF001
+    fingerprints.adopt(
+        "panel-candidate",
+        materializer._StageFingerprints.snapshot(tmp_path, "panel-candidate"),  # noqa: SLF001
+    )
+    fingerprints.require_roots_unchanged_before(tmp_path, before_child="panel")
+    (tmp_path / "stages" / "panel" / "candidates" / "c1" / "index.html").write_text(
+        "<html>changed</html>", encoding="utf-8"
+    )
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="panel-candidate stage changed after it was verified, before child panel",
+    ):
+        fingerprints.require_roots_unchanged_before(tmp_path, before_child="panel")
+
+
+def test_the_panel_child_writing_beside_the_candidate_is_not_a_false_refusal(
+    tmp_path: Path,
+) -> None:
+    """The after-child check leaves a sibling's own root alone; the candidate itself is untouched."""
+
+    _write_candidate_stage(tmp_path)
+    fingerprints = materializer._StageFingerprints()  # noqa: SLF001
+    fingerprints.adopt(
+        "panel-candidate",
+        materializer._StageFingerprints.snapshot(tmp_path, "panel-candidate"),  # noqa: SLF001
+    )
+    generations = tmp_path / "stages" / "panel" / "generations"
+    generations.mkdir()
+    (generations / "g1.json").write_text("{}", encoding="utf-8")
+    fingerprints.require_roots_unchanged(tmp_path, after_child="panel")
+    fingerprints.require_roots_unchanged_before(tmp_path, before_child="panel")
+
+
+def test_native_stage_verifiers_write_nothing_into_a_stage_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Snapshot-before-verify is only sound if the verifiers leave the stat inventory alone.
+
+    Runs the real ledger and baseline verifiers (and `read_current`) of a produced run, then the
+    real report reader, and requires the pre-verification snapshot to still match afterwards.
+    """
+
+    preflight, output_root = _cold_attended_run(tmp_path, monkeypatch)
+    fingerprints = materializer._StageFingerprints()  # noqa: SLF001
+    snapshots = {
+        role: materializer._StageFingerprints.snapshot(output_root, role)  # noqa: SLF001
+        for role in ("ledger", "baseline")
+    }
+    for role, row in snapshots.items():
+        fingerprints.adopt(role, row)
+    assert materializer._attended_completed_stages(  # noqa: SLF001
+        output_root, ("ledger", "baseline")
+    ) == ["ledger", "baseline"]
+    fingerprints.require_roots_unchanged_before(output_root, before_child="attribution")
+    fingerprints.require_receipts_unchanged(output_root, before_child="attribution")
+
+
+def test_the_real_report_reader_writes_nothing_into_the_report_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "output" / "stages" / "report"
+    as_of = date(2026, 9, 17)
+    report_bytes = canonical_json_bytes(
+        {"report_schema_version": 1, "as_of_date": as_of.isoformat()}
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("attended-report-test", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="attended report resume test",
+            fact_types=("portfolio report",),
+            observed_start=as_of,
+            observed_end=as_of,
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/portfolio-report-data.json",
+                sha256=hashlib.sha256(report_bytes).hexdigest(),
+                size_bytes=len(report_bytes),
+                as_of_date=as_of,
+                schema_name="portfolio-report-data",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    generation_dir = stage_generation(root, manifest).parent
+    (generation_dir / "portfolio-report-data.json").write_bytes(report_bytes)
+    publish_generation(root, manifest.generation_id)
+    candidate = root / "candidates" / hashlib.sha256(report_bytes).hexdigest()
+    candidate.mkdir(parents=True)
+    (candidate / "portfolio-report-data.json").write_bytes(report_bytes)
+    _write_json(
+        tmp_path / "output" / "stage-results" / "report.json",
+        {
+            "generation_id": manifest.generation_id,
+            "root": str(root),
+            "candidate_dir": str(candidate),
+        },
+    )
+    output_root = tmp_path / "output"
+    fingerprints = materializer._StageFingerprints()  # noqa: SLF001
+    fingerprints.adopt(
+        "report",
+        materializer._StageFingerprints.snapshot(output_root, "report"),  # noqa: SLF001
+    )
+    assert materializer._attended_completed_stages(  # noqa: SLF001
+        output_root, ("report",)
+    ) == ["report"]
+    fingerprints.require_roots_unchanged_before(output_root, before_child="panel")
+    fingerprints.require_receipts_unchanged(output_root, before_child="panel")
+
+
+def test_the_memo_refuses_a_stage_it_could_not_snapshot_before_verifying_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        materializer, "_attended_completed_stages", lambda *_a, **_k: ["ledger"]
+    )
+    memo = materializer._VerifiedStages()  # noqa: SLF001
+    assert memo.completed(tmp_path, ("ledger",), label="x") == ["ledger"]
+    with pytest.raises(
+        materializer.MaterializationError, match="changed while it was being verified"
+    ):
+        memo.snapshots(tmp_path, ("ledger",))

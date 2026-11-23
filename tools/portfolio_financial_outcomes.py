@@ -224,6 +224,35 @@ def _artifact_for_digest(
     return node
 
 
+def _displayed_alpha_alternatives(
+    lenses: Sequence[Mapping[str, Any]], series_id: str, surface: str
+) -> list[dict[str, Any]]:
+    """Lens cells of the panel where ``series_id`` has an AVAILABLE alpha on ``surface``."""
+
+    found: list[dict[str, Any]] = []
+    for lens in lenses:
+        node = (lens.get("surfaces") or {}).get(surface) or {}
+        for row in node.get("series", []):
+            context = row.get("alpha_context")
+            if (
+                row.get("series_id") == series_id
+                and isinstance(context, Mapping)
+                and context.get("status") == "AVAILABLE"
+                and row.get("status") in {"AVAILABLE", "DIAGNOSTIC_ONLY"}
+            ):
+                found.append(
+                    {
+                        "lens_id": lens.get("lens_id"),
+                        "lens_label": lens.get("lens_label"),
+                        "source_key": row.get("source_key"),
+                        "surface": surface,
+                        "series_status": row.get("status"),
+                        "basis_status": context.get("basis_status"),
+                    }
+                )
+    return found
+
+
 def _first_difference(actual: Any, expected: Any, path: str = "") -> str:
     """Name the first place two projections diverge, so a failure is actionable."""
 
@@ -1519,6 +1548,17 @@ def _verify_decomposition_consumers(
             "source_label": producer.DECOMPOSITION_LENS_SOURCES[source_key][1],
             "surface": surface,
         }
+        context = expected.get("alpha_context")
+        if isinstance(context, Mapping) and context.get("status") == "UNAVAILABLE":
+            # The panel points an UNAVAILABLE series at the other lenses where the same
+            # series has an alpha (_attach_alpha_alternatives); that list spans cells, so
+            # it is rebuilt here from the other displayed lens rows, not one projection.
+            expected["alpha_context"] = {
+                **context,
+                "alternatives": _displayed_alpha_alternatives(
+                    modes.get(mode, []), series[strategy], surface
+                ),
+            }
         # Reported one clause at a time. As a single `or` chain this said only
         # "values differ", which cost hours to attribute -- the tripped clause
         # and the differing field were both invisible.

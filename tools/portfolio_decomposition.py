@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import sys
 import tempfile
 from typing import Any, Final, Mapping, Sequence, cast
 
@@ -213,6 +214,9 @@ class Fit:
     exposures: FloatArray
     rank: int
     rank_status: str
+    constraint: str
+    ridge: str
+    data_sha256: str
 
 
 @dataclass(frozen=True)
@@ -223,6 +227,9 @@ class DynamicFit:
     exposures: FloatArray
     fitted: FloatArray
     rank_status: str
+    smoothness: str
+    ridge: str
+    data_sha256: str
 
 
 def _strict_keys(value: Mapping[str, Any], expected: set[str], name: str) -> None:
@@ -1566,7 +1573,13 @@ def _fit(
             coefficients = np.linalg.pinv(normal) @ right
         status = "FULL_RANK" if rank == design.shape[1] else "SINGULAR_PSEUDOINVERSE"
         return Fit(
-            float(coefficients[0]), coefficients[1:].astype(np.float64), rank, status
+            float(coefficients[0]),
+            coefficients[1:].astype(np.float64),
+            rank,
+            status,
+            constraint,
+            _identity_number(ridge),
+            _data_digest(matrix, target),
         )
 
     centered_matrix = matrix - np.mean(matrix, axis=0)
@@ -1589,7 +1602,15 @@ def _fit(
         raise DecompositionError("constrained regression did not converge")
     intercept = float(np.mean(target - matrix @ exposures))
     rank = int(np.linalg.matrix_rank(centered_matrix))
-    return Fit(intercept, exposures, rank, "CONSTRAINED_SIMPLEX")
+    return Fit(
+        intercept,
+        exposures,
+        rank,
+        "CONSTRAINED_SIMPLEX",
+        constraint,
+        _identity_number(ridge),
+        _data_digest(matrix, target),
+    )
 
 
 def _predict(fit: Fit, matrix: FloatArray) -> FloatArray:
@@ -1928,6 +1949,9 @@ def _dynamic_fit(
         exposures=cast(FloatArray, exposures.astype(np.float64)),
         fitted=cast(FloatArray, fitted.astype(np.float64)),
         rank_status=rank_status,
+        smoothness=_identity_number(smoothness),
+        ridge=_identity_number(ridge),
+        data_sha256=_data_digest(matrix, target),
     )
 
 
@@ -1948,6 +1972,13 @@ def _dynamic_loo_score(
     block solves.
     """
 
+    if fit is not None and (
+        fit.smoothness != _identity_number(smoothness)
+        or fit.ridge != _identity_number(ridge)
+        or fit.data_sha256 != _data_digest(matrix, target)
+    ):
+        # A retained fit made with other parameters than these is never reused.
+        fit = None
     if fit is None:
         fit = _dynamic_fit(
             matrix,
@@ -2026,6 +2057,16 @@ def _identity_number(value: float) -> str:
     return float(value).hex()
 
 
+def _data_digest(matrix: FloatArray, target: FloatArray) -> str:
+    """The exact bytes a fit was solved on."""
+
+    digest = hashlib.sha256()
+    for array in (matrix, target):
+        digest.update(repr(array.shape).encode())
+        digest.update(np.ascontiguousarray(array, dtype=np.float64).tobytes())
+    return digest.hexdigest()
+
+
 def _consumed_producer_identity() -> dict[str, str]:
     """Hash only the local bytes the decomposition producer actually consumes."""
 
@@ -2040,6 +2081,169 @@ def _consumed_producer_identity() -> dict[str, str]:
     return {
         name: hashlib.sha256(path.read_bytes()).hexdigest()
         for name, path in sorted(paths.items())
+    }
+
+
+# The retained fit cache stores exactly what these functions produce and read back.
+_FIT_CACHE_ROOTS: Final = (
+    "_dynamic_fit",
+    "_dynamic_loo_score",
+    "_fit",
+    "_dynamic_fit_to_cache",
+    "_dynamic_fit_from_cache",
+    "_fit_to_cache",
+    "_fit_from_cache",
+    "_benchmark_fit",
+    "_cached_fit_parameters",
+    "_data_digest",
+)
+_NUMERIC_STACK: Final = ("numpy", "scipy", "scikit-learn")
+
+
+def _fit_source_identity(source: str) -> str:
+    """Hash the parsed code of the functions a cached fit is computed by.
+
+    Follows every module-level name reachable from ``_FIT_CACHE_ROOTS`` and hashes
+    the syntax trees (comments, docstrings and layout are not code), so an edit
+    elsewhere in this module -- a loader, a report field, a guard -- keeps the
+    retained fits valid while any edit to the fit code or a constant, helper or
+    class it uses changes the identity.  A name the walk cannot resolve (not a
+    module definition, import, builtin or local) is an error, never skipped.
+    """
+
+    import ast
+    import builtins
+
+    tree = ast.parse(source)
+    definitions: dict[str, list[ast.stmt]] = {}
+    imported: set[str] = set()
+
+    def bound(target: ast.AST) -> list[str]:
+        return [
+            item.id
+            for item in ast.walk(target)
+            if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)
+        ]
+
+    def collect(statements: Sequence[ast.stmt]) -> None:
+        for node in statements:
+            names: list[str] = []
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names = [node.name]
+            elif isinstance(node, ast.Assign):
+                names = [name for target in node.targets for name in bound(target)]
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                names = bound(node.target)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                imported.update(
+                    (alias.asname or alias.name).split(".")[0] for alias in node.names
+                )
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                names = bound(node.target)
+            for name in names:
+                definitions.setdefault(name, []).append(node)
+            for field in ("body", "orelse", "finalbody"):
+                nested = getattr(node, field, None)
+                if nested and not isinstance(
+                    node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ):
+                    collect(nested)
+            for handler in getattr(node, "handlers", []):
+                collect(handler.body)
+
+    collect(tree.body)
+
+    def local_names(node: ast.AST) -> set[str]:
+        names: set[str] = set()
+        for item in ast.walk(node):
+            if isinstance(item, ast.Name) and isinstance(
+                item.ctx, (ast.Store, ast.Del)
+            ):
+                names.add(item.id)
+            elif isinstance(item, ast.arg):
+                names.add(item.arg)
+            elif isinstance(
+                item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                names.add(item.name)
+            elif isinstance(item, ast.ExceptHandler) and item.name:
+                names.add(item.name)
+            elif isinstance(item, (ast.Import, ast.ImportFrom)):
+                names.update(
+                    (alias.asname or alias.name).split(".")[0] for alias in item.names
+                )
+            elif isinstance(item, (ast.Global, ast.Nonlocal)):
+                names.update(item.names)
+        return names
+
+    reached: set[str] = set()
+    pending = list(_FIT_CACHE_ROOTS)
+    while pending:
+        name = pending.pop()
+        if name in reached:
+            continue
+        if name not in definitions:
+            raise DecompositionError(f"fit cache identity root {name} is missing")
+        reached.add(name)
+        for node in definitions[name]:
+            local = local_names(node)
+            for item in ast.walk(node):
+                if not (isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load)):
+                    continue
+                if item.id in definitions:
+                    pending.append(item.id)
+                elif (
+                    item.id not in imported
+                    and item.id not in local
+                    and not hasattr(builtins, item.id)
+                ):
+                    raise DecompositionError(
+                        f"fit cache identity cannot resolve {item.id} used by {name}"
+                    )
+    digest = hashlib.sha256()
+    for name in sorted(reached):
+        for node in definitions[name]:
+            for item in ast.walk(node):
+                body = getattr(item, "body", None)
+                if (
+                    isinstance(
+                        item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                    )
+                    and body
+                    and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)
+                ):
+                    item.body = body[1:] or [ast.Pass()]
+            digest.update(name.encode())
+            digest.update(ast.dump(node).encode())
+    return digest.hexdigest()
+
+
+def _numeric_stack_identity() -> dict[str, str]:
+    """Interpreter minor version and the installed numeric libraries."""
+
+    from importlib import metadata
+
+    versions = {"python": f"{sys.version_info[0]}.{sys.version_info[1]}"}
+    for package in _NUMERIC_STACK:
+        try:
+            versions[package] = metadata.version(package)
+        except metadata.PackageNotFoundError:
+            versions[package] = "absent"
+    return versions
+
+
+def _fit_producer_identity() -> dict[str, object]:
+    """What a retained fit depends on: not the whole producer file or the lock."""
+
+    return {
+        "canonical_json": hashlib.sha256(
+            Path(canonical_json_bytes.__code__.co_filename).resolve().read_bytes()
+        ).hexdigest(),
+        "fit_source": _fit_source_identity(Path(__file__).read_text(encoding="utf-8")),
+        "methodology": hashlib.sha256(METHODOLOGY_PATH.read_bytes()).hexdigest(),
+        "numeric_stack": _numeric_stack_identity(),
     }
 
 
@@ -2066,7 +2270,11 @@ def _training_identity(
         if key in interval_association
     }
     payload = {
-        "consumed_producer_identity": _consumed_producer_identity(),
+        "fit_parameters": {
+            name: _identity_number(value) if isinstance(value, float) else value
+            for name, value in sorted(_cached_fit_parameters(model).items())
+        },
+        "fit_producer_identity": _fit_producer_identity(),
         "interval_association": policy_identity,
         "model": {
             "constraint": model.constraint,
@@ -2155,6 +2363,9 @@ def _dynamic_fit_to_cache(fit: DynamicFit) -> dict[str, object]:
         "fitted": [_identity_number(value) for value in fit.fitted],
         "intercept": _identity_number(fit.intercept),
         "rank_status": fit.rank_status,
+        "ridge": fit.ridge,
+        "smoothness": fit.smoothness,
+        "data_sha256": fit.data_sha256,
     }
 
 
@@ -2162,10 +2373,13 @@ def _dynamic_fit_from_cache(
     value: object, expected_shape: tuple[int, int]
 ) -> DynamicFit | None:
     if not isinstance(value, dict) or set(value) != {
+        "data_sha256",
         "exposures",
         "fitted",
         "intercept",
         "rank_status",
+        "ridge",
+        "smoothness",
     }:
         return None
     try:
@@ -2183,6 +2397,9 @@ def _dynamic_fit_from_cache(
         exposures.shape != expected_shape
         or fitted.shape != (expected_shape[0],)
         or not isinstance(value["rank_status"], str)
+        or not isinstance(value["ridge"], str)
+        or not isinstance(value["smoothness"], str)
+        or not isinstance(value["data_sha256"], str)
     ):
         return None
     return DynamicFit(
@@ -2190,24 +2407,33 @@ def _dynamic_fit_from_cache(
         exposures=exposures,
         fitted=fitted,
         rank_status=value["rank_status"],
+        smoothness=value["smoothness"],
+        ridge=value["ridge"],
+        data_sha256=value["data_sha256"],
     )
 
 
 def _fit_to_cache(fit: Fit) -> dict[str, object]:
     return {
         "exposures": [_identity_number(value) for value in fit.exposures],
+        "constraint": fit.constraint,
         "intercept": _identity_number(fit.intercept),
         "rank": fit.rank,
         "rank_status": fit.rank_status,
+        "ridge": fit.ridge,
+        "data_sha256": fit.data_sha256,
     }
 
 
 def _fit_from_cache(value: object, factor_count: int) -> Fit | None:
     if not isinstance(value, dict) or set(value) != {
+        "constraint",
+        "data_sha256",
         "exposures",
         "intercept",
         "rank",
         "rank_status",
+        "ridge",
     }:
         return None
     try:
@@ -2221,6 +2447,9 @@ def _fit_from_cache(value: object, factor_count: int) -> Fit | None:
         exposures.shape != (factor_count,)
         or not isinstance(value["rank"], int)
         or not isinstance(value["rank_status"], str)
+        or not isinstance(value["constraint"], str)
+        or not isinstance(value["ridge"], str)
+        or not isinstance(value["data_sha256"], str)
     ):
         return None
     return Fit(
@@ -2228,7 +2457,40 @@ def _fit_from_cache(value: object, factor_count: int) -> Fit | None:
         exposures=exposures,
         rank=value["rank"],
         rank_status=value["rank_status"],
+        constraint=value["constraint"],
+        ridge=value["ridge"],
+        data_sha256=value["data_sha256"],
     )
+
+
+def _benchmark_fit(
+    cached: object,
+    matrix: FloatArray,
+    target: FloatArray,
+    *,
+    constraint: str,
+    ridge: float,
+) -> Fit:
+    """The static benchmark fit, from the cache only if it was made with these arguments."""
+
+    fit = _fit_from_cache(cached, matrix.shape[1])
+    if (
+        fit is None
+        or fit.constraint != constraint
+        or fit.ridge != _identity_number(ridge)
+        or fit.data_sha256 != _data_digest(matrix, target)
+    ):
+        fit = _fit(matrix, target, constraint=constraint, ridge=ridge)
+    return fit
+
+
+def _cached_fit_parameters(model: ModelDefinition) -> dict[str, Any]:
+    """Which of the model's parameters the retained fits are computed with."""
+
+    return {
+        "ridge": model.ridge_candidates[0],
+        "static_constraint": "UNCONSTRAINED",
+    }
 
 
 def _write_new_atomic(path: Path, content: bytes) -> bool:
@@ -2663,7 +2925,8 @@ def _dynamic_model_result(
     training_design: Mapping[str, object],
     cached_training: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    ridge = model.ridge_candidates[0]
+    parameters = _cached_fit_parameters(model)
+    ridge = parameters["ridge"]
     sensitivity: list[dict[str, object]] = []
     scored: list[tuple[float, float]] = []
     candidate_fits: dict[float, DynamicFit] = {}
@@ -2766,20 +3029,15 @@ def _dynamic_model_result(
     holdout_r_squared = _r_squared(
         test_target, test_predicted, float(np.mean(train_target))
     )
-    static_benchmark_fit = (
-        _fit_from_cache(
-            cached_training.get("static_benchmark_fit"), train_matrix.shape[1]
-        )
+    static_benchmark_fit = _benchmark_fit(
+        cached_training.get("static_benchmark_fit")
         if isinstance(cached_training, Mapping)
-        else None
+        else None,
+        train_matrix,
+        train_target,
+        constraint=parameters["static_constraint"],
+        ridge=ridge,
     )
-    if static_benchmark_fit is None:
-        static_benchmark_fit = _fit(
-            train_matrix,
-            train_target,
-            constraint="UNCONSTRAINED",
-            ridge=ridge,
-        )
     static_benchmark_predictions = _predict(static_benchmark_fit, test_matrix)
     static_benchmark_r_squared = _r_squared(
         test_target,

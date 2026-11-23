@@ -37,6 +37,7 @@ from typing import Any, cast
 from .. import owner_view as owner_view  # re-exported: the runner uses it
 from . import (
     facts_bindings,
+    hwm_acceptance,
     layers,
     payload_rule,
     shell,
@@ -103,7 +104,13 @@ _AVAILABLE_PREFIXES = (
 AFTER_TAX_NOT_APPLICABLE = "NOT_APPLICABLE_PRE_TAX_REPORTING_SCOPE"
 _NOT_READY_VALUES = frozenset({"REQUIRED_NOT_READY", "NOT_READY"})
 _UNADMITTED_FLOW_PATHS = frozenset(
-    {"NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"}
+    {
+        "NO_ACCEPTED_FACT_PATH",
+        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF",
+        "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF",
+        "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF",
+        "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF",
+    }
 )
 _NUMBER_WORDS = {
     "one": 1,
@@ -3071,6 +3078,13 @@ def _itemized_candidates(
         at_cutoff[
             "sum(current account values at cutoff) + current reserve + retained excluded"
         ] = cutoff_systematic + current_reserve + retained_value
+        # The baseline's own identity record is stamped on the account basis (#624); the
+        # same identity on that lane carries the current reserve and retained balance.
+        for lane_name, lane_value in account_lane.items():
+            at_cutoff[f"{lane_name} + current reserve"] = lane_value + current_reserve
+            at_cutoff[f"{lane_name} + current reserve + retained excluded"] = (
+                lane_value + current_reserve + retained_value
+            )
     strategy = row.get("strategy_id")
     if isinstance(strategy, str):
         for item in rows(ctx.report, "allocation_history"):
@@ -8881,6 +8895,52 @@ def _incomplete_series_count(
     return gaps + max(0, declared - len(unavailable))
 
 
+def _hwm_proof(ctx: Context) -> Mapping[str, Any] | None:
+    proof = ctx.panel.get("hwm_governed_proof") or ctx.report.get("hwm_governed_proof")
+    return proof if isinstance(proof, Mapping) else None
+
+
+def _hwm_claims_acceptance(ctx: Context) -> bool:
+    proof = _hwm_proof(ctx)
+    return (
+        proof is not None
+        and proof.get("financial_acceptance") == hwm_acceptance.OWNER_ACCEPTED
+    )
+
+
+def _hwm_acceptance_gaps(ctx: Context) -> list[str]:
+    """E2 clears only when the owner's record, the gap bounds and the proof all agree
+    (acceptance/validate/hwm_acceptance.py); a non-empty list is why it does not."""
+
+    root = (
+        ctx.repo_root
+        if ctx.repo_root is not None
+        else Path(__file__).resolve().parents[2]
+    )
+
+    def read_bytes(name: str) -> bytes | None:
+        try:
+            return (root / "contracts" / name).read_bytes()
+        except OSError:
+            return None
+
+    def read(name: str) -> Any:
+        raw = read_bytes(name)
+        try:
+            return json.loads(raw) if raw is not None else None
+        except ValueError:
+            return None
+
+    record_raw = read_bytes("portfolio-hwm-owner-acceptance-v1.json")
+    return hwm_acceptance.verify_acceptance(
+        _hwm_proof(ctx),
+        node(ctx.panel, "advisory", "hwm_candidate", "kpi", "missing_daily_points"),
+        read("portfolio-hwm-owner-acceptance-v1.json"),
+        read("portfolio-hwm-gap-bounds-v1.json"),
+        hashlib.sha256(record_raw).hexdigest() if record_raw is not None else None,
+    )
+
+
 def check_completeness(ctx: Context) -> Iterator[Finding]:
     """E1-E8: required outputs that are unavailable, as NOT_READY register entries."""
 
@@ -8903,7 +8963,10 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
             "current holdings lack tickers",
         )
     status = node(ctx.report, "hwm_summary", "hwm_numerical_status")
-    if status is not None and status != "AVAILABLE":
+    acceptance_gaps = (
+        _hwm_acceptance_gaps(ctx) if status not in (None, "AVAILABLE") else []
+    )
+    if status is not None and status != "AVAILABLE" and acceptance_gaps:
         yield _finding(
             "completeness.required_outputs",
             NOT_READY,
@@ -8911,6 +8974,11 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
             {
                 "hwm_numerical_status": status,
                 "reason": node(ctx.report, "hwm_summary", "hwm_numerical_reason"),
+                **(
+                    {"owner_acceptance_not_covering": acceptance_gaps}
+                    if _hwm_claims_acceptance(ctx)
+                    else {}
+                ),
             },
             "AVAILABLE",
             REPORT,
@@ -9011,9 +9079,11 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
         reference = universe(ctx)
         # E8 scope (#894/#895): the check applies to levered accounts. An account is
         # outside it only when the report itself states ACCOUNT_FINANCING_STATE rows for
-        # it and every one reads NOT_LEVERED; an account with no state row, a LEVERED or
-        # INCIDENTAL_DEBIT one, or an unreadable classification stays applicable, so a
-        # missing declaration never narrows the check.
+        # it and every one reads NOT_LEVERED, or INCIDENTAL_DEBIT for the reason
+        # SETTLED_DEBIT_NO_INTEREST (a retirement settlement float, owner ruling); an
+        # account with no state row, a LEVERED or any other INCIDENTAL_DEBIT one, or an
+        # unreadable classification stays applicable, so a missing declaration never
+        # narrows the check.
         not_levered = {
             account
             for account in {
@@ -9023,12 +9093,19 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
                 and row.get("measurement_basis") == "ACCOUNT_FINANCING_STATE"
             }
             if all(
-                row.get("classification") == "NOT_LEVERED"
+                (
+                    row.get("classification") == "NOT_LEVERED"
+                    or (
+                        row.get("classification") == "INCIDENTAL_DEBIT"
+                        and str(row.get("coverage_reason")).split(";")[0]
+                        == "SETTLED_DEBIT_NO_INTEREST"
+                    )
+                )
                 and is_available(row.get("coverage_status"))
                 and "UNVERIFIED" not in str(row.get("coverage_reason"))
                 and "CONFLICT" not in str(row.get("coverage_reason"))
                 and str(row.get("coverage_reason")).split(";")[0]
-                in _NOT_LEVERED_EVIDENCE_REASONS
+                in _NOT_LEVERED_EVIDENCE_REASONS | _SETTLED_DEBIT_REASONS
                 for row in disclosures
                 if str(row.get("account_id")) == account
                 and row.get("data_class") == "ACCOUNT_FINANCING"
@@ -9100,6 +9177,11 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
 
 # The only reasons under which a producer's NOT_LEVERED may narrow E8: the declaration
 # plus observed cash days showing no debit (tools/account_financing.classify).
+# Owner ruling (#894): a retirement account's interest-free settled debit (the producer's
+# INCIDENTAL_DEBIT / SETTLED_DEBIT_NO_INTEREST state, declared NONE_BY_ACCOUNT_TYPE) is not
+# borrowing, so it leaves E8 scope like NOT_LEVERED: the one exception to the rule that an
+# INCIDENTAL_DEBIT account stays applicable.  Any other INCIDENTAL_DEBIT still does.
+_SETTLED_DEBIT_REASONS = frozenset({"SETTLED_DEBIT_NO_INTEREST"})
 _NOT_LEVERED_EVIDENCE_REASONS = frozenset(
     {
         "MARGIN_AVAILABLE_UNUSED_NO_DEBIT_EVIDENCE",

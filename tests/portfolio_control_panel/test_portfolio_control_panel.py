@@ -15801,6 +15801,48 @@ def test_panel_appends_retained_strategy_records_after_the_current_rows(
     assert all("lifecycle_state" in row for row in data["performance"])
 
 
+def test_panel_carries_the_cost_classification_of_a_retained_record(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """F2 item 36: a retained record's classification reaches the panel strategy row."""
+
+    classification = {
+        "classification": "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+        "product_interval_end": "2024-12-12",
+        "reason": "SYNTHETIC owner-approved exclusion from live costs",
+        "ruling_reference": "OWNER_1_COMMENT_2_DEPRECATED",
+        "ruling_url": "https://github.com/dachent/quant_engine/issues/1#issuecomment-2",
+        "source": "contracts/portfolio-financial-mvp-source-v1.json",
+    }
+    report = _report_with_baseline(inputs)
+    report["lifecycle_schema_version"] = 1
+    report["strategy_summary"] = [
+        {**row, **_LIFECYCLE_ACTIVE} for row in report["strategy_summary"]
+    ]
+    report["twr_mwr"] = [{**row, **_LIFECYCLE_ACTIVE} for row in report["twr_mwr"]]
+    report["retained_strategies"] = [
+        _retained_record("fund-retired", cost_classification=classification),
+        _retained_record("sleeve-plain"),
+    ]
+    root = tmp_path / "classified-report"
+    _publish_report(
+        root,
+        tmp_path / "classified-report.json",
+        _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog()),
+    )
+    built = panel.build_candidate(
+        root,
+        inputs["legacy"],
+        tmp_path / "classified-output",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    rows = {row["strategy_id"]: row for row in _candidate_data(built)["strategies"]}
+    assert rows["fund-retired"]["cost_classification"] == classification
+    assert "cost_classification" not in rows["sleeve-plain"]
+
+
 def test_panel_without_the_lifecycle_marker_keeps_the_previous_shape(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -15916,6 +15958,48 @@ def test_model_vs_actual_rides_through_the_real_render_schema_and_pin(
             **base_kwargs,
             model_vs_actual_input=(staged.with_name("absent.json"), pin),
         )
+
+
+def test_the_underwriting_references_use_the_blocks_own_as_of_through_the_real_render(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reference lookup receives the panel's own as-of sources and the pinned input."""
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_mva_synthetic_refs", Path(__file__).with_name("test_model_vs_actual.py")
+    )
+    assert spec is not None and spec.loader is not None
+    mva_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mva_tests)
+    staged = tmp_path / "audit-bridges.json"
+    staged.write_bytes(mva_tests.synthetic_staged_bytes())
+    pin = hashlib.sha256(staged.read_bytes()).hexdigest()
+    seen: list[tuple[Any, bytes, str, Any]] = []
+    real = panel.model_account_gap_references_for
+
+    def spy(panel_like: Any, raw: bytes, sha: str, ids: Any) -> dict[str, Any]:
+        seen.append((panel_like, raw, sha, ids))
+        return real(panel_like, raw, sha, ids)  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(panel, "model_account_gap_references_for", spy)
+    _files, data, _bound = panel._rendered_files(
+        inputs["report"],
+        inputs["legacy"],
+        panel.DEFAULT_TEMPLATE_ROOT,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        model_vs_actual_input=(staged, pin),
+    )
+
+    assert len(seen) == 1
+    panel_like, raw, sha, ids = seen[0]
+    assert (raw, sha) == (staged.read_bytes(), pin)
+    assert tuple(ids) == panel.REPLICA_REFERENCE_STRATEGY_IDS
+    # the as-of the lookup cuts off at is the one the block cuts its own windows at
+    mva = panel._model_vs_actual_module
+    assert mva._as_of(panel_like) == data["model_vs_actual"]["as_of"]  # noqa: SLF001
 
 
 def test_vendor_gap_fills_input_is_pinned_bound_and_closed_against_receipts(
@@ -16112,3 +16196,109 @@ def test_a_gate_rejected_schema_three_row_publishes_no_number_outside_the_detail
     detail = row["diagnostic_detail"]
     assert detail["orthogonal_attribution"]["mode_coefficients"]
     assert detail["dynamic"]["exposure_path"]
+
+
+def _provisional_stamp(cycle):
+    """Write the stamp and the cycle's own resolved manifest the way a refresh cycle has them;
+    return the token the driver would hand to its stages."""
+    import hashlib
+    import json as _json
+
+    cycle.mkdir(parents=True, exist_ok=True)
+    (cycle / "resolved-cycle.json").write_bytes(b'{"cycle_manifest_sha256": "m1"}')
+    raw = _json.dumps(
+        {
+            "tier": "PROVISIONAL",
+            "not_a_release": True,
+            "schema_version": "qe-provisional-refresh/1",
+            "cycle_manifest_sha256": "m1",
+        }
+    ).encode("utf-8")
+    (cycle / "PROVISIONAL.json").write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _render_reuse_world(monkeypatch, tmp_path: Path):
+    state = tmp_path / "render-state"
+    state.mkdir()
+    monkeypatch.setenv("QE_RENDER_REUSE", "provisional")
+    monkeypatch.setenv("QE_RENDER_STATE_ROOT", str(state))
+    monkeypatch.setenv("QE_RENDER_RUN_TOKEN", _provisional_stamp(tmp_path))
+    live = {"n": 0}
+    real = panel._rendered_files_live
+
+    def counting(*args, **kwargs):
+        live["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(panel, "_rendered_files_live", counting)
+    return live
+
+
+def _render_reuse_verify(inputs: dict[str, Path], candidate: Path):
+    return panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+
+
+def _render_reuse_build(inputs: dict[str, Path]):
+    return panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+
+
+def test_provisional_render_is_built_once_and_verification_is_identical(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch
+) -> None:
+    reference = _render_reuse_build(inputs)
+    full = _render_reuse_verify(inputs, Path(reference["candidate_dir"]))
+    live = _render_reuse_world(monkeypatch, tmp_path)
+    built = _render_reuse_build(inputs)
+    verified = _render_reuse_verify(inputs, Path(built["candidate_dir"]))
+    again = _render_reuse_verify(inputs, Path(built["candidate_dir"]))
+    assert live["n"] == 1  # build rendered; both verifications reused it
+    assert verified == again == full  # byte-identical to the full verification
+    assert built["panel_id"] == reference["panel_id"]
+
+
+def test_provisional_render_reuse_never_hides_a_tampered_candidate_or_input(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch
+) -> None:
+    live = _render_reuse_world(monkeypatch, tmp_path)
+    built = _render_reuse_build(inputs)
+    candidate = Path(built["candidate_dir"])
+    assert _render_reuse_verify(inputs, candidate)["all_passed"] is True
+    assert live["n"] == 1
+    page = candidate / "index.html"
+    page.write_bytes(page.read_bytes() + b" ")  # one byte on the candidate
+    with pytest.raises(panel.ControlPanelValidationError, match="deterministic"):
+        _render_reuse_verify(inputs, candidate)
+    page.write_bytes(page.read_bytes()[:-1])
+    assert _render_reuse_verify(inputs, candidate)["all_passed"] is True
+    freshness = inputs["freshness"]
+    freshness.write_bytes(freshness.read_bytes() + b"\n")  # one byte of an input
+    before = live["n"]
+    with pytest.raises(panel.ControlPanelValidationError, match="deterministic"):
+        _render_reuse_verify(inputs, candidate)
+    assert (
+        live["n"] == before + 1
+    )  # re-rendered and refused, not served from the receipt
+
+
+def test_release_runs_render_live_every_time(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch
+) -> None:
+    live = _render_reuse_world(monkeypatch, tmp_path)
+    monkeypatch.delenv("QE_RENDER_REUSE")
+    built = _render_reuse_build(inputs)
+    _render_reuse_verify(inputs, Path(built["candidate_dir"]))
+    assert live["n"] == 2
+    assert not list((tmp_path / "render-state").rglob("*"))

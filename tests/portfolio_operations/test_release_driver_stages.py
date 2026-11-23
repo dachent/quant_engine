@@ -1998,3 +1998,33 @@ def test_the_calendar_seed_stage_must_reproduce_the_pinned_bytes(
     assert _drive(world, graph) != 0  # the file hashes to something else
     _config(world, pin=hashlib.sha256(b"x").hexdigest())
     assert _drive(world, graph, "--replace") == 0
+
+
+def _argv_flags(argv: list[Any]) -> set[str]:
+    flags: set[str] = set()
+    for item in argv:
+        if isinstance(item, str) and item.startswith("--"):
+            flags.add(item)
+        elif isinstance(item, dict):
+            flags.update(
+                arg
+                for arg in item.get("args", [])
+                if isinstance(arg, str) and arg.startswith("--")
+            )
+    return flags
+
+
+def test_a_resumed_attended_run_passes_every_flag_of_the_first_run() -> None:
+    """The attended request identity binds retained_cache_base (and the other launch flags): a resume argv that
+    drops one can never match the first run's receipt (D refresh: 'attended resume identity differs')."""
+
+    stages = {stage["id"]: stage for stage in _shipped()["stages"]}
+    first = _argv_flags(stages["attended"]["argv"])
+    assert "--retained-cache-base" in first
+    # the attended stage's own resume argv adds --resume and nothing else is dropped
+    assert _argv_flags(stages["attended"]["resume"]["argv"]) == first | {"--resume"}
+    # the later resume stage adds the QA directory and --resume, and no longer holds at the QA gate
+    assert _argv_flags(stages["resume"]["argv"]) == (first - {"--qa-hold"}) | {
+        "--qa-dir",
+        "--resume",
+    }

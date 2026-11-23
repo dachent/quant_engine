@@ -394,6 +394,41 @@
             "--zero-financing-observations",
             "{zero_financing_observations}"
           ]
+        },
+        {
+          "if": "schwab_gross_exposure",
+          "args": [
+            "--schwab-gross-exposure",
+            "{schwab_gross_exposure}"
+          ]
+        },
+        {
+          "if": "schwab_margin_interest",
+          "args": [
+            "--schwab-margin-interest",
+            "{schwab_margin_interest}"
+          ]
+        },
+        {
+          "if": "event_completeness_declaration",
+          "args": [
+            "--event-completeness-declaration",
+            "{event_completeness_declaration}"
+          ]
+        },
+        {
+          "if": "quantbase_position_closes",
+          "args": [
+            "--quantbase-position-closes",
+            "{quantbase_position_closes}"
+          ]
+        },
+        {
+          "if": "quantbase_rollback",
+          "args": [
+            "--quantbase-rollback",
+            "{quantbase_rollback}"
+          ]
         }
       ],
       "checks": [
@@ -1181,6 +1216,13 @@
           },
           "--output-root",
           "{run}",
+          {
+            "if": "retained_cache_base",
+            "args": [
+              "--retained-cache-base",
+              "{retained_cache_base}"
+            ]
+          },
           "--retained-cache-root",
           "{retained_cache_root}",
           "--requested-as-of",
@@ -1394,6 +1436,13 @@
         },
         "--output-root",
         "{run}",
+        {
+          "if": "retained_cache_base",
+          "args": [
+            "--retained-cache-base",
+            "{retained_cache_base}"
+          ]
+        },
         "--retained-cache-root",
         "{retained_cache_root}",
         "--requested-as-of",
