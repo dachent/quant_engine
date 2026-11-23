@@ -200,3 +200,123 @@ def test_a_numeric_stack_change_refits(
         spec, source_root, tmp_path / "second", retained_cache_root=retained
     )
     assert work.dynamic_fits > 0
+
+
+# ---------------------------------------------------------------------------
+# A retained fit is never served to a call that asks for other parameters
+# ---------------------------------------------------------------------------
+
+
+def _first_run_then_new_result_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, work: Any
+) -> tuple[Any, Path, Path, Path]:
+    source_root = tmp_path / "source"
+    target_path, days = reuse._write_dynamic(source_root)
+    spec = base._spec(
+        source_root, target_path, days, models=[base._dynamic_model(days)]
+    )
+    retained = tmp_path / "retained"
+    decomposition.stage_candidate(
+        spec, source_root, tmp_path / "first", retained_cache_root=retained
+    )
+    assert work.dynamic_fits > 0 and work.static_fits > 0
+    # move the whole-file result key so only the fit level decides what is reused
+    reuse._alter_producer(tmp_path / "altered", monkeypatch)
+    work.reset()
+    return spec, source_root, retained, tmp_path / "second"
+
+
+def _wrap(monkeypatch: pytest.MonkeyPatch, name: str, **change: Any) -> None:
+    """Mimic an edit of the call in ``_dynamic_model_result`` (not in the key)."""
+
+    real = getattr(decomposition, name)
+
+    def changed(*args: Any, **kwargs: Any) -> Any:
+        for key, edit in change.items():
+            if key in kwargs:
+                kwargs[key] = edit(kwargs[key])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(decomposition, name, changed)
+
+
+@pytest.mark.parametrize(
+    ("function", "change", "expect"),
+    [
+        ("_dynamic_loo_score", {"ridge": lambda value: value * 1000.0}, "dynamic"),
+        ("_dynamic_loo_score", {"smoothness": lambda value: value * 2.0}, "dynamic"),
+        ("_benchmark_fit", {"constraint": lambda value: "LONG_ONLY"}, "static"),
+        ("_benchmark_fit", {"ridge": lambda value: value * 2.0}, "static"),
+    ],
+    ids=[
+        "M1-dynamic-ridge",
+        "M4-smoothness",
+        "M2-static-constraint",
+        "M3-static-ridge",
+    ],
+)
+def test_a_changed_fit_argument_is_a_miss_not_a_stale_hit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    work: Any,
+    function: str,
+    change: dict[str, Any],
+    expect: str,
+) -> None:
+    spec, source_root, retained, out = _first_run_then_new_result_key(
+        tmp_path, monkeypatch, work
+    )
+    _wrap(monkeypatch, function, **change)
+    decomposition.stage_candidate(spec, source_root, out, retained_cache_root=retained)
+    assert (work.dynamic_fits if expect == "dynamic" else work.static_fits) > 0
+
+
+def test_unchanged_arguments_still_hit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, work: Any
+) -> None:
+    spec, source_root, retained, out = _first_run_then_new_result_key(
+        tmp_path, monkeypatch, work
+    )
+    decomposition.stage_candidate(spec, source_root, out, retained_cache_root=retained)
+    assert work.dynamic_fits == 0 and work.static_fits == 0
+
+
+def test_a_fit_unresolvable_name_is_an_error() -> None:
+    source = _source()
+    changed = _edit(
+        source,
+        "        rank = int(np.linalg.matrix_rank(design))\n",
+        "        rank = int(np.linalg.matrix_rank(design)) + some_undefined_name\n",
+    )
+    with pytest.raises(decomposition.DecompositionError, match="cannot resolve"):
+        decomposition._fit_source_identity(changed)
+
+
+def test_the_walk_follows_unpacked_conditional_augmented_and_async_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    template = (
+        "import math\n"
+        "if True:\n"
+        "    A, B = {a}, 2\n"
+        "C = 1\n"
+        "C += {c}\n"
+        "try:\n"
+        "    D = {d}\n"
+        "except ImportError:\n"
+        "    D = 0\n"
+        "async def helper():\n"
+        "    return {h}\n"
+        "def f(x):\n"
+        "    return math.floor(x) + A + B + C + D\n"
+        "def g():\n"
+        "    return helper\n"
+    )
+    monkeypatch.setattr(decomposition, "_FIT_CACHE_ROOTS", ("f", "g"))
+    base_values = {"a": 1, "c": 1, "d": 1, "h": 1}
+    reference = decomposition._fit_source_identity(template.format(**base_values))
+    for name in base_values:
+        changed = {**base_values, name: 9}
+        assert (
+            decomposition._fit_source_identity(template.format(**changed)) != reference
+        ), name
