@@ -5366,7 +5366,10 @@ def _schwab_gross_exposure_rows(
             for key, close in schwab_leverage_observations.load_closes(raw).items():
                 if closes.setdefault(key, close) != close:
                     raise ProviderLedgerError("close files disagree on a close")
-        except (UnicodeDecodeError, schwab_leverage_observations.SchwabExposureError) as exc:
+        except (
+            UnicodeDecodeError,
+            schwab_leverage_observations.SchwabExposureError,
+        ) as exc:
             raise ProviderLedgerError(f"schwab_gross_exposure: {exc}") from exc
         digest = hashlib.sha256(raw).hexdigest()
         digests.append(digest)
@@ -5383,13 +5386,18 @@ def _schwab_gross_exposure_rows(
     if not artifacts:
         raise ProviderLedgerError("schwab_gross_exposure names no close file")
     cutoff = as_of.isoformat()
-    observation = "gross-exposure-" + hashlib.sha256(
-        "\n".join([*sorted(digests), cutoff, *sorted(accounts)]).encode()
-    ).hexdigest()[:24]
+    observation = (
+        "gross-exposure-"
+        + hashlib.sha256(
+            "\n".join([*sorted(digests), cutoff, *sorted(accounts)]).encode()
+        ).hexdigest()[:24]
+    )
     rows = schwab_leverage_observations.gross_exposure_rows(
         accounts=accounts,
         positions=[
-            r for r in combined.get("positions", []) if r.get("provider_id") == provider_id
+            r
+            for r in combined.get("positions", [])
+            if r.get("provider_id") == provider_id
         ],
         nav_rows=[
             r
@@ -5444,7 +5452,9 @@ def _schwab_margin_interest_rows(
         )
     if not isinstance(ref["accounts"], list):
         raise ProviderLedgerError("schwab_margin_interest accounts differ")
-    accounts = {_text(item, "schwab_margin_interest.accounts item") for item in ref["accounts"]}
+    accounts = {
+        _text(item, "schwab_margin_interest.accounts item") for item in ref["accounts"]
+    }
     observed = {
         str(r["account_id"])
         for r in combined.get("nav_observations", [])
@@ -5506,17 +5516,22 @@ def _schwab_margin_interest_rows(
     ]
     ids = {a.artifact_id for a in artifacts}
     if any(r["source_artifact_id"] not in ids for r in rows):
-        raise ProviderLedgerError("schwab_margin_interest: a row names a source the manifest lacks")
-    observation = "margin-interest-" + hashlib.sha256(
-        "\n".join(
-            [
-                hashlib.sha256(sums_raw).hexdigest(),
-                hashlib.sha256(mapping_raw).hexdigest(),
-                as_of.isoformat(),
-                *sorted(accounts),
-            ]
-        ).encode()
-    ).hexdigest()[:24]
+        raise ProviderLedgerError(
+            "schwab_margin_interest: a row names a source the manifest lacks"
+        )
+    observation = (
+        "margin-interest-"
+        + hashlib.sha256(
+            "\n".join(
+                [
+                    hashlib.sha256(sums_raw).hexdigest(),
+                    hashlib.sha256(mapping_raw).hexdigest(),
+                    as_of.isoformat(),
+                    *sorted(accounts),
+                ]
+            ).encode()
+        ).hexdigest()[:24]
+    )
     return (
         [
             {

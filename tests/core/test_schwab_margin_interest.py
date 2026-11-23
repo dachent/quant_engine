@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -13,7 +14,9 @@ from typing import Any
 
 import pytest
 
+import account_financing as af
 import leverage_closure as lc
+import leverage_disclosure as ld
 import provider_ledger
 import schwab_margin_interest as smi
 import zero_financing_statements as zf
@@ -51,7 +54,9 @@ def _ev(basis: str, stamp: str, **extra: Any) -> dict[str, Any]:
     }
 
 
-def _table(stamp: str, first: str, last: str, avg: str, rate: str, interest: str) -> dict[str, Any]:
+def _table(
+    stamp: str, first: str, last: str, avg: str, rate: str, interest: str
+) -> dict[str, Any]:
     return _ev(
         smi.TABLE_ROW,
         stamp,
@@ -63,7 +68,9 @@ def _table(stamp: str, first: str, last: str, avg: str, rate: str, interest: str
     )
 
 
-def _debit(day: str, balance: str, measurement: str = "RANGE_AVERAGE") -> dict[str, Any]:
+def _debit(
+    day: str, balance: str, measurement: str = "RANGE_AVERAGE"
+) -> dict[str, Any]:
     return {
         "account_id": ACC,
         "as_of_date": day,
@@ -85,19 +92,51 @@ def _evidence() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     cost = [
         _posting("2026-01-29", "-1.00"),
         _table("2026-01-31", "2026-01-02", "2026-01-04", "1000.00", "12.000", "1.00"),
-        _ev(smi.CHARGED_PERIOD, "2026-01-31", period_start="2025-12-30", period_end="2026-01-28"),
-        _ev(smi.INTEREST_PAID, "2026-01-31", source_amount=_amt("1.00"), ytd_amount=_amt("1.00")),
-        _ev(smi.LOAN_BLOCK, "2026-01-31", opening_amount=_amt("0.00"), source_amount=_amt("0.00")),
-        _ev(smi.INTEREST_PAID, "2026-02-28", source_amount=_amt("0.00"), ytd_amount=_amt("1.00")),
-        _ev(smi.LOAN_BLOCK, "2026-02-28", opening_amount=_amt("0.00"), source_amount=_amt("0.00")),
+        _ev(
+            smi.CHARGED_PERIOD,
+            "2026-01-31",
+            period_start="2025-12-30",
+            period_end="2026-01-28",
+        ),
+        _ev(
+            smi.INTEREST_PAID,
+            "2026-01-31",
+            source_amount=_amt("1.00"),
+            ytd_amount=_amt("1.00"),
+        ),
+        _ev(
+            smi.LOAN_BLOCK,
+            "2026-01-31",
+            opening_amount=_amt("0.00"),
+            source_amount=_amt("0.00"),
+        ),
+        _ev(
+            smi.INTEREST_PAID,
+            "2026-02-28",
+            source_amount=_amt("0.00"),
+            ytd_amount=_amt("1.00"),
+        ),
+        _ev(
+            smi.LOAN_BLOCK,
+            "2026-02-28",
+            opening_amount=_amt("0.00"),
+            source_amount=_amt("0.00"),
+        ),
         # a statement with no paid column: a derived zero
-        _ev(smi.LOAN_BLOCK, "2026-03-31", opening_amount=_amt("0.00"), source_amount=_amt("0.00")),
+        _ev(
+            smi.LOAN_BLOCK,
+            "2026-03-31",
+            opening_amount=_amt("0.00"),
+            source_amount=_amt("0.00"),
+        ),
     ]
     liability = [_debit(d, "1000.00") for d in _span("2026-01-02", "2026-01-04")]
     return cost, liability
 
 
-def _close(cost: list[dict[str, Any]], liability: list[dict[str, Any]], **kw: Any) -> lc.Closure:
+def _close(
+    cost: list[dict[str, Any]], liability: list[dict[str, Any]], **kw: Any
+) -> lc.Closure:
     return lc.financing_cost_posting_reconciliation(
         cost, liability, kw.get("cutoff", CUTOFF), kw.get("epoch", "2025-12-01")
     )
@@ -105,7 +144,9 @@ def _close(cost: list[dict[str, Any]], liability: list[dict[str, Any]], **kw: An
 
 def test_the_reconciled_account_is_covered() -> None:
     closure = _close(*_evidence())
-    assert closure.covered and closure.check_id == "FINANCING_COST_POSTING_RECONCILIATION"
+    assert (
+        closure.covered and closure.check_id == "FINANCING_COST_POSTING_RECONCILIATION"
+    )
     assert closure.evidence["failure_count"] == 0 and closure.evidence["postings"] == 1
 
 
@@ -115,10 +156,15 @@ def _failures(cost: list[dict[str, Any]], liability: list[dict[str, Any]]) -> st
     return str(closure.evidence["failures"])
 
 
-def _edit(cost: list[dict[str, Any]], basis: str, **fields: Any) -> list[dict[str, Any]]:
+def _edit(
+    cost: list[dict[str, Any]], basis: str, **fields: Any
+) -> list[dict[str, Any]]:
     out = copy.deepcopy(cost)
     for row in out:
-        if row.get("measurement_basis") == basis and row.get("classification") != "BROKER_DEBIT_INTEREST":
+        if (
+            row.get("measurement_basis") == basis
+            and row.get("classification") != "BROKER_DEBIT_INTEREST"
+        ):
             row.update(fields)
     return out
 
@@ -141,7 +187,14 @@ def test_a_posting_without_exactly_one_printed_cycle_is_not_covered() -> None:
 
 def test_a_printed_cycle_without_a_posting_is_not_covered() -> None:
     cost, liability = _evidence()
-    cost.append(_ev(smi.CHARGED_PERIOD, "2026-02-28", period_start="2026-01-29", period_end="2026-02-25"))
+    cost.append(
+        _ev(
+            smi.CHARGED_PERIOD,
+            "2026-02-28",
+            period_start="2026-01-29",
+            period_end="2026-02-25",
+        )
+    )
     assert "CHARGED_PERIOD_WITHOUT_POSTING" in _failures(cost, liability)
 
 
@@ -150,7 +203,9 @@ def test_a_table_row_that_does_not_recompute_is_not_covered() -> None:
     # 1000 x 12% x 3 / 360 = 1.00; 1.03 is beyond two cents (and the posting follows it)
     cost = _edit(cost, smi.TABLE_ROW, source_amount=_amt("1.03"))
     cost[0] = _posting("2026-01-29", "-1.03")
-    cost = _edit(cost, smi.INTEREST_PAID, source_amount=_amt("1.03"), ytd_amount=_amt("1.03"))
+    cost = _edit(
+        cost, smi.INTEREST_PAID, source_amount=_amt("1.03"), ytd_amount=_amt("1.03")
+    )
     assert "TABLE_ROW_DOES_NOT_RECOMPUTE:2026-01-02" in _failures(cost, liability)
 
 
@@ -158,13 +213,21 @@ def test_the_recomputation_tolerates_two_cents_and_no_more() -> None:
     cost, liability = _evidence()
     ok = _edit(cost, smi.TABLE_ROW, source_amount=_amt("1.02"))
     ok[0] = _posting("2026-01-29", "-1.02")
-    ok = _edit(ok, smi.INTEREST_PAID, source_amount=_amt("1.02"), ytd_amount=_amt("1.02"))
+    ok = _edit(
+        ok, smi.INTEREST_PAID, source_amount=_amt("1.02"), ytd_amount=_amt("1.02")
+    )
     ok = [
-        {**r, "ytd_amount": _amt("1.02")} if r.get("measurement_basis") == smi.INTEREST_PAID else r
+        {**r, "ytd_amount": _amt("1.02")}
+        if r.get("measurement_basis") == smi.INTEREST_PAID
+        else r
         for r in ok
     ]
-    assert _close(ok, liability).covered is False  # the Feb ytd (1.00) no longer rolls from 1.02
-    assert "TABLE_ROW_DOES_NOT_RECOMPUTE" not in str(_close(ok, liability).evidence["failures"])
+    assert (
+        _close(ok, liability).covered is False
+    )  # the Feb ytd (1.00) no longer rolls from 1.02
+    assert "TABLE_ROW_DOES_NOT_RECOMPUTE" not in str(
+        _close(ok, liability).evidence["failures"]
+    )
 
 
 def test_a_statement_paid_amount_must_equal_its_table_rows() -> None:
@@ -175,10 +238,20 @@ def test_a_statement_paid_amount_must_equal_its_table_rows() -> None:
 
 def test_the_ytd_must_roll_and_restart_in_january() -> None:
     cost, liability = _evidence()
-    cost[-3] = _ev(smi.INTEREST_PAID, "2026-02-28", source_amount=_amt("0.00"), ytd_amount=_amt("1.50"))
+    cost[-3] = _ev(
+        smi.INTEREST_PAID,
+        "2026-02-28",
+        source_amount=_amt("0.00"),
+        ytd_amount=_amt("1.50"),
+    )
     assert "YTD_DOES_NOT_ROLL:2026-02-28" in _failures(cost, liability)
     cost, liability = _evidence()
-    cost[3] = _ev(smi.INTEREST_PAID, "2026-01-31", source_amount=_amt("1.00"), ytd_amount=_amt("9.00"))
+    cost[3] = _ev(
+        smi.INTEREST_PAID,
+        "2026-01-31",
+        source_amount=_amt("1.00"),
+        ytd_amount=_amt("9.00"),
+    )
     assert "YTD_DOES_NOT_RESTART:2026-01-31" in _failures(cost, liability)
 
 
@@ -190,10 +263,20 @@ def test_a_printed_zero_month_with_a_posting_or_table_row_is_not_covered() -> No
 
 def test_a_month_without_a_paid_column_must_be_a_derived_zero() -> None:
     cost, liability = _evidence()
-    cost[-1] = _ev(smi.LOAN_BLOCK, "2026-03-31", opening_amount=_amt("5.00"), source_amount=_amt("0.00"))
+    cost[-1] = _ev(
+        smi.LOAN_BLOCK,
+        "2026-03-31",
+        opening_amount=_amt("5.00"),
+        source_amount=_amt("0.00"),
+    )
     assert "MONTH_WITHOUT_PAID_COLUMN_NOT_ZERO:2026-03-31" in _failures(cost, liability)
     cost, liability = _evidence()
-    cost[-1] = _ev(smi.LOAN_BLOCK, "2026-03-31", opening_amount=_amt("0.00"), source_amount=_amt("5.00"))
+    cost[-1] = _ev(
+        smi.LOAN_BLOCK,
+        "2026-03-31",
+        opening_amount=_amt("0.00"),
+        source_amount=_amt("5.00"),
+    )
     assert "MONTH_WITHOUT_PAID_COLUMN_NOT_ZERO" in _failures(cost, liability)
     cost, liability = _evidence()
     cost.append(_posting("2026-03-20", "-0.10"))
@@ -236,12 +319,21 @@ def test_an_unmapped_posting_in_the_epoch_is_a_gap_unless_before_it() -> None:
     cost, liability = _evidence()
     cost[0] = {**cost[0], "mapping_status": "UNMAPPED"}
     assert "POSTING_UNMAPPED_IN_EPOCH" in _failures(cost, liability)
-    assert lc.financing_cost_posting_reconciliation(cost, liability, CUTOFF, "2026-06-01").covered
+    assert lc.financing_cost_posting_reconciliation(
+        cost, liability, CUTOFF, "2026-06-01"
+    ).covered
 
 
 def test_an_unreadable_table_is_a_named_failure() -> None:
     cost, liability = _evidence()
-    cost.append(_ev(smi.TABLE_ROW, "2026-01-31", refusal="TABLE_DETAIL_UNREADABLE", source_amount={"status": "UNAVAILABLE", "value": None}))
+    cost.append(
+        _ev(
+            smi.TABLE_ROW,
+            "2026-01-31",
+            refusal="TABLE_DETAIL_UNREADABLE",
+            source_amount={"status": "UNAVAILABLE", "value": None},
+        )
+    )
     assert "STATEMENT_TABLE_UNREADABLE" in _failures(cost, liability)
 
 
@@ -256,7 +348,9 @@ def test_a_table_row_outside_every_charged_period_is_not_covered() -> None:
     cost, liability = _evidence()
     # a zero-interest stray row inside the January statement but dated in February, with its
     # ledger debit day: the only failing check is that no charged period contains it
-    cost.append(_table("2026-01-31", "2026-02-10", "2026-02-10", "0.00", "12.000", "0.00"))
+    cost.append(
+        _table("2026-01-31", "2026-02-10", "2026-02-10", "0.00", "12.000", "0.00")
+    )
     liability.append(_debit("2026-02-10", "0.00001"))
     assert _failures(cost, liability) == "TABLE_ROW_OUTSIDE_CHARGED_PERIOD"
 
@@ -267,13 +361,25 @@ def test_statements_without_a_loan_block_never_cover_the_account() -> None:
     assert not _close(no_blocks, liability).covered
 
 
-def test_an_account_with_only_zero_months_and_no_interest_table_is_not_covered_here() -> None:
+def test_an_account_with_only_zero_months_and_no_interest_table_is_not_covered_here() -> (
+    None
+):
     """Zero-interest margin accounts are the zero-financing path's; this closure covers the
     ones that were charged, so it needs a printed table (and its postings) to cover."""
 
     cost = [
-        _ev(smi.INTEREST_PAID, "2026-01-31", source_amount=_amt("0.00"), ytd_amount=_amt("0.00")),
-        _ev(smi.LOAN_BLOCK, "2026-01-31", opening_amount=_amt("0.00"), source_amount=_amt("0.00")),
+        _ev(
+            smi.INTEREST_PAID,
+            "2026-01-31",
+            source_amount=_amt("0.00"),
+            ytd_amount=_amt("0.00"),
+        ),
+        _ev(
+            smi.LOAN_BLOCK,
+            "2026-01-31",
+            opening_amount=_amt("0.00"),
+            source_amount=_amt("0.00"),
+        ),
     ]
     closure = _close(cost, [])
     assert not closure.covered and closure.evidence["failure_count"] == 0
@@ -283,7 +389,12 @@ def test_rows_after_the_cutoff_are_not_read() -> None:
     cost, liability = _evidence()
     cost += [
         _posting("2026-12-29", "-9.00"),  # no cycle, dated after the cutoff
-        _ev(smi.INTEREST_PAID, "2026-12-31", source_amount=_amt("9.00"), ytd_amount=_amt("9.00")),
+        _ev(
+            smi.INTEREST_PAID,
+            "2026-12-31",
+            source_amount=_amt("9.00"),
+            ytd_amount=_amt("9.00"),
+        ),
     ]
     assert _close(cost, liability).covered
 
@@ -305,7 +416,14 @@ TABLE_HEAD = [
 ]
 
 
-def _statement(period: str, *, paid: str | None, ytd: str | None, rows: tuple[str, ...], thru: str | None) -> str:
+def _statement(
+    period: str,
+    *,
+    paid: str | None,
+    ytd: str | None,
+    rows: tuple[str, ...],
+    thru: str | None,
+) -> str:
     lines = [
         "Schwab One Account of   Account Number   Statement Period",
         f"   ****-*{LAST3}   {period}",
@@ -347,19 +465,25 @@ TEXTS = {
 
 
 @pytest.fixture
-def statements(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, dict[str, str]]:
+def statements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, dict[str, str]]:
     sums = {}
     for name in TEXTS:
         (tmp_path / name).write_bytes(name.encode())
         sums[name] = hashlib.sha256(name.encode()).hexdigest()
     monkeypatch.setattr(zf, "_pdftotext", lambda path: TEXTS[path.name])
     monkeypatch.setattr(
-        zf, "pdftotext_raw", lambda path: (_ for _ in ()).throw(zf.ZeroFinancingError("none"))
+        zf,
+        "pdftotext_raw",
+        lambda path: (_ for _ in ()).throw(zf.ZeroFinancingError("none")),
     )
     return tmp_path, sums
 
 
-def _rows(statements: tuple[Path, dict[str, str]], accounts: set[str] | None = None) -> Any:
+def _rows(
+    statements: tuple[Path, dict[str, str]], accounts: set[str] | None = None
+) -> Any:
     directory, sums = statements
     return smi.statement_rows(
         directory,
@@ -371,7 +495,9 @@ def _rows(statements: tuple[Path, dict[str, str]], accounts: set[str] | None = N
     )
 
 
-def test_the_reader_emits_pinned_evidence_rows(statements: tuple[Path, dict[str, str]]) -> None:
+def test_the_reader_emits_pinned_evidence_rows(
+    statements: tuple[Path, dict[str, str]],
+) -> None:
     rows, manifest = _rows(statements)
     kinds = sorted({r["measurement_basis"] for r in rows})
     assert kinds == sorted(smi.BASES)
@@ -379,7 +505,10 @@ def test_the_reader_emits_pinned_evidence_rows(statements: tuple[Path, dict[str,
     assert (table["period_start"], table["period_end"]) == ("2026-01-02", "2026-01-04")
     assert table["source_amount"] == _amt("1.00") and table["rate_percent"] == "12.000"
     paid = [r for r in rows if r["measurement_basis"] == smi.INTEREST_PAID]
-    assert [(p["as_of_date"], p["source_amount"]["value"], p["ytd_amount"]["value"]) for p in paid] == [
+    assert [
+        (p["as_of_date"], p["source_amount"]["value"], p["ytd_amount"]["value"])
+        for p in paid
+    ] == [
         ("2026-01-31", "1.00", "1.00"),
         ("2026-02-28", "0.00", "1.00"),
     ]
@@ -402,7 +531,9 @@ def test_the_reader_skips_a_retirement_statement_even_with_a_loan_block(
     (tmp_path / name).write_bytes(b"x")
     monkeypatch.setattr(zf, "_pdftotext", lambda path: ira)
     monkeypatch.setattr(
-        zf, "pdftotext_raw", lambda path: (_ for _ in ()).throw(zf.ZeroFinancingError("none"))
+        zf,
+        "pdftotext_raw",
+        lambda path: (_ for _ in ()).throw(zf.ZeroFinancingError("none")),
     )
     rows, manifest = smi.statement_rows(
         tmp_path,
@@ -431,7 +562,9 @@ def test_the_interest_paid_ytd_is_read_next_to_the_period_amount() -> None:
     assert smi.interest_paid_ytd("no loan block") is None
 
 
-def _spec(tmp_path: Path, statements: tuple[Path, dict[str, str]], **over: Any) -> dict[str, Any]:
+def _spec(
+    tmp_path: Path, statements: tuple[Path, dict[str, str]], **over: Any
+) -> dict[str, Any]:
     directory, sums = statements
     sums_raw = "".join(f"{d}  {n}\n" for n, d in sorted(sums.items())).encode()
     mapping_raw = (
@@ -454,7 +587,11 @@ def _spec(tmp_path: Path, statements: tuple[Path, dict[str, str]], **over: Any) 
 
 
 def _ledger_call(spec: dict[str, Any]) -> Any:
-    combined = {"nav_observations": [{"account_id": ACC, "provider_id": "schwab", "as_of_date": CUTOFF}]}
+    combined = {
+        "nav_observations": [
+            {"account_id": ACC, "provider_id": "schwab", "as_of_date": CUTOFF}
+        ]
+    }
     return provider_ledger._schwab_margin_interest_rows(
         spec,
         {"schwab"},
@@ -469,10 +606,15 @@ def test_the_spec_key_projects_rows_under_the_provider_generation(
 ) -> None:
     rows, artifacts = _ledger_call(_spec(tmp_path, statements))
     assert rows and all(r["generation_id"] == "gen-1" for r in rows)
-    assert all(r["observation_generation_id"].startswith("margin-interest-") for r in rows)
+    assert all(
+        r["observation_generation_id"].startswith("margin-interest-") for r in rows
+    )
     ids = {a.artifact_id for a in artifacts}
     assert all(r["source_artifact_id"] in ids for r in rows)
-    assert {"margin-interest/schwab/SHA256SUMS", "margin-interest/schwab/account-mapping"} <= ids
+    assert {
+        "margin-interest/schwab/SHA256SUMS",
+        "margin-interest/schwab/account-mapping",
+    } <= ids
 
 
 @pytest.mark.parametrize(
@@ -481,7 +623,10 @@ def test_the_spec_key_projects_rows_under_the_provider_generation(
         (lambda s: {**s, "extra": 1}, "keys differ"),
         (lambda s: {**s, "provider_id": "ibkr"}, "does not declare"),
         (lambda s: {**s, "accounts": []}, "differ from the provider"),
-        (lambda s: {**s, "accounts": ["account-unobserved"]}, "differ from the provider"),
+        (
+            lambda s: {**s, "accounts": ["account-unobserved"]},
+            "differ from the provider",
+        ),
         (lambda s: {**s, "accounts": [ACC, ACC]}, "differ from the provider"),
         (lambda s: {**s, "sums_sha256": "0" * 64}, "identity differs"),
         (lambda s: {**s, "mapping_sha256": "0" * 64}, "identity differs"),
@@ -501,20 +646,24 @@ def test_the_spec_key_refuses_when_no_margin_statement_is_found(
     spec = _spec(tmp_path, statements)
     spec["accounts"] = [other]
     combined = {"nav_observations": [{"account_id": other, "provider_id": "schwab"}]}
-    with pytest.raises(provider_ledger.ProviderLedgerError, match="no margin statement"):
+    with pytest.raises(
+        provider_ledger.ProviderLedgerError, match="no margin statement"
+    ):
         provider_ledger._schwab_margin_interest_rows(
-            spec, {"schwab"}, date(2026, 11, 19), combined, {"schwab": SimpleNamespace(generation_id="g")}
+            spec,
+            {"schwab"},
+            date(2026, 11, 19),
+            combined,
+            {"schwab": SimpleNamespace(generation_id="g")},
         )
 
 
 # --- the disclosure picks the closure --------------------------------------------------------
-import json
-
-import account_financing as af
-import leverage_disclosure as ld
 
 
-def _disclosure(cost: list[dict[str, Any]], liability: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+def _disclosure(
+    cost: list[dict[str, Any]], liability: list[dict[str, Any]]
+) -> dict[tuple[str, str], dict[str, Any]]:
     declaration = af.load_declaration(
         json.dumps(
             {
@@ -547,11 +696,19 @@ def _disclosure(cost: list[dict[str, Any]], liability: list[dict[str, Any]]) -> 
     catalog = {
         "nav_observations": nav,
         "financing_cost_observations": [{**r, "provider_id": "schwab"} for r in cost],
-        "financing_liability_observations": [{**r, "provider_id": "schwab"} for r in liability],
+        "financing_liability_observations": [
+            {**r, "provider_id": "schwab"} for r in liability
+        ],
         "leverage_exposure_observations": [],
         "positions": [],
     }
-    rows = ld.account_financing_rows(declaration, catalog, cutoff=CUTOFF, generation_id="d" * 64, catalog_sha256="d" * 64)
+    rows = ld.account_financing_rows(
+        declaration,
+        catalog,
+        cutoff=CUTOFF,
+        generation_id="d" * 64,
+        catalog_sha256="d" * 64,
+    )
     return {(r["data_class"], r["measurement_basis"]): r for r in rows}
 
 

@@ -707,6 +707,25 @@ def _pdftotext(path: Path) -> str:
     return result.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
 
 
+def statement_text(path: Path) -> str:
+    """The layout text of one statement: the entry point for sibling statement readers."""
+
+    return _pdftotext(path)
+
+
+def parse_money_amount(amount_text: str) -> Decimal:
+    """One printed money amount (``$x``, ``($x)``, ``-$x``)."""
+
+    return _parse_money(amount_text)
+
+
+def refine_table_from_raw(facts: dict[str, Any], raw_text: str) -> None:
+    """Re-read the Margin Interest table from the content-stream text (see the private
+    reader); public for sibling statement readers."""
+
+    _refine_table_from_raw(facts, raw_text)
+
+
 def load_mapping(raw: bytes, provider_id: str) -> dict[str, tuple[str, str]]:
     """label -> (ledger account id, last3) from the local-only mapping input."""
 

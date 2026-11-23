@@ -449,7 +449,9 @@ def _dates(row: Mapping[str, Any]) -> tuple[date, date] | None:
 
 
 def _posting_day(row: Mapping[str, Any]) -> date | None:
-    when = row.get("accounting_date") or row.get("effective_date") or row.get("event_date")
+    when = (
+        row.get("accounting_date") or row.get("effective_date") or row.get("event_date")
+    )
     try:
         return _day(when) if when else None
     except ValueError:
@@ -481,7 +483,9 @@ def financing_cost_posting_reconciliation(
     rows = [
         r
         for r in cost_rows
-        if str(r.get("as_of_date") or r.get("accounting_date") or r.get("period_end") or "")
+        if str(
+            r.get("as_of_date") or r.get("accounting_date") or r.get("period_end") or ""
+        )
         <= cutoff
     ]
     postings = [
@@ -490,7 +494,9 @@ def financing_cost_posting_reconciliation(
         if r.get("classification") == "BROKER_DEBIT_INTEREST"
         and r.get("measurement_basis") == "CASH_POSTING"
     ]
-    evidence_rows = [r for r in rows if r.get("measurement_basis") in STATEMENT_EVIDENCE_BASES]
+    evidence_rows = [
+        r for r in rows if r.get("measurement_basis") in STATEMENT_EVIDENCE_BASES
+    ]
     tables = [r for r in evidence_rows if r["measurement_basis"] == _TABLE_ROW]
     cycles = [r for r in evidence_rows if r["measurement_basis"] == _CHARGED_PERIOD]
     paid = [r for r in evidence_rows if r["measurement_basis"] == _INTEREST_PAID]
@@ -547,7 +553,9 @@ def financing_cost_posting_reconciliation(
             fail(f"POSTING_NOT_EQUAL_TO_TABLE:{day.isoformat()}")
     if any(c not in matched for c in cycle_spans):
         fail("CHARGED_PERIOD_WITHOUT_POSTING")
-    if any(not any(a <= t[0] and t[1] <= b for a, b in cycle_spans) for t in table_rows):
+    if any(
+        not any(a <= t[0] and t[1] <= b for a, b in cycle_spans) for t in table_rows
+    ):
         fail("TABLE_ROW_OUTSIDE_CHARGED_PERIOD")
     paid_by_day: dict[str, tuple[Decimal, Decimal]] = {}
     for r in paid:
@@ -585,7 +593,9 @@ def financing_cost_posting_reconciliation(
         elif opening != 0 or closing != 0 or listed or in_month:
             fail(f"MONTH_WITHOUT_PAID_COLUMN_NOT_ZERO:{stamp}")
     listed_days = {
-        t[0] + timedelta(days=n) for t in table_rows for n in range((t[1] - t[0]).days + 1)
+        t[0] + timedelta(days=n)
+        for t in table_rows
+        for n in range((t[1] - t[0]).days + 1)
     }
     range_days: set[date] = set()
     dust: dict[tuple[date, date], Decimal] = defaultdict(lambda: _ZERO)
@@ -610,7 +620,11 @@ def financing_cost_posting_reconciliation(
                 fail(f"DEBIT_DAY_OUTSIDE_CHARGED_PERIOD:{day.isoformat()}")
                 continue
             rate = max(
-                (t[3] for t in table_rows if owners[0][0] <= t[0] and t[1] <= owners[0][1]),
+                (
+                    t[3]
+                    for t in table_rows
+                    if owners[0][0] <= t[0] and t[1] <= owners[0][1]
+                ),
                 default=None,
             )
             if rate is None:

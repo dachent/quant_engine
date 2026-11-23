@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+from datetime import date
 from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 import leverage_closure
+import provider_ledger
 import schwab_leverage_observations as slo
 
 CUTOFF = "2026-11-19"
@@ -78,7 +83,9 @@ def test_both_closures_pass_and_the_row_is_a_mapped_available_gross() -> None:
 
 def test_the_row_closes_the_disclosure_cutoff_gross() -> None:
     row = _only(_rows())
-    closure, gross, nav = leverage_closure.gross_exposure([row], [{**NAV[0], "mapping_status": "MAPPED"}], CUTOFF)
+    closure, gross, nav = leverage_closure.gross_exposure(
+        [row], [{**NAV[0], "mapping_status": "MAPPED"}], CUTOFF
+    )
     assert closure.covered and gross == Decimal("223.45") and nav == Decimal("126.12")
 
 
@@ -98,15 +105,23 @@ def test_a_line_within_the_cent_is_accepted_and_just_beyond_is_refused() -> None
     within = {**CLOSES, ("AAA", CUTOFF): Decimal("12.3454")}
     assert _only(_rows(closes=within))["amount"]["status"] == "AVAILABLE"
     beyond = {**CLOSES, ("AAA", CUTOFF): Decimal("12.3456")}
-    assert _refusal(closes=beyond) == "SNAPSHOT_PRICE_DATE_OR_SOURCE_DIFFERS_FROM_CLOSES"
+    assert (
+        _refusal(closes=beyond) == "SNAPSHOT_PRICE_DATE_OR_SOURCE_DIFFERS_FROM_CLOSES"
+    )
 
 
 def test_a_missing_close_refuses_with_a_reason() -> None:
-    assert _refusal(closes={("AAA", CUTOFF): Decimal("12.345")}) == "CLOSE_MISSING_FOR_A_LINE"
+    assert (
+        _refusal(closes={("AAA", CUTOFF): Decimal("12.345")})
+        == "CLOSE_MISSING_FOR_A_LINE"
+    )
 
 
 def test_a_close_for_the_next_day_does_not_stand_in_for_the_cutoff() -> None:
-    other = {("AAA", "2026-11-20"): Decimal("12.345"), ("BRK-B", "2026-11-20"): Decimal("25")}
+    other = {
+        ("AAA", "2026-11-20"): Decimal("12.345"),
+        ("BRK-B", "2026-11-20"): Decimal("25"),
+    }
     assert _refusal(closes=other) == "CLOSE_MISSING_FOR_A_LINE"
 
 
@@ -124,14 +139,26 @@ def test_without_an_observed_debit_the_cash_is_not_invented() -> None:
 
 def test_a_debit_on_another_day_is_not_the_cutoff_cash() -> None:
     other = {**DEBIT_DAY, "as_of_date": "2026-11-18"}
-    assert _refusal(zero_financing_rows=[other]) == "NAV_CLOSURE_FAILS_OR_CASH_NOT_OBSERVED"
+    assert (
+        _refusal(zero_financing_rows=[other])
+        == "NAV_CLOSURE_FAILS_OR_CASH_NOT_OBSERVED"
+    )
 
 
 def test_a_zero_day_row_at_the_cutoff_closes_only_when_gross_equals_nav() -> None:
-    zero = {**DEBIT_DAY, "amount": _amt("0"), "classification": "OBSERVED_ZERO_FINANCING_DAY"}
+    zero = {
+        **DEBIT_DAY,
+        "amount": _amt("0"),
+        "classification": "OBSERVED_ZERO_FINANCING_DAY",
+    }
     exact = [{"account_id": ACC, "as_of_date": CUTOFF, "nav": _amt("223.45")}]
-    assert _only(_rows(zero_financing_rows=[zero], nav_rows=exact))["amount"]["status"] == "AVAILABLE"
-    assert _refusal(zero_financing_rows=[zero]) == "NAV_CLOSURE_FAILS_OR_CASH_NOT_OBSERVED"
+    assert (
+        _only(_rows(zero_financing_rows=[zero], nav_rows=exact))["amount"]["status"]
+        == "AVAILABLE"
+    )
+    assert (
+        _refusal(zero_financing_rows=[zero]) == "NAV_CLOSURE_FAILS_OR_CASH_NOT_OBSERVED"
+    )
 
 
 @pytest.mark.parametrize(
@@ -140,7 +167,10 @@ def test_a_zero_day_row_at_the_cutoff_closes_only_when_gross_equals_nav() -> Non
         [_line("AAA", "-10", "123.45"), LINES[1]],
         [_line("AAA", "10", "-123.45"), LINES[1]],
         [_line("AAA", "0", "0"), LINES[1]],
-        [{**LINES[0], "market_value": {"status": "UNAVAILABLE", "value": None}}, LINES[1]],
+        [
+            {**LINES[0], "market_value": {"status": "UNAVAILABLE", "value": None}},
+            LINES[1],
+        ],
     ],
 )
 def test_a_short_zero_or_unreadable_line_refuses(lines: list[dict[str, Any]]) -> None:
@@ -157,7 +187,9 @@ def test_two_strategies_or_an_unmapped_line_is_not_a_mapped_row() -> None:
     split = [LINES[0], {**LINES[1], "strategy_id": "strategy-2"}]
     row = _only(_rows(positions=split))
     assert row["mapping_status"] == "UNMAPPED" and row["strategy_id"] is None
-    closure, gross, _ = leverage_closure.gross_exposure([row], [{**NAV[0], "mapping_status": "MAPPED"}], CUTOFF)
+    closure, gross, _ = leverage_closure.gross_exposure(
+        [row], [{**NAV[0], "mapping_status": "MAPPED"}], CUTOFF
+    )
     assert not closure.covered and gross is None
     unmapped = [LINES[0], {**LINES[1], "mapping_status": "UNMAPPED"}]
     assert _only(_rows(positions=unmapped))["mapping_status"] == "UNMAPPED"
@@ -170,7 +202,9 @@ def test_the_nav_must_be_exactly_one_row() -> None:
 
 def test_a_refusal_reason_reaches_the_closure_evidence() -> None:
     row = _only(_rows(zero_financing_rows=[]))
-    closure, gross, _ = leverage_closure.gross_exposure([row], [{**NAV[0], "mapping_status": "MAPPED"}], CUTOFF)
+    closure, gross, _ = leverage_closure.gross_exposure(
+        [row], [{**NAV[0], "mapping_status": "MAPPED"}], CUTOFF
+    )
     assert not closure.covered and gross is None
     assert closure.evidence["refusals"] == "NAV_CLOSURE_FAILS_OR_CASH_NOT_OBSERVED"
 
@@ -191,22 +225,23 @@ def test_load_closes_reads_vendor_columns_and_rejects_conflicts() -> None:
         slo.load_closes(b"Ticker,Date,Close\nAAA,2026-11-19,x\n")
 
 
-def test_a_security_trade_after_the_cutoff_refuses_but_a_cash_row_or_an_earlier_trade_does_not() -> None:
+def test_a_security_trade_after_the_cutoff_refuses_but_a_cash_row_or_an_earlier_trade_does_not() -> (
+    None
+):
     trade = {"account_id": ACC, "symbol": "AAA", "event_date": "2026-11-20"}
-    assert _refusal(transactions=[trade]) == "SECURITY_TRADE_AFTER_CUTOFF_CHANGES_QUANTITY"
+    assert (
+        _refusal(transactions=[trade]) == "SECURITY_TRADE_AFTER_CUTOFF_CHANGES_QUANTITY"
+    )
     cash = {"account_id": ACC, "symbol": None, "event_date": "2026-11-20"}
     earlier = {**trade, "event_date": "2026-11-19"}
     other = {**trade, "account_id": "account-y"}
-    assert _only(_rows(transactions=[cash, earlier, other]))["amount"]["status"] == "AVAILABLE"
+    assert (
+        _only(_rows(transactions=[cash, earlier, other]))["amount"]["status"]
+        == "AVAILABLE"
+    )
 
 
 # --- the ledger spec key -------------------------------------------------------------------
-import hashlib
-from datetime import date
-from pathlib import Path
-from types import SimpleNamespace
-
-import provider_ledger
 
 
 def _spec(tmp_path: Path, csv_text: str | None = None, **over: Any) -> dict[str, Any]:
@@ -221,7 +256,11 @@ def _spec(tmp_path: Path, csv_text: str | None = None, **over: Any) -> dict[str,
         "provider_id": "schwab",
         "accounts": [ACC],
         "closes": [
-            {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": len(raw)}
+            {
+                "path": str(path),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "size_bytes": len(raw),
+            }
         ],
     }
     spec.update(over)
@@ -259,11 +298,20 @@ def test_the_spec_key_builds_pinned_rows_and_artifacts(tmp_path: Path) -> None:
         (lambda s: {**s, "extra": 1}, "keys differ"),
         (lambda s: {**s, "provider_id": "ibkr"}, "does not declare"),
         (lambda s: {**s, "accounts": []}, "differ from the provider"),
-        (lambda s: {**s, "accounts": ["account-unobserved"]}, "differ from the provider"),
+        (
+            lambda s: {**s, "accounts": ["account-unobserved"]},
+            "differ from the provider",
+        ),
         (lambda s: {**s, "accounts": [ACC, ACC]}, "differ from the provider"),
         (lambda s: {**s, "closes": []}, "no close file"),
-        (lambda s: {**s, "closes": [{**s["closes"][0], "sha256": "0" * 64}]}, "identity differs"),
-        (lambda s: {**s, "closes": [{**s["closes"][0], "size_bytes": 1}]}, "size differs"),
+        (
+            lambda s: {**s, "closes": [{**s["closes"][0], "sha256": "0" * 64}]},
+            "identity differs",
+        ),
+        (
+            lambda s: {**s, "closes": [{**s["closes"][0], "size_bytes": 1}]},
+            "size differs",
+        ),
     ],
 )
 def test_the_spec_key_is_strict(tmp_path: Path, mutate: Any, text: str) -> None:
@@ -271,7 +319,9 @@ def test_the_spec_key_is_strict(tmp_path: Path, mutate: Any, text: str) -> None:
         _call(mutate(_spec(tmp_path)))
 
 
-def test_the_spec_key_refuses_a_malformed_or_conflicting_close_file(tmp_path: Path) -> None:
+def test_the_spec_key_refuses_a_malformed_or_conflicting_close_file(
+    tmp_path: Path,
+) -> None:
     with pytest.raises(provider_ledger.ProviderLedgerError, match="columns"):
         _call(_spec(tmp_path, "Symbol,Date,Close\n"))
 

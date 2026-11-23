@@ -52,7 +52,7 @@ def interest_paid_ytd(text: str) -> Decimal | None:
         for row in lines[number + 1 : number + 6]:
             found = re.findall(r"\(?\$[\d,]+\.\d\d\)?", row)
             if len(found) >= 2:
-                return abs(zfs._parse_money(found[-1]))
+                return abs(zfs.parse_money_amount(found[-1]))
         return None
     return None
 
@@ -72,7 +72,8 @@ def statement_rows(
     manifest: list[dict[str, Any]] = []
     for name in sorted(sums):
         match = re.fullmatch(
-            re.escape(provider_id) + r"-stmt-([0-9a-f]{8})-(\d{4}-\d{2}-\d{2})\.pdf", name
+            re.escape(provider_id) + r"-stmt-([0-9a-f]{8})-(\d{4}-\d{2}-\d{2})\.pdf",
+            name,
         )
         if match is None:
             raise zfs.ZeroFinancingError(f"unexpected statement file name: {name}")
@@ -87,17 +88,15 @@ def statement_rows(
         if digest != sums[name]:
             raise zfs.ZeroFinancingError(f"statement identity differs: {name}")
         account, last3 = mapping[label]
-        text = zfs._pdftotext(path)
+        text = zfs.statement_text(path)
         facts = zfs.parse_statement(text, date.fromisoformat(day))
         if facts["last3"] != last3 or not facts["file_label_matches"]:
             raise zfs.ZeroFinancingError(f"statement differs from its mapping: {name}")
         try:
-            zfs._refine_table_from_raw(facts, zfs.pdftotext_raw(path))
+            zfs.refine_table_from_raw(facts, zfs.pdftotext_raw(path))
         except zfs.ZeroFinancingError:
             pass  # the layout read stands
-        manifest.append(
-            {"name": name, "sha256": digest, "size_bytes": len(content)}
-        )
+        manifest.append({"name": name, "sha256": digest, "size_bytes": len(content)})
         if facts["retirement"] or facts["loan_block"] is None:
             continue  # a retirement or loan-free statement has no margin-interest evidence
         end: date = facts["period_end"]
@@ -114,7 +113,9 @@ def statement_rows(
             _digest: str = digest,
             **extra: Any,
         ) -> dict[str, Any]:
-            source_id = f"margin-interest:{_account}:{_end.isoformat()}:{basis}:{ordinal}"
+            source_id = (
+                f"margin-interest:{_account}:{_end.isoformat()}:{basis}:{ordinal}"
+            )
             return {
                 "account_id": _account,
                 "as_of_date": _end.isoformat(),

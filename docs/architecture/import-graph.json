@@ -770,6 +770,16 @@
     ],
     [
       "provider_ledger",
+      "schwab_leverage_observations",
+      1
+    ],
+    [
+      "provider_ledger",
+      "schwab_margin_interest",
+      1
+    ],
+    [
+      "provider_ledger",
       "schwab_rollback",
       1
     ],
@@ -1001,6 +1011,11 @@
     [
       "schwab_capture_ingest",
       "schwab_nav_derive",
+      1
+    ],
+    [
+      "schwab_margin_interest",
+      "zero_financing_statements",
       1
     ],
     [

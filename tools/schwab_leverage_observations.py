@@ -216,10 +216,21 @@ def gross_exposure_rows(
             refuse("POSITION_LINE_NOT_LONG_OR_UNREADABLE", strategy, status, **evidence)
             continue
         if missing:
-            refuse("CLOSE_MISSING_FOR_A_LINE", strategy, status, missing=len(missing), **evidence)
+            refuse(
+                "CLOSE_MISSING_FOR_A_LINE",
+                strategy,
+                status,
+                missing=len(missing),
+                **evidence,
+            )
             continue
         if worst > CENT:
-            refuse("SNAPSHOT_PRICE_DATE_OR_SOURCE_DIFFERS_FROM_CLOSES", strategy, status, **evidence)
+            refuse(
+                "SNAPSHOT_PRICE_DATE_OR_SOURCE_DIFFERS_FROM_CLOSES",
+                strategy,
+                status,
+                **evidence,
+            )
             continue
         navs = [
             v
