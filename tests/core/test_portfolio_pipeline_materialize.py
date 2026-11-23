@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 import copy
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -8184,3 +8185,262 @@ def test_execute_pipeline_commit_path_promotes_through_the_orchestration_gate() 
     call = "_validate_portfolio_orchestration(spec, verify_runtime=True, promote=True)"
     assert call in source
     assert source.index("if commit:") < source.index(call)
+
+
+def _cold_attended_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict[str, object], Path]:
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+    return preflight, output_root
+
+
+def _count_completed_stage_verifications(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, ...]]:
+    calls: list[tuple[str, ...]] = []
+    real = materializer._attended_completed_stages
+
+    def counting(
+        output_root: Path, required_stages: Sequence[str], **kwargs: object
+    ) -> list[str]:
+        calls.append(tuple(required_stages))
+        return real(output_root, required_stages, **kwargs)
+
+    monkeypatch.setattr(materializer, "_attended_completed_stages", counting)
+    return calls
+
+
+def test_attended_resume_verifies_completed_stages_once_before_it_runs_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate, the resume check and the execute start share ONE verification.
+
+    Before: three identical passes (qa gate, start-or-resume, execute start) plus the final view.
+    """
+
+    preflight, output_root = _cold_attended_run(tmp_path, monkeypatch)
+    # a real preflight plans every attended stage, so the gate and the resume ask the same question
+    monkeypatch.setattr(materializer, "ATTENDED_STAGES", ("ledger", "baseline"))
+    calls = _count_completed_stage_verifications(monkeypatch)
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a verified completed stage must be skipped")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 0
+    )
+    assert len(calls) == 2  # one verification before the run + the final view
+
+
+def test_attended_resume_still_fails_closed_at_the_single_verification_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each removed duplicate pass left its tamper cases to the one pass that remains."""
+
+    for tamper in ("receipt", "generation", "stage-root"):
+        run_dir = tmp_path / tamper
+        run_dir.mkdir()
+        preflight, output_root = _cold_attended_run(run_dir, monkeypatch)
+        if tamper == "receipt":
+            (output_root / "stage-results" / "ledger.json").write_bytes(b"not-json")
+        elif tamper == "generation":
+            baseline = (
+                next((output_root / "stages" / "baseline" / "generations").iterdir())
+                / "portfolio-baseline.json"
+            )
+            baseline.write_bytes(baseline.read_bytes() + b"\n")
+        else:
+            shutil.rmtree(output_root / "stages" / "ledger")
+        calls = _count_completed_stage_verifications(monkeypatch)
+
+        def no_child(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("a tampered completed stage must stop before a child")
+
+        monkeypatch.setattr(materializer.subprocess, "run", no_child)
+        assert (
+            materializer.main(
+                _attended_argv(preflight, output_root, execute=True, resume=True)
+            )
+            == 1
+        ), tamper
+        assert len(calls) <= 2, tamper
+
+
+def test_attended_run_verifies_again_after_every_child_it_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The memo must not hide a stage a child just wrote: each child is followed by a fresh pass."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+    calls = _count_completed_stage_verifications(monkeypatch)
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+    # execute start + after ledger + after baseline + the final view
+    assert len(calls) == 4
+
+
+def test_verified_stages_memo_reuses_only_an_identical_unchanged_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[tuple[str, ...], str | None]] = []
+
+    def fake(
+        _root: Path, required: Sequence[str], *, failed_stage: str | None = None
+    ) -> list[str]:
+        calls.append((tuple(required), failed_stage))
+        return list(required)[:1]
+
+    monkeypatch.setattr(materializer, "_attended_completed_stages", fake)
+    memo = materializer._VerifiedStages()
+    first = memo.completed(tmp_path, ("ledger", "baseline"), label="a")
+    first.append("mutated by the caller")  # a caller cannot corrupt the stored answer
+    assert memo.completed(tmp_path, ("ledger", "baseline"), label="b") == ["ledger"]
+    assert len(calls) == 1
+    memo.completed(tmp_path, ("ledger", "baseline"), label="c", failed_stage="baseline")
+    memo.completed(tmp_path, ("ledger",), label="d")
+    assert (
+        len(calls) == 3
+    )  # another failed stage or another stage list is a new question
+    memo.invalidate()
+    memo.completed(tmp_path, ("ledger", "baseline"), label="e")
+    assert len(calls) == 4  # nothing survives an invalidation
+
+
+def test_verified_stages_memo_never_caches_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts: list[int] = []
+
+    def refuse(*_args: object, **_kwargs: object) -> list[str]:
+        attempts.append(1)
+        raise materializer.MaterializationError("tampered")
+
+    monkeypatch.setattr(materializer, "_attended_completed_stages", refuse)
+    memo = materializer._VerifiedStages()
+    for _ in range(2):
+        with pytest.raises(materializer.MaterializationError, match="tampered"):
+            memo.completed(tmp_path, ("ledger",), label="x")
+    assert len(attempts) == 2
+
+
+def test_attended_children_stream_their_output_instead_of_being_captured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger",)
+    output_root = tmp_path / "output"
+    seen: list[dict[str, object]] = []
+
+    def complete(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(dict(kwargs))
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, None, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+    assert len(seen) == 1
+    assert "capture_output" not in seen[0]
+    assert "stdout" not in seen[0] and "stderr" not in seen[0]
+
+
+def test_attended_run_writes_phase_timers_to_the_timing_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "timing.jsonl"
+    monkeypatch.setenv("QE_STAGE_TIMING_LOG", str(log))
+    preflight, output_root = _cold_attended_run(tmp_path, monkeypatch)
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a verified completed stage must be skipped")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 0
+    )
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    names = [row["stage"] for row in rows]
+    assert names.count("attended_preflight") == 2  # the cold run and the resume
+    assert {row["role"] for row in rows if row["stage"] == "attended_role"} == {
+        "ledger",
+        "baseline",
+    }
+    labels = {
+        row["label"] for row in rows if row["stage"] == "attended_completed_stages"
+    }
+    assert {"execute_start", "after_ledger", "after_baseline"} <= labels
+    assert "attended_completed_stages_reused" in names  # the resume reused its one pass
+    assert all(isinstance(row["seconds"], float) for row in rows)
+
+
+def test_attended_resume_verifies_again_after_preparation_has_rewritten_stage_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preparation builds stage roots after the gate ran: the gate's answer must not be reused.
+
+    The stub preparation corrupts a completed stage the way a faulty rebuild would. If the
+    verification memo survived the preparation call, the resume pass would reuse the gate's
+    pre-preparation answer and miss it.
+    """
+
+    preflight, output_root = _cold_attended_run(tmp_path, monkeypatch)
+    # an interrupted run: the baseline never completed, so a child WOULD start after the gate
+    (output_root / "stage-results" / "baseline.json").unlink()
+    shutil.rmtree(output_root / "stages" / "baseline")
+    monkeypatch.setattr(materializer, "ATTENDED_STAGES", ("ledger", "baseline"))
+    monkeypatch.setattr(materializer, "_attended_basic_preflight", lambda _args: None)
+    monkeypatch.setattr(materializer, "_git", lambda *_args: "0" * 40)
+    spec = tmp_path / "preparation-spec.json"
+    spec.write_text("{}", encoding="utf-8")
+
+    def plan(**_kwargs: object) -> dict[str, object]:
+        return {"source_phase": {}}
+
+    def prepare(**_kwargs: object) -> dict[str, object]:
+        (output_root / "stage-results" / "ledger.json").write_bytes(b"not-json")
+        return {"source_run": preflight["source_run"], "financial_stage_inputs": {}}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "portfolio_attended_preparation",
+        SimpleNamespace(plan_attended_inputs=plan, prepare_attended_inputs=prepare),
+    )
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a stage corrupted by preparation must stop the run")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    argv = _attended_argv(preflight, output_root, execute=True, resume=True)
+    at = argv.index("--source-run")
+    del argv[at : at + 2]  # preparation supplies the source run itself
+    argv += ["--preparation-spec", str(spec), "--evaluated-on", "2026-09-20"]
+    assert materializer.main(argv) == 1

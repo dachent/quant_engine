@@ -32,6 +32,8 @@ from quant_engine.core import (
     InterpreterRefusal,
     require_interpreter,
     run_storage,
+    timed_call,
+    timed_stage,
     verify_if_promoted,
 )
 from quant_engine.core import (
@@ -6419,6 +6421,43 @@ def _attended_completed_stages(
     return completed
 
 
+class _VerifiedStages:
+    """The completed-stage verification results of ONE attended invocation.
+
+    ``_attended_completed_stages`` re-reads every bound artifact of every completed stage (minutes
+    on a full run). One resume asked for it three times in a row with nothing written in between.
+    This memo returns the result of a verification already made by this invocation for the same
+    (stages, failed stage) instead of repeating it. It never outlives the invocation, and every
+    writer of stage state calls ``invalidate`` first, so a stage changed after a verification is
+    always verified again. Nothing is cached across processes or runs.
+    """
+
+    def __init__(self) -> None:
+        self._results: dict[tuple[str, tuple[str, ...], str | None], list[str]] = {}
+
+    def completed(
+        self,
+        output_root: Path,
+        required_stages: Sequence[str],
+        *,
+        label: str,
+        failed_stage: str | None = None,
+    ) -> list[str]:
+        key = (str(output_root), tuple(required_stages), failed_stage)
+        if key in self._results:
+            with timed_stage("attended_completed_stages_reused", label=label):
+                return list(self._results[key])
+        with timed_stage("attended_completed_stages", label=label):
+            result = _attended_completed_stages(
+                output_root, required_stages, failed_stage=failed_stage
+            )
+        self._results[key] = list(result)
+        return result
+
+    def invalidate(self) -> None:
+        self._results.clear()
+
+
 ATTENDED_QA_STAGE: Final = "panel"
 ATTENDED_QA_INSTRUCTIONS: Final = (
     "stage 'panel' consumes browser QA evidence produced from the panel-candidate "
@@ -7758,7 +7797,9 @@ def _attended_start_or_resume(
     *,
     resume: bool,
     on_create: Callable[[Path], None] | None = None,
+    verified: _VerifiedStages | None = None,
 ) -> str | None:
+    verified = verified if verified is not None else _VerifiedStages()
     request_identity = preflight["request_identity"]
     if not isinstance(request_identity, dict):
         raise MaterializationError("attended request identity differs")
@@ -7776,7 +7817,11 @@ def _attended_start_or_resume(
                     "attended run receipt is missing after execution started"
                 )
             return _attended_start_or_resume(
-                preflight, output_root, resume=False, on_create=on_create
+                preflight,
+                output_root,
+                resume=False,
+                on_create=on_create,
+                verified=verified,
             )
         value = _load(receipt, "attended run receipt")
         failed = value.get("failed_stage")
@@ -7804,8 +7849,11 @@ def _attended_start_or_resume(
             ):
                 raise MaterializationError("attended failed-stage checkpoint differs")
             failed_role = cast(str, failed["role"])
-        completed = _attended_completed_stages(
-            output_root, preflight["required_stages"], failed_stage=failed_role
+        completed = verified.completed(
+            output_root,
+            preflight["required_stages"],
+            label="start_or_resume",
+            failed_stage=failed_role,
         )
         source_phase = preflight.get("source_phase")
         if not isinstance(source_phase, dict) or (
@@ -8020,12 +8068,15 @@ def _attended_execute(
     *,
     resume: bool,
     storage: run_storage.AttendedStorage | None = None,
+    verified: _VerifiedStages | None = None,
 ) -> tuple[int, dict[str, Any]]:
+    verified = verified if verified is not None else _VerifiedStages()
     failed_stage = _attended_start_or_resume(
         preflight,
         output_root,
         resume=resume,
         on_create=storage.mark_created if storage is not None else None,
+        verified=verified,
     )
     attempt = _attended_start_execution_attempt(output_root)
     measured: dict[str, Any] = {}
@@ -8048,15 +8099,21 @@ def _attended_execute(
         if storage is not None:
             # The overlay is created (or its base re-verified) before any child can
             # read the cache, and the run is measured before any child can write.
-            measured["cache"] = storage.open_cache()
-            measured["start"] = storage.start()
+            with timed_stage("attended_open_cache"):
+                measured["cache"] = storage.open_cache()
+            with timed_stage("attended_storage_start"):
+                measured["start"] = storage.start()
             _attended_record_attempt_storage(
                 output_root, "execution", attempt, {**measured, "stages": stage_bytes}
             )
         if failed_stage is not None:
             _attended_preserve_failed_stage(output_root, failed_stage)
-        completed = _attended_completed_stages(
-            output_root, preflight["required_stages"], failed_stage=failed_stage
+            verified.invalidate()  # the failed stage's root was just moved aside
+        completed = verified.completed(
+            output_root,
+            preflight["required_stages"],
+            label="execute_start",
+            failed_stage=failed_stage,
         )
         # An interruption that killed a child before it returned leaves partial bytes with no
         # receipt and no failed_stage, and the create-only producer refuses its own partial
@@ -8084,20 +8141,29 @@ def _attended_execute(
                     _attended_preserve_failed_stage(output_root, role)
                     preserved_partial = True
         if preserved_partial:
-            completed = _attended_completed_stages(
-                output_root, preflight["required_stages"], failed_stage=failed_stage
+            verified.invalidate()
+            completed = verified.completed(
+                output_root,
+                preflight["required_stages"],
+                label="execute_after_preserve",
+                failed_stage=failed_stage,
             )
         for role in preflight["required_stages"]:
             if role in completed:
                 continue
             command = _attended_stage_command(preflight, output_root, role)
-            result = subprocess.run(
-                command,
-                cwd=cast(Path, preflight["repo_root"]),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            # The child inherits this process's stdout/stderr, so its output reaches the
+            # driver log as it is written instead of in one block after the child ends
+            # (a captured child made the driver see minutes of silence).
+            sys.stdout.flush()
+            sys.stderr.flush()
+            with timed_stage("attended_role", role=role):
+                result = subprocess.run(
+                    command,
+                    cwd=cast(Path, preflight["repo_root"]),
+                    text=True,
+                    check=False,
+                )
             if result.stdout:
                 print(result.stdout, end="")
             if result.stderr:
@@ -8120,9 +8186,11 @@ def _attended_execute(
                     completed,
                 )
             record_stage_bytes(role)
-            completed = _attended_completed_stages(
+            verified.invalidate()  # this child just wrote a stage: verify afresh
+            completed = verified.completed(
                 output_root,
                 preflight["required_stages"],
+                label=f"after_{role}",
             )
             if role not in completed:
                 raise MaterializationError(
@@ -8435,14 +8503,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "--oracle-manifest (the acceptance inputs manifest)"
                 )
 
+            verified = _VerifiedStages()
+
             def qa_gate() -> None:
                 # The hold concerns the stages this run will still execute: a resume
                 # whose panel stage is already complete needs no declaration.
                 completed_stages: list[str] = []
                 if args.resume:
                     try:
-                        completed_stages = _attended_completed_stages(
-                            Path(args.output_root).resolve(), ATTENDED_STAGES
+                        completed_stages = verified.completed(
+                            Path(args.output_root).resolve(),
+                            ATTENDED_STAGES,
+                            label="qa_gate",
                         )
                     except MaterializationError:
                         # An unreadable receipt is reported with its own message when
@@ -8512,7 +8584,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 storage = storage or _attended_storage(args)
                 storage.admit(resume=args.resume)
-                prepared = preparation.prepare_attended_inputs(
+                prepared = timed_call("attended_prepare_inputs")(
+                    preparation.prepare_attended_inputs
+                )(
                     preparation_spec_path=args.preparation_spec,
                     output_root=Path(args.output_root).resolve(),
                     requested_as_of=args.requested_as_of,
@@ -8528,6 +8602,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     resume=args.resume,
                     on_create=storage.mark_created,
                 )
+                # preparation builds the ledger/baseline/attribution stage roots: whatever the
+                # gate verified before it is stale
+                verified.invalidate()
                 source_run = prepared.get("source_run")
                 financial = prepared.get("financial_stage_inputs")
                 if not isinstance(source_run, Path) or not isinstance(
@@ -8544,7 +8621,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "attended preparation financial bindings differ"
                         )
                     setattr(args, flag[2:].replace("-", "_"), path)
-            preflight = _attended_preflight(args)
+            with timed_stage("attended_preflight"):
+                preflight = _attended_preflight(args)
             if args.execute and args.resume and args.preparation_spec is None:
                 qa_gate()
             # Join against the FINAL admitted source phase, the ledger the run will
@@ -8564,6 +8642,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     Path(args.output_root).resolve(),
                     resume=args.resume,
                     storage=storage,
+                    verified=verified,
                 )
             else:
                 result = _attended_view(

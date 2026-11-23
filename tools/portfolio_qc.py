@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping, Sequence, cast
 
 from quant_engine.core import timed_call
 
@@ -92,13 +92,27 @@ def _run_checked(
     return completed.stdout
 
 
-def _load_and_validate_spec(path: Path, *, profile: str) -> tuple[Any, dict[str, Any]]:
+def _load_and_validate_spec(
+    path: Path,
+    *,
+    profile: str,
+    before_validation: Callable[[Any], None] | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Load the spec and validate its financial outcomes.
+
+    ``before_validation`` runs on the loaded spec before the (minutes-long) financial-outcome
+    validation, so a caller can refuse a cheap-to-detect defect first. It may raise
+    ``QualityControlFailure``; nothing else about the validation changes.
+    """
+
     _regular_file(path, "pipeline spec")
     try:
         from quant_engine.core.pipeline import PipelineSpec
         from portfolio_financial_outcomes import validate_financial_outcomes
 
         spec = PipelineSpec.from_json_bytes(path.read_bytes())
+        if before_validation is not None:
+            before_validation(spec)
         proof = validate_financial_outcomes(
             spec, allow_synthetic=False, caller=f"portfolio_qc.{profile}"
         )
@@ -672,11 +686,24 @@ def _fact_admission(spec: Any) -> dict[str, Any]:
 def _release_preflight(args: argparse.Namespace) -> Path:
     if args.spec is None:
         raise PrerequisiteUnavailable("pipeline spec")
-    spec, proof = _load_and_validate_spec(args.spec, profile="release-preflight")
+    # The provider-admission gate reads only catalogs on disk and takes seconds; the financial
+    # outcome validation inside the loader takes minutes. Run the gate on the loaded spec first,
+    # so a bound provider generation missing from the workspace refuses at once. Same check, same
+    # refusal text, same receipt; only the order of two independent refusals changes.
+    admitted: dict[str, Any] = {}
+
+    def admit(loaded: Any) -> None:
+        admitted["result"] = _fact_admission(loaded)
+
+    spec, proof = _load_and_validate_spec(
+        args.spec, profile="release-preflight", before_validation=admit
+    )
     evidence_dir = _evidence_directory(args.evidence_dir)
     before = _production_snapshot(spec)
     qa, plan = _candidate_qa(spec, proof), _expected_plan(spec)
-    qa["fact_admission"] = _fact_admission(spec)
+    qa["fact_admission"] = (
+        admitted["result"] if "result" in admitted else _fact_admission(spec)
+    )
     after = _production_snapshot(spec)
     if after != before:
         raise QualityControlFailure("production state changed during release preflight")
