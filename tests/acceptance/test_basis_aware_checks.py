@@ -691,3 +691,47 @@ def test_the_pass_27_candidate_has_no_invariant_finding_beyond_the_stub_items(
         f["check_id"] for f in document["findings"] if f["class"].startswith("BLOCKER")
     }
     assert blockers == STUB_ITEMS
+
+
+def test_the_account_lane_total_with_the_current_reserve_and_retained_is_reproduced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The baseline stamps total_liquid on the account basis (#624: it is not rebuilt for a
+    # declaration): account lane 8175 + current reserve 150 + retained excluded 7.
+    cut = {
+        synth.DECLARED: (D(1575), [synth.SLEEVE]),
+        "synthetic-beta": (D(3000), []),
+        "synthetic-gamma": (D(5000), []),
+    }
+    monkeypatch.setattr(checks, "cutoff_capital_by_strategy", lambda _ctx: cut)
+    for total, expected in (("8175", 0), ("8325", 0), ("8332", 0), ("8200", 1)):
+        context = _context(
+            report=_current_reserve_report(
+                total, "STATEMENT_DATED_MANDATE_CLASSIFICATION"
+            ),
+            declared=True,
+        )
+        assert len(list(checks.check_reconciliation_recompute(context))) == expected, (
+            total
+        )
+
+
+def test_the_account_lane_with_reserve_is_not_a_free_pass_without_the_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cut = {"synthetic-beta": (D(1000), [])}
+    monkeypatch.setattr(checks, "cutoff_capital_by_strategy", lambda _ctx: cut)
+    context = _context(
+        report=_current_reserve_report(
+            "1157", "STATEMENT_DATED_MANDATE_CLASSIFICATION"
+        ),
+        declared=False,
+    )
+    assert list(checks.check_reconciliation_recompute(context)) == []  # sleeve identity
+    context = _context(
+        report=_current_reserve_report(
+            "1120", "STATEMENT_DATED_MANDATE_CLASSIFICATION"
+        ),
+        declared=False,
+    )
+    assert len(list(checks.check_reconciliation_recompute(context))) == 1

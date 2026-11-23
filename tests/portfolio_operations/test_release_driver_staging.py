@@ -1029,6 +1029,56 @@ def test_the_basis_group_is_absent_without_a_release_inputs_root() -> None:
     assert "--crosswalk" in argv
 
 
+def test_the_ledger_spec_stage_argv_carries_the_f1_pins_only_when_configured() -> None:
+    """F1: the ledger spec stage passes the event completeness declaration and the Quantbase position closes pin."""
+
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    stage = next(
+        s
+        for s in graph["stages"]
+        if any(
+            isinstance(a, str) and a.endswith("release_ledger_spec.py")
+            for a in s.get("argv", [])
+        )
+    )
+    config = {
+        "repo_root": "R",
+        "python": "py",
+        "cycle": "C",
+        "run": "C/run",
+        "code_commit": "c" * 40,
+        "mode": "release",
+        "requested_as_of": "2026-11-06",
+        "ceremony": "full",
+        "predecessor_ledger_spec": "P/pred.json",
+    }
+    bare = driver.stage_argv(driver.Run(config, graph, offline=True), stage)
+    assert "--event-completeness-declaration" not in bare
+    assert "--quantbase-position-closes" not in bare
+    assert "--quantbase-rollback" not in bare
+    full = driver.stage_argv(
+        driver.Run(
+            {
+                **config,
+                "event_completeness_declaration": "D/declaration-v5.json",
+                "quantbase_position_closes": "D/SHV-closes.csv",
+                "quantbase_rollback": "D/rollback.json",
+            },
+            graph,
+            offline=True,
+        ),
+        stage,
+    )
+    assert (
+        full[full.index("--event-completeness-declaration") + 1]
+        == "D/declaration-v5.json"
+    )
+    assert full[full.index("--quantbase-position-closes") + 1] == "D/SHV-closes.csv"
+    assert full[full.index("--quantbase-rollback") + 1] == "D/rollback.json"
+    # nothing else moves: the F1 keys only append their own flags
+    assert full[: len(bare)] == bare
+
+
 def test_a_config_key_no_stage_reads_does_not_rebind_it_but_a_referenced_one_does(
     pass26: Path,
 ) -> None:

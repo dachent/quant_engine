@@ -255,11 +255,15 @@ def test_evidence_of_borrowing_fails_the_bracket_and_leaves_the_days_unobserved(
 ) -> None:
     artifact = _build(tmp_path, True, _capture(tmp_path, **over))
     assert artifact["rows"] == []
-    assert artifact["capture_decisions"][0] == {
-        "account_id": ACCOUNT,
-        "bracket": False,
-        "reason": reason,
-    }
+    note = dict(artifact["capture_decisions"][0])
+    replay = note.pop("cash_replay", None)
+    assert note == {"account_id": ACCOUNT, "bracket": False, "reason": reason}
+    # a cash replay is tried only for the two reasons it can answer, and with no printed
+    # statement cash here it stays closed
+    if reason == "CAPTURE_TRANSACTION_CAN_CREATE_A_DEBIT":
+        assert replay == {"closes": False, "reason": "LAST_STATEMENT_CASH_UNAVAILABLE"}
+    else:
+        assert replay is None
 
 
 def test_a_capture_claiming_zero_while_its_raw_files_say_otherwise_is_not_evidence(

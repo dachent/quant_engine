@@ -244,9 +244,9 @@
      "schwab-tt-04"
     ],
     "generation": {
-     "generation_id": "8883029dfe97a4ef208b6d6177ffbe76eb9f3dc6c996d41544d8384faa261e5b",
-     "manifest_sha256": "cf8d09f7c2caa1ec74607c8253a89edd9624b42b67768eb40bd53b97dbb2535b",
-     "pointer_sha256": "9c2c662d55832f2058c1d43867a1966d5c04dc56164f6f372c14f2cc2d0e4c83",
+     "generation_id": "b273f524e9191c11f018b793684d1b3d34c4f2e9af953dd7fb4367da992f8e6f",
+     "manifest_sha256": "065cbf39145ec2010290a14642d0bbbded0615900dcda653d31d0ae877bf3d9e",
+     "pointer_sha256": "25e59e80b17efc2b11b24df333ca9d7e4af7c3c94c6cdcabfcc60dedd004bb7b",
      "as_of": "2026-11-08"
     }
    }
@@ -4507,11 +4507,11 @@
      "authority_issue": 303,
      "effective_start": "2026-08-14",
      "effective_end": null,
-     "upstream_inventory_sha256": "51625d0726b97c7b2c37518d7c1200d94d99707f13e25f56a2b541ccf5bb23ad",
+     "upstream_inventory_sha256": "537ab009526dd238b6f6b705219936f36cc4d5b0fd1ccef1e051e61a937abadf",
      "product_data_class_count": 9,
      "product_data_class_set_sha256": "9f9c5f50e9cc0c9fdbc7123197897e20a4c7ab444cca73caad37aeda88a8943f",
-     "admitted_item_count": 69,
-     "admitted_item_set_sha256": "487dcf014303a4a658b67f7ca78e57e9730ff2b11bdc558115d8ec48cd95ed7f",
+     "admitted_item_count": 111,
+     "admitted_item_set_sha256": "58fad56b0a28909f646ae2a4d8043a3c82269d9fe72ad35d942bfc7f823931cc",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -4574,7 +4574,8 @@
    },
    "data_classes": [
     "ACCOUNT_NAV",
-    "CAPITAL_ANCHOR"
+    "CAPITAL_ANCHOR",
+    "POSITION"
    ],
    "authority": "MATRIXPORT_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "catalog.json in an exact governed Matrixport generation",
@@ -4615,7 +4616,8 @@
     "facts": [
      "NAV_OBSERVATION",
      "CAPITAL_ANCHOR",
-     "EXTERNAL_FLOW"
+     "EXTERNAL_FLOW",
+     "POSITION"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -4625,10 +4627,10 @@
      "effective_start": "2026-08-16",
      "effective_end": null,
      "upstream_inventory_sha256": "3c973f7280e1ec125eabc9ee102d271bc98b9a7ad77af0562c8d11fe42275b51",
-     "product_data_class_count": 2,
-     "product_data_class_set_sha256": "6fb4cf869ae4a20bf8862b84ea3154ea38e13b594cccc47ef11c01ea89b8c888",
-     "admitted_item_count": 6,
-     "admitted_item_set_sha256": "27d6bd4c7afef6c2fd0bf33989693715ac160062a8601484d06b7eadf805801c",
+     "product_data_class_count": 3,
+     "product_data_class_set_sha256": "53df948591c113abcefcb009a735c94d5c36f91790e4acfd91e1424686a04114",
+     "admitted_item_count": 7,
+     "admitted_item_set_sha256": "4713806990fa5a318d973b595aea860ed49def484a01d2a6a0cb430736414223",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -4764,7 +4766,8 @@
     "ACCOUNT_NAV",
     "EXTERNAL_FLOW",
     "CAPITAL_ANCHOR",
-    "TRANSACTION"
+    "TRANSACTION",
+    "POSITION"
    ],
    "authority": "QUANTBASE_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "quantbase-generation.json in an exact governed generation",
@@ -4806,7 +4809,8 @@
      "NAV_OBSERVATION",
      "EXTERNAL_FLOW",
      "CAPITAL_ANCHOR",
-     "TRANSACTION"
+     "TRANSACTION",
+     "POSITION"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -4816,10 +4820,10 @@
      "effective_start": "2026-08-16",
      "effective_end": null,
      "upstream_inventory_sha256": "ab38ff27f4aaad8ea0a75f24b4bfd3653d57cec5d4f6058181fb89183cd8cd96",
-     "product_data_class_count": 4,
-     "product_data_class_set_sha256": "781038a1a8cdb4d69c2064ae3c86a1b5f65efa1004052c19ce215494ac56a325",
-     "admitted_item_count": 7,
-     "admitted_item_set_sha256": "f72255e57e89f5641f6d86d22fe0513a172bb4648a18ffe95495e150058fcb2f",
+     "product_data_class_count": 5,
+     "product_data_class_set_sha256": "883d19be19357aceedaa7163d055bcc84101b448ec5f5fab14b91ea36c4bc457",
+     "admitted_item_count": 9,
+     "admitted_item_set_sha256": "90008612aea6228f6b24dc0ffada33d38ddb2485e2bdc68b67b1bb76d1b72947",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -4937,11 +4941,11 @@
      "authority_issue": 303,
      "effective_start": "2026-08-14",
      "effective_end": null,
-     "upstream_inventory_sha256": "02f8813ed0341d6f9f2147e31f199624d5435fed9971169620c406ba11ce93f2",
+     "upstream_inventory_sha256": "bf57a8928f8cf408185eb474e537d03511853d2775e925b126f6e982ec7d8648",
      "product_data_class_count": 5,
-     "product_data_class_set_sha256": "4c211655b8f36016f837f32708fbbd44da4cec30730d3ed814f113ee019430b2",
-     "admitted_item_count": 24,
-     "admitted_item_set_sha256": "7a5bf445c33877f14d8452538407df7bc838838ee4490bc5211671da11a6ed8a",
+     "product_data_class_set_sha256": "83d8e3dc217e0d466e47100fe5db16c602b1d40769e401820d5acfb1b53bffd4",
+     "admitted_item_count": 25,
+     "admitted_item_set_sha256": "0e714f3ebee64575bbf70c36ffdf04adb62e517becf540694892c365d4bc8576",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -4964,8 +4968,8 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "8883029dfe97a4ef208b6d6177ffbe76eb9f3dc6c996d41544d8384faa261e5b",
-    "sha256": "cf8d09f7c2caa1ec74607c8253a89edd9624b42b67768eb40bd53b97dbb2535b",
+    "generation_id": "b273f524e9191c11f018b793684d1b3d34c4f2e9af953dd7fb4367da992f8e6f",
+    "sha256": "065cbf39145ec2010290a14642d0bbbded0615900dcda653d31d0ae877bf3d9e",
     "as_of": "2026-11-08"
    },
    "existence_status": "EXISTS",
@@ -5348,7 +5352,7 @@
   },
   {
    "source_id": "portfolio-fx-rates",
-   "source_version": "portfolio-fx-rates:ff77af45a7ab5d29bb5a619e810dd52a5ef15ce24d6901333b7432ebe7d6667c",
+   "source_version": "portfolio-fx-rates:1add4dec409918e16d75c9fa7806ed4f9d215b828dc9743450a55d859be00aa9",
    "strategy_version": {
     "status": "NOT_APPLICABLE",
     "binding": "REFERENCE_DATA_NOT_STRATEGY_VERSIONED",
@@ -5370,7 +5374,7 @@
     "FX_RATE"
    ],
    "authority": "OWNER_APPROVED_EVENT_DATE_AND_VALUATION_DATE_FX_SOURCE",
-   "endpoint_or_artifact_selector": "Yahoo USDC-USD and USDT-USD daily Close on each original UTC event or NAV date; generation ff77af45a7ab5d29bb5a619e810dd52a5ef15ce24d6901333b7432ebe7d6667c, catalog 75edf2f8226f20c3d951a688c7f834a3d486741d2a317ac71512c34250b315a2, rates eadf7a5a77c1de870a25d1342f39d398befff3049b7bda732ad2128765484d42",
+   "endpoint_or_artifact_selector": "Yahoo USDC-USD and USDT-USD daily Close on each original UTC event or NAV date; generation 1add4dec409918e16d75c9fa7806ed4f9d215b828dc9743450a55d859be00aa9, catalog 3c2a924423024cf10fb3e8e3068cfffb015b0efa1c7fbc159d2a213fdfc5a132, rates 7312e7f6756a4a74b07bbfdaca800b3a5c039fd6514e89f81747b4ad423f314d",
    "acquisition": {
     "adapter": "agent-market-data-terminal-approved-route",
     "mode": "ALREADY_LOCAL_APPROVED_SOURCE_FREEZE",
@@ -5379,7 +5383,7 @@
    "evidence_layer": "MARKET_OBSERVATION",
    "interval": {
     "observed_start": "2025-01-01",
-    "observed_end": "2026-11-06",
+    "observed_end": "2026-11-19",
     "effective_start": null,
     "effective_end": null,
     "splice_policy": "EVENT_DATE_FOR_FLOWS_AND_DECLARED_VALUATION_DATE_FOR_NAV; ORIGINAL_UTC_DATE; NO_PARITY_INTERPOLATION_OR_FILL"
@@ -5418,9 +5422,9 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "ff77af45a7ab5d29bb5a619e810dd52a5ef15ce24d6901333b7432ebe7d6667c",
-    "sha256": "9e820c1ae4538601d17fa0e45e3075d51620f0ebe0c50a078981089c2756c13e",
-    "as_of": "2026-11-06"
+    "generation_id": "1add4dec409918e16d75c9fa7806ed4f9d215b828dc9743450a55d859be00aa9",
+    "sha256": "0b7630383f80599fc8e58543a3b585119dc39314f010af810724b32d273c60a0",
+    "as_of": "2026-11-19"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",
@@ -5435,7 +5439,7 @@
     "PANEL",
     "RELEASE_RECEIPT"
    ],
-   "owner_policy_decision": "Owner approval #374 selects Yahoo USDC-USD and USDT-USD daily Close, quoted as USD per native unit, on each original UTC deposit, withdrawal, or NAV date. Preserve original amounts, currencies, and timestamps. No parity assumption, interpolation, or fill. Owner selection 2026-10-01 (#374 comment 5924282578) admitted generation fd6096d8 for UTC dates 2025-01-01 through 2026-09-17; the R3 owner selection for cutoff 2026-11-06 (#374, extending that comment) admits generation ff77af45 for UTC dates 2025-01-01 through 2026-11-06."
+   "owner_policy_decision": "Owner approval #374 selects Yahoo USDC-USD and USDT-USD daily Close, quoted as USD per native unit, on each original UTC deposit, withdrawal, or NAV date. Preserve original amounts, currencies, and timestamps. No parity assumption, interpolation, or fill. Owner selection 2026-10-01 (#374 comment 5924282578) admitted generation fd6096d8 for UTC dates 2025-01-01 through 2026-09-17; the R3 owner selection for cutoff 2026-11-06 (#374, extending that comment) admitted generation ff77af45 for UTC dates 2025-01-01 through 2026-11-06; the same-method extension to cutoff 2026-11-19 (same source, same selection rule, owner standing instruction 2026-11-17, capture record #283 comment 7065163148) admits generation 1add4dec for UTC dates 2025-01-01 through 2026-11-19."
   },
   {
    "source_id": "portfolio-calendars",

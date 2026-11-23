@@ -1679,6 +1679,31 @@ def _plain_words(code: object) -> str:
     return str(code).replace("_", " ").lower()
 
 
+def _cash_drag_fields(
+    provider_comparison: Mapping[str, Any], benchmark_comparison: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Cash drag status and reason of both comparisons of one strategy row.
+
+    The row's ``cash_drag_*`` keys are the provider comparison's; the benchmark
+    comparison has its own status (a provider row can be unavailable where the
+    benchmark row is evidenced), so it is carried beside it, not dropped."""
+
+    return {
+        "cash_drag_status": provider_comparison.get("cash_drag_status"),
+        "cash_drag_reason": provider_comparison.get("cash_drag_reason"),
+        "benchmark_cash_drag_status": benchmark_comparison.get("cash_drag_status"),
+        "benchmark_cash_drag_reason": benchmark_comparison.get("cash_drag_reason"),
+    }
+
+
+def _retained_cost_fields(cost_row: Mapping[str, Any]) -> dict[str, Any]:
+    """A retained or history-only strategy row carries its cost classification (and
+    the ruling reference inside it) when the baseline states one, not a blank."""
+
+    classification = cost_row.get("cost_classification")
+    return {"cost_classification": classification} if classification else {}
+
+
 def cost_components(cost: Mapping[str, Any]) -> list[dict[str, Any]]:
     """The structured cost pieces of one strategy row, every word taken from data.
 
@@ -3213,8 +3238,7 @@ def _merge_attribution(
                 "provider_upside_capture": metrics.get("upside_capture"),
                 "provider_downside_capture": metrics.get("downside_capture"),
                 "provider_relative_drawdown": metrics.get("relative_drawdown"),
-                "cash_drag_status": comparison.get("cash_drag_status"),
-                "cash_drag_reason": comparison.get("cash_drag_reason"),
+                **_cash_drag_fields(comparison, benchmark_comparison),
                 "legacy_baseline_disposition": comparison.get(
                     "legacy_baseline_disposition"
                 ),
@@ -3733,7 +3757,13 @@ def _reconcile_multi_account_strategy_composite(
 
 
 MWR_FLOW_PATH_UNPROVEN = frozenset(
-    {"NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"}
+    {
+        "NO_ACCEPTED_FACT_PATH",
+        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF",
+        "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF",
+        "CAPTURED_NOT_ADMITTED_NOT_COMPLETENESS_PROOF",
+        "EXCLUDED_BY_RULING_NOT_COMPLETENESS_PROOF",
+    }
 )
 
 
@@ -5061,6 +5091,7 @@ def _derived_value_basis(
 
 
 _PROVIDER_REPORTED_AUTHORITY: Final = "remain provider-reported USD authority"
+_DERIVED_POSITION_BASIS: Final = "DERIVED_AT_CUTOFF_FROM_LATER_SNAPSHOT"
 
 
 def _noun(count: int, singular: str, plural: str) -> str:
@@ -8447,6 +8478,7 @@ def _strategies(
                 **live_boundary_basis,
                 "cost_evidence_status": EVIDENCE_STATUS_UNAVAILABLE,
                 "benchmark_evidence_status": EVIDENCE_STATUS_UNAVAILABLE,
+                **_retained_cost_fields(cost_row),
                 "source_route_status": source_route.get("status", "UNAVAILABLE"),
                 "source_route_ids": source_route.get("source_ids", []),
                 "strategy_evidence_layers": layer_inventory,
@@ -8616,10 +8648,34 @@ def _positions(
                 },
             }
         )
+        if item.get("evidence_class") == _DERIVED_POSITION_BASIS:
+            # inferred at the cutoff from a later snapshot: the row says so and names the
+            # days whose split between holdings the retained pages do not show
+            window = item.get("residual_reallocation_window_days") or []
+            accepted[-1]["residual_reallocation_window_days"] = list(window)
+            earlier = sorted(
+                (item.get("closure") or {}).get("earlier_market_value_days") or []
+            )
+            accepted[-1]["basis_note"] = (
+                "position inferred, not observed: derived at cutoff from a later snapshot "
+                f"(captured {item.get('capture_date')}); net zero change in the account "
+                "total over the days since the cutoff, holdings/cash split inferred from "
+                + (f"the {earlier[0]} page" if earlier else "the capture")
+                + (
+                    f"; same-total reallocation cannot be excluded between {window[0]} "
+                    f"and {window[1]}; a later page equal in total does not rule it out, "
+                    "so the per-symbol split is not proven for those days"
+                    if len(window) == 2
+                    else ""
+                )
+            )
         # A value the finality evidence declares derived is not "captured": the row says
         # how it was valued and keeps the capture date and clock it was held under.
         value_basis = _derived_value_basis(derived_values, account_id, as_of_date)
-        if value_basis is not None:
+        if (
+            value_basis is not None
+            and item.get("evidence_class") != _DERIVED_POSITION_BASIS
+        ):
             accepted[-1]["value_basis"] = value_basis
             accepted[-1]["as_of_basis"] = value_basis["basis"]
     return sorted(
@@ -10719,13 +10775,18 @@ def _lifecycle_strategy_rows(
     strategy_names: Mapping[str, str],
     derived_epochs: Sequence[tuple[str, str, str, str | None]] = (),
     manifest_rows: Sequence[Mapping[str, Any]] = (),
+    costs: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Lifecycle fields for the current strategies and the retained records.
 
     The retained records are the strategies the report does not carry as current
     but that the current-epoch crosswalk or the nested-strategy tag map names:
-    history-only, effective-dated, with no live product outcome (#592, #567).
+    history-only, effective-dated, with no live product outcome (#592, #567).  A
+    retained record carries the cost classification its baseline cost row states
+    (a structural exclusion from live costs and its ruling), never a blank.
     """
+
+    cost_rows = costs or {}
 
     epochs_by_strategy: dict[str, list[Mapping[str, Any]]] = {}
     for crosswalk_row in crosswalk_rows:
@@ -10782,6 +10843,7 @@ def _lifecycle_strategy_rows(
                 link=sleeves_by_strategy.get(strategy_id),
             ),
             **_economic_end_fields(strategy_id, manifest_rows),
+            **_retained_cost_fields(cost_rows.get(strategy_id, {})),
         }
     for strategy_id, link in sleeves_by_strategy.items():
         if strategy_id in current_ids or strategy_id in retained:
@@ -10820,6 +10882,7 @@ def _lifecycle_strategy_rows(
                 link=link,
             ),
             **_economic_end_fields(strategy_id, manifest_rows),
+            **_retained_cost_fields(cost_rows.get(strategy_id, {})),
         }
     return current, [retained[key] for key in sorted(retained)]
 
@@ -12235,6 +12298,10 @@ def build_report_data_live(
                         item.get("name"), "strategy.name"
                     )
                     for item in _objects(catalog.get("strategies"), "strategies")
+                },
+                costs={
+                    str(item["strategy_id"]): item
+                    for item in _objects(catalog.get("costs"), "costs")
                 },
             )
         )

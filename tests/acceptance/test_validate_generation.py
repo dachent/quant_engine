@@ -2717,6 +2717,25 @@ def test_a_truthful_receipt_beside_a_disclosed_unproven_flow_path_passes(
     assert not [f for f in findings if f.check_id == "flows.admission_consistency"]
 
 
+def test_a_complete_receipt_beside_unattributed_provider_flows_passes(
+    tmp_path: Path,
+) -> None:
+    """The typed status for provider events that carry no strategy attribution is an
+    unadmitted flow path like the other two: the receipt's COMPLETE beside its
+    disclosure is truthful."""
+
+    status = "PROVIDER_EVENTS_NOT_ATTRIBUTED_NOT_COMPLETENESS_PROOF"
+
+    def mutate(report: dict[str, Any]) -> None:
+        report["fact_coverage_matrix"][0]["status"] = status
+        for row in report["twr_mwr"]:
+            if row.get("account_id") == "A1":
+                row["mwr_flow_path_status"] = status
+
+    findings = run(build(tmp_path / "ok", Spec(report=[mutate])))
+    assert not [f for f in findings if f.check_id == "flows.admission_consistency"]
+
+
 @pytest.mark.parametrize(
     "disclosed", [None, "OBSERVED_NOT_COMPLETENESS_PROOF"], ids=["absent", "mismatch"]
 )

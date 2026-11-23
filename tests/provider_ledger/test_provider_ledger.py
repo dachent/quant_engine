@@ -549,8 +549,8 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
             "2026-11-09",
         ),
         "schwab": (
-            "8883029dfe97a4ef208b6d6177ffbe76eb9f3dc6c996d41544d8384faa261e5b",
-            "cf8d09f7c2caa1ec74607c8253a89edd9624b42b67768eb40bd53b97dbb2535b",
+            "b273f524e9191c11f018b793684d1b3d34c4f2e9af953dd7fb4367da992f8e6f",
+            "065cbf39145ec2010290a14642d0bbbded0615900dcda653d31d0ae877bf3d9e",
             "2026-11-08",
         ),
     }
@@ -6702,6 +6702,7 @@ def test_quantbase_dispatch_projects_fund_anchors_account_flows_and_nav(
         "capital_anchors",
         "flows",
         "nav_observations",
+        "positions",
         "transactions",
     }
     assert len(projected["capital_anchors"]) == 1

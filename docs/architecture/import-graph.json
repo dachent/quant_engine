@@ -59,7 +59,7 @@
     [
       "schwab",
       "core",
-      3
+      4
     ],
     [
       "schwab",
@@ -141,6 +141,16 @@
     [
       "check_plausibility",
       "validate_generation",
+      1
+    ],
+    [
+      "decision_refresh",
+      "release_cycle_manifest",
+      1
+    ],
+    [
+      "event_completeness",
+      "leverage_disclosure",
       1
     ],
     [
@@ -750,6 +760,11 @@
     ],
     [
       "provider_ledger",
+      "event_completeness",
+      1
+    ],
+    [
+      "provider_ledger",
       "quantbase_fund_days",
       1
     ],
@@ -974,6 +989,11 @@
       1
     ],
     [
+      "release_world",
+      "release_cycle_manifest",
+      1
+    ],
+    [
       "schwab_capture_ingest",
       "schwab_capture_driver",
       1
@@ -996,6 +1016,11 @@
     [
       "schwab_page_actions",
       "capture_action_guard",
+      1
+    ],
+    [
+      "schwab_statement_cash_summaries",
+      "zero_financing_statements",
       1
     ],
     [
@@ -1046,6 +1071,11 @@
     [
       "validate_release_targets",
       "validate_generation",
+      1
+    ],
+    [
+      "yahoo_refresh_capture",
+      "yahoo_fetch_driver",
       1
     ],
     [

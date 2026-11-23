@@ -502,3 +502,38 @@ release_baseline_assemble.py --derive-a A.json --derive-b B.json --manifest M.js
   contracts/portfolio-financial-mvp-source-v1.json = the CRLF bytes of main 865bf905>`, writes the R2.2 release baseline
   (`ri-r22v9`, sha256 `35f7851f...`) byte for byte (`tests/acceptance/test_release_baseline_assemble.py`; skipped
   without the evidence).
+
+## Late binding and the cutoff-coverage guard (refs #418)
+
+`providers.<id>.generation.mode` may be `latest_at_or_before`. The resolver then picks, among the generations under the
+provider root, the **newest `as_of_date`** of those that are `VERIFIED`, were captured on or before `evaluated_on`
+(a capture is usually dated after the cutoff, so the cutoff cannot bound it) and whose `coverage.observed_end` is on or
+after the cutoff. A tie is `AMBIGUOUS_GENERATION`; no candidate is `NO_ELIGIBLE_GENERATION` with every verdict listed.
+`CURRENT.json` is never read, so staged, never-published generations are eligible. `manifest_sha256` may be omitted in
+this mode only (every other mode still pins it); the resolved file records the file's hash. The resolved provider row
+gains a `selection` object (rule, dates, every candidate and verdict); no other mode adds the key, so existing resolved
+files are byte-identical.
+
+For **every** mode, `resolve` refuses a provider whose chosen generation's observed coverage ends before the cutoff
+(`COVERAGE_BEFORE_CUTOFF`) or whose declared `finalized_through` is before the cutoff (`FINALITY_BEFORE_CUTOFF`).
+`FINITE_STATIC` providers are exempt; any other exemption is `cutoff_coverage: NOT_REQUIRED` with a non-empty
+`cutoff_coverage_reason` (a reason without the exemption is refused). A cycle manifest that names a live-qualified provider
+whose data ends before the cutoff (for example the Alpaca generation, which ends 2026-07-17) must now declare that
+exemption explicitly.
+
+### Finality records (refs #418)
+
+For `latest_at_or_before` a provider whose finality is not its generation manifest (`SELECTED_SOURCE_ARTIFACT`,
+`CYCLE_MANIFEST_NATIVE`) takes `finalized_through` and the finality-evidence file from a record the capture stage left
+beside the generation: `<provider root>/finality/<generation_id>.json` (`qe-capture-finality/1`: provider, generation,
+`finalized_through`, and the evidence file as `{relative, sha256, size_bytes}` under the provider root). A hand-typed
+`finality_evidence` or `finalized_through` in the cycle manifest is refused in this mode (`FINALITY_HAND_TYPED`). A
+generation without a valid record is not eligible (`REJECTED_NO_FINALITY_RECORD`); a record final before the cutoff is
+`REJECTED_FINALITY_BEFORE_CUTOFF`. A capture stage writes the record, create-only, with
+`release_cycle_manifest.write_finality_record(...)` or
+`python tools/release_cycle_manifest.py write-finality --provider-root DIR --provider-id P --generation-id G --finalized-through D --evidence REL`.
+
+A bad newest generation is never skipped silently: when the newest generation under a late-bound provider has a missing or
+unusable finality record and an older one would be selected, `resolve` refuses (`FINALITY_RECORD_BAD`, naming both). Pass
+`--allow-older-on-bad-newest` to accept the older generation on purpose; the skip stays visible in `selection.candidates`.
+A `generation.json` that is not a JSON object is `GENERATION_INVALID`.

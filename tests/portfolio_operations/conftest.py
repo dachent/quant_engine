@@ -4,6 +4,10 @@ The production rule (``tools/release_cycle_manifest.py``: a cutoff after 2026-09
 ``refresh_started_at_utc``) is exercised by ``test_release_cycle_manifest.py``; every other suite
 builds manifests to test something else, so for them the legacy boundary is lifted for the test
 only. The production constant is untouched.
+
+The cutoff-coverage guard (``_check_cutoff_coverage``: a provider's observed coverage and declared finality must
+reach the cutoff) is exercised by ``test_release_cycle_manifest.py`` with generations that carry coverage; the
+synthetic generations of the other suites carry none, so for them the guard is lifted for the test only.
 """
 
 from __future__ import annotations
@@ -28,4 +32,7 @@ def _lift_the_legacy_cutoff_boundary(
         yield
         return
     monkeypatch.setattr(release_cycle_manifest, "LEGACY_LAST_CUTOFF", date.max)
+    monkeypatch.setattr(
+        release_cycle_manifest, "_check_cutoff_coverage", lambda *args, **kwargs: None
+    )
     yield

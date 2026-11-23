@@ -540,6 +540,62 @@ def b_fact_matrix_grid(payload: Payload) -> None:
     payload.panel["fact_coverage_matrix"].pop()
 
 
+_CLOSURE_UNMAPPED = re.compile(
+    r"; (\d+) provider \w+ records without a strategy attribution lie inside the "
+    r"tie-out-closed interval and are proved by the closure"
+)
+
+
+def p_closure_unmapped_declared(payload: Payload) -> Result:
+    matrix = rows_of(payload.panel.get("fact_coverage_matrix"))
+    named = [
+        r
+        for r in matrix
+        if _CLOSURE_UNMAPPED.search(str(r.get("missing_interval_reason")))
+    ]
+    if not named:
+        return skip(
+            "no matrix row states unattributed records inside a closed interval"
+        )
+    wrong = [
+        str(r.get("account_id"))
+        for r in named
+        if r.get("status") != "DECLARED_COMPLETE"
+        or r.get("boundary_basis") != "LEDGER_CLOSURE"
+        or int(_CLOSURE_UNMAPPED.search(str(r["missing_interval_reason"])).group(1)) < 1  # type: ignore[union-attr]
+    ]
+    if wrong:
+        return bad(
+            "a row states closure-proved unattributed records but is not "
+            f"DECLARED_COMPLETE by LEDGER_CLOSURE with a positive count: {names(wrong)}"
+        )
+    return ok(
+        f"{len(named)} row(s) state closure-proved unattributed records, all DECLARED_COMPLETE"
+    )
+
+
+def f_closure_unmapped_declared(payload: Payload) -> None:
+    payload.panel["fact_coverage_matrix"].append(
+        {
+            "account_id": "a3",
+            "fact_type": "flows",
+            "status": "DECLARED_COMPLETE",
+            "boundary_basis": "LEDGER_CLOSURE",
+            "missing_interval_reason": (
+                "completeness proved by ledger closure X; 5 provider flows records "
+                "without a strategy attribution lie inside the tie-out-closed interval "
+                "and are proved by the closure: pre-epoch or unmapped, not strategy capital"
+            ),
+        }
+    )
+
+
+def b_closure_unmapped_declared(payload: Payload) -> None:
+    payload.panel["fact_coverage_matrix"][-1]["status"] = (
+        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+    )
+
+
 _OLD_MWR = (
     "MWR remains unavailable outside accounts and intervals with complete admitted"
 )
@@ -1166,6 +1222,17 @@ BASELINE_PY = "tools/portfolio_baseline.py"
 
 
 ROWS: tuple[Row, ...] = (
+    Row(
+        "FD1",
+        "count",
+        "Data",
+        BASELINE_PY,
+        (r"are proved by the closure: pre-epoch or unmapped, not strategy capital",),
+        "a fact-matrix row that states closure-proved unattributed records is DECLARED_COMPLETE by LEDGER_CLOSURE with a positive stated count",
+        p_closure_unmapped_declared,
+        b_closure_unmapped_declared,
+        pass_fixture=f_closure_unmapped_declared,
+    ),
     Row(
         "HWM1",
         "count",
