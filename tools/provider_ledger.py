@@ -2482,6 +2482,10 @@ _QUANTBASE_CASH_SYMBOL: Final = "$USD"
 # close; the replayed opening holdings must reproduce it within a hundredth of a percent
 _QUANTBASE_OPENING_TOLERANCE: Final = Decimal("0.0001")
 _QUANTBASE_ROLLBACK_SCALE_TOLERANCE: Final = Decimal("0.001")
+# A next-day capture whose cutoff day carries the rebalance: the vendor NAV of that day
+# values the opening holdings at the close, the cutoff holdings are the post-rebalance
+# ones, so the two differ by the move between the fills and the close.
+_QUANTBASE_NEXT_DAY_REBALANCE_SCALE_TOLERANCE: Final = Decimal("0.01")
 # holdings snapshots print shares to two places, replayed orders carry nine
 _QUANTBASE_REPLAY_QUANTITY_TOLERANCE: Final = Decimal("0.005")
 
@@ -2532,8 +2536,8 @@ def _quantbase_rollback(value: object) -> dict[str, Any]:
                 _quantbase_rollback_decimal(item["quantity"]),
             )
         )
-    if not rebalances and not activity:
-        raise ProviderLedgerError("quantbase_rollback declares nothing to roll back")
+    # An empty declared set is the next-day capture: the multiset equality in
+    # _quantbase_check_rollback_set then proves nothing was booked after the cutoff.
     return {
         "cutoff": _day(top["cutoff"], "quantbase_rollback.cutoff"),
         "snapshot_day": _day(top["snapshot_day"], "quantbase_rollback.snapshot_day"),
@@ -2579,6 +2583,7 @@ def _quantbase_roll_back(
     cutoff_day: date,
     cutoff_nav: Decimal | None,
     closes: Mapping[str, Mapping[date, Decimal]],
+    relaxed_scale_tolerance: Decimal | None = None,
 ) -> tuple[
     Decimal,
     list[tuple[str, Decimal, Decimal, Decimal]],
@@ -2657,7 +2662,19 @@ def _quantbase_roll_back(
         raw[sym] = qty * close
     total = cutoff_nav - cash
     scale = total / sum(raw.values(), Decimal(0))
-    if abs(scale - 1) > _QUANTBASE_ROLLBACK_SCALE_TOLERANCE:
+    # The relaxed bound exists only for a cutoff-day rebalance: with no order filled on
+    # the cutoff day the cutoff holdings are the opening ones and the opening check
+    # above already pins their value to the NAV, so the strict bound stays.
+    cutoff_day_orders = any(
+        day == cutoff_day and sym != _QUANTBASE_CASH_SYMBOL and qty != 0
+        for day, sym, qty in mine
+    )
+    scale_tolerance = (
+        relaxed_scale_tolerance
+        if relaxed_scale_tolerance is not None and cutoff_day_orders
+        else _QUANTBASE_ROLLBACK_SCALE_TOLERANCE
+    )
+    if abs(scale - 1) > scale_tolerance:
         raise ProviderLedgerError(
             "quantbase rolled-back holdings at the official closes differ from the "
             "strategy NAV by more than the tolerance"
@@ -2676,7 +2693,21 @@ def _quantbase_roll_back(
         "official_close_value_usd": format(sum(raw.values(), Decimal(0)), "f"),
         "value_scale_to_nav": format(scale, "f"),
         "opening_tolerance": str(_QUANTBASE_OPENING_TOLERANCE),
-        "scale_tolerance": str(_QUANTBASE_ROLLBACK_SCALE_TOLERANCE),
+        "scale_tolerance": str(scale_tolerance),
+        # recorded only for the next-day shape: the same-day evidence bytes are unchanged
+        **(
+            {
+                "cutoff_day_orders": cutoff_day_orders,
+                "disclosure": (
+                    "post-rebalance position valued at vendor NAV; official-close "
+                    f"valuation differs by {abs(scale - 1) * 100:.3f}%"
+                    if cutoff_day_orders
+                    else "cutoff holdings equal the opening holdings, valued at vendor NAV"
+                ),
+            }
+            if relaxed_scale_tolerance is not None
+            else {}
+        ),
     }
     return cash, risky, values, evidence
 
@@ -2874,12 +2905,27 @@ def _quantbase_positions(
         else:
             risky.append((symbol, quantity, value, price))
     snapshot_nav = navs.get(snapshot_day)
-    if snapshot_nav is None or snapshot_nav <= 0:
+    # A next-day capture: taken after the cutoff, no daily label after the cutoff, and
+    # the declared roll-back set empty (matched above against the rows, so nothing was
+    # booked after the cutoff).  Its snapshot day has no vendor NAV by construction, so
+    # the snapshot cannot close to one; the NAV proof is the one at the last labelled
+    # day, the cutoff, made by the order replay below.  Every other shape is unchanged.
+    next_day = (
+        rollback is not None
+        and snapshot_day > cutoff_day
+        and snapshot_nav is None
+        and not any(day > cutoff_day for day in navs)
+        and not later_rebalances
+        and not later_activity
+    )
+    snapshot_total = cash + sum((v for _s, _q, v, _p in risky), Decimal(0))
+    if next_day:
+        pass
+    elif snapshot_nav is None or snapshot_nav <= 0:
         raise ProviderLedgerError(
             "quantbase strategy NAV is absent on the snapshot day"
         )
-    snapshot_total = cash + sum((v for _s, _q, v, _p in risky), Decimal(0))
-    if abs(snapshot_total - snapshot_nav) > _QUANTBASE_SNAPSHOT_CENT:
+    elif abs(snapshot_total - snapshot_nav) > _QUANTBASE_SNAPSHOT_CENT:
         raise ProviderLedgerError(
             "quantbase holdings do not close against the strategy NAV"
         )
@@ -2909,6 +2955,9 @@ def _quantbase_positions(
             cutoff_day=cutoff_day,
             cutoff_nav=cutoff_nav,
             closes=fill_closes or {},
+            relaxed_scale_tolerance=(
+                _QUANTBASE_NEXT_DAY_REBALANCE_SCALE_TOLERANCE if next_day else None
+            ),
         )
         rolled_evidence["rollback_rebalance_count"] = len(later_rebalances)
         rolled_evidence["rollback_activity_count"] = len(later_activity)
@@ -2932,12 +2981,22 @@ def _quantbase_positions(
     else:
         values = {symbol: value for symbol, _q, value, _p in risky}
     independent: dict[str, dict[str, str]] = {}
+    # the next-day shape scales the cutoff holdings to the start-of-day NAV, so the
+    # official-close value may differ from it by up to the same bound
+    independent_tolerance = (
+        Decimal(rolled_evidence["scale_tolerance"])
+        if next_day and rolled_evidence is not None
+        else Decimal("0.001")
+    )
     for symbol, quantity, _value, _price in risky:
         close = (fill_closes or {}).get(symbol, {}).get(cutoff_day)
         if close is None:
             independent[symbol] = {"status": "UNAVAILABLE"}
             continue
-        if abs(quantity * close - values[symbol]) > Decimal("0.001") * values[symbol]:
+        if (
+            abs(quantity * close - values[symbol])
+            > independent_tolerance * values[symbol]
+        ):
             raise ProviderLedgerError(
                 f"quantbase holding {symbol} differs from its shares times the "
                 "official close of the cutoff"
@@ -2960,9 +3019,18 @@ def _quantbase_positions(
         "nav_usd": format(cutoff_nav if derived else snapshot_nav, "f"),
         "nav_date": cutoff_day.isoformat(),
         "snapshot_day": snapshot_day.isoformat(),
-        "snapshot_nav_usd": format(snapshot_nav, "f"),
+        "snapshot_nav_usd": (
+            None if snapshot_nav is None else format(snapshot_nav, "f")
+        ),
         "snapshot_total_usd": format(snapshot_total, "f"),
-        "snapshot_difference_usd": format(snapshot_total - snapshot_nav, "f"),
+        "snapshot_difference_usd": (
+            None if snapshot_nav is None else format(snapshot_total - snapshot_nav, "f")
+        ),
+        **(
+            {"snapshot_close_basis": "NEXT_DAY_CAPTURE_NAV_AT_LAST_LABELLED_DAY"}
+            if next_day
+            else {}
+        ),
         "last_rebalance_date": (
             last_rebalance.isoformat() if last_rebalance is not None else None
         ),
@@ -4289,11 +4357,13 @@ def _finality_quantbase(ctx: _FinalityContext) -> dict[str, Any]:
             evidence.get("intraday_unfinalized_dates"), "quantbase intraday dates"
         )
     }
+    # An empty intraday set is the next-trading-day capture: the file ends at the
+    # cutoff label itself. It is accepted only then, because `max(labels - intraday)
+    # == end` with nothing removed also proves no label lies past the cutoff.
     if (
         not labels
-        or not intraday
         or not intraday.issubset(labels)
-        or min(intraday) <= end
+        or (intraday and min(intraday) <= end)
         or not labels - intraday
         or max(labels - intraday) != end
         or evidence.get("latest_complete_daily_cutoff") != end.isoformat()
@@ -4301,6 +4371,17 @@ def _finality_quantbase(ctx: _FinalityContext) -> dict[str, Any]:
         raise ProviderLedgerError(
             "quantbase finality selection differs from actual daily labels"
         )
+    if not intraday:
+        # Nothing later than the cutoff label vouches for the cutoff bar, so the
+        # capture itself must postdate the cutoff day: the hash-bound catalog's
+        # holdings capture time, never a self-declared date.
+        if _quantbase_snapshot_day(catalog) <= end:
+            raise ProviderLedgerError(
+                "quantbase finality without an unfinalized label needs a capture "
+                "after the cutoff day"
+            )
+        result["basis"] = "NEXT_DAY_CAPTURE_NO_UNFINALIZED_LABEL"
+        return result
     result["basis"] = "CONVERSION_RECEIPT_POLICY_SELECTED_NATIVE_LABEL"
     return result
 
