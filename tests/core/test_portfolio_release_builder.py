@@ -6228,3 +6228,119 @@ def test_lens_worker_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     assert builder._lens_worker_count(3) == 3
     monkeypatch.setenv(builder._LENS_WORKERS_ENV, "1")
     assert builder._lens_worker_count(26) == 1
+
+
+def test_release_builder_refuses_to_run_with_render_reuse_set(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    import types
+
+    monkeypatch.setattr(
+        builder,
+        "_parser",
+        lambda: types.SimpleNamespace(
+            parse_args=lambda argv: types.SimpleNamespace(command="build")
+        ),
+    )
+    monkeypatch.setenv("QE_RENDER_REUSE", "provisional")
+    assert builder.main([]) == 2  # no token
+    assert "render reuse is refresh-only" in capsys.readouterr().err
+    monkeypatch.setenv("QE_RENDER_STATE_ROOT", str(tmp_path / "render-cache"))
+    monkeypatch.setenv("QE_RENDER_RUN_TOKEN", "0" * 64)
+    assert builder.main([]) == 2  # a token of some other cycle
+    assert "render reuse is refresh-only" in capsys.readouterr().err
+
+
+def test_render_reuse_with_a_valid_token_is_bound_to_its_own_cycle_output_root(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    import hashlib
+    import types
+
+    cycle = tmp_path / "cycle-a"
+    cycle.mkdir()
+    (cycle / "resolved-cycle.json").write_bytes(b'{"cycle_manifest_sha256": "m1"}')
+    raw = json.dumps(
+        {
+            "tier": "PROVISIONAL",
+            "not_a_release": True,
+            "schema_version": "qe-provisional-refresh/1",
+            "cycle_manifest_sha256": "m1",
+        }
+    ).encode("utf-8")
+    (cycle / "PROVISIONAL.json").write_bytes(raw)
+    monkeypatch.setenv("QE_RENDER_REUSE", "provisional")
+    monkeypatch.setenv("QE_RENDER_STATE_ROOT", str(cycle / "render-cache"))
+    monkeypatch.setenv("QE_RENDER_RUN_TOKEN", hashlib.sha256(raw).hexdigest())
+    other = tmp_path / "cycle-b" / "out"
+    monkeypatch.setattr(
+        builder,
+        "_parser",
+        lambda: types.SimpleNamespace(
+            parse_args=lambda argv: types.SimpleNamespace(
+                command="build", output_root=other
+            )
+        ),
+    )
+    assert builder.main([]) == 2  # a valid token, an output root in another cycle
+    assert "outside it" in capsys.readouterr().err
+    # inside its own cycle the guard passes (the command then runs and fails on its own terms)
+    monkeypatch.setattr(
+        builder,
+        "_parser",
+        lambda: types.SimpleNamespace(
+            parse_args=lambda argv: types.SimpleNamespace(
+                command="inventory", output_root=cycle / "out"
+            )
+        ),
+    )
+    try:
+        builder.main([])
+    except Exception:  # noqa: BLE001 - past the guard is all this test asserts
+        pass
+    assert "outside it" not in capsys.readouterr().err
+
+
+def test_render_reuse_guard_covers_recipe_output_and_skips_read_only_commands(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    import hashlib
+    import types
+
+    cycle = tmp_path / "cycle-a"
+    cycle.mkdir()
+    (cycle / "resolved-cycle.json").write_bytes(b'{"cycle_manifest_sha256": "m1"}')
+    raw = json.dumps(
+        {
+            "tier": "PROVISIONAL",
+            "not_a_release": True,
+            "schema_version": "qe-provisional-refresh/1",
+            "cycle_manifest_sha256": "m1",
+        }
+    ).encode("utf-8")
+    (cycle / "PROVISIONAL.json").write_bytes(raw)
+    monkeypatch.setenv("QE_RENDER_REUSE", "provisional")
+    monkeypatch.setenv("QE_RENDER_STATE_ROOT", str(cycle / "render-cache"))
+    monkeypatch.setenv("QE_RENDER_RUN_TOKEN", hashlib.sha256(raw).hexdigest())
+
+    def run_with(**namespace: object) -> int | None:
+        monkeypatch.setattr(
+            builder,
+            "_parser",
+            lambda: types.SimpleNamespace(
+                parse_args=lambda argv: types.SimpleNamespace(**namespace)
+            ),
+        )
+        try:
+            return builder.main([])
+        except Exception:  # noqa: BLE001 - past the guard is all this asserts
+            return None
+
+    assert run_with(command="recipe", output=tmp_path / "other" / "r.json") == 2
+    assert "outside it" in capsys.readouterr().err
+    run_with(command="recipe", output=cycle / "recipes" / "r.json")
+    assert "outside it" not in capsys.readouterr().err
+    run_with(command="inventory", path=tmp_path / "anywhere")  # writes nothing
+    assert "outside it" not in capsys.readouterr().err

@@ -566,3 +566,221 @@ def test_cross_stage_a_one_byte_tamper_after_a_pass_forces_a_rerun_that_refuses(
     third = _stage(world, tmp_path)
     assert third.returncode != 0 and "verifier refuses" in third.stderr, third
     assert "REUSED" not in third.stdout
+
+
+class BlobVerifier(Verifier):
+    """Returns a non-JSON result (bytes and tuples), as a rendered bundle does."""
+
+    def compute(self) -> dict[str, object]:  # type: ignore[override]
+        base = super().compute()
+        return {"files": {"a": b"\x00\xff" * 4}, "pair": (Path("x"), "s"), **base}
+
+    def run(self, *, identity: str = "spec1") -> dict[str, object]:
+        import pickle
+
+        return vr.run_with_receipt(
+            "blob",
+            {"spec": identity},
+            repo_root=self.world["repo"],
+            state_root=self.world["state"],
+            compute=self.compute,
+            on_reuse=self.reused.append,
+            blob_codec=(
+                lambda value: pickle.dumps(value, protocol=4),
+                vr._restricted_loads,
+            ),
+        )
+
+
+def test_blob_result_is_reused_with_its_exact_types_after_digest_check(world):
+    v = BlobVerifier(world)
+    first = v.run()
+    vr.clear_memory_receipts()  # a new process
+    second = v.run()
+    assert v.live == 1 and len(v.reused) == 1
+    assert second == first and isinstance(second["pair"], tuple)
+    assert list(vr.receipt_directory(world["state"]).glob("blob-*.blob"))
+
+
+def test_a_tampered_or_missing_blob_is_never_loaded(world):
+    v = BlobVerifier(world)
+    v.run()
+    (blob,) = vr.receipt_directory(world["state"]).glob("blob-*.blob")
+    blob.write_bytes(blob.read_bytes() + b"x")  # one appended byte
+    vr.clear_memory_receipts()
+    assert v.run()["total"] == 3
+    assert v.live == 2 and v.reused == []
+    blob.unlink()
+    vr.clear_memory_receipts()
+    v.run()
+    assert v.live == 3
+
+
+def test_a_changed_input_voids_a_blob_receipt_and_default_mode_writes_no_blob(
+    world, monkeypatch
+):
+    v = BlobVerifier(world)
+    v.run()
+    (world["data"] / "a.json").write_text('{"v": 10}', encoding="utf-8")
+    assert v.run()["total"] == 12 and v.live == 2
+    monkeypatch.delenv(vr.MODE_ENV)
+    for stale in vr.receipt_directory(world["state"]).glob("*"):
+        stale.unlink()
+    vr.clear_memory_receipts()
+    BlobVerifier(world).run()
+    assert not list(vr.receipt_directory(world["state"]).glob("*.blob"))
+
+
+_FORGED_MARKER = {"ran": False}
+
+
+def _forged_call() -> str:
+    _FORGED_MARKER["ran"] = True
+    return "pwned"
+
+
+class _Forged:
+    def __reduce__(self):
+        return (_forged_call, ())
+
+
+def test_a_forged_sidecar_with_a_matching_receipt_digest_never_executes(world):
+    """The digest sits beside the blob, so a writer of the state root can forge both;
+    the loader must still refuse any callable and fall back to a live run."""
+    import pickle
+
+    v = BlobVerifier(world)
+    v.run()
+    directory = vr.receipt_directory(world["state"])
+    (blob,) = directory.glob("blob-*.blob")
+    (receipt_path,) = directory.glob("blob-*.json")
+    forged = pickle.dumps(_Forged(), protocol=4)
+    blob.write_bytes(forged)
+    document = json.loads(receipt_path.read_bytes())
+    body = document["body"]
+    body["result"] = json.dumps(
+        {"blob_sha256": __import__("hashlib").sha256(forged).hexdigest()},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    document["receipt_sha256"] = vr._sha(body)
+    receipt_path.write_bytes(json.dumps(document).encode())
+    vr.clear_memory_receipts()
+    _FORGED_MARKER["ran"] = False
+    result = v.run()
+    assert _FORGED_MARKER["ran"] is False
+    assert result["total"] == 3 and v.live == 2 and v.reused == []
+
+
+def test_restricted_loader_refuses_builtin_callables_and_off_mode_computes_live(
+    world, monkeypatch
+):
+    import pickle
+
+    class _Bytes:
+        def __reduce__(self):
+            return (bytes, (10,))
+
+    with pytest.raises(pickle.UnpicklingError):
+        vr._restricted_loads(pickle.dumps(_Bytes(), protocol=4))
+    assert vr._restricted_loads(pickle.dumps({"a": (b"x", [1, 2.5, None])})) == {
+        "a": (b"x", [1, 2.5, None])
+    }
+    monkeypatch.setenv(vr.RENDER_REUSE_ENV, "provisional")
+    monkeypatch.setenv(vr.RENDER_STATE_ENV, str(world["state"]))
+    monkeypatch.setenv(vr.RENDER_TOKEN_ENV, _provisional_stamp(world["state"].parent))
+    monkeypatch.setenv(vr.MODE_ENV, "off")
+    calls = []
+    for _ in range(2):
+        vr.reuse_render(
+            "x", [], {}, repo_root=world["repo"], compute=lambda: calls.append(1)
+        )
+    assert len(calls) == 2 and not list(world["state"].rglob("*"))
+
+
+def test_an_unpicklable_result_is_served_live_and_stores_nothing(world):
+    import types
+
+    v = BlobVerifier(world)
+    base = v.compute
+
+    def compute() -> dict[str, object]:
+        out = base()
+        out["view"] = types.MappingProxyType({"k": 1})  # not picklable
+        return out
+
+    result = vr.run_with_receipt(
+        "blob",
+        {"spec": "unpicklable"},
+        repo_root=world["repo"],
+        state_root=world["state"],
+        compute=compute,
+        blob_codec=(
+            lambda value: __import__("pickle").dumps(value),
+            vr._restricted_loads,
+        ),
+    )
+    assert result["view"]["k"] == 1
+    assert not list(vr.receipt_directory(world["state"]).glob("blob-*"))
+
+
+def _provisional_stamp(cycle):
+    """Write the stamp and the cycle's own resolved manifest the way a refresh cycle has them;
+    return the token the driver would hand to its stages."""
+    import hashlib
+    import json as _json
+
+    cycle.mkdir(parents=True, exist_ok=True)
+    (cycle / "resolved-cycle.json").write_bytes(b'{"cycle_manifest_sha256": "m1"}')
+    raw = _json.dumps(
+        {
+            "tier": "PROVISIONAL",
+            "not_a_release": True,
+            "schema_version": "qe-provisional-refresh/1",
+            "cycle_manifest_sha256": "m1",
+        }
+    ).encode("utf-8")
+    (cycle / "PROVISIONAL.json").write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def test_inherited_render_vars_without_the_token_render_live_and_store_nothing(
+    world, monkeypatch
+):
+    monkeypatch.setenv(vr.RENDER_REUSE_ENV, "provisional")
+    monkeypatch.setenv(vr.RENDER_STATE_ENV, str(world["state"]))
+    calls = []
+    for _ in range(2):  # no run id, then a foreign one: both render live
+        vr.reuse_render(
+            "x", [], {}, repo_root=world["repo"], compute=lambda: calls.append(1)
+        )
+        monkeypatch.setenv(vr.RENDER_TOKEN_ENV, "0" * 64)
+    assert len(calls) == 2 and not list(world["state"].rglob("*"))
+    assert not vr.render_reuse_enabled()
+    monkeypatch.setenv(vr.RENDER_TOKEN_ENV, _provisional_stamp(world["state"].parent))
+    assert vr.render_reuse_enabled()
+
+
+def test_a_stamp_for_another_manifest_or_schema_yields_no_token(tmp_path):
+    _provisional_stamp(tmp_path)
+    assert vr.provisional_token(tmp_path)
+    (tmp_path / "resolved-cycle.json").write_bytes(
+        b'{"cycle_manifest_sha256": "other"}'
+    )
+    assert vr.provisional_token(tmp_path) is None  # stamp belongs to another manifest
+    (tmp_path / "resolved-cycle.json").unlink()
+    assert vr.provisional_token(tmp_path) is None  # no manifest of its own
+    _provisional_stamp(tmp_path)
+    stamp = (
+        (tmp_path / "PROVISIONAL.json").read_bytes().replace(b"refresh/1", b"refresh/2")
+    )
+    (tmp_path / "PROVISIONAL.json").write_bytes(stamp)
+    assert vr.provisional_token(tmp_path) is None  # wrong schema
+
+
+def test_render_reuse_covers_only_its_own_cycle(tmp_path):
+    env = {vr.RENDER_STATE_ENV: str(tmp_path / "c1" / "render-cache")}
+    assert vr.render_reuse_covers(tmp_path / "c1" / "out", env)
+    assert not vr.render_reuse_covers(tmp_path / "c2" / "out", env)
+    assert not vr.render_reuse_covers(tmp_path / "c1" / ".." / "c2", env)
+    assert not vr.render_reuse_covers(tmp_path, {})

@@ -41,6 +41,7 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.core import inventory_identity
 from quant_engine.core import InterpreterRefusal, require_current_interpreter
+from quant_engine.core import render_reuse_authorized, render_reuse_covers
 from portfolio_counted_producer import (
     COUNTED_PRODUCERS,
     COUNTER_ENV,
@@ -7500,8 +7501,42 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _reuse_write_root(args: Any) -> Path | None:
+    """Where this command writes, for the render-reuse cycle check; None for a command that
+    writes nothing (inventory)."""
+
+    root = getattr(args, "output_root", None)
+    if root is not None:  # build, stage
+        return Path(root)
+    output = getattr(args, "output", None)
+    if output is not None:  # recipe writes one file
+        return Path(output).parent
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if not render_reuse_authorized():
+        # Render reuse is for PROVISIONAL refresh runs only (#885 1d): a set variable
+        # without the token of the provisional cycle that owns the cache is a refusal.
+        print(
+            "portfolio-release-builder: FAIL: QE_RENDER_REUSE is set without a "
+            "provisional run token; render reuse is refresh-only",
+            file=sys.stderr,
+        )
+        return 2
+    written = _reuse_write_root(args)
+    if (
+        os.environ.get("QE_RENDER_REUSE")
+        and written is not None
+        and not render_reuse_covers(written, os.environ)
+    ):
+        print(
+            "portfolio-release-builder: FAIL: render reuse is bound to its own "
+            "provisional cycle; the output root lies outside it",
+            file=sys.stderr,
+        )
+        return 2
     if args.command in ("build", "stage"):
         try:
             require_current_interpreter(f"the release builder {args.command}")
