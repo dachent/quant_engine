@@ -8962,6 +8962,26 @@ def test_the_positions_fact_types_declared_boundaries_apart_from_gaps() -> None:
     ]
 
 
+def _provisional_stamp(cycle):
+    """Write the stamp and the cycle's own resolved manifest the way a refresh cycle has them;
+    return the token the driver would hand to its stages."""
+    import hashlib
+    import json as _json
+
+    cycle.mkdir(parents=True, exist_ok=True)
+    (cycle / "resolved-cycle.json").write_bytes(b'{"cycle_manifest_sha256": "m1"}')
+    raw = _json.dumps(
+        {
+            "tier": "PROVISIONAL",
+            "not_a_release": True,
+            "schema_version": "qe-provisional-refresh/1",
+            "cycle_manifest_sha256": "m1",
+        }
+    ).encode("utf-8")
+    (cycle / "PROVISIONAL.json").write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
 def test_provisional_report_data_is_built_once_and_tampering_is_still_refused(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -8972,6 +8992,7 @@ def test_provisional_report_data_is_built_once_and_tampering_is_still_refused(
     state.mkdir()
     monkeypatch.setenv("QE_RENDER_REUSE", "provisional")
     monkeypatch.setenv("QE_RENDER_STATE_ROOT", str(state))
+    monkeypatch.setenv("QE_RENDER_RUN_TOKEN", _provisional_stamp(tmp_path))
     live = {"n": 0}
     real = reporter.build_report_data_live
 

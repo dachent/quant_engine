@@ -16187,11 +16187,32 @@ def test_a_gate_rejected_schema_three_row_publishes_no_number_outside_the_detail
     assert detail["dynamic"]["exposure_path"]
 
 
+def _provisional_stamp(cycle):
+    """Write the stamp and the cycle's own resolved manifest the way a refresh cycle has them;
+    return the token the driver would hand to its stages."""
+    import hashlib
+    import json as _json
+
+    cycle.mkdir(parents=True, exist_ok=True)
+    (cycle / "resolved-cycle.json").write_bytes(b'{"cycle_manifest_sha256": "m1"}')
+    raw = _json.dumps(
+        {
+            "tier": "PROVISIONAL",
+            "not_a_release": True,
+            "schema_version": "qe-provisional-refresh/1",
+            "cycle_manifest_sha256": "m1",
+        }
+    ).encode("utf-8")
+    (cycle / "PROVISIONAL.json").write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
 def _render_reuse_world(monkeypatch, tmp_path: Path):
     state = tmp_path / "render-state"
     state.mkdir()
     monkeypatch.setenv("QE_RENDER_REUSE", "provisional")
     monkeypatch.setenv("QE_RENDER_STATE_ROOT", str(state))
+    monkeypatch.setenv("QE_RENDER_RUN_TOKEN", _provisional_stamp(tmp_path))
     live = {"n": 0}
     real = panel._rendered_files_live
 

@@ -1120,9 +1120,16 @@ def test_a_config_key_no_stage_reads_does_not_rebind_it_but_a_referenced_one_doe
 
 
 def _stamp(cycle: Path, tier: str = "PROVISIONAL", not_a_release: bool = True) -> str:
-    import hashlib
-
-    raw = json.dumps({"tier": tier, "not_a_release": not_a_release}).encode("utf-8")
+    cycle.mkdir(parents=True, exist_ok=True)
+    (cycle / "resolved-cycle.json").write_bytes(b'{"cycle_manifest_sha256": "m1"}')
+    raw = json.dumps(
+        {
+            "tier": tier,
+            "not_a_release": not_a_release,
+            "schema_version": "qe-provisional-refresh/1",
+            "cycle_manifest_sha256": "m1",
+        }
+    ).encode("utf-8")
     (cycle / "PROVISIONAL.json").write_bytes(raw)
     return hashlib.sha256(raw).hexdigest()
 
@@ -1176,3 +1183,25 @@ def test_a_provisional_cycle_gets_a_cache_and_a_token_bound_to_its_stamp(
     )
     assert not render_reuse_authorized(env)
     assert render_reuse_authorized({})
+
+
+def test_a_provisional_cycle_is_refused_by_commit_and_preflight_before_any_write(
+    world: dict[str, Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import release_preflight as pf
+
+    config = json.loads(world["config"].read_text(encoding="utf-8"))
+    _stamp(world["cycle"])
+    before = sorted(p.name for p in world["cycle"].iterdir())
+    run = driver.Run(config, {"paths": {}, "derive": {}, "stages": []})
+    stage = {"id": "commit", "commit_gate": {"spec": "unused"}}
+    with pytest.raises(driver.Refusal, match="provisional refresh root"):
+        driver.check_commit_gate(run, stage)
+    monkeypatch.setattr(driver, "check_config_paths", lambda _run: None)
+    with pytest.raises(driver.Refusal, match="provisional refresh root"):
+        pf.row_config_paths(run, pf.Env.__new__(pf.Env))
+    assert sorted(p.name for p in world["cycle"].iterdir()) == before
+    # an unstamped cycle is not touched by the guard
+    (world["cycle"] / "PROVISIONAL.json").unlink()
+    driver.refuse_provisional_cycle(run)

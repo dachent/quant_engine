@@ -41,7 +41,7 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.core import inventory_identity
 from quant_engine.core import InterpreterRefusal, require_current_interpreter
-from quant_engine.core import render_reuse_authorized
+from quant_engine.core import render_reuse_authorized, render_reuse_covers
 from portfolio_counted_producer import (
     COUNTED_PRODUCERS,
     COUNTER_ENV,
@@ -7509,6 +7509,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             "portfolio-release-builder: FAIL: QE_RENDER_REUSE is set without a "
             "provisional run token; render reuse is refresh-only",
+            file=sys.stderr,
+        )
+        return 2
+    if os.environ.get("QE_RENDER_REUSE") and not render_reuse_covers(
+        getattr(args, "output_root", None) or Path("."), os.environ
+    ):
+        print(
+            "portfolio-release-builder: FAIL: render reuse is bound to its own "
+            "provisional cycle; the output root lies outside it",
             file=sys.stderr,
         )
         return 2

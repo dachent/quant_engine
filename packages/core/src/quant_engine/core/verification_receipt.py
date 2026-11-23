@@ -922,6 +922,8 @@ RENDER_STATE_ENV = "QE_RENDER_STATE_ROOT"
 
 RENDER_TOKEN_ENV = "QE_RENDER_RUN_TOKEN"
 PROVISIONAL_MARKER = "PROVISIONAL.json"
+PROVISIONAL_SCHEMA = "qe-provisional-refresh/1"
+RESOLVED_CYCLE = "resolved-cycle.json"
 RENDER_CACHE_DIR = "render-cache"
 
 
@@ -938,8 +940,21 @@ def provisional_token(cycle: Path) -> str | None:
         not isinstance(stamp, dict)
         or stamp.get("tier") != "PROVISIONAL"
         or stamp.get("not_a_release") is not True
+        or stamp.get("schema_version") != PROVISIONAL_SCHEMA
     ):
         return None
+    try:
+        resolved = json.loads((cycle / RESOLVED_CYCLE).read_bytes())
+    except (OSError, ValueError):
+        return None
+    manifest_sha = stamp.get("cycle_manifest_sha256")
+    if (
+        not isinstance(resolved, dict)
+        or not isinstance(manifest_sha, str)
+        or not manifest_sha
+        or resolved.get("cycle_manifest_sha256") != manifest_sha
+    ):
+        return None  # the stamp is for another cycle's manifest
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -974,11 +989,30 @@ def render_reuse_authorized(env: Mapping[str, str] | None = None) -> bool:
     return actual is not None and hmac.compare_digest(actual, token)
 
 
-def render_reuse_enabled() -> bool:
-    """Only the refresh driver sets this, and only for a PROVISIONAL run (#885 1d)."""
+def render_reuse_covers(
+    output_root: Path, env: Mapping[str, str] | None = None
+) -> bool:
+    """True when ``output_root`` lies inside the provisional cycle that owns the cache."""
 
-    return os.environ.get(RENDER_REUSE_ENV) == "provisional" and bool(
-        os.environ.get(RENDER_STATE_ENV)
+    env = os.environ if env is None else env
+    state = env.get(RENDER_STATE_ENV)
+    if not state:
+        return False
+    try:
+        Path(output_root).resolve().relative_to(Path(state).parent.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def render_reuse_enabled() -> bool:
+    """Only the refresh driver sets this, and only for a PROVISIONAL run (#885 1d); a
+    process that merely inherited the two variables, without the stamp-bound token, renders live."""
+
+    return (
+        os.environ.get(RENDER_REUSE_ENV) == "provisional"
+        and bool(os.environ.get(RENDER_STATE_ENV))
+        and render_reuse_authorized()
     )
 
 
