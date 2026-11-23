@@ -2,6 +2,8 @@
 
 A refresh runs the **same frozen code** on newer data into a root that can never become a release. Nothing here commits, publishes or moves a pointer. Commands are as the tools exist at the time of writing; paths in angle brackets are for the operator. Times are CST.
 
+How long each stage takes (provisional tier against full release, measured) and what a cycle one day later reuses: `docs/release-run-times.md`.
+
 ## 0. What the first refresh can and cannot use (read first)
 - Release B is frozen **without** PRs 994 (resolver and coverage guard), 996 (finality records), 997 and the `decision_refresh.py` PR (next release only). A step that runs *inside* the driver from the frozen tree (`cycle-resolve`) therefore cannot use `latest_at_or_before` until a release contains it.
 - **Path A, the day after B commits (explicit ids):** build the new cycle manifest with explicit generation ids and manifest hashes (`release_world.py cycle-manifest`), written from the latest captures by hand-listing their ids. Tools from the newer branches (`release_world.py`, `decision_refresh.py stamp`) run from a *separate tools clone*; they only write plain data files. No guarantee against a cutoff beyond the data (that guard lives in the newer `release_cycle_manifest.py`): run its `resolve` from the tools clone first as a check (step 6).
