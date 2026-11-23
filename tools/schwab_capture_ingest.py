@@ -665,8 +665,13 @@ def ingest(
     output_root: Path,
     config: IngestConfig,
     derivation: Mapping[str, Any] | None = None,
+    classification_run: Path | None = None,
 ) -> dict[str, object]:
-    """Bind one verified driver run; returns the binding document."""
+    """Bind one verified driver run; returns the binding document.
+
+    ``classification_run`` is an earlier verified run of the same accounts whose raw holdings say
+    which position group a symbol sold in full after the cutoff belongs to (only needed for an
+    account with several position groups)."""
 
     try:
         verified = driver.verify_run(run_dir, crosswalk=crosswalk)
@@ -738,6 +743,17 @@ def ingest(
                 rolled,
                 closes_dir=closes_dir,
                 day=cutoff.as_of_date,
+                classification=(
+                    None
+                    if classification_run is None
+                    else derive_tool.holdings_classification(
+                        strict_json_loads(
+                            (classification_run / "raw/holdings.v2.json").read_bytes(),
+                            label="classification holdings",
+                        ),
+                        crosswalk,
+                    )
+                ),
             )
     except derive_tool.DeriveError as exc:
         raise IngestError(str(exc)) from exc
@@ -1595,6 +1611,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--base-spec", type=Path)
     run.add_argument("--spec-out", type=Path)
     run.add_argument("--derivation-record", type=Path)
+    run.add_argument("--classification-run", type=Path)
     return parser
 
 
@@ -1620,6 +1637,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             derivation=_load(args.derivation_record, "derivation record")
             if args.derivation_record
             else None,
+            classification_run=args.classification_run,
         )
         result: dict[str, object] = {
             "as_of_date": binding["as_of_date"],

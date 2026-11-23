@@ -349,19 +349,46 @@ def absent_rolled_positions(
     return {s: q for s, q in sorted(after.quantities.items()) if s not in seen}
 
 
+def holdings_classification(
+    raw: object, crosswalk: Mapping[str, str]
+) -> dict[tuple[str, str], tuple[str, int]]:
+    """(internal account, symbol) -> (group name, security type) of every position row of a raw
+    holdings response: what an earlier governed capture said the symbol was in that account."""
+
+    found: dict[tuple[str, str], tuple[str, int]] = {}
+    for account in _list(_mapping(raw, "holdings").get("accounts"), "accounts"):
+        internal = crosswalk[
+            str(_mapping(account, "holdings account").get("accountId"))
+        ]
+        for group in _list(account.get("groupedPositions"), "holdings groups"):
+            if group.get("securityType") == CASH_SECURITY_TYPE:
+                continue
+            for row in _list(group.get("holdingsRows"), "holdings rows"):
+                symbol = row.get("dataSymbol")
+                if not isinstance(symbol, str) or not symbol.strip():
+                    symbol = _mapping(row.get("symbol"), "symbol").get("symbol")
+                found[(internal, str(symbol))] = (
+                    str(group.get("groupName")),
+                    int(group["securityType"]),
+                )
+    return found
+
+
 def _derived_row(
     account: Mapping[str, Any],
     internal: str,
     symbol: str,
     quantity: Decimal,
     close: Decimal,
+    classification: Mapping[tuple[str, str], tuple[str, int]] | None,
 ) -> tuple[dict[str, Any], dict[str, Any], Mapping[str, Any]]:
     """A row for a position the capture lacks, shaped from its account's own position rows.
 
-    Refuses unless the account has position rows and every position row of every position group
-    has the same set of fields (the shape is then not ambiguous). The row carries only the symbol,
-    the rolled-back quantity and the official close; every value field of the sibling is blanked.
-    Returns the row, its flag and the group it goes into.
+    The row goes into the account's only position group, or, when it has several, into the group
+    an earlier governed capture put the same symbol of the same account in (``classification``);
+    without that it refuses. Every row of that group must have the same set of fields (the shape is
+    then not ambiguous). The row carries only the symbol, the rolled-back quantity and the official
+    close; every value field of the sibling is blanked. Returns the row, its flag and its group.
     """
 
     groups = [
@@ -369,19 +396,43 @@ def _derived_row(
         for g in _list(account.get("groupedPositions"), "holdings groups")
         if g.get("securityType") != CASH_SECURITY_TYPE
     ]
-    rows = [r for g in groups for r in _list(g.get("holdingsRows"), "holdings rows")]
-    if not rows:
+    if not groups:
         raise DeriveError(
             f"{internal}: {symbol} was held at the close but the capture has no position row "
             "of the account to take a shape from"
         )
+    if len(groups) == 1:
+        group = groups[0]
+        group_source = "ONLY_POSITION_GROUP_OF_THE_ACCOUNT"
+    else:
+        known = (
+            None if classification is None else classification.get((internal, symbol))
+        )
+        matching = [
+            g
+            for g in groups
+            if known is not None
+            and (str(g.get("groupName")), int(g["securityType"])) == known
+        ]
+        if len(matching) != 1:
+            raise DeriveError(
+                f"{internal}: {symbol} was held at the close, the account has several position "
+                "groups and no earlier capture places the symbol in one of them, so the group "
+                "and shape of its row are ambiguous"
+            )
+        group = matching[0]
+        group_source = "EARLIER_GOVERNED_CAPTURE_OF_THE_SAME_ACCOUNT"
+    rows = _list(group.get("holdingsRows"), "holdings rows")
+    if not rows:
+        raise DeriveError(
+            f"{internal}: {symbol} was held at the close but its group has no row to take a shape from"
+        )
     shapes = {frozenset(_mapping(r, "holdings row")) for r in rows}
     if len(shapes) != 1:
         raise DeriveError(
-            f"{internal}: {symbol} was held at the close but the account's position rows have "
+            f"{internal}: {symbol} was held at the close but the rows of its group have "
             "different shapes, so the shape of its row is ambiguous"
         )
-    group = groups[0]
     template = _mapping(_list(group.get("holdingsRows"), "holdings rows")[0], "row")
     row = copy.deepcopy(dict(template))
     for key in _DERIVED_ROW_BLANKED:
@@ -405,6 +456,7 @@ def _derived_row(
         "quantity": format(quantity, "f"),
         "official_close": format(close, "f"),
         "group": str(group.get("groupName")),
+        "group_source": group_source,
         "source": ROLLBACK_SOURCE,
     }
     return row, flag, group
@@ -417,6 +469,7 @@ def apply_rollback(
     *,
     closes_dir: Path | None = None,
     day: date | None = None,
+    classification: Mapping[tuple[str, str], tuple[str, int]] | None = None,
 ) -> tuple[dict[str, Any], int, list[dict[str, Any]]]:
     """A copy of the raw holdings response whose quantities and cash are the rolled-back ones.
 
@@ -478,7 +531,7 @@ def apply_rollback(
                         f"close for {day}, so its row cannot be derived"
                     )
                 row, flag, group = _derived_row(
-                    account, internal, symbol, quantity, close
+                    account, internal, symbol, quantity, close, classification
                 )
                 _list(group.get("holdingsRows"), "holdings rows").append(row)
                 derived_flags.append(flag)

@@ -77,9 +77,19 @@ def _closes(tmp_path: Path, table: dict[str, str]) -> Path:
     return folder
 
 
-def _apply(doc: dict[str, Any], rolled: dict[str, RolledBack], closes: Path | None):
+def _apply(
+    doc: dict[str, Any],
+    rolled: dict[str, RolledBack],
+    closes: Path | None,
+    classification: dict[tuple[str, str], tuple[str, int]] | None = None,
+):
     return nd.apply_rollback(
-        doc, CROSSWALK, rolled, closes_dir=closes, day=DAY if closes else None
+        doc,
+        CROSSWALK,
+        rolled,
+        closes_dir=closes,
+        day=DAY if closes else None,
+        classification=classification,
     )
 
 
@@ -88,7 +98,12 @@ def test_a_position_sold_in_full_after_the_day_gets_a_flagged_derived_row(
 ) -> None:
     doc = _doc(equity=[_row("AAA", "10")], etf=[_row("CCC", "5")])
     rolled = _rolled({"AAA": "10", "CCC": "5", "ZZZ": "7"})
-    out, zeroed, flags = _apply(doc, rolled, _closes(tmp_path, {"ZZZ": "36.28"}))
+    out, zeroed, flags = _apply(
+        doc,
+        rolled,
+        _closes(tmp_path, {"ZZZ": "36.28"}),
+        {(ACCOUNT, "ZZZ"): ("Equity", 1)},
+    )
     assert zeroed == 0
     assert flags == [
         {
@@ -97,6 +112,7 @@ def test_a_position_sold_in_full_after_the_day_gets_a_flagged_derived_row(
             "quantity": "7",
             "official_close": "36.28",
             "group": "Equity",
+            "group_source": "EARLIER_GOVERNED_CAPTURE_OF_THE_SAME_ACCOUNT",
             "source": nd.ROLLBACK_SOURCE,
         }
     ]
@@ -134,8 +150,8 @@ def test_a_position_without_an_official_close_of_the_day_is_refused(
 
 
 def test_ambiguous_position_row_shapes_are_refused(tmp_path: Path) -> None:
-    doc = _doc(equity=[_row("AAA", "10")], etf=[_row("CCC", "5", extraField=1)])
-    with pytest.raises(nd.DeriveError, match="ambiguous"):
+    doc = _doc(equity=[_row("AAA", "10"), _row("CCC", "5", extraField=1)])
+    with pytest.raises(nd.DeriveError, match="different shapes"):
         _apply(
             doc,
             _rolled({"AAA": "10", "CCC": "5", "ZZZ": "7"}),
@@ -268,3 +284,38 @@ def test_the_derivation_record_names_the_derived_row_and_only_for_that_account(
     )
     assert "derived_rows_absent_from_capture" not in record[other]
     assert record[ACCOUNT]["official_0917"] == "600.00"
+
+
+def test_several_position_groups_without_an_earlier_classification_are_refused(
+    tmp_path: Path,
+) -> None:
+    doc = _doc(equity=[_row("AAA", "10")], etf=[_row("CCC", "5")])
+    closes = _closes(tmp_path, {"ZZZ": "3"})
+    rolled = _rolled({"AAA": "10", "CCC": "5", "ZZZ": "7"})
+    with pytest.raises(nd.DeriveError, match="no earlier capture places the symbol"):
+        _apply(doc, rolled, closes)
+    with pytest.raises(nd.DeriveError, match="no earlier capture places the symbol"):
+        _apply(doc, rolled, closes, {(ACCOUNT, "ZZZ"): ("Bonds", 5)})
+
+
+def test_the_group_an_earlier_capture_names_decides_the_shape(tmp_path: Path) -> None:
+    """Equity and ETF rows differ in shape: the row copies the shape of its own group's rows."""
+
+    doc = _doc(equity=[_row("AAA", "10")], etf=[_row("CCC", "5", etfOnly=1)])
+    out, _z, flags = _apply(
+        doc,
+        _rolled({"AAA": "10", "CCC": "5", "ZZZ": "7"}),
+        _closes(tmp_path, {"ZZZ": "3"}),
+        {(ACCOUNT, "ZZZ"): ("ETF", 2)},
+    )
+    assert flags[0]["group"] == "ETF"
+    etf_rows = out["accounts"][0]["groupedPositions"][1]["holdingsRows"]
+    assert "etfOnly" in next(r for r in etf_rows if r["dataSymbol"] == "ZZZ")
+
+
+def test_the_classification_reader_maps_symbols_to_their_groups() -> None:
+    doc = _doc(equity=[_row("AAA", "10")], etf=[_row("CCC", "5")])
+    assert nd.holdings_classification(doc, CROSSWALK) == {
+        (ACCOUNT, "AAA"): ("Equity", 1),
+        (ACCOUNT, "CCC"): ("ETF", 2),
+    }
