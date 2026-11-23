@@ -33,7 +33,6 @@ from quant_engine.core import (
     InterpreterRefusal,
     require_interpreter,
     run_storage,
-    timed_call,
     timed_stage,
     verify_if_promoted,
 )
@@ -8780,24 +8779,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 storage = storage or _attended_storage(args)
                 storage.admit(resume=args.resume)
-                prepared = timed_call("attended_prepare_inputs")(
-                    preparation.prepare_attended_inputs
-                )(
-                    preparation_spec_path=args.preparation_spec,
-                    output_root=Path(args.output_root).resolve(),
-                    requested_as_of=args.requested_as_of,
-                    evaluated_on=args.evaluated_on,
-                    release_commit=_git(
-                        REPOSITORY_ROOT,
-                        "rev-parse",
-                        "HEAD^{tree}"
-                        if getattr(args, "code_identity_scheme", COMMIT_SCHEME)
-                        == TREE_SCHEME
-                        else "HEAD",
-                    ),
-                    resume=args.resume,
-                    on_create=storage.mark_created,
-                )
+                # a plain call inside the timer block: the controller graph reads
+                # `preparation.prepare_attended_inputs` as a call of `main`
+                with timed_stage("attended_prepare_inputs"):
+                    prepared = preparation.prepare_attended_inputs(
+                        preparation_spec_path=args.preparation_spec,
+                        output_root=Path(args.output_root).resolve(),
+                        requested_as_of=args.requested_as_of,
+                        evaluated_on=args.evaluated_on,
+                        release_commit=_git(
+                            REPOSITORY_ROOT,
+                            "rev-parse",
+                            "HEAD^{tree}"
+                            if getattr(args, "code_identity_scheme", COMMIT_SCHEME)
+                            == TREE_SCHEME
+                            else "HEAD",
+                        ),
+                        resume=args.resume,
+                        on_create=storage.mark_created,
+                    )
                 # preparation builds the ledger/baseline/attribution stage roots: whatever the
                 # gate verified before it is stale
                 verified.invalidate()
