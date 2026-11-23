@@ -477,6 +477,10 @@ def test_load_balances_reads_the_one_matching_account() -> None:
     assert slo.load_balances(raw, "054") == BAL
     with pytest.raises(slo.SchwabExposureError, match="once"):
         slo.load_balances(raw, "111")
+    # the id must END with the digits: 054 inside another position does not match
+    inside = json.dumps({"brokerageAccountList": [{"accountId": "05499"}]}).encode()
+    with pytest.raises(slo.SchwabExposureError, match="once"):
+        slo.load_balances(inside, "054")
     twice = json.dumps(
         {"brokerageAccountList": [{"accountId": "1054"}, {"accountId": "2054"}]}
     ).encode()
@@ -621,4 +625,13 @@ def test_the_zero_holdings_spec_is_strict(
 ) -> None:
     spec = mutate(_zero_spec(tmp_path), tmp_path)
     with pytest.raises(provider_ledger.ProviderLedgerError, match=text):
+        _zero_call(spec, [ACC])
+
+
+def test_the_balances_reference_keys_are_exact(tmp_path: Path) -> None:
+    spec = _zero_spec(tmp_path)
+    spec["zero_holdings"][0]["balances"] = _balances_file(tmp_path, extra="x")
+    with pytest.raises(
+        provider_ledger.ProviderLedgerError, match="balances keys differ"
+    ):
         _zero_call(spec, [ACC])

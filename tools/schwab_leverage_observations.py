@@ -220,11 +220,7 @@ def gross_exposure_rows(
                 )
             )
 
-        refusal_sources = (
-            [zero_holdings[account]["source"]]
-            if not lines and account in zero_holdings
-            else list(closes_sources)
-        )
+        refusal_sources = list(closes_sources)
         if not lines:
             if account not in zero_holdings:
                 refuse("NO_POSITIONS_ROWS_AT_CUTOFF")
