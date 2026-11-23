@@ -109,6 +109,30 @@ def test_a_partly_free_or_interest_posted_debit_is_not_exempt(
     assert state.state == "LEVERED" and state.conflicts
 
 
+@pytest.mark.parametrize(
+    "coverage, conflict",
+    [
+        ({"unobserved_days": 40}, "SETTLED_DEBIT_WITH_UNOBSERVED_DAYS"),
+        ({"unobserved_days": 1}, "SETTLED_DEBIT_WITH_UNOBSERVED_DAYS"),
+        ({"unobserved_days": None}, "SETTLED_DEBIT_COVERAGE_UNMEASURED"),
+    ],
+)
+def test_the_state_needs_every_nav_day_observed_else_it_carries_a_conflict(
+    coverage: dict[str, Any], conflict: str
+) -> None:
+    state = _classify(**coverage)
+    assert (state.state, state.reason) == (
+        "INCIDENTAL_DEBIT",
+        af.SETTLED_DEBIT_NO_INTEREST,
+    )
+    assert state.conflicts == (conflict,)
+
+
+def test_a_non_base_currency_debit_is_not_exempt() -> None:
+    state = _classify(currency_debit_days=2)
+    assert state.state == "LEVERED" and state.conflicts
+
+
 def test_an_account_without_the_declaration_field_is_never_exempt() -> None:
     state = _classify(account=OTHER)
     assert state.state == "LEVERED" and state.conflicts
@@ -262,3 +286,20 @@ def test_the_debit_days_stay_in_the_ledger_rows_for_the_panel() -> None:
     assert [r["amount"]["value"] for r in days] == [
         "97.33"
     ] * 3  # the disclosure never drops them
+
+
+def test_a_settled_debit_state_with_a_coverage_conflict_keeps_its_rows_and_scope() -> (
+    None
+):
+    catalog = _catalog()
+    catalog["nav_observations"].append(
+        {**catalog["nav_observations"][0], "as_of_date": "2026-11-16"}
+    )  # a NAV day with no observation of the financing balance
+    rows = _rows(catalog)
+    state = next(r for r in rows if r["measurement_basis"] == "ACCOUNT_FINANCING_STATE")
+    assert state["classification"] == "INCIDENTAL_DEBIT"
+    assert state["coverage_status"] == "OBSERVED_UNRECONCILED"
+    assert "CONFLICT=SETTLED_DEBIT_WITH_UNOBSERVED_DAYS" in state["coverage_reason"]
+    assert any(
+        r["data_class"] == "FINANCING_COST" for r in rows
+    )  # the cost row is owed

@@ -183,9 +183,11 @@ def classify(
 
     A ``NO_MARGIN_FACILITY`` account whose declaration (verified) says ``settled_debit_interest:
     NONE_BY_ACCOUNT_TYPE`` and whose every net debit day is stated interest-free by the
-    producer (``interest_bearing: false``, with no interest posting) is ``INCIDENTAL_DEBIT``
-    with reason ``SETTLED_DEBIT_NO_INTEREST`` and no conflict (owner ruling, #894): a
-    retirement account's settlement float is not borrowing.  A margin account's debit days
+    producer (``interest_bearing: false``, with no interest posting and no non-base currency
+    debit) is ``INCIDENTAL_DEBIT`` with reason ``SETTLED_DEBIT_NO_INTEREST`` and no
+    NO_FACILITY conflict (owner ruling, #894): a retirement account's settlement float is
+    not borrowing.  Like NOT_LEVERED it needs every NAV day observed; otherwise the state
+    carries a coverage conflict and the account stays in E8 scope.  A margin account's debit days
     carry no such statement, so they still make it LEVERED.
 
     A ``NO_MARGIN_FACILITY`` account that shows a net base debit or a debit-interest
@@ -208,8 +210,15 @@ def classify(
             and seen.net_base_debit_days
             and seen.interest_free_debit_days >= seen.net_base_debit_days
             and not seen.debit_interest_postings
+            and not seen.currency_debit_days
         ):
             state, reason = "INCIDENTAL_DEBIT", SETTLED_DEBIT_NO_INTEREST
+            # like NOT_LEVERED, the claim needs every NAV day observed: an unmeasured or
+            # incomplete coverage is a conflict, which keeps the account in E8 scope
+            if seen.unobserved_days is None:
+                conflicts.append("SETTLED_DEBIT_COVERAGE_UNMEASURED")
+            elif seen.unobserved_days:
+                conflicts.append("SETTLED_DEBIT_WITH_UNOBSERVED_DAYS")
         elif seen.net_base_debit_days:
             state, reason = "LEVERED", "NET_BASE_CASH_NEGATIVE"
             if seen.range_average_debit_days >= seen.net_base_debit_days:

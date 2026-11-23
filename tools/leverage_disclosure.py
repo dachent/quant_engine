@@ -419,7 +419,10 @@ def account_financing_rows(
         )
         if state.state == "NOT_LEVERED" and not state.conflicts:
             continue
-        if state.reason == account_financing.SETTLED_DEBIT_NO_INTEREST:
+        if (
+            state.reason == account_financing.SETTLED_DEBIT_NO_INTEREST
+            and not state.conflicts
+        ):
             # owner ruling (#894): a retirement account's interest-free settled debit is its
             # own state; the state row (and the debit days, which the panel shows) is the
             # disclosure, no cost or exposure row is owed
