@@ -62,9 +62,8 @@ from quant_engine.core import (
 from quant_engine.core import InterpreterRefusal, require_interpreter
 from quant_engine.core import (
     RECEIPT_MODE_ENV,
-    RENDER_REUSE_ENV,
-    RENDER_STATE_ENV,
     STAGE_TIMING_LOG_ENV,
+    stage_render_env,
     summarize_stage_timing,
 )
 import release_cycle_manifest
@@ -1625,15 +1624,6 @@ def _timing(run: Run, text: str) -> None:
         handle.write(f"{_now()} {text}\n")
 
 
-def scrub_render_reuse(env: dict[str, str]) -> None:
-    """A release stage never reuses a rendered panel or report (#885 1d): only the
-    refresh driver may set these, for a PROVISIONAL run. Whatever the operator's
-    environment carries is dropped here."""
-
-    env.pop(RENDER_REUSE_ENV, None)
-    env.pop(RENDER_STATE_ENV, None)
-
-
 def _launch(
     run: Run,
     stage_id: str,
@@ -1801,7 +1791,7 @@ def _execute_stage(
         # operator's own value (persist/refresh) wins.
         env.setdefault(RECEIPT_MODE_ENV, DEFAULT_RECEIPT_MODE)
         record["receipts_mode"] = env[RECEIPT_MODE_ENV]
-        scrub_render_reuse(env)
+        stage_render_env(env, run.cycle)
         if stdout_to is not None:
             stdout_to.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("wb") as log:

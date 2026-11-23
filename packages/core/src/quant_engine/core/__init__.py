@@ -3,6 +3,7 @@
 from quant_engine.core.verification_receipt import MODE_ENV as RECEIPT_MODE_ENV
 from quant_engine.core.verification_receipt import RENDER_REUSE_ENV, RENDER_STATE_ENV
 from quant_engine.core.verification_receipt import reuse_render
+from quant_engine.core.verification_receipt import render_reuse_authorized, stage_render_env
 from quant_engine.core.stage_timing import (
     TIMING_LOG_ENV as STAGE_TIMING_LOG_ENV,
     stage as timed_stage,

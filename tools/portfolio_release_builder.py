@@ -41,6 +41,7 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.core import inventory_identity
 from quant_engine.core import InterpreterRefusal, require_current_interpreter
+from quant_engine.core import render_reuse_authorized
 from portfolio_counted_producer import (
     COUNTED_PRODUCERS,
     COUNTER_ENV,
@@ -7502,12 +7503,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if os.environ.get("QE_RENDER_REUSE"):
-        # Render reuse is for PROVISIONAL refresh runs only (#885 1d); a release
-        # builder never runs with it, so a leaked variable is a refusal, not a mode.
+    if not render_reuse_authorized():
+        # Render reuse is for PROVISIONAL refresh runs only (#885 1d): a set variable
+        # without the token of the provisional cycle that owns the cache is a refusal.
         print(
-            "portfolio-release-builder: FAIL: QE_RENDER_REUSE is set; render reuse "
-            "is refresh-only",
+            "portfolio-release-builder: FAIL: QE_RENDER_REUSE is set without a "
+            "provisional run token; render reuse is refresh-only",
             file=sys.stderr,
         )
         return 2

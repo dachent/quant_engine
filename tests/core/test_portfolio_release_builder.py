@@ -6231,7 +6231,9 @@ def test_lens_worker_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_release_builder_refuses_to_run_with_render_reuse_set(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     import types
 
@@ -6243,5 +6245,9 @@ def test_release_builder_refuses_to_run_with_render_reuse_set(
         ),
     )
     monkeypatch.setenv("QE_RENDER_REUSE", "provisional")
-    assert builder.main([]) == 2
+    assert builder.main([]) == 2  # no token
+    assert "render reuse is refresh-only" in capsys.readouterr().err
+    monkeypatch.setenv("QE_RENDER_STATE_ROOT", str(tmp_path / "render-cache"))
+    monkeypatch.setenv("QE_RENDER_RUN_TOKEN", "0" * 64)
+    assert builder.main([]) == 2  # a token of some other cycle
     assert "render reuse is refresh-only" in capsys.readouterr().err

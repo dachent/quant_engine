@@ -39,6 +39,7 @@ from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import contextvars
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -917,6 +918,60 @@ def _restricted_loads(data: bytes) -> Any:
 
 RENDER_REUSE_ENV = "QE_RENDER_REUSE"
 RENDER_STATE_ENV = "QE_RENDER_STATE_ROOT"
+
+
+RENDER_TOKEN_ENV = "QE_RENDER_RUN_TOKEN"
+PROVISIONAL_MARKER = "PROVISIONAL.json"
+RENDER_CACHE_DIR = "render-cache"
+
+
+def provisional_token(cycle: Path) -> str | None:
+    """sha256 of the cycle's PROVISIONAL.json, or None unless it stamps a provisional tier."""
+
+    path = cycle / PROVISIONAL_MARKER
+    try:
+        raw = path.read_bytes()
+        stamp = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(stamp, dict)
+        or stamp.get("tier") != "PROVISIONAL"
+        or stamp.get("not_a_release") is not True
+    ):
+        return None
+    return hashlib.sha256(raw).hexdigest()
+
+
+def stage_render_env(env: dict[str, str], cycle: Path) -> None:
+    """Driver-owned: every stage child starts without render reuse; only a cycle stamped
+    PROVISIONAL gets it, bound to that stamp by a token. A release cycle has no path in."""
+
+    for key in (RENDER_REUSE_ENV, RENDER_STATE_ENV, RENDER_TOKEN_ENV):
+        env.pop(key, None)
+    token = provisional_token(cycle)
+    if token is None:
+        return
+    cache = cycle / RENDER_CACHE_DIR
+    cache.mkdir(parents=True, exist_ok=True)
+    env[RENDER_REUSE_ENV] = "provisional"
+    env[RENDER_STATE_ENV] = str(cache)
+    env[RENDER_TOKEN_ENV] = token
+
+
+def render_reuse_authorized(env: Mapping[str, str] | None = None) -> bool:
+    """True when reuse is unset, or set with the token of the provisional cycle that owns
+    the cache directory. A release builder calls this and refuses on False."""
+
+    env = os.environ if env is None else env
+    if not env.get(RENDER_REUSE_ENV):
+        return True
+    state = env.get(RENDER_STATE_ENV)
+    token = env.get(RENDER_TOKEN_ENV)
+    if not state or not token:
+        return False
+    actual = provisional_token(Path(state).parent)
+    return actual is not None and hmac.compare_digest(actual, token)
 
 
 def render_reuse_enabled() -> bool:

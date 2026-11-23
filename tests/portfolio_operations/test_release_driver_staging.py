@@ -21,6 +21,7 @@ import sys
 from typing import Any
 
 import pytest
+from quant_engine.core import render_reuse_authorized
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tools"))
@@ -1118,18 +1119,60 @@ def test_a_config_key_no_stage_reads_does_not_rebind_it_but_a_referenced_one_doe
         pytest.skip("the first stage references no scalar config key")
 
 
-def test_release_driver_stages_never_inherit_the_provisional_render_reuse_env(
-    monkeypatch: pytest.MonkeyPatch,
+def _stamp(cycle: Path, tier: str = "PROVISIONAL", not_a_release: bool = True) -> str:
+    import hashlib
+
+    raw = json.dumps({"tier": tier, "not_a_release": not_a_release}).encode("utf-8")
+    (cycle / "PROVISIONAL.json").write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def test_a_release_cycle_never_gets_render_reuse_even_when_exported(
+    tmp_path: Path,
 ) -> None:
     env = {
         "QE_RENDER_REUSE": "provisional",
         "QE_RENDER_STATE_ROOT": "C:/somewhere",
+        "QE_RENDER_RUN_TOKEN": "abc",
         "KEEP": "1",
     }
-    driver.scrub_render_reuse(env)
+    driver.stage_render_env(env, tmp_path)  # no stamp: a release cycle
     assert env == {"KEEP": "1"}
+    assert not (tmp_path / "render-cache").exists()
+    for tier, flag in (("RELEASE", True), ("PROVISIONAL", False)):  # forged stamps
+        _stamp(tmp_path, tier, flag)
+        env = {"QE_RENDER_REUSE": "provisional"}
+        driver.stage_render_env(env, tmp_path)
+        assert env == {}
+    (tmp_path / "PROVISIONAL.json").write_bytes(b"not json")
+    env = {}
+    driver.stage_render_env(env, tmp_path)
+    assert env == {}
     source = Path(driver.__file__).read_text(encoding="utf-8")
-    # the stage launcher applies it to the environment every stage child receives
-    assert source.index("scrub_render_reuse(env)") < source.index(
+    assert source.index("stage_render_env(env, run.cycle)") < source.index(
         'rc = _launch(run, stage["id"], record, argv, log, log, env)'
     )
+
+
+def test_a_provisional_cycle_gets_a_cache_and_a_token_bound_to_its_stamp(
+    tmp_path: Path,
+) -> None:
+    token = _stamp(tmp_path)
+    env = {"QE_RENDER_RUN_TOKEN": "operator"}
+    driver.stage_render_env(env, tmp_path)
+    assert env["QE_RENDER_REUSE"] == "provisional"
+    assert env["QE_RENDER_RUN_TOKEN"] == token
+    assert Path(env["QE_RENDER_STATE_ROOT"]) == tmp_path / "render-cache"
+    assert (tmp_path / "render-cache").is_dir()
+    assert render_reuse_authorized(env)
+    # another cycle's token, a missing token and a changed stamp are all refused
+    assert not render_reuse_authorized({**env, "QE_RENDER_RUN_TOKEN": "0" * 64})
+    assert not render_reuse_authorized(
+        {k: v for k, v in env.items() if k != "QE_RENDER_RUN_TOKEN"}
+    )
+    _stamp(tmp_path, "PROVISIONAL", True)
+    (tmp_path / "PROVISIONAL.json").write_bytes(
+        b'{"tier": "PROVISIONAL", "not_a_release": true, "x": 1}'
+    )
+    assert not render_reuse_authorized(env)
+    assert render_reuse_authorized({})
