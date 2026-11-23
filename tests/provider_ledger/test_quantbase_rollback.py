@@ -682,3 +682,22 @@ def test_without_a_cutoff_day_order_the_next_day_shape_keeps_the_strict_bound(
     evidence = rows[0]["closure"]["rollback"]
     assert evidence["cutoff_day_orders"] is False
     assert evidence["scale_tolerance"] == "0.001"
+
+
+def test_the_next_day_shape_discloses_the_revaluation_in_plain_words(
+    tmp_path: Path,
+) -> None:
+    evidence = _next_rows(tmp_path)[0]["closure"]["rollback"]
+    assert evidence["cutoff_day_orders"] is True
+    assert evidence["disclosure"] == (
+        "post-rebalance position valued at vendor NAV; official-close valuation "
+        "differs by 0.199%"
+    )
+    for key in (
+        "opening_value_at_official_closes_usd",
+        "official_close_value_usd",
+        "value_scale_to_nav",
+        "scale_tolerance",
+    ):
+        assert key in evidence
+    assert "disclosure" not in _rows(tmp_path / "same_day")[0]["closure"]["rollback"]

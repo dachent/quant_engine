@@ -2696,7 +2696,15 @@ def _quantbase_roll_back(
         "scale_tolerance": str(scale_tolerance),
         # recorded only for the next-day shape: the same-day evidence bytes are unchanged
         **(
-            {"cutoff_day_orders": cutoff_day_orders}
+            {
+                "cutoff_day_orders": cutoff_day_orders,
+                "disclosure": (
+                    "post-rebalance position valued at vendor NAV; official-close "
+                    f"valuation differs by {abs(scale - 1) * 100:.3f}%"
+                    if cutoff_day_orders
+                    else "cutoff holdings equal the opening holdings, valued at vendor NAV"
+                ),
+            }
             if relaxed_scale_tolerance is not None
             else {}
         ),
