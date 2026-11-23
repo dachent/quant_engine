@@ -138,3 +138,26 @@ def test_attended_children_and_verifiers_are_timed_by_name(
         pass
     (row,) = [json.loads(line) for line in log.read_text("utf-8").splitlines()]
     assert row["stage"] == "attended_role" and row["role"] == "report"
+
+
+def test_timers_are_strict_no_ops_without_the_log_variable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No QE_STAGE_TIMING_LOG: no clock read, nothing on stdout or stderr."""
+
+    class NoClock:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"clock read: time.{name}")
+
+    monkeypatch.delenv(stage_timing.TIMING_LOG_ENV, raising=False)
+    monkeypatch.setattr(stage_timing, "time", NoClock())
+
+    @stage_timing.timed("decorated")
+    def work() -> int:
+        return 7
+
+    with stage_timing.stage("probe") as extra:
+        extra["k"] = 1
+    assert work() == 7
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
