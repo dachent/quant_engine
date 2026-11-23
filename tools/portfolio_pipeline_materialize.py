@@ -6500,12 +6500,14 @@ class _StageFingerprints:
     def require_roots_unchanged_before(
         self, output_root: Path, *, before_child: str
     ) -> None:
-        """G1 at the start of a child: nothing changed since the snapshot that preceded verification."""
+        """G1 at the start of a child: nothing changed since the snapshot that preceded verification.
 
-        shared = set(_attended_shared_stage_roles(output_root, before_child))
+        Nothing writes before a child starts, so every verified role is checked here, the roles
+        that share the child's stage root included (`panel-candidate` is fingerprinted over its own
+        `candidates/` only, which the `panel` child does not own).
+        """
+
         for role, (receipt_sha256, inventory) in self._rows.items():
-            if role in shared:
-                continue
             try:
                 changed = (
                     self._inventory(output_root, role) != inventory

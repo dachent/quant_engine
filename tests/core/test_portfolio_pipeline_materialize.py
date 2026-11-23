@@ -8318,6 +8318,10 @@ def test_verified_stages_memo_reuses_only_an_identical_unchanged_question(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[tuple[tuple[str, ...], str | None]] = []
+    # the memo snapshots a stage before it is verified, so the stage must exist on disk
+    (tmp_path / "stage-results").mkdir()
+    (tmp_path / "stage-results" / "ledger.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "stages" / "ledger").mkdir(parents=True)
 
     def fake(
         _root: Path, required: Sequence[str], *, failed_stage: str | None = None
@@ -8661,3 +8665,147 @@ def test_a_stage_changed_between_the_shared_verification_and_the_first_child_is_
         "attended ledger stage changed after it was verified, before child baseline"
         in capsys.readouterr().err
     )
+
+
+def _write_candidate_stage(output_root: Path) -> None:
+    candidate = output_root / "stages" / "panel" / "candidates" / "c1"
+    candidate.mkdir(parents=True)
+    (candidate / "index.html").write_text("<html></html>", encoding="utf-8")
+    receipts = output_root / "stage-results"
+    receipts.mkdir(parents=True, exist_ok=True)
+    (receipts / "panel-candidate.json").write_text("{}", encoding="utf-8")
+
+
+def test_the_panel_child_may_not_start_over_a_changed_panel_candidate(
+    tmp_path: Path,
+) -> None:
+    """Before a child starts nothing writes, so a role sharing the child's root is checked too."""
+
+    _write_candidate_stage(tmp_path)
+    fingerprints = materializer._StageFingerprints()  # noqa: SLF001
+    fingerprints.adopt(
+        "panel-candidate",
+        materializer._StageFingerprints.snapshot(tmp_path, "panel-candidate"),  # noqa: SLF001
+    )
+    fingerprints.require_roots_unchanged_before(tmp_path, before_child="panel")
+    (tmp_path / "stages" / "panel" / "candidates" / "c1" / "index.html").write_text(
+        "<html>changed</html>", encoding="utf-8"
+    )
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="panel-candidate stage changed after it was verified, before child panel",
+    ):
+        fingerprints.require_roots_unchanged_before(tmp_path, before_child="panel")
+
+
+def test_the_panel_child_writing_beside_the_candidate_is_not_a_false_refusal(
+    tmp_path: Path,
+) -> None:
+    """The after-child check leaves a sibling's own root alone; the candidate itself is untouched."""
+
+    _write_candidate_stage(tmp_path)
+    fingerprints = materializer._StageFingerprints()  # noqa: SLF001
+    fingerprints.adopt(
+        "panel-candidate",
+        materializer._StageFingerprints.snapshot(tmp_path, "panel-candidate"),  # noqa: SLF001
+    )
+    generations = tmp_path / "stages" / "panel" / "generations"
+    generations.mkdir()
+    (generations / "g1.json").write_text("{}", encoding="utf-8")
+    fingerprints.require_roots_unchanged(tmp_path, after_child="panel")
+    fingerprints.require_roots_unchanged_before(tmp_path, before_child="panel")
+
+
+def test_native_stage_verifiers_write_nothing_into_a_stage_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Snapshot-before-verify is only sound if the verifiers leave the stat inventory alone.
+
+    Runs the real ledger and baseline verifiers (and `read_current`) of a produced run, then the
+    real report reader, and requires the pre-verification snapshot to still match afterwards.
+    """
+
+    preflight, output_root = _cold_attended_run(tmp_path, monkeypatch)
+    fingerprints = materializer._StageFingerprints()  # noqa: SLF001
+    snapshots = {
+        role: materializer._StageFingerprints.snapshot(output_root, role)  # noqa: SLF001
+        for role in ("ledger", "baseline")
+    }
+    for role, row in snapshots.items():
+        fingerprints.adopt(role, row)
+    assert materializer._attended_completed_stages(  # noqa: SLF001
+        output_root, ("ledger", "baseline")
+    ) == ["ledger", "baseline"]
+    fingerprints.require_roots_unchanged_before(output_root, before_child="attribution")
+    fingerprints.require_receipts_unchanged(output_root, before_child="attribution")
+
+
+def test_the_real_report_reader_writes_nothing_into_the_report_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "output" / "stages" / "report"
+    as_of = date(2026, 9, 17)
+    report_bytes = canonical_json_bytes(
+        {"report_schema_version": 1, "as_of_date": as_of.isoformat()}
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("attended-report-test", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="attended report resume test",
+            fact_types=("portfolio report",),
+            observed_start=as_of,
+            observed_end=as_of,
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/portfolio-report-data.json",
+                sha256=hashlib.sha256(report_bytes).hexdigest(),
+                size_bytes=len(report_bytes),
+                as_of_date=as_of,
+                schema_name="portfolio-report-data",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    generation_dir = stage_generation(root, manifest).parent
+    (generation_dir / "portfolio-report-data.json").write_bytes(report_bytes)
+    publish_generation(root, manifest.generation_id)
+    candidate = root / "candidates" / hashlib.sha256(report_bytes).hexdigest()
+    candidate.mkdir(parents=True)
+    (candidate / "portfolio-report-data.json").write_bytes(report_bytes)
+    _write_json(
+        tmp_path / "output" / "stage-results" / "report.json",
+        {
+            "generation_id": manifest.generation_id,
+            "root": str(root),
+            "candidate_dir": str(candidate),
+        },
+    )
+    output_root = tmp_path / "output"
+    fingerprints = materializer._StageFingerprints()  # noqa: SLF001
+    fingerprints.adopt(
+        "report",
+        materializer._StageFingerprints.snapshot(output_root, "report"),  # noqa: SLF001
+    )
+    assert materializer._attended_completed_stages(  # noqa: SLF001
+        output_root, ("report",)
+    ) == ["report"]
+    fingerprints.require_roots_unchanged_before(output_root, before_child="panel")
+    fingerprints.require_receipts_unchanged(output_root, before_child="panel")
+
+
+def test_the_memo_refuses_a_stage_it_could_not_snapshot_before_verifying_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        materializer, "_attended_completed_stages", lambda *_a, **_k: ["ledger"]
+    )
+    with pytest.raises(
+        materializer.MaterializationError, match="changed while it was being verified"
+    ):
+        materializer._VerifiedStages().completed(  # noqa: SLF001
+            tmp_path, ("ledger",), label="x"
+        )
