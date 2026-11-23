@@ -6301,3 +6301,46 @@ def test_render_reuse_with_a_valid_token_is_bound_to_its_own_cycle_output_root(
     except Exception:  # noqa: BLE001 - past the guard is all this test asserts
         pass
     assert "outside it" not in capsys.readouterr().err
+
+
+def test_render_reuse_guard_covers_recipe_output_and_skips_read_only_commands(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    import hashlib
+    import types
+
+    cycle = tmp_path / "cycle-a"
+    cycle.mkdir()
+    (cycle / "resolved-cycle.json").write_bytes(b'{"cycle_manifest_sha256": "m1"}')
+    raw = json.dumps(
+        {
+            "tier": "PROVISIONAL",
+            "not_a_release": True,
+            "schema_version": "qe-provisional-refresh/1",
+            "cycle_manifest_sha256": "m1",
+        }
+    ).encode("utf-8")
+    (cycle / "PROVISIONAL.json").write_bytes(raw)
+    monkeypatch.setenv("QE_RENDER_REUSE", "provisional")
+    monkeypatch.setenv("QE_RENDER_STATE_ROOT", str(cycle / "render-cache"))
+    monkeypatch.setenv("QE_RENDER_RUN_TOKEN", hashlib.sha256(raw).hexdigest())
+
+    def run_with(**namespace: object) -> int | None:
+        monkeypatch.setattr(
+            builder,
+            "_parser",
+            lambda: types.SimpleNamespace(
+                parse_args=lambda argv: types.SimpleNamespace(**namespace)
+            ),
+        )
+        try:
+            return builder.main([])
+        except Exception:  # noqa: BLE001 - past the guard is all this asserts
+            return None
+
+    assert run_with(command="recipe", output=tmp_path / "other" / "r.json") == 2
+    assert "outside it" in capsys.readouterr().err
+    run_with(command="recipe", output=cycle / "recipes" / "r.json")
+    assert "outside it" not in capsys.readouterr().err
+    run_with(command="inventory", path=tmp_path / "anywhere")  # writes nothing
+    assert "outside it" not in capsys.readouterr().err

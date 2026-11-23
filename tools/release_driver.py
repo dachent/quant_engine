@@ -62,6 +62,7 @@ from quant_engine.core import (
 from quant_engine.core import InterpreterRefusal, require_interpreter
 from quant_engine.core import (
     RECEIPT_MODE_ENV,
+    RENDER_REUSE_ENV,
     STAGE_TIMING_LOG_ENV,
     stage_render_env,
     summarize_stage_timing,
@@ -933,6 +934,15 @@ def refuse_provisional_cycle(run: Run) -> None:
 
     import decision_refresh
 
+    reused = sorted(
+        stage_id
+        for stage_id, stage_record in run.state["stages"].items()
+        if stage_record.get("render_reuse") is True
+    )
+    if reused:  # independent of the stamp: these outputs were built with render reuse
+        raise Refusal(
+            f"stages {reused} ran with provisional render reuse; this cycle cannot become a release"
+        )
     for key in ("cycle", "release_inputs_root"):
         if key in run.values:
             try:
@@ -1806,6 +1816,11 @@ def _execute_stage(
         env.setdefault(RECEIPT_MODE_ENV, DEFAULT_RECEIPT_MODE)
         record["receipts_mode"] = env[RECEIPT_MODE_ENV]
         stage_render_env(env, run.cycle)
+        if RENDER_REUSE_ENV in env:
+            # recorded in the run state, so deleting the stamp later cannot promote this cycle
+            with run.lock:
+                record["render_reuse"] = True
+                run.save()
         if stdout_to is not None:
             stdout_to.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("wb") as log:

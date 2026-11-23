@@ -1205,3 +1205,26 @@ def test_a_provisional_cycle_is_refused_by_commit_and_preflight_before_any_write
     # an unstamped cycle is not touched by the guard
     (world["cycle"] / "PROVISIONAL.json").unlink()
     driver.refuse_provisional_cycle(run)
+
+
+def test_deleting_the_stamp_after_a_reuse_stage_does_not_open_the_commit_gate(
+    world: dict[str, Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import release_preflight as pf
+    from test_release_driver import CHAIN, _drive, _graph
+
+    config = json.loads(world["config"].read_text(encoding="utf-8"))
+    _stamp(world["cycle"])
+    graph = _graph(world, [CHAIN[0]])
+    assert _drive(world, graph) == 0  # the stage ran with the reuse env
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    assert state["stages"]["one"]["render_reuse"] is True
+    (world["cycle"] / "PROVISIONAL.json").unlink()  # the stamp is gone
+    run = driver.Run(config, json.loads(graph.read_text(encoding="utf-8")))
+    stage = {"id": "commit", "commit_gate": {"spec": "unused"}}
+    with pytest.raises(driver.Refusal, match="provisional render reuse"):
+        driver.check_commit_gate(run, stage)
+    monkeypatch.setattr(driver, "check_config_paths", lambda _run: None)
+    with pytest.raises(driver.Refusal, match="provisional render reuse"):
+        pf.row_config_paths(run, pf.Env.__new__(pf.Env))

@@ -7501,6 +7501,19 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _reuse_write_root(args: Any) -> Path | None:
+    """Where this command writes, for the render-reuse cycle check; None for a command that
+    writes nothing (inventory)."""
+
+    root = getattr(args, "output_root", None)
+    if root is not None:  # build, stage
+        return Path(root)
+    output = getattr(args, "output", None)
+    if output is not None:  # recipe writes one file
+        return Path(output).parent
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if not render_reuse_authorized():
@@ -7512,8 +7525,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    if os.environ.get("QE_RENDER_REUSE") and not render_reuse_covers(
-        getattr(args, "output_root", None) or Path("."), os.environ
+    written = _reuse_write_root(args)
+    if (
+        os.environ.get("QE_RENDER_REUSE")
+        and written is not None
+        and not render_reuse_covers(written, os.environ)
     ):
         print(
             "portfolio-release-builder: FAIL: render reuse is bound to its own "

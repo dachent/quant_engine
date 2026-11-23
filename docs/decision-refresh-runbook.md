@@ -81,7 +81,8 @@ python tools/decision_refresh.py stamp --resolved <world>/c/resolved-cycle.json 
 python tools/decision_refresh.py check-not-release --root <cycle root>     # exit 1: it is provisional
 ```
 `stamp` needs a clean frozen repo and writes `PROVISIONAL.json` create-only: tier, cutoff, frozen commit, resolved-cycle sha, one staleness line per provider (data end, age at `evaluated_on`), last full fit. `stamp` requires late-bound providers (Path B); Path A records the same facts by hand in the memo.
-**Open (R0, not in this PR):** the driver's `commit` and the pointer helpers do not yet call `check-not-release`; until they do, never point a release config at a refresh root.
+The driver's commit gate and release preflight call the same check on the cycle and release-inputs root, and also refuse any cycle whose run state records a stage that ran with provisional render reuse (`render_reuse: true`), so deleting the stamp does not open the gate.
+**No promotion.** A refresh world is never promoted to a release. A release runs as a fresh full ceremony in a NEW unstamped world and may reuse only captured inputs, pinned specs and recipes, and the content-keyed fit cache through `release_cache_base` promote/seed. Never reuse stage outputs, render caches (`render-cache/`) or verification receipts from a refresh world.
 
 ## 10. After a PASSED run
 ```bash
