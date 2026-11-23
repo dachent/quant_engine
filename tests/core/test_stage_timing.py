@@ -115,21 +115,21 @@ def test_stage_records_its_end_time(
     assert row["t_end"] > 1_000_000_000
 
 
-def test_attended_children_and_verifiers_are_timed_by_name(
+def test_attended_roles_and_panel_candidate_verification_are_timed_by_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """P-timers: the attended role loop, the account-manifest build/verify split and
-    the panel candidate verification emit named timing rows (observation only)."""
+    """P-timers: the attended role loop and the panel candidate verification emit named
+    timing rows (observation only). The account-manifest stager is deliberately NOT timed:
+    it must stay clock-free and silent (test_stage_current_epoch_manifest)."""
 
     root = Path(__file__).resolve().parents[2] / "tools"
     wiring = {
         "portfolio_pipeline_materialize.py": 'timed_stage("attended_role", role=role)',
-        "build_account_manifest_generation.py": 'timed_stage("account_manifest_verify")',
         "portfolio_control_panel.py": '@timed_call("panel_verify_candidate")',
     }
     for name, needle in wiring.items():
         assert needle in (root / name).read_text("utf-8"), name
-    assert 'timed_stage("account_manifest_build")' in (
+    assert "timed_stage" not in (
         root / "build_account_manifest_generation.py"
     ).read_text("utf-8")
     log = tmp_path / "t.jsonl"
