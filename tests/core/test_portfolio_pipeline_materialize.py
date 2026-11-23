@@ -8803,9 +8803,9 @@ def test_the_memo_refuses_a_stage_it_could_not_snapshot_before_verifying_it(
     monkeypatch.setattr(
         materializer, "_attended_completed_stages", lambda *_a, **_k: ["ledger"]
     )
+    memo = materializer._VerifiedStages()  # noqa: SLF001
+    assert memo.completed(tmp_path, ("ledger",), label="x") == ["ledger"]
     with pytest.raises(
         materializer.MaterializationError, match="changed while it was being verified"
     ):
-        materializer._VerifiedStages().completed(  # noqa: SLF001
-            tmp_path, ("ledger",), label="x"
-        )
+        memo.snapshots(tmp_path, ("ledger",))

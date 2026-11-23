@@ -314,6 +314,15 @@ def _complete_by_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(materializer, "_attended_completed_stages", completed)
 
+    def new_role(root: Path, role: str) -> None:
+        # the one-stage verification after a child is judged by receipt here too
+        if not (root / "stage-results" / f"{role}.json").is_file():
+            raise materializer.MaterializationError(
+                f"attended {role} child returned success without completed artifacts"
+            )
+
+    monkeypatch.setattr(materializer, "_attended_verify_new_role", new_role)
+
 
 def _observations(output_root: Path) -> dict[str, list[dict[str, object]]]:
     value = json.loads(

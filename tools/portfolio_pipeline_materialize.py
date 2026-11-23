@@ -6592,9 +6592,14 @@ class _VerifiedStages:
     ) -> dict[str, tuple[str, tuple[tuple[str, int, int], ...]]]:
         """The stat inventories and receipt hashes taken BEFORE that verification read the stages."""
 
-        return dict(
-            self._snapshots[(str(output_root), tuple(required_stages), failed_stage)]
-        )
+        key = (str(output_root), tuple(required_stages), failed_stage)
+        snapshots = self._snapshots[key]
+        if any(role not in snapshots for role in self._results[key]):
+            # a stage reported complete that could not be snapshotted before it was read
+            raise MaterializationError(
+                "attended completed stage changed while it was being verified"
+            )
+        return dict(snapshots)
 
     def completed(
         self,
@@ -6620,12 +6625,8 @@ class _VerifiedStages:
             result = _attended_completed_stages(
                 output_root, required_stages, failed_stage=failed_stage
             )
-        if any(role not in before for role in result):
-            raise MaterializationError(
-                "attended completed stage changed while it was being verified"
-            )
         self._results[key] = list(result)
-        self._snapshots[key] = {role: before[role] for role in result}
+        self._snapshots[key] = {role: before[role] for role in result if role in before}
         return result
 
     def invalidate(self) -> None:

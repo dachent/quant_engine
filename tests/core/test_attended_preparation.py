@@ -4418,7 +4418,12 @@ def test_attended_execute_binds_prepared_handoff_before_native_stages(
         return preflight
 
     def execute(
-        actual: object, actual_root: Path, *, resume: bool, storage: object
+        actual: object,
+        actual_root: Path,
+        *,
+        resume: bool,
+        storage: object,
+        verified: object = None,
     ) -> tuple[int, dict[str, object]]:
         events.append("execute")
         assert actual is preflight
@@ -4477,7 +4482,12 @@ def test_supported_entrypoint_records_preparation_attempt_before_preflight(
         return {"prepared": True}
 
     def execute(
-        actual: object, _root: Path, *, resume: bool, storage: object
+        actual: object,
+        _root: Path,
+        *,
+        resume: bool,
+        storage: object,
+        verified: object = None,
     ) -> tuple[int, dict[str, object]]:
         events.append("execute")
         assert actual == {"prepared": True}
