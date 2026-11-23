@@ -18,6 +18,7 @@ CUTOFF = "2026-11-19"
 ACC = "account-x"
 SRC = {"artifact_id": "gross-exposure/schwab/closes-0.csv", "sha256": "a" * 64}
 SRC2 = {"artifact_id": "gross-exposure/schwab/closes-1.csv", "sha256": "b" * 64}
+CAPTURED = "2026-11-20"
 BAL_SRC = {"artifact_id": "gross-exposure/schwab/balances-0.json", "sha256": "c" * 64}
 
 
@@ -347,6 +348,7 @@ BAL = {
     "securities_market_value": Decimal("0"),
     "cash_total": Decimal("3.81"),
 }
+HELD = {"balances": BAL, "capture_date": CAPTURED, "source": BAL_SRC}
 ZNAV = [
     {
         "account_id": ACC,
@@ -364,7 +366,7 @@ def _zero(**over: Any) -> list[dict[str, Any]]:
         "nav_rows": ZNAV,
         "zero_financing_rows": [],
         "empty_position_accounts": [ACC],
-        "zero_holdings": {ACC: {"balances": BAL, "source": BAL_SRC}},
+        "zero_holdings": {ACC: HELD},
     }
     args.update(over)
     return _rows(**args)
@@ -401,7 +403,7 @@ def test_the_provider_must_list_the_account_as_holding_nothing() -> None:
     "field", ["market_value", "investments_total", "securities_market_value"]
 )
 def test_a_capture_that_shows_any_holding_refuses(field: str) -> None:
-    held = {"balances": {**BAL, field: Decimal("1")}, "source": BAL_SRC}
+    held = {**HELD, "balances": {**BAL, field: Decimal("1")}}
     assert _zero_refusal(zero_holdings={ACC: held}) == "CAPTURE_SHOWS_HOLDINGS"
 
 
@@ -447,7 +449,7 @@ def test_an_account_not_declared_zero_holding_still_refuses_without_positions() 
 
 
 def test_positions_win_over_a_zero_holding_declaration() -> None:
-    row = _only(_rows(zero_holdings={ACC: {"balances": BAL, "source": BAL_SRC}}))
+    row = _only(_rows(zero_holdings={ACC: HELD}))
     assert row["amount"] == _amt("223.45")  # priced from its lines, not 0
     assert BAL_SRC["artifact_id"] not in row["source_artifact_ids"]
 
@@ -495,6 +497,7 @@ def test_load_balances_reads_the_one_matching_account() -> None:
 def _balances_file(tmp_path: Path, **over: Any) -> dict[str, Any]:
     raw = json.dumps(
         {
+            "estYesterdayDate": "2026-11-19 06:53:44",
             "brokerageAccountList": [
                 {
                     "accountId": "1234054",
@@ -503,7 +506,7 @@ def _balances_file(tmp_path: Path, **over: Any) -> dict[str, Any]:
                     "investments": {"total": 0, "securitiesMarketValue": 0},
                     "cashInvestments": {"total": 3.81},
                 }
-            ]
+            ],
         }
     ).encode()
     path = tmp_path / "balances.json"
@@ -537,7 +540,12 @@ def _zero_call(spec: dict[str, Any], empty: list[str]) -> Any:
 def _zero_spec(tmp_path: Path, **over: Any) -> dict[str, Any]:
     spec = _spec(tmp_path)
     spec["zero_holdings"] = [
-        {"account_id": ACC, "last3": "054", "balances": _balances_file(tmp_path)}
+        {
+            "account_id": ACC,
+            "last3": "054",
+            "capture_date": CAPTURED,
+            "balances": _balances_file(tmp_path),
+        }
     ]
     spec.update(over)
     return spec
@@ -568,8 +576,49 @@ def test_the_spec_key_closes_a_zero_holding_account_against_the_pinned_balances(
                 **s,
                 "zero_holdings": [
                     {
+                        k: v
+                        for k, v in s["zero_holdings"][0].items()
+                        if k != "capture_date"
+                    }
+                ],
+            },
+            "keys differ",
+        ),
+        (
+            lambda s, t: {
+                **s,
+                "zero_holdings": [
+                    {**s["zero_holdings"][0], "capture_date": "20-11-2026"}
+                ],
+            },
+            "not an ISO date",
+        ),
+        (
+            lambda s, t: {
+                **s,
+                "zero_holdings": [
+                    {**s["zero_holdings"][0], "capture_date": "2026-11-25"}
+                ],
+            },
+            "contradicts the capture stamp",
+        ),
+        (
+            lambda s, t: {
+                **s,
+                "zero_holdings": [
+                    {**s["zero_holdings"][0], "capture_date": "2026-11-19"}
+                ],
+            },
+            "contradicts the capture stamp",
+        ),
+        (
+            lambda s, t: {
+                **s,
+                "zero_holdings": [
+                    {
                         "account_id": "account-y",
                         "last3": "054",
+                        "capture_date": CAPTURED,
                         "balances": _balances_file(t),
                     }
                 ],
@@ -590,6 +639,7 @@ def test_the_spec_key_closes_a_zero_holding_account_against_the_pinned_balances(
                     {
                         "account_id": ACC,
                         "last3": "054",
+                        "capture_date": CAPTURED,
                         "balances": _balances_file(t, sha256="0" * 64),
                     }
                 ],
@@ -603,6 +653,7 @@ def test_the_spec_key_closes_a_zero_holding_account_against_the_pinned_balances(
                     {
                         "account_id": ACC,
                         "last3": "054",
+                        "capture_date": CAPTURED,
                         "balances": _balances_file(t, size_bytes=1),
                     }
                 ],
@@ -613,7 +664,12 @@ def test_the_spec_key_closes_a_zero_holding_account_against_the_pinned_balances(
             lambda s, t: {
                 **s,
                 "zero_holdings": [
-                    {"account_id": ACC, "last3": "999", "balances": _balances_file(t)}
+                    {
+                        "account_id": ACC,
+                        "last3": "999",
+                        "capture_date": CAPTURED,
+                        "balances": _balances_file(t),
+                    }
                 ],
             },
             "once",
@@ -634,4 +690,101 @@ def test_the_balances_reference_keys_are_exact(tmp_path: Path) -> None:
     with pytest.raises(
         provider_ledger.ProviderLedgerError, match="balances keys differ"
     ):
+        _zero_call(spec, [ACC])
+
+
+# --- the capture date: a capture older than the cutoff is refused -------------------------
+
+
+@pytest.mark.parametrize(
+    "captured, ok",
+    [
+        ("2026-11-18", False),
+        ("2026-11-19", True),
+        ("2026-11-20", True),
+        ("2026-12-01", True),
+    ],
+)
+def test_a_capture_before_the_cutoff_refuses_and_one_at_or_after_it_does_not(
+    captured: str, ok: bool
+) -> None:
+    held = {**HELD, "capture_date": captured}
+    row = _only(_zero(zero_holdings={ACC: held}))
+    assert row["evidence"]["capture_date"] == captured
+    if ok:
+        assert row["amount"] == _amt("0.00") and "refusal" not in row
+    else:
+        assert row["refusal"] == "CAPTURE_OLDER_THAN_CUTOFF"
+        assert row["amount"]["status"] == "UNAVAILABLE"
+
+
+def test_a_stale_capture_is_refused_before_its_content_is_read() -> None:
+    held = {
+        **HELD,
+        "capture_date": "2026-11-18",
+        "balances": {**BAL, "market_value": Decimal("1")},
+    }
+    assert _zero_refusal(zero_holdings={ACC: held}) == "CAPTURE_OLDER_THAN_CUTOFF"
+
+
+def test_the_capture_stamp_is_read_from_the_bytes() -> None:
+    stamped = b'{"estYesterdayDate": "2026-11-19 06:53:44"}'
+    assert slo.capture_stamp(stamped) == "2026-11-19"
+    for bad in (
+        b"{}",
+        b"not json",
+        b'{"estYesterdayDate": null}',
+        b'{"estYesterdayDate": "soon"}',
+    ):
+        with pytest.raises(slo.SchwabExposureError, match="no readable stamp"):
+            slo.capture_stamp(bad)
+
+
+@pytest.mark.parametrize(
+    "declared, stamp, ok",
+    [
+        ("2026-11-20", "2026-11-19", True),
+        ("2026-11-23", "2026-11-19", True),  # a long weekend before
+        ("2026-11-24", "2026-11-19", False),  # stamp more than four days earlier
+        (
+            "2026-11-19",
+            "2026-11-19",
+            False,
+        ),  # the stamp is the previous day, never the same
+        ("2026-11-18", "2026-11-19", False),
+    ],
+)
+def test_the_declared_capture_date_must_be_bracketed_by_the_stamp(
+    declared: str, stamp: str, ok: bool
+) -> None:
+    if ok:
+        assert slo.check_capture_date(declared, stamp) == declared
+    else:
+        with pytest.raises(slo.SchwabExposureError, match="contradicts"):
+            slo.check_capture_date(declared, stamp)
+
+
+def test_a_balances_file_without_a_stamp_is_refused_at_load(tmp_path: Path) -> None:
+    spec = _zero_spec(tmp_path)
+    raw = json.dumps(
+        {
+            "brokerageAccountList": [
+                {
+                    "accountId": "1234054",
+                    "total": 3.81,
+                    "marketValue": 0,
+                    "investments": {"total": 0, "securitiesMarketValue": 0},
+                    "cashInvestments": {"total": 3.81},
+                }
+            ]
+        }
+    ).encode()
+    path = tmp_path / "nostamp.json"
+    path.write_bytes(raw)
+    spec["zero_holdings"][0]["balances"] = {
+        "path": str(path),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+    }
+    with pytest.raises(provider_ledger.ProviderLedgerError, match="no readable stamp"):
         _zero_call(spec, [ACC])

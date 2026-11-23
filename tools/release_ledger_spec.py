@@ -65,7 +65,7 @@ ZERO_FINANCING_PIN_KEYS = frozenset(
 GROSS_EXPOSURE_KEYS = frozenset({"accounts", "closes", "provider_id"})
 GROSS_EXPOSURE_OPTIONAL = frozenset({"zero_holdings"})
 GROSS_EXPOSURE_FILE_KEYS = frozenset({"path", "sha256", "size_bytes"})
-ZERO_HOLDING_KEYS = frozenset({"account_id", "balances", "last3"})
+ZERO_HOLDING_KEYS = frozenset({"account_id", "balances", "capture_date", "last3"})
 MARGIN_INTEREST_KEYS = ZERO_FINANCING_PIN_KEYS | {"accounts"}
 CARRIED = (
     "strategy_inputs",
@@ -136,6 +136,7 @@ def gross_exposure_pin(pin: Any) -> dict[str, Any]:
                 and set(h) == ZERO_HOLDING_KEYS
                 and isinstance(h["account_id"], str)
                 and isinstance(h["last3"], str)
+                and isinstance(h["capture_date"], str)
                 and _file_ref_ok(h["balances"])
                 for h in held
             )
@@ -145,7 +146,7 @@ def gross_exposure_pin(pin: Any) -> dict[str, Any]:
             "INPUT",
             "schwab gross exposure pin must carry exactly "
             + ", ".join(sorted(GROSS_EXPOSURE_KEYS))
-            + " (and optionally zero_holdings: account_id, last3, balances path/sha256/size_bytes)",
+            + " (and optionally zero_holdings: account_id, last3, capture_date, balances path/sha256/size_bytes)",
         )
     return dict(pin)
 

@@ -23,11 +23,18 @@ A pure function of its inputs: no file access beyond ``load_closes`` / ``load_ba
 given bytes.
 
 Zero holdings (an account with no positions rows): the row is gross 0 only when the provider's
-own catalog lists the account as holding nothing, the pinned live balances capture shows no
-securities (market value, investments and securities market value all 0), no ledger
-transaction is dated after the cutoff (so the capture's cash is the cutoff cash), and the
-capture's cash total equals the NAV at the cutoff to the cent.  Each failure is a named
-refusal; nothing is plugged.
+own catalog lists the account as holding nothing, the pinned live balances capture was taken at
+or after the cutoff (its declared capture date, which the capture's own stamp must bracket),
+shows no securities (market value, investments and securities market value all 0), and its
+cash total equals the NAV at the cutoff to the cent.  That cash == NAV closure carries the
+weight.  A ledger transaction dated after the cutoff is only a guard that refuses (the ledger's
+Schwab window can end before the cutoff, so its absence proves nothing); it is not evidence.
+Each failure is a named refusal; nothing is plugged.
+
+Identity limit: the capture is matched to the account by the last three digits of its id and
+by holding exactly one such entry.  Another login's capture holding one same-last-three account
+whose cash also equals the NAV would pass; the pin (path, sha256) and the capture's own file are
+what bind it, not the digits.
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ from __future__ import annotations
 import csv
 import json
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
@@ -103,6 +111,32 @@ def load_balances(raw: bytes, last3: str) -> dict[str, Decimal]:
         }
     except (KeyError, TypeError, InvalidOperation) as exc:
         raise SchwabExposureError("balances capture is unreadable") from exc
+
+
+def capture_stamp(raw: bytes) -> str:
+    """The ISO date of the capture's own ``estYesterdayDate`` stamp (it prints the day before
+    the capture); a capture without one cannot be dated from its bytes."""
+
+    try:
+        stamp = str(json.loads(raw)["estYesterdayDate"])[:10]
+        date.fromisoformat(stamp)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise SchwabExposureError("balances capture carries no readable stamp") from exc
+    return stamp
+
+
+def check_capture_date(declared: str, stamp: str) -> str:
+    """The declared capture date, when the capture's own stamp (the previous day, up to a
+    long weekend before) brackets it; otherwise the declaration is not read from the bytes."""
+
+    try:
+        taken = date.fromisoformat(declared)
+        seen = date.fromisoformat(stamp)
+    except ValueError as exc:
+        raise SchwabExposureError("capture date is not an ISO date") from exc
+    if not taken - timedelta(days=4) <= seen < taken:
+        raise SchwabExposureError("declared capture date contradicts the capture stamp")
+    return taken.isoformat()
 
 
 def _amount(row: Mapping[str, Any], field: str) -> Decimal | None:
@@ -184,7 +218,7 @@ def gross_exposure_rows(
 
     ``close_source_index`` names, per (ticker, date), the index in ``closes_sources`` of the
     file the close came from.  ``zero_holdings`` maps an account to ``{"balances": the
-    parsed live balances, "source": {"artifact_id", "sha256"}}``."""
+    parsed live balances, "capture_date": the ISO date it was taken, "source": {"artifact_id", "sha256"}}``."""
 
     empty = set(empty_position_accounts)
     zero_holdings = zero_holdings or {}
@@ -386,9 +420,11 @@ def _zero_holdings_row(
         and navs[0].get("mapping_status") == "MAPPED"
         and None not in strategies
     )
+    capture_date = str(declared["capture_date"])
     evidence: dict[str, Any] = {
         "cash_total": str(balances["cash_total"]),
         "capture_market_value": str(balances["market_value"]),
+        "capture_date": capture_date,
     }
 
     def done(reason: str | None, amount: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -413,6 +449,8 @@ def _zero_holdings_row(
         return done("NAV_AT_CUTOFF_NOT_ONE_ROW", nothing)
     if not listed_empty:
         return done("ZERO_HOLDINGS_NOT_OBSERVED_BY_PROVIDER", nothing)
+    if capture_date < cutoff:
+        return done("CAPTURE_OLDER_THAN_CUTOFF", nothing)
     if (
         balances["market_value"] != 0
         or balances["investments_total"] != 0

@@ -673,6 +673,7 @@ ZERO_HOLDINGS = [
     {
         "account_id": "account-0000000000000001",
         "last3": "054",
+        "capture_date": "2026-11-20",
         "balances": {"path": "bal.json", "sha256": "b" * 64, "size_bytes": 7},
     }
 ]
@@ -759,6 +760,16 @@ def test_a_given_pin_file_replaces_the_carried_value(
         },
         {**GROSS_PIN, "zero_holdings": []},
         {**GROSS_PIN, "zero_holdings": [{"account_id": "a", "last3": "054"}]},
+        {
+            **GROSS_PIN,
+            "zero_holdings": [
+                {k: v for k, v in ZERO_HOLDINGS[0].items() if k != "capture_date"}
+            ],
+        },
+        {
+            **GROSS_PIN,
+            "zero_holdings": [{**ZERO_HOLDINGS[0], "capture_date": 20261120}],
+        },
         {
             **GROSS_PIN,
             "zero_holdings": [{**ZERO_HOLDINGS[0], "balances": {"path": "b"}}],
