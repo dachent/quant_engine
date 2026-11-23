@@ -714,7 +714,10 @@ def test_an_unpicklable_result_is_served_live_and_stores_nothing(world):
         repo_root=world["repo"],
         state_root=world["state"],
         compute=compute,
-        blob_codec=(lambda value: __import__("pickle").dumps(value), vr._restricted_loads),
+        blob_codec=(
+            lambda value: __import__("pickle").dumps(value),
+            vr._restricted_loads,
+        ),
     )
     assert result["view"]["k"] == 1
     assert not list(vr.receipt_directory(world["state"]).glob("blob-*"))
