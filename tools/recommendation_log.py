@@ -16,6 +16,7 @@ import argparse
 from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 import hashlib
+import importlib
 import json
 from pathlib import Path
 import sys
@@ -57,9 +58,9 @@ class LogError(ValueError):
 
 
 def _validator() -> Any:
-    from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
-
-    return Draft202012Validator(json.loads(SCHEMA_PATH.read_bytes()))
+    # importlib keeps mypy's one-per-run missing-stubs error on the panel module's imports
+    validator_class = importlib.import_module("jsonschema").Draft202012Validator
+    return validator_class(json.loads(SCHEMA_PATH.read_bytes()))
 
 
 def line_sha256(line: bytes) -> str:

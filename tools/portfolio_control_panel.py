@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 import gzip
 import hashlib
+import importlib
 from html import escape as html_escape
 from html.parser import HTMLParser
 from importlib import import_module
@@ -12497,11 +12498,11 @@ def _decision_block(data: Mapping[str, Any]) -> dict[str, Any] | None:
         DECISION_POLICY_SCHEMA, "decision policy schema"
     )
     try:
-        from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+        validator_class = importlib.import_module("jsonschema").Draft202012Validator
 
         policy = _json_from_bytes(policy_bytes, "decision policy")
         errors = sorted(
-            Draft202012Validator(_json_from_bytes(schema_bytes, "schema")).iter_errors(
+            validator_class(_json_from_bytes(schema_bytes, "schema")).iter_errors(
                 policy
             ),
             key=str,

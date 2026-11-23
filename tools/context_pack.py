@@ -22,7 +22,6 @@ import json
 import math
 from pathlib import Path
 import re
-import sys
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -180,7 +179,8 @@ def known_issue_lines(contract: Mapping[str, Any]) -> list[str]:
                 f"known-issues contract: {issue_id} has no do_not_rely text"
             )
         if status == "OPEN":
-            fix = issue.get("fix") if isinstance(issue.get("fix"), Mapping) else {}
+            raw_fix = issue.get("fix")
+            fix: Mapping[str, Any] = raw_fix if isinstance(raw_fix, Mapping) else {}
             ticket = f", fix {fix['ticket']}" if fix.get("ticket") else ""
             lines.append(
                 f"{issue_id} ({issue.get('verification', 'CONTROL')}{ticket}): {_clean(text)}"
@@ -978,8 +978,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--prior-pack", type=Path)
     args = parser.parse_args(argv)
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import portfolio_decision
+    import portfolio_decision  # run as a script, tools/ is already sys.path[0]
 
     data = json.loads(args.payload.read_bytes())
     policy_bytes = (

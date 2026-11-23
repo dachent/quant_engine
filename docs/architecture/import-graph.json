@@ -144,6 +144,11 @@
       1
     ],
     [
+      "context_pack",
+      "portfolio_decision",
+      1
+    ],
+    [
       "decision_refresh",
       "release_cycle_manifest",
       1
@@ -325,6 +330,11 @@
     ],
     [
       "portfolio_control_panel",
+      "context_pack",
+      1
+    ],
+    [
+      "portfolio_control_panel",
       "portfolio_cash_drag",
       2
     ],
@@ -366,6 +376,11 @@
     [
       "portfolio_control_panel",
       "portfolio_vendor_nav_gap_fill",
+      1
+    ],
+    [
+      "portfolio_control_panel",
+      "recommendation_log",
       1
     ],
     [
