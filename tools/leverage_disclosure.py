@@ -262,7 +262,7 @@ def _debit_evidence(
         unobserved_days=_unobserved_days(nav_days, known_days, cutoff),
         net_base_debit_days=len(base_days),
         range_average_debit_days=len(range_days & base_days),
-        interest_free_debit_days=len(free_days & base_days),
+        interest_free_debit_days=len(free_days),
         debit_interest_postings=postings,
         currency_debit_days=len(currency_days),
         unreadable_debit_rows=unreadable,
