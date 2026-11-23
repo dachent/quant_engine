@@ -104,8 +104,60 @@ def resolve_base(
     still reads the real range).  ``whole_tree`` asks for the whole-tree scan on purpose.
     """
 
-    if base != EMPTY_TREE or whole_tree:
-        return GIT_EMPTY_TREE if base == EMPTY_TREE else base
+    if whole_tree and base == EMPTY_TREE:
+        return GIT_EMPTY_TREE
+    if base != EMPTY_TREE and not _merges_in_range(repo_root, base, head):
+        return base
+    branch_point = _default_branch_point(repo_root, head)
+    if base == EMPTY_TREE:
+        return branch_point
+    # A merge from the default branch inside the range (an update-branch push) would make every line
+    # main already holds look "added": read what the branch adds relative to main, like the pull-request run.
+    # On the default branch itself the branch point is the head, which is an empty range: keep ``base``.
+    if branch_point is None or branch_point == _rev(repo_root, head):
+        return base
+    return branch_point
+
+
+def _rev(repo_root: Path, ref: str) -> str | None:
+    found = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"{ref}^{{commit}}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return (
+        found.stdout.strip() if found.returncode == 0 and found.stdout.strip() else None
+    )
+
+
+def _merges_in_range(repo_root: Path, base: str, head: str) -> bool:
+    found = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "rev-list",
+            "--merges",
+            "--max-count=1",
+            f"{base}..{head}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return found.returncode == 0 and bool(found.stdout.strip())
+
+
+def _default_branch_point(repo_root: Path, head: str) -> str | None:
     for ref in ("origin/main", "refs/remotes/origin/main", "main"):
         found = subprocess.run(
             ["git", "-C", str(repo_root), "merge-base", ref, head],

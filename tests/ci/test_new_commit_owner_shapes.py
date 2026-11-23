@@ -170,3 +170,63 @@ def test_the_marker_acknowledges_but_never_hides_a_line(
     (tmp_path / "two").mkdir()
     root2, base2 = _repo(tmp_path / "two", {"a.md": mixed})
     assert _run(root2, base2) == 1
+
+
+def _rev(root: Path, ref: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", ref],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def _commit_file(root: Path, name: str, text: str, message: str) -> None:
+    (root / name).write_text(text, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", message)
+
+
+def _update_branch_push(tmp_path: Path, branch_line: str | None) -> tuple[Path, str]:
+    """A feature branch, then main gains a flagged line, then main is merged into the branch (update-branch).
+
+    Returns the repo and the push event's ``before`` (the branch head before the merge)."""
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _commit_file(root, "base.txt", "base\n", "base")
+    _git(root, "checkout", "-q", "-b", "feature")
+    _commit_file(root, "feature.txt", "clean\n", "feature")
+    if branch_line is not None:
+        _commit_file(root, "added.txt", branch_line + "\n", "branch adds")
+    before = _rev(root, "HEAD")
+    _git(root, "checkout", "-q", "main")
+    _commit_file(
+        root, "fixture.txt", f"acct {ACCOUNT}\n", "main already holds this line"
+    )
+    _git(root, "checkout", "-q", "feature")
+    _git(root, "merge", "-q", "--no-ff", "-m", "Merge branch main into feature", "main")
+    return root, before
+
+
+def test_lines_merged_in_from_main_are_not_added_by_the_branch(tmp_path: Path) -> None:
+    root, before = _update_branch_push(tmp_path, None)
+    assert _run(root, before) == 0
+
+
+def test_a_new_flagged_line_on_the_branch_still_fails_after_a_merge_from_main(
+    tmp_path: Path,
+) -> None:
+    root, before = _update_branch_push(tmp_path, f"contact {MAIL}")
+    assert _run(root, before) == 1
+
+
+def test_a_merge_from_main_does_not_hide_the_main_line_from_main_itself(
+    tmp_path: Path,
+) -> None:
+    root, before = _update_branch_push(tmp_path, None)
+    _git(root, "checkout", "-q", "main")
+    _git(root, "merge", "-q", "--no-ff", "-m", "Merge pull request", "feature")
+    # on main the branch point is the head: the original base..head range is kept, not emptied
+    assert tool.resolve_base(root, before, "HEAD") == before
