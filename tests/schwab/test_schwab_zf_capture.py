@@ -448,3 +448,31 @@ def test_a_capped_history_that_stops_short_of_the_required_start_is_refused(
     _history_run(
         tmp_path / "n", _hist_body(200, bookmark="x", earliest="10/20/2026"), None
     )
+
+
+def test_a_malformed_reach_back_date_is_refused_not_failed_open(tmp_path: Path) -> None:
+    for bad in ("2026-13-01", "x", "11/01/2026"):
+        with pytest.raises(zf.CaptureRefused, match="not an ISO date"):
+            _history_run(tmp_path / bad, _hist_body(200, bookmark="x"), bad)
+
+
+def test_an_unreadable_balances_body_is_a_recorded_refusal(tmp_path: Path) -> None:
+    sink: list[dict[str, str]] = []
+    fake = FakePage(zf.XhrLog(), body=_balances("620"))
+    real = zf.cash_check
+    zf.cash_check = lambda text, body: (_ for _ in ()).throw(KeyError("x"))
+    try:
+        with pytest.raises(zf.CaptureRefused, match="XHR_UNREADABLE"):
+            zf.capture_accounts(
+                fake,
+                fake.xhr,
+                "balances",
+                ["620"],
+                tmp_path / "o",
+                expected_et_date="2026-11-20",
+                pause=lambda s: None,
+                sink=sink,
+            )
+    finally:
+        zf.cash_check = real
+    assert sink[0]["cash_check"] == "XHR_UNREADABLE"

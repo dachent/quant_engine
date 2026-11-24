@@ -299,6 +299,13 @@ def capture_accounts(
 
     if kind not in _KINDS:
         raise CaptureRefused(f"unknown kind {kind!r}")
+    if reach_back_to is not None:
+        try:
+            reach_back_to = date.fromisoformat(reach_back_to).isoformat()
+        except ValueError as exc:
+            raise CaptureRefused(
+                f"--reach-back-to {reach_back_to!r} is not an ISO date (YYYY-MM-DD)"
+            ) from exc
     out.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, str]] = []
     for account in accounts:
@@ -350,7 +357,17 @@ def capture_accounts(
         )
         problem: str | None = None
         if body is not None and kind == "balances":
-            record.update(cash_check(text, body))
+            try:
+                record.update(cash_check(text, body))
+            except (KeyError, IndexError, AttributeError, TypeError, ValueError):
+                record.update(
+                    cash_check="XHR_UNREADABLE",
+                    page_cash_total="ABSENT",
+                    xhr_margin_balance="ABSENT",
+                    xhr_bank_sweep="ABSENT",
+                    xhr_total="ABSENT",
+                    xhr_trade_date_balance="ABSENT",
+                )
             if record["cash_check"] != "AGREES" and not allow_cash_mismatch:
                 problem = (
                     f"account {account}: the page's cash total does not close to the balances "
@@ -358,7 +375,7 @@ def capture_accounts(
                     f"marginBalance {record['xhr_margin_balance']} + sweep "
                     f"{record['xhr_bank_sweep']}, total {record['xhr_total']}, trade-date "
                     f"{record['xhr_trade_date_balance']}); the capture was taken while the "
-                    f"balance was moving ({record['market_session']}): take it again"
+                    f"balance was moving ({record['market_session']}): take it again into a new --out"
                 )
         if body is not None and kind == "history":
             record.update(history_stats(body))
@@ -374,7 +391,7 @@ def capture_accounts(
                     f"account {account}: the history hit its {record['history_row_cap']}-row cap "
                     f"({record['history_rows']} rows, bookmark {record['history_bookmark']}) and its "
                     f"earliest row {record['history_earliest_row']} does not precede "
-                    f"{reach_back_to}: narrow the search window and capture again"
+                    f"{reach_back_to}: narrow the search window and capture again into a new --out"
                 )
         records.append(record)
         if sink is not None:
