@@ -27,6 +27,12 @@ COMPONENT_ENDPOINTS = (
 )
 METADATA_ENDPOINTS = ("last-rebalance.txt", "last-update.txt")
 MARKET_VANE_CLASS_IDS = tuple(range(8))
+# The vendor has published MarketVane = -1 (not one of the eight classes).  Its meaning is not
+# established; it is recorded verbatim and flagged, never mapped to a class.  Nothing reads the
+# class as a number (it is a disclosure field), so accepting it changes no calculation.
+MARKET_VANE_UNCLASSIFIED = -1
+MARKET_VANE_UNCLASSIFIED_STATE = "VENDOR_PUBLISHED_UNCLASSIFIED"
+MARKET_VANE_UNCLASSIFIED_NOTE = "vendor published -1, meaning not established"
 MARKET_VANE_SIGNAL_KEYS = (
     "DdMargin",
     "EcoMom",
@@ -316,11 +322,11 @@ def _market_vane(path: Path) -> dict[str, object]:
     if not current_value.is_integer():
         raise SourceManifestError("market-vane current class is not an integer")
     current = int(current_value)
-    if current not in MARKET_VANE_CLASS_IDS:
+    if current not in MARKET_VANE_CLASS_IDS and current != MARKET_VANE_UNCLASSIFIED:
         raise SourceManifestError(
             "market-vane current class is outside the eight classes"
         )
-    return {
+    evidence: dict[str, object] = {
         "class_ids": list(MARKET_VANE_CLASS_IDS),
         "current_class_id": current,
         "signals": {
@@ -329,6 +335,10 @@ def _market_vane(path: Path) -> dict[str, object]:
         },
         "status_endpoint": _identity(path),
     }
+    if current == MARKET_VANE_UNCLASSIFIED:
+        evidence["state"] = MARKET_VANE_UNCLASSIFIED_STATE
+        evidence["note"] = MARKET_VANE_UNCLASSIFIED_NOTE
+    return evidence
 
 
 def _price_tape_binding(

@@ -327,15 +327,18 @@ def test_a_scale_beyond_the_tolerance_refuses(tmp_path: Path) -> None:
         _rows(tmp_path, closes=far)
 
 
-def test_the_declaration_is_strict() -> None:
+def test_the_declaration_is_strict(tmp_path: Path) -> None:
     with pytest.raises(ledger.ProviderLedgerError, match="keys differ"):
         ledger._quantbase_rollback({**ROLLBACK, "extra": 1})
     with pytest.raises(ledger.ProviderLedgerError, match="activity keys differ"):
         ledger._quantbase_rollback(
             {**ROLLBACK, "activity": [{"id": "a", "activity_type": "order"}]}
         )
-    with pytest.raises(ledger.ProviderLedgerError, match="declares nothing"):
-        ledger._quantbase_rollback({**ROLLBACK, "rebalances": [], "activity": []})
+    # an empty declaration parses; it only matches when nothing was booked after the cutoff
+    empty = {**ROLLBACK, "rebalances": [], "activity": []}
+    assert ledger._quantbase_rollback(empty)["rebalances"] == []
+    with pytest.raises(ledger.ProviderLedgerError, match="rebalance rows after"):
+        _rows(tmp_path, rollback=empty)
     with pytest.raises(ledger.ProviderLedgerError, match="not a number"):
         ledger._quantbase_rollback(
             {
@@ -450,3 +453,251 @@ def test_a_price_printed_to_the_cent_may_differ_by_its_rounding_not_more(
             assignments,
             financial_cutoff=None,
         )
+
+
+# ---------------------------------------------------------------------------
+# Next-day capture: the cutoff is the last labelled day, the capture is after it and
+# nothing was booked in between, so the declared roll-back set is empty.
+# ---------------------------------------------------------------------------
+E = date(2026, 11, 20)
+NEXT_CAPTURED_AT = "2026-11-23T15:05:00.000000Z"
+NEXT_HOLDINGS = (
+    "symbol,quantity,value,latest_price,percentage\nTQQQ,250.00,12000.00,48.00,100.00\n"
+)
+# the vendor NAV of the cutoff is the opening holdings at the close (start-of-day
+# convention); the post-rebalance holdings at the close are worth a little more
+NEXT_NAVS = (
+    "time,value,cost_basis,profit_loss\n"
+    "11/18/2026,10005.00,10000,0.0005\n"
+    "11/19/2026,10008.00,10000,0.0008\n"
+    "11/20/2026,10010.00,10000,0.001\n"
+)
+NEXT_ROLLBACK: dict[str, Any] = {
+    "cutoff": "2026-11-20",
+    "snapshot_day": "2026-11-23",
+    "fund_title": "Volatis Strategy",
+    "rebalances": [],
+    "activity": [],
+}
+NEXT_CLOSES = {
+    "SH": {E: Decimal("40.00")},
+    "GLD": {E: Decimal("200.00")},
+    "TQQQ": {E: Decimal("40.12")},
+}
+
+
+def _next_rows(
+    tmp_path: Path,
+    *,
+    rollback: object | None = NEXT_ROLLBACK,
+    captured_at: str = NEXT_CAPTURED_AT,
+    **edits: str,
+) -> list[dict[str, Any]]:
+    manifest = _manifest(
+        tmp_path,
+        {
+            **FILES,
+            "csv/dashboard_Volatis_Strategy_holdings.csv": NEXT_HOLDINGS,
+            "csv/dashboard_Volatis_Strategy_pricehistory.csv": NEXT_NAVS,
+            **edits,
+        },
+    )
+    catalog = copy.deepcopy(CATALOG)
+    catalog["datasets"][0]["captured_at"] = captured_at
+    assignments = {
+        ACCOUNT: [
+            {
+                "effective_start": "2024-10-01",
+                "mapping_status": "MAPPED",
+                "strategy_id": "volatis-strategy",
+            }
+        ]
+    }
+    return ledger._quantbase_positions(
+        "gen-1",
+        manifest,
+        catalog,
+        tmp_path,
+        {ACCOUNT},
+        {"volatis-strategy"},
+        assignments,
+        financial_cutoff=E,
+        fill_closes=NEXT_CLOSES,
+        rollback=(
+            ledger._quantbase_rollback(rollback) if rollback is not None else None
+        ),
+    )
+
+
+def test_a_next_day_capture_takes_its_nav_proof_at_the_last_labelled_day(
+    tmp_path: Path,
+) -> None:
+    rows = _next_rows(tmp_path)
+    assert [r["symbol"] for r in rows] == ["TQQQ"]
+    row = rows[0]
+    assert row["as_of_date"] == "2026-11-20" and row["capture_date"] == "2026-11-23"
+    assert row["as_of_basis"] == "CAPTURE_TIME_SNAPSHOT_ROLLED_BACK_TO_CUTOFF"
+    closure = row["closure"]
+    assert (
+        closure["snapshot_close_basis"] == "NEXT_DAY_CAPTURE_NAV_AT_LAST_LABELLED_DAY"
+    )
+    assert closure["snapshot_nav_usd"] is None
+    assert closure["snapshot_difference_usd"] is None
+    assert closure["nav_usd"] == "10010.00" and closure["nav_date"] == "2026-11-20"
+    assert closure["independent_price_check"] == "PASSED"
+    assert closure["rollback"]["replay_reproduces_snapshot"] is True
+    assert closure["rollback"]["rollback_rebalance_count"] == 0
+    assert closure["rollback"]["rollback_activity_count"] == 0
+    # the cutoff-day rebalance moved the value by 0.2 percent: only the next-day
+    # tolerance admits it, and the evidence says which one was used
+    assert closure["rollback"]["scale_tolerance"] == "0.01"
+    assert row["market_value"]["value"] == "10010.00"
+
+
+def test_the_same_day_shape_keeps_its_closure_bytes(tmp_path: Path) -> None:
+    closure = _rows(tmp_path)[0]["closure"]
+    assert "snapshot_close_basis" not in closure
+    assert closure["snapshot_nav_usd"] == "10030.00"
+    assert closure["snapshot_difference_usd"] == "0.00"
+    assert closure["rollback"]["scale_tolerance"] == "0.001"
+
+
+def test_the_next_day_tolerance_is_not_used_when_the_snapshot_day_has_a_label(
+    tmp_path: Path,
+) -> None:
+    # a label on the snapshot day makes it an ordinary snapshot: the snapshot must
+    # close to that NAV and the strict scale tolerance applies
+    labelled = NEXT_NAVS + "11/23/2026,12000.00,10000,0.2\n"
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="differ from the strategy NAV by more"
+    ):
+        _next_rows(
+            tmp_path,
+            **{"csv/dashboard_Volatis_Strategy_pricehistory.csv": labelled},
+        )
+
+
+@pytest.mark.parametrize(
+    ("edits", "rollback", "match"),
+    [
+        # a label after the cutoff that is not the snapshot day
+        (
+            {
+                "csv/dashboard_Volatis_Strategy_pricehistory.csv": NEXT_NAVS
+                + "11/21/2026,10020.00,10000,0.002\n"
+            },
+            NEXT_ROLLBACK,
+            "NAV is absent on the snapshot day",
+        ),
+        # a rebalance after the cutoff that the empty declaration does not name
+        (
+            {
+                "csv/volatis_strategy_rebalance_history.csv": REBALANCES
+                + "2026-11-23,SH,1.000000000\n"
+            },
+            NEXT_ROLLBACK,
+            "rebalance rows after the cutoff differ",
+        ),
+        # activity after the cutoff that the empty declaration does not name
+        (
+            {
+                "csv/account_activity.csv": ACTIVITY
+                + _order("n1", "2026-11-23", "SH", "5")
+            },
+            NEXT_ROLLBACK,
+            "activity after the cutoff differs",
+        ),
+        # no declaration at all is not the next-day shape
+        ({}, None, "NAV is absent on the snapshot day"),
+        # a declaration for another cutoff
+        (
+            {},
+            {**NEXT_ROLLBACK, "cutoff": "2026-11-19"},
+            "declared for another cutoff or snapshot day",
+        ),
+    ],
+)
+def test_every_other_next_day_shape_still_refuses(
+    tmp_path: Path, edits: dict[str, str], rollback: object, match: str
+) -> None:
+    with pytest.raises(ledger.ProviderLedgerError, match=match):
+        _next_rows(tmp_path, rollback=rollback, **edits)
+
+
+def test_an_empty_declared_set_parses_and_the_keys_are_still_required() -> None:
+    parsed = ledger._quantbase_rollback(NEXT_ROLLBACK)
+    assert parsed["rebalances"] == [] and parsed["activity"] == []
+    broken = {key: value for key, value in NEXT_ROLLBACK.items() if key != "activity"}
+    with pytest.raises(ledger.ProviderLedgerError, match="keys differ"):
+        ledger._quantbase_rollback(broken)
+
+
+def test_a_capture_on_the_cutoff_day_without_its_label_is_not_the_next_day_shape(
+    tmp_path: Path,
+) -> None:
+    without_cutoff_label = NEXT_NAVS.replace("11/20/2026,10010.00,10000,0.001\n", "")
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="NAV is absent on the snapshot"
+    ):
+        _next_rows(
+            tmp_path,
+            rollback={**NEXT_ROLLBACK, "snapshot_day": "2026-11-20"},
+            captured_at="2026-11-20T15:00:00.000000Z",
+            **{"csv/dashboard_Volatis_Strategy_pricehistory.csv": without_cutoff_label},
+        )
+
+
+def test_without_a_cutoff_day_order_the_next_day_shape_keeps_the_strict_bound(
+    tmp_path: Path,
+) -> None:
+    # nothing filled on the cutoff day: the cutoff holdings are the opening ones
+    quiet = (
+        _HEADER
+        + _order("o1", "2026-11-18", "SHV", "100")
+        + _order("o2", "2026-11-18", "$USD", "10")
+        + _order("o3", "2026-11-19", "SHV", "-100")
+        + _order("o4", "2026-11-19", "SH", "150")
+        + _order("o5", "2026-11-19", "GLD", "20")
+        + _order("o6", "2026-11-19", "$USD", "-10")
+        + _order("o7", "2026-11-19", "$USD", "10")
+        + _txn("t19", "2026-11-19")
+    )
+    holdings = (
+        "symbol,quantity,value,latest_price,percentage\n"
+        "SH,150.00,6000.00,40.00,60.00\nGLD,20.00,4000.00,200.00,39.96\n"
+        "$USD,10.00,10.00,1.00,0.04\n"
+    )
+    rebalances = (
+        "date,symbol,proportion\n2026-11-18,SHV,1.000000000\n"
+        "2026-11-19,SH,0.500000000\n2026-11-19,GLD,0.500000000\n"
+    )
+    rows = _next_rows(
+        tmp_path,
+        **{
+            "csv/account_activity.csv": quiet,
+            "csv/dashboard_Volatis_Strategy_holdings.csv": holdings,
+            "csv/volatis_strategy_rebalance_history.csv": rebalances,
+        },
+    )
+    evidence = rows[0]["closure"]["rollback"]
+    assert evidence["cutoff_day_orders"] is False
+    assert evidence["scale_tolerance"] == "0.001"
+
+
+def test_the_next_day_shape_discloses_the_revaluation_in_plain_words(
+    tmp_path: Path,
+) -> None:
+    evidence = _next_rows(tmp_path)[0]["closure"]["rollback"]
+    assert evidence["cutoff_day_orders"] is True
+    assert evidence["disclosure"] == (
+        "post-rebalance position valued at vendor NAV; official-close valuation "
+        "differs by 0.199%"
+    )
+    for key in (
+        "opening_value_at_official_closes_usd",
+        "official_close_value_usd",
+        "value_scale_to_nav",
+        "scale_tolerance",
+    ):
+        assert key in evidence
+    assert "disclosure" not in _rows(tmp_path / "same_day")[0]["closure"]["rollback"]

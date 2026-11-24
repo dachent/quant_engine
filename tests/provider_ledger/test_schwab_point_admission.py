@@ -123,9 +123,15 @@ def test_build_catalog_retains_selected_point_without_extending_daily_finality(
 
 
 def _forged_candidate(
-    tmp_path: Path, generation: Path, authority: dict[str, Any], catalog: dict[str, Any]
+    tmp_path: Path,
+    generation: Path,
+    authority: dict[str, Any],
+    catalog: dict[str, Any],
+    *,
+    built: tuple[bytes, bytes] | None = None,
 ) -> Path:
-    """Rebind all candidate receipts/digests; only selected sources stay fixed."""
+    """Rebind all candidate receipts/digests; only selected sources stay fixed.  ``built`` =
+    (catalog bytes, receipt bytes) exactly as the ledger produced them: nothing is recomputed."""
     identities, manifests, catalogs = [], {}, {}
     observation = authority["run_observation"]
     for provider_id, selection in observation["providers"].items():
@@ -163,17 +169,21 @@ def _forged_candidate(
     ):
         if not facts["ibkr"].get(fact_name):
             facts["ibkr"].pop(fact_name, None)
-    _, receipt_bytes = ledger._admit_or_declare_receipt(
-        authority,
-        identities,
-        manifests,
-        catalogs,
-        facts,
-        catalog["provider_strategy_returns"],
-    )
+    if built is None:
+        _, receipt_bytes = ledger._admit_or_declare_receipt(
+            authority,
+            identities,
+            manifests,
+            catalogs,
+            facts,
+            catalog["provider_strategy_returns"],
+        )
+        catalog_bytes = canonical_json_bytes(catalog)
+    else:
+        catalog_bytes, receipt_bytes = built
     contents = {
         "normalized/admit-or-declare-receipt.json": receipt_bytes,
-        "normalized/provider-ledger.json": canonical_json_bytes(catalog),
+        "normalized/provider-ledger.json": catalog_bytes,
     }
     original = GenerationManifest.from_json_bytes(
         (generation / "generation.json").read_bytes()
@@ -598,3 +608,148 @@ def test_a_derived_position_that_does_not_close_is_refused_by_the_ledger(
     # the fixture stages the candidate, which builds the catalog: the seam refuses there
     with pytest.raises(ledger.ProviderLedgerError, match="derived position refused"):
         _derived_stage(tmp_path, override)
+
+
+# --- ledger-derived rows (F2): the ledger's own receipt must count what the baseline re-derives ----
+
+
+def _derived_row(
+    provider_id: str,
+    fact: str,
+    generation_id: str,
+    account: str,
+    ordinal: int = 0,
+    day: str = "2026-08-31",
+) -> dict[str, Any]:
+    source = f"margin-interest:synthetic:{ordinal}:{day}:STATEMENT_INTEREST_PAID"
+    return {
+        "account_id": account,
+        "as_of_date": day,
+        "classification": "MARGIN_INTEREST_STATEMENT_EVIDENCE",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "generation_id": generation_id,
+        "mapping_reason": "ACCOUNT_LEVEL_OBSERVATION",
+        "mapping_status": "UNMAPPED",
+        "measurement_basis": "STATEMENT_INTEREST_PAID",
+        "observation_generation_id": "margin-interest-" + "b" * 24,
+        "provider_id": provider_id,
+        "record_id": f"{provider_id}:{source}:{fact}",
+        "source_artifact_id": "native/nav.csv",
+        "source_record_id": source,
+        "strategy_id": None,
+    }
+
+
+def _stage_with_derived(
+    point_stage: PointStage,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    keys: tuple[str, ...],
+) -> tuple[Path, dict[str, Any], tuple[bytes, bytes], tuple[bytes, bytes]]:
+    """Build the ledger twice from the staged spec: without and with the F2 derived keys (their
+    row producers return one synthetic Schwab row each).  Returns the staged generation, the
+    authority, and (catalog bytes, receipt bytes) of the with-derived build and of the plain one."""
+
+    generation, authority, spec_path = point_stage
+    plain = ledger.build_catalog(spec_path)
+    spec = json.loads(spec_path.read_bytes())
+    for key in keys:
+        spec[key] = {"provider_id": "schwab", "synthetic": True}
+    derived_spec = tmp_path / "spec-derived.json"
+    derived_spec.write_bytes(canonical_json_bytes(spec))
+    account = next(
+        row["account_id"]
+        for row in plain[0]["nav_observations"]
+        if row["provider_id"] == "schwab"
+    )
+
+    def interest(
+        ref: Any, providers: Any, as_of: Any, combined: Any, manifests: Any
+    ) -> Any:
+        generation_id = manifests["schwab"].generation_id
+        fact = "financing_cost_observations"
+        # producer order C, A, B; the catalog order is B, A, C (day first, then record id)
+        a = _derived_row("schwab", fact, generation_id, account, 1, "2026-08-31")
+        b = _derived_row("schwab", fact, generation_id, account, 2, "2026-07-31")
+        c = _derived_row("schwab", fact, generation_id, account, 3, "2026-08-31")
+        return ([c, a, b], [])
+
+    def exposure(
+        ref: Any,
+        providers: Any,
+        as_of: Any,
+        combined: Any,
+        zero: Any,
+        manifests: Any,
+        empty: Any,
+    ) -> Any:
+        return (
+            [
+                _derived_row(
+                    "schwab",
+                    "leverage_exposure_observations",
+                    manifests["schwab"].generation_id,
+                    account,
+                )
+            ],
+            [],
+        )
+
+    monkeypatch.setattr(ledger, "_schwab_margin_interest_rows", interest)
+    monkeypatch.setattr(ledger, "_schwab_gross_exposure_rows", exposure)
+    catalog, _, catalog_bytes, receipt_bytes = ledger.build_catalog(derived_spec)
+    return generation, authority, (catalog_bytes, receipt_bytes), (plain[2], plain[3])
+
+
+@pytest.mark.parametrize("keys", [("schwab_margin_interest",)])
+def test_a_ledger_built_with_derived_schwab_rows_passes_the_baseline_re_derivation(
+    point_stage: PointStage,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    keys: tuple[str, ...],
+) -> None:
+    generation, authority, built, plain = _stage_with_derived(
+        point_stage, tmp_path, monkeypatch, keys
+    )
+    catalog = json.loads(built[0])
+    fact = {
+        "schwab_margin_interest": "financing_cost_observations",
+        "schwab_gross_exposure": "leverage_exposure_observations",
+    }
+    for key in keys:
+        assert any(
+            row["classification"] == "MARGIN_INTEREST_STATEMENT_EVIDENCE"
+            for row in catalog[fact[key]]
+            if row["provider_id"] == "schwab"
+        )
+    assert built[1] != plain[1]  # the receipt counts the derived rows
+    forged = _forged_candidate(tmp_path, generation, authority, catalog, built=built)
+    _verify(forged, authority)
+
+
+def test_the_plain_ledger_receipt_is_unchanged_by_the_derived_row_seam(
+    point_stage: PointStage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spec without the F2 keys keeps its receipt byte for byte (D's receipts must not move)."""
+
+    generation, authority, _, plain = _stage_with_derived(
+        point_stage, tmp_path, monkeypatch, ("schwab_margin_interest",)
+    )
+    staged = (generation / "admit-or-declare-receipt.json").read_bytes()
+    assert plain[1] == staged
+
+
+def test_a_receipt_that_ignores_the_derived_rows_is_refused_by_the_baseline(
+    point_stage: PointStage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generation, authority, built, plain = _stage_with_derived(
+        point_stage, tmp_path, monkeypatch, ("schwab_margin_interest",)
+    )
+    catalog = json.loads(built[0])
+    forged = _forged_candidate(
+        tmp_path, generation, authority, catalog, built=(built[0], plain[1])
+    )
+    with pytest.raises(
+        materializer.MaterializationError, match="provider admission differs"
+    ):
+        _verify(forged, authority)
