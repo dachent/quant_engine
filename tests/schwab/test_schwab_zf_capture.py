@@ -476,3 +476,12 @@ def test_an_unreadable_balances_body_is_a_recorded_refusal(tmp_path: Path) -> No
     finally:
         zf.cash_check = real
     assert sink[0]["cash_check"] == "XHR_UNREADABLE"
+
+
+def test_the_load_counter_takes_a_handler_call_with_or_without_arguments() -> None:
+    """Playwright calls a page 'load' handler with the page or with nothing: both must count."""
+
+    counter = zf.LoadCounter()
+    counter()
+    counter(object())
+    assert counter.count == 2

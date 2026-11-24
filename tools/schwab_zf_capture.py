@@ -257,6 +257,17 @@ class XhrLog:
         return None
 
 
+class LoadCounter:
+    """Counts the page's own ``load`` events.  Playwright may hand the handler the page or nothing,
+    so it takes any arguments; only the one page is watched, so every call is one load."""
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def __call__(self, *_args: Any) -> None:
+        self.count += 1
+
+
 class Page(Protocol):
     def text(self) -> str: ...
 
@@ -488,13 +499,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - live o
                     return
 
         page.on("response", on_response)
-        navigated = [0]
-        page.on(
-            "load",
-            lambda frame: navigated.__setitem__(
-                0, navigated[0] + (1 if frame == page else 0)
-            ),
-        )
+        loads = LoadCounter()
+        page.on("load", loads)
 
         class Live:
             def text(self) -> str:
@@ -507,7 +513,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - live o
                 page.get_by_text(f"\u2026{suffix}", exact=True).first.click()
 
             def navigations(self) -> int:
-                return navigated[0]
+                return loads.count
 
         try:
             for kind, url in (
