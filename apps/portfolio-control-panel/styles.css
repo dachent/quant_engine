@@ -393,3 +393,11 @@ td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* Tablet-height sidebar: 14 nav items fit a 768 px viewport (QA text_overflow on aside.sidebar). */
+@media (min-width: 761px) and (max-height: 820px) {
+  .sidebar { padding: 16px 18px; }
+  .brand { padding-bottom: 14px; }
+  .nav-stack { gap: 2px; }
+  .nav-item { padding: 8px 12px; }
+}
