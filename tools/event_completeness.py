@@ -62,6 +62,30 @@ _QUANTBASE_VALUE_BASES: Final = frozenset(
 )
 _QUANTBASE_CENT: Final = Decimal("0.01")
 _QUANTBASE_CLOSE_TOLERANCE: Final = Decimal("0.001")
+# the next-day Quantbase shape may scale a cutoff-day rebalance to the vendor NAV by up to
+# this much, never more (the builder records the bound it used)
+_QUANTBASE_NEXT_DAY_SCALE_CAP: Final = Decimal("0.01")
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _next_day_scale_within_bound(rolled: Mapping[str, Any]) -> bool:
+    scale = _decimal_or_none(rolled.get("value_scale_to_nav"))
+    bound = _decimal_or_none(rolled.get("scale_tolerance"))
+    return (
+        scale is not None
+        and bound is not None
+        and bound <= _QUANTBASE_NEXT_DAY_SCALE_CAP
+        and abs(scale - 1) <= bound
+    )
+
+
 # Typed outcomes that are NOT completeness: the evidence files are cited by hash and the ledger
 # verifies each file, but nothing is proved about the events themselves.
 OUTCOME_CAPTURED_NOT_ADMITTED: Final = "CAPTURED_NOT_ADMITTED"
@@ -512,10 +536,28 @@ def _evaluate_quantbase_positions(
             c = closure_of(p)
             difference = number(c.get("snapshot_difference_usd"))
             snapshot_day = str(c.get("snapshot_day") or "")
+            rolled = c.get("rollback")
+            # A next-day capture has no vendor NAV on its snapshot day, so there is no
+            # difference to read; its proof is the order replay that reproduces the
+            # snapshot and closes the opening holdings to the NAV of the cutoff.
+            next_day = (
+                c.get("snapshot_close_basis")
+                == "NEXT_DAY_CAPTURE_NAV_AT_LAST_LABELLED_DAY"
+                and c.get("snapshot_nav_usd") is None
+                and c.get("snapshot_difference_usd") is None
+                and isinstance(rolled, Mapping)
+                and rolled.get("replay_reproduces_snapshot") is True
+                and rolled.get("rollback_rebalance_count") == 0
+                and rolled.get("rollback_activity_count") == 0
+                and snapshot_day > end.isoformat()
+                and _next_day_scale_within_bound(rolled)
+            )
             if (
                 c.get("activity_after_cutoff_count") != 0
-                or difference is None
-                or abs(difference) > _QUANTBASE_CENT
+                or (
+                    not next_day
+                    and (difference is None or abs(difference) > _QUANTBASE_CENT)
+                )
                 or not snapshot_day
                 or snapshot_day < end.isoformat()
             ):
@@ -549,6 +591,22 @@ def _evaluate_quantbase_positions(
         <= _QUANTBASE_CENT
         else 1,
     )
+
+    def close_tolerance(p: Mapping[str, Any]) -> Decimal:
+        c = closure_of(p)
+        rolled_evidence = c.get("rollback")
+        if (
+            c.get("snapshot_close_basis") == "NEXT_DAY_CAPTURE_NAV_AT_LAST_LABELLED_DAY"
+            and isinstance(rolled_evidence, Mapping)
+            and _next_day_scale_within_bound(rolled_evidence)
+        ):
+            return max(
+                _QUANTBASE_CLOSE_TOLERANCE,
+                _decimal_or_none(rolled_evidence.get("scale_tolerance"))
+                or _QUANTBASE_CLOSE_TOLERANCE,
+            )
+        return _QUANTBASE_CLOSE_TOLERANCE
+
     mismatched = 0
     for p, value in zip(rows, values, strict=True):
         quantity = number(p.get("quantity"))
@@ -558,7 +616,7 @@ def _evaluate_quantbase_positions(
             or close is None
             or value is None
             or value == 0
-            or abs(quantity * close - value) > _QUANTBASE_CLOSE_TOLERANCE * abs(value)
+            or abs(quantity * close - value) > close_tolerance(p) * abs(value)
         ):
             mismatched += 1
     record("SHARES_TIMES_OFFICIAL_CLOSE_MATCH_VALUE", mismatched if rows else 1)

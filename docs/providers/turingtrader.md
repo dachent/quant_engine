@@ -86,6 +86,14 @@ stamp or the market-vane capture at or after the same bound, records `cutoff` an
 `capture_bound_utc` in the provenance, and `verify` re-checks it. Without the flag the builder is
 unchanged. The bound rule is written once in each of the two modules and a test keeps them equal.
 
+The market-vane class (`market_vane.current_class_id`) is a disclosure field: no calculation reads
+it (the reconciliation consumer only validates its shape). It is one of the eight classes `0..7`,
+or the vendor's `-1`, which is recorded verbatim with `state: VENDOR_PUBLISHED_UNCLASSIFIED` and
+`note: vendor published -1, meaning not established` (the meaning of `-1` is not established; it is
+never mapped to a class). Any other value, a non-integer, or a status missing a signal key is still
+refused by both the producer and the consumer. A manifest whose class is one of the eight is
+byte-identical to what the builder wrote before `-1` was admitted.
+
 ## Public object capture tool
 
 `tools/tt_public_capture.py` is the governed replacement for the three hand
