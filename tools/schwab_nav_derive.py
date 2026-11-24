@@ -173,13 +173,10 @@ def read_closes(closes_dir: Path, symbol: str) -> dict[date, Decimal]:
     if not path.is_file():
         raise DeriveError(f"no official close file for {symbol}")
     rows = csv.DictReader(io.StringIO(path.read_bytes().decode("utf-8-sig")))
-    closes: dict[date, Decimal] = {}
-    for row in rows:
-        day = date.fromisoformat(row["date"])
-        if day in closes:
-            raise DeriveError(f"the official close file of {symbol} repeats {day}")
-        closes[day] = _decimal(row["close"], f"{symbol} close")
-    return closes
+    return {
+        date.fromisoformat(row["date"]): _decimal(row["close"], f"{symbol} close")
+        for row in rows
+    }
 
 
 def official_value(
@@ -312,201 +309,21 @@ def _like(original: object, value: Decimal) -> object:
     return float(value)
 
 
-ROLLBACK_SOURCE = "ROLLED_BACK_ABSENT_FROM_CAPTURE"
-
-
-def absent_rolled_positions(
-    account: Mapping[str, Any], after: RolledBack
-) -> dict[str, Decimal]:
-    """The symbols held at the close of the day that the capture has no row for (sold in full after it)."""
-
-    seen: set[str] = set()
-    for group in _list(account.get("groupedPositions"), "holdings groups"):
-        if group.get("securityType") == CASH_SECURITY_TYPE:
-            continue
-        for row in _list(group.get("holdingsRows"), "holdings rows"):
-            symbol = row.get("dataSymbol")
-            if not isinstance(symbol, str) or not symbol.strip():
-                symbol = _mapping(row.get("symbol"), "symbol").get("symbol")
-            seen.add(str(symbol))
-    return {s: q for s, q in sorted(after.quantities.items()) if s not in seen}
-
-
-def assert_derived_rows_checked(
-    derivation: Mapping[str, Any] | None, accounts: Sequence[str]
-) -> None:
-    """Refuse derived rows (positions sold in full after the day) on an account whose derivation
-    record does not show them checked: the native NAV of the day must agree with the official value
-    that includes them, with no waived prior closure and no stale-carry patch."""
-
-    for account in sorted(set(accounts)):
-        row = (derivation or {}).get(account)
-        if not isinstance(row, Mapping) or not row.get(
-            "derived_rows_absent_from_capture"
-        ):
-            raise DeriveError(
-                f"{account}: derived rows need the derivation record that lists them "
-                "(pass the record of schwab_nav_derive derive)"
-            )
-        if row.get("derived_rows_native_closure") != STATUS_AGREES:
-            raise DeriveError(
-                f"{account}: derived rows are not checked: the native NAV does not agree with the "
-                f"official value ({row.get('derived_rows_native_closure')}), so nothing checks them"
-            )
-
-
-def holdings_classification(
-    raw: object, crosswalk: Mapping[str, str]
-) -> dict[tuple[str, str], tuple[str, int]]:
-    """(internal account, symbol) -> (group name, security type) of every position row of a raw
-    holdings response: what an earlier governed capture said the symbol was in that account."""
-
-    found: dict[tuple[str, str], tuple[str, int]] = {}
-    for account in _list(_mapping(raw, "holdings").get("accounts"), "accounts"):
-        external = str(_mapping(account, "holdings account").get("accountId"))
-        if external not in crosswalk:
-            raise DeriveError(
-                "the classification run holds an account outside the crosswalk"
-            )
-        internal = crosswalk[external]
-        for group in _list(account.get("groupedPositions"), "holdings groups"):
-            if group.get("securityType") == CASH_SECURITY_TYPE:
-                continue
-            for row in _list(group.get("holdingsRows"), "holdings rows"):
-                symbol = row.get("dataSymbol")
-                if not isinstance(symbol, str) or not symbol.strip():
-                    symbol = _mapping(row.get("symbol"), "symbol").get("symbol")
-                if (internal, str(symbol)) in found:
-                    raise DeriveError(
-                        f"the classification run lists {symbol} twice in {internal}"
-                    )
-                found[(internal, str(symbol))] = (
-                    str(group.get("groupName")),
-                    int(group["securityType"]),
-                )
-    return found
-
-
-def _derived_row(
-    account: Mapping[str, Any],
-    internal: str,
-    symbol: str,
-    quantity: Decimal,
-    close: Decimal,
-    classification: Mapping[tuple[str, str], tuple[str, int]] | None,
-) -> tuple[dict[str, Any], dict[str, Any], Mapping[str, Any]]:
-    """A row for a position the capture lacks, shaped from its account's own position rows.
-
-    The row goes into the account's only position group, or, when it has several, into the group
-    an earlier governed capture put the same symbol of the same account in (``classification``);
-    without that it refuses. The row takes the fields common to every row of that group, which must include
-    the quantity, price and symbol fields. The row carries only the symbol, the rolled-back quantity and the official
-    close; every value field of the sibling is blanked. Returns the row, its flag and its group.
-    """
-
-    groups = [
-        g
-        for g in _list(account.get("groupedPositions"), "holdings groups")
-        if g.get("securityType") != CASH_SECURITY_TYPE
-    ]
-    if not groups:
-        raise DeriveError(
-            f"{internal}: {symbol} was held at the close but the capture has no position row "
-            "of the account to take a shape from"
-        )
-    if len(groups) == 1:
-        group = groups[0]
-        group_source = "ONLY_POSITION_GROUP_OF_THE_ACCOUNT"
-    else:
-        known = (
-            None if classification is None else classification.get((internal, symbol))
-        )
-        matching = [
-            g
-            for g in groups
-            if known is not None
-            and (str(g.get("groupName")), int(g["securityType"])) == known
-        ]
-        if len(matching) != 1:
-            raise DeriveError(
-                f"{internal}: {symbol} was held at the close, the account has several position "
-                "groups and no earlier capture places the symbol in one of them, so the group "
-                "and shape of its row are ambiguous"
-            )
-        group = matching[0]
-        group_source = "EARLIER_GOVERNED_CAPTURE_OF_THE_SAME_ACCOUNT"
-    rows = _list(group.get("holdingsRows"), "holdings rows")
-    if not rows:
-        raise DeriveError(
-            f"{internal}: {symbol} was held at the close but its group has no row to take a shape from"
-        )
-    # the fields every row of the group carries: the provider adds optional fields to some rows
-    # only, so the derived row takes exactly the common ones (and refuses when one the reader
-    # needs is not common to all)
-    common = frozenset.intersection(
-        *(frozenset(_mapping(r, "holdings row")) for r in rows)
-    )
-    if not {"qty", "price"} <= common or not ({"dataSymbol", "symbol"} & common):
-        raise DeriveError(
-            f"{internal}: {symbol} was held at the close but the rows of its group do not all "
-            "carry the quantity, price and symbol fields, so the shape of its row is ambiguous"
-        )
-    template = _mapping(rows[0], "row")
-    quoted = template.get("price")
-    sibling_qty = template.get("qty")
-    if (
-        not isinstance(quoted, dict)
-        or not isinstance(quoted.get("priceDate"), str)
-        or not isinstance(sibling_qty, dict)
-        or "qty" not in sibling_qty
-    ):
-        raise DeriveError(
-            f"{internal}: {symbol} was held at the close but the sibling row has no readable "
-            "quantity and price date to shape its row from"
-        )
-    # an allow-list: only the symbol, the rolled-back quantity and the official close; nothing
-    # else of the sibling (identifiers, values, quote fields) is carried over
-    row = {
-        "dataSymbol": symbol,
-        "symbol": {"symbol": symbol},
-        "qty": {"qty": _like(sibling_qty["qty"], quantity)},
-        "price": {"price": float(close), "priceDate": quoted["priceDate"]},
-        "rollbackSynthesized": ROLLBACK_SOURCE,
-    }
-    flag = {
-        "account_id": internal,
-        "symbol": symbol,
-        "quantity": format(quantity, "f"),
-        "official_close": format(close, "f"),
-        "group": str(group.get("groupName")),
-        "group_source": group_source,
-        "source": ROLLBACK_SOURCE,
-    }
-    return row, flag, group
-
-
 def apply_rollback(
     raw: object,
     crosswalk: Mapping[str, str],
     rolled: Mapping[str, RolledBack],
-    *,
-    closes_dir: Path | None = None,
-    day: date | None = None,
-    classification: Mapping[tuple[str, str], tuple[str, int]] | None = None,
-) -> tuple[dict[str, Any], int, list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], int]:
     """A copy of the raw holdings response whose quantities and cash are the rolled-back ones.
 
     Rows keep their shape; a position rolled to zero keeps a zero-quantity row (counted in the second
     result, for the caller to reconcile). A position the capture never listed (sold in full after the
-    day) is given a derived row, flagged in the third result, only when the caller supplies the
-    official closes and the day, the rolled-back quantity is positive, the symbol has an official
-    close of the day and the account's position rows share one shape; otherwise it refuses. The cash
-    change needs the account's one quantity-less cash summary row, else it refuses.
+    day) cannot be given a row the provider never sent, and the cash change needs the account's one
+    quantity-less cash summary row: both refuse.
     """
 
     document = copy.deepcopy(dict(_mapping(raw, "holdings")))
     zeroed = 0
-    derived_flags: list[dict[str, Any]] = []
     for account in _list(document.get("accounts"), "holdings accounts"):
         internal = crosswalk[
             str(_mapping(account, "holdings account").get("accountId"))
@@ -535,29 +352,10 @@ def apply_rollback(
                         zeroed += 1
         absent = sorted(set(after.quantities) - symbols_seen)
         if absent:
-            if closes_dir is None or day is None:
-                raise DeriveError(
-                    f"{internal}: held at the close but absent from the capture (sold in full "
-                    f"after it): {','.join(absent)}; the capture has no row to bind them to"
-                )
-            for symbol in absent:
-                quantity = after.quantities[symbol]
-                if quantity <= 0:
-                    raise DeriveError(
-                        f"{internal}: {symbol} rolls back to {quantity}, not a long position; "
-                        "no row is derived for it"
-                    )
-                close = read_closes(closes_dir, symbol).get(day)
-                if close is None or close <= 0:
-                    raise DeriveError(
-                        f"{internal}: {symbol} was sold in full after {day} but has no positive "
-                        f"official close for {day}, so its row cannot be derived"
-                    )
-                row, flag, group = _derived_row(
-                    account, internal, symbol, quantity, close, classification
-                )
-                _list(group.get("holdingsRows"), "holdings rows").append(row)
-                derived_flags.append(flag)
+            raise DeriveError(
+                f"{internal}: held at the close but absent from the capture (sold in full "
+                f"after it): {','.join(absent)}; the capture has no row to bind them to"
+            )
         delta = after.cash - cash_now
         if delta:
             if len(summary) != 1:
@@ -569,7 +367,7 @@ def apply_rollback(
             value["val"] = _like(
                 value["val"], _decimal(value["val"], "cash value") + delta
             )
-    return document, zeroed, derived_flags
+    return document, zeroed
 
 
 def derive(
@@ -598,14 +396,12 @@ def derive(
         raise DeriveError(f"a waiver names accounts outside the crosswalk: {unknown}")
     if prior_day >= day:
         raise DeriveError("the prior day must precede the day")
-    raw_holdings = strict_json_loads(
-        (run_dir / "raw/holdings.v2.json").read_bytes(), label="raw holdings"
+    held = read_holdings(
+        strict_json_loads(
+            (run_dir / "raw/holdings.v2.json").read_bytes(), label="raw holdings"
+        ),
+        crosswalk,
     )
-    held = read_holdings(raw_holdings, crosswalk)
-    raw_accounts = {
-        crosswalk[str(_mapping(a, "holdings account").get("accountId"))]: a
-        for a in _list(_mapping(raw_holdings, "holdings").get("accounts"), "accounts")
-    }
     placements = decide_rolled(run_dir, held, closes_dir, day, tolerance)
     rolled_by_account = {a: p.rolled for a, p in placements.items()}
     symbols = sorted(
@@ -667,7 +463,6 @@ def derive(
                 f"{account}: the native NAV {native_day} of {day} differs from the official value "
                 f"{official_day} by more than {tolerance} and is not a carry of {prior_day}"
             )
-        absent = absent_rolled_positions(raw_accounts[account], rolled)
         entry = {
             f"official_{day_tag}": str(official_day),
             f"official_{prior_tag}": str(official_prior),
@@ -691,16 +486,6 @@ def derive(
         if rolled.rows_rolled_back:
             entry["rolled_back_rows"] = ", ".join(
                 f"{k} x{v}" for k, v in sorted(rolled.rows_rolled_back.items())
-            )
-        if absent:
-            # the provider's own balance of the day is what checks a derived row: say whether it did
-            entry["derived_rows_native_closure"] = (
-                PRIOR_CLOSURE_WAIVED if waived else status
-            )
-            entry["derived_rows_absent_from_capture"] = "; ".join(
-                f"{symbol} quantity={format(quantity, 'f')} "
-                f"official_close={format(closes[symbol][day], 'f')} source={ROLLBACK_SOURCE}"
-                for symbol, quantity in absent.items()
             )
         if after_day:
             entry["after_day_informational_rows"] = ", ".join(

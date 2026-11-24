@@ -177,7 +177,6 @@ EXCUSED = {
     "release_measurements": "wall-clock and size measurements of the run",
     "release_canary": "filesystem timing and environment probe of the commit path; derives no figure",
     "verify_sleeve_ledger": "re-reads a ledger and compares digests",
-    "context_pack": "stdlib-only text builder over an already-built panel payload: rounding and ratios for display, no regression, no numeric library, no pin",
     "factor_lens_status": "stdlib-only: date arithmetic and threshold/sign comparisons on already-published figures; no regression, no numeric library, no pin",
 }
 GUARDED_MARKERS = (

@@ -665,13 +665,8 @@ def ingest(
     output_root: Path,
     config: IngestConfig,
     derivation: Mapping[str, Any] | None = None,
-    classification_run: Path | None = None,
 ) -> dict[str, object]:
-    """Bind one verified driver run; returns the binding document.
-
-    ``classification_run`` is an earlier verified run of the same accounts whose raw holdings say
-    which position group a symbol sold in full after the cutoff belongs to (only needed for an
-    account with several position groups)."""
+    """Bind one verified driver run; returns the binding document."""
 
     try:
         verified = driver.verify_run(run_dir, crosswalk=crosswalk)
@@ -711,24 +706,6 @@ def ingest(
     raw_response = strict_json_loads(
         (run_dir / "raw/holdings.v2.json").read_bytes(), label="raw holdings"
     )
-    classification_ref: dict[str, str] | None = None
-    if classification_run is not None:
-        try:
-            driver.verify_run(classification_run, crosswalk=crosswalk)
-            classification_manifest = driver.load_json_file(
-                classification_run / "manifest.json", "classification manifest"
-            )
-        except driver.DriverError as exc:
-            raise IngestError(f"classification run does not verify: {exc}") from exc
-        classification_ref = {
-            "run_id": str(classification_manifest.get("run_id")),
-            "manifest_sha256": _sha256(
-                (classification_run / "manifest.json").read_bytes()
-            ),
-            "holdings_sha256": _sha256(
-                (classification_run / "raw/holdings.v2.json").read_bytes()
-            ),
-        }
     late = capture["capture_mode"] == driver.MODE_LATE
     # the capture is the account at capture time; the binding is the account at the cutoff close,
     # so the roll-back comes before the scope of the official closes is read off the holdings
@@ -737,7 +714,6 @@ def ingest(
     rolled: dict[str, Any] = {}
     placed: dict[str, Any] = {}
     rolled_zero_rows = 0
-    derived_rows: list[dict[str, Any]] = []
     quote_dates_set = 0
     try:
         if late or derive_tool.rows_after_exist(
@@ -755,30 +731,9 @@ def ingest(
                 a: r for a, r in rolled.items() if r.rows_rolled_back or r.informational
             }
         if undone:
-            raw_response, rolled_zero_rows, derived_rows = derive_tool.apply_rollback(
-                raw_response,
-                crosswalk,
-                rolled,
-                closes_dir=closes_dir,
-                day=cutoff.as_of_date,
-                classification=(
-                    None
-                    if classification_run is None
-                    else derive_tool.holdings_classification(
-                        strict_json_loads(
-                            (classification_run / "raw/holdings.v2.json").read_bytes(),
-                            label="classification holdings",
-                        ),
-                        crosswalk,
-                    )
-                ),
+            raw_response, rolled_zero_rows = derive_tool.apply_rollback(
+                raw_response, crosswalk, rolled
             )
-    except derive_tool.DeriveError as exc:
-        raise IngestError(str(exc)) from exc
-    try:
-        derive_tool.assert_derived_rows_checked(
-            derivation, [str(f["account_id"]) for f in derived_rows]
-        )
     except derive_tool.DeriveError as exc:
         raise IngestError(str(exc)) from exc
     if late:
@@ -800,9 +755,7 @@ def ingest(
         if rolled
         else held
     )
-    symbols = sorted(
-        {str(row["symbol"]) for row in scope} | {str(r["symbol"]) for r in derived_rows}
-    )
+    symbols = sorted({str(row["symbol"]) for row in scope})
     close_set = official_closes(closes_dir, cutoff.as_of_date)
     if label is None:
         if close_set.provenance["status"] != PROVENANCE_VERIFIED:
@@ -914,13 +867,10 @@ def ingest(
         )
         for row in held
     }
-    # a derived row (a position sold in full after the cutoff) has no quote in the capture: it is
-    # listed in the binding with its own flag, not counted as a quote that differs
     quoted_differs = sum(
         1
         for row in snapshot.positions
-        if (str(row["account_id"]), str(row["symbol"])) in quoted
-        and quoted[(str(row["account_id"]), str(row["symbol"]))]
+        if quoted[(str(row["account_id"]), str(row["symbol"]))]
         != Decimal(str(_market_value(row)))
     )
 
@@ -1096,26 +1046,12 @@ def ingest(
         binding["roll_back"] = {
             "to": cutoff.as_of_date.isoformat(),
             "basis": "CAPTURE_MINUS_POSTED_TRANSACTIONS_AFTER_THE_CUTOFF_CLOSE",
-            **(
-                {"classification_run": classification_ref}
-                if classification_ref is not None and derived_rows
-                else {}
-            ),
             "accounts": {
                 account: {
                     "after_cutoff_rows_not_applied": dict(
                         sorted(r.informational.items())
                     ),
                     "rows_rolled_back": dict(sorted(r.rows_rolled_back.items())),
-                    **(
-                        {
-                            "derived_rows_absent_from_capture": [
-                                f for f in derived_rows if f["account_id"] == account
-                            ]
-                        }
-                        if any(f["account_id"] == account for f in derived_rows)
-                        else {}
-                    ),
                     **(
                         {
                             "straddler_reading": placed[account].reading,
@@ -1643,7 +1579,6 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--base-spec", type=Path)
     run.add_argument("--spec-out", type=Path)
     run.add_argument("--derivation-record", type=Path)
-    run.add_argument("--classification-run", type=Path)
     return parser
 
 
@@ -1669,7 +1604,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             derivation=_load(args.derivation_record, "derivation record")
             if args.derivation_record
             else None,
-            classification_run=args.classification_run,
         )
         result: dict[str, object] = {
             "as_of_date": binding["as_of_date"],
