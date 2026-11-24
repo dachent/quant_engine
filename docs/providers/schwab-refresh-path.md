@@ -70,9 +70,30 @@ is `...NNN`. It is a separate tool, **not** a new governed driver capability: ad
 `balances/brokerage` to the driver would change the reviewed web-contract catalog hash that governance
 evidence binds, which needs its own review.
 
+Checks made at capture time (cycle E findings):
+
+* **Cash closes to the page.** For each balances capture the page's `Cash & Cash Investments Total`
+  is compared with the balances XHR (`marginBalance` plus the bank-sweep credit, the response's own
+  `total`, a non-zero `tradeDateBalance`). A capture that does not close was taken while the balance
+  was moving (typically mid-session: pending sweep or trades); it is refused after its files are
+  saved, with the figures in the message and in `capture-records.json`. Take it again outside the
+  session, or pass `--allow-cash-mismatch` to record the status instead of refusing.
+* **Session.** Every record carries the page stamp, the local capture time (epoch) and whether the
+  stamp is inside the regular session (weekday 09:30 to 16:00 ET; holidays are not known). Prefer a
+  capture taken after the close.
+* **History cap.** The history page returns at most 200 rows. Each history record states rows
+  returned, the cap, whether a bookmark is present and the earliest row date. With `--reach-back-to`
+  set to the start of the final statement period, a capped history (bookmark present or 200 rows)
+  whose earliest row does not precede that date is refused after saving; narrow the search window on
+  the page and capture again. The tool does not narrow or page the history itself (it only clicks the
+  account selector).
+* **No reloads.** Never reload or navigate the page while a capture runs (a keepalive reload destroys
+  the page context mid-capture). The tool refuses an account whose capture saw a page load.
+
 ```
 uv run --extra schwab-live python tools/schwab_zf_capture.py --cdp-url http://127.0.0.1:9334 \
-  --out <dir outside Git and OneDrive> --et-date 2026-11-20 --accounts 824,691,054,620,757,722,703,293
+  --out <dir outside Git and OneDrive> --et-date 2026-11-20 --accounts 824,691,054,620,757,722,703,293 \
+  --reach-back-to 2026-10-01
 ```
 
 Open points: the Bank account page (...949) has its own balance endpoint (not captured by this tool);

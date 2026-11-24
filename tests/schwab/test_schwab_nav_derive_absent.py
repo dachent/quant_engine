@@ -446,16 +446,81 @@ def test_the_record_states_whether_the_native_nav_checked_the_derived_rows(
     (tmp_path / "stale").mkdir()
     agreeing = world(574.5, 600.0, tmp_path / "ok")
     assert agreeing[ACCOUNT]["derived_rows_native_closure"] == nd.STATUS_AGREES
-    nd.assert_derived_rows_checked(agreeing, [ACCOUNT])
+    flag = {
+        "account_id": ACCOUNT,
+        "symbol": "AAA",
+        "quantity": "1",
+        "official_close": "95.5",
+    }
+    nd.assert_derived_rows_checked(agreeing, [flag])
     # a native balance that just repeats the day before (574.50 twice) is a stale carry
     stale = world(574.5, 574.5, tmp_path / "stale")
     assert stale[ACCOUNT]["derived_rows_native_closure"] == nd.STATUS_PATCH
     with pytest.raises(nd.DeriveError, match="nothing checks them"):
-        nd.assert_derived_rows_checked(stale, [ACCOUNT])
+        nd.assert_derived_rows_checked(stale, [flag])
 
 
 def test_derived_rows_without_the_record_that_lists_them_are_refused() -> None:
     with pytest.raises(nd.DeriveError, match="need the derivation record"):
-        nd.assert_derived_rows_checked(None, [ACCOUNT])
+        nd.assert_derived_rows_checked(
+            None,
+            [
+                {
+                    "account_id": ACCOUNT,
+                    "symbol": "AAA",
+                    "quantity": "1",
+                    "official_close": "95.5",
+                }
+            ],
+        )
     with pytest.raises(nd.DeriveError, match="need the derivation record"):
-        nd.assert_derived_rows_checked({ACCOUNT: {"cash": "1"}}, [ACCOUNT])
+        nd.assert_derived_rows_checked(
+            {ACCOUNT: {"cash": "1"}},
+            [
+                {
+                    "account_id": ACCOUNT,
+                    "symbol": "AAA",
+                    "quantity": "1",
+                    "official_close": "95.5",
+                }
+            ],
+        )
+
+
+def test_a_record_that_lists_other_rows_than_the_ones_derived_is_refused() -> None:
+    """A stale or foreign record cannot vouch for different rows: symbol, quantity and close must
+    all match what the ingest derived."""
+
+    def record(text: str) -> dict:
+        return {
+            ACCOUNT: {
+                "derived_rows_absent_from_capture": text,
+                "derived_rows_native_closure": nd.STATUS_AGREES,
+            }
+        }
+
+    def flag(symbol: str = "AAA", quantity: str = "1", close: str = "95.5") -> dict:
+        return {
+            "account_id": ACCOUNT,
+            "symbol": symbol,
+            "quantity": quantity,
+            "official_close": close,
+        }
+
+    good = nd.derived_row_text("AAA", "1", "95.5")
+    nd.assert_derived_rows_checked(record(good), [flag()])
+    # order does not matter
+    both = "; ".join([nd.derived_row_text("ZZZ", "3", "2"), good])
+    nd.assert_derived_rows_checked(record(both), [flag(), flag("ZZZ", "3", "2")])
+    for derived in (
+        [flag("BBB")],  # another symbol
+        [flag(quantity="2")],  # another quantity
+        [flag(close="96")],  # another close
+        [flag(), flag("ZZZ", "3", "2")],  # a derived row the record lacks
+    ):
+        with pytest.raises(nd.DeriveError, match="stale or foreign record"):
+            nd.assert_derived_rows_checked(record(good), derived)
+    with pytest.raises(nd.DeriveError, match="stale or foreign record"):
+        nd.assert_derived_rows_checked(
+            record(both), [flag()]
+        )  # a row the ingest did not derive
