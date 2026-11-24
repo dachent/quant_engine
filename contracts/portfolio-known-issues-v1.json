@@ -1,0 +1,233 @@
+{
+  "schema_version": 1,
+  "contract_id": "PORT-KNOWN-ISSUES-1",
+  "release": "B",
+  "as_of": "2026-11-17",
+  "authority": "Disclosure of known defects in a committed release. Source: records/sprint/B-KNOWN-ISSUES-DISCLOSURE.md (sprint-ledger, from control's list). Each entry is shown to the analyst under DO NOT RELY ON in the context pack. Append an entry when a defect is found; set status to FIXED (with fixed_in) when a later release removes it; never delete an entry.",
+  "entry_shape": {
+    "id": "KI-NN, unique, never reused",
+    "status": "OPEN | FIXED",
+    "verification": "BYTES (checked against files) | CONTROL (control's tracking, not re-verified)",
+    "do_not_rely": "One sentence for the analyst: what not to rely on.",
+    "effect": "What is wrong and its size.",
+    "affected_paths": "Payload paths or surfaces the defect touches (empty if it is a wording or scope limit).",
+    "fix": {
+      "ticket": "issue or PR number or null",
+      "release": "release expected to fix it",
+      "note": "what the fix is"
+    }
+  },
+  "issues": [
+    {
+      "id": "KI-01",
+      "status": "OPEN",
+      "verification": "BYTES",
+      "do_not_rely": "The Schwab coverage sentence that says 2 accepted accounts hold cash only: it counts account 691, which holds a money-market position of about 70,856 USD, and the 691 positions were never captured.",
+      "effect": "A wrong sentence in the downloadable payload JSON only; it is not rendered and no number, status or panel screen depends on it. The matrix cells for the two accounts say NO_ACCEPTED_FACT_PATH and name the gap.",
+      "affected_paths": [
+        "coverage[*].structural_boundaries",
+        "fact_coverage_matrix positions row structural_boundaries"
+      ],
+      "fix": {
+        "ticket": null,
+        "release": "F1",
+        "note": "governed empty-position account list (054 only), a real 691 position row, new Schwab generation"
+      }
+    },
+    {
+      "id": "KI-02",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "Alpha net, its annualised standard error and annualised tracking error on the 22 factor-fit rows whose train dates carry a count other than 252 a year: EU economic lenses (260 or 261) understate alpha by about 3.2 or 3.6 percent, EU rows at 245 overstate it by 2.8 percent, Robuxio style lenses at 246 by 2.4 percent. None is a headline figure; they appear only in lens detail.",
+      "effect": "22 of 630 rows with train anchors scale by 252 instead of their own count; 12 are AVAILABLE and 10 are DIAGNOSTIC_ONLY (alpha withheld). Per-row list: records/sprint/F1-PPY-ROWS.txt.",
+      "affected_paths": [
+        "factor_analysis lens detail rows"
+      ],
+      "fix": {
+        "ticket": "#904",
+        "release": "F1",
+        "note": "annualization fix"
+      }
+    },
+    {
+      "id": "KI-03",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "Any factor-based statistic as covering October and November 2026: factor data end on 2026-09-30.",
+      "effect": "Factor-based statistics do not cover Oct-Nov 2026.",
+      "affected_paths": [
+        "factor_analysis"
+      ],
+      "fix": {
+        "ticket": null,
+        "release": "F1",
+        "note": "later factor capture; the 2007-2010 proxy risk-free is carried by the base bundle work (#1017, related, does not fix it)"
+      }
+    },
+    {
+      "id": "KI-04",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "Pre-2011 excess returns: the 2007-2010 style and sector risk-free rate is a price-return proxy (BIL), not a total-return series.",
+      "effect": "Excess returns before 2011 use a proxy risk-free rate.",
+      "affected_paths": [
+        "factor_analysis"
+      ],
+      "fix": {
+        "ticket": null,
+        "release": "F1",
+        "note": "total-return risk-free construction, carried by the base bundle work (#1017, related, does not fix it)"
+      }
+    },
+    {
+      "id": "KI-05",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "The as-of date on total liquid capital: it is the oldest component's date (2025-11-24, a 0.19 USD Echotrade balance), not the cutoff.",
+      "effect": "The as-of label is the oldest component's date; the amounts are unaffected.",
+      "affected_paths": [
+        "capital_status"
+      ],
+      "fix": {
+        "ticket": "#1015",
+        "release": "F1",
+        "note": "label rule: oldest-component wording"
+      }
+    },
+    {
+      "id": "KI-06",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "The wording 'no reported events' for the 558 provider transactions that have events but no strategy attribution.",
+      "effect": "The matrix says no events where events exist but none is attributed to a strategy.",
+      "affected_paths": [
+        "fact_coverage_matrix"
+      ],
+      "fix": {
+        "ticket": null,
+        "release": "F1",
+        "note": "typed status for events not attributed (ledger bundle, PR 1003)"
+      }
+    },
+    {
+      "id": "KI-07",
+      "status": "OPEN",
+      "verification": "BYTES",
+      "do_not_rely": "Volatis values on fill days: the fill-day restatement is not applied, so those days carry the dashboard value before the fill (for example 2025-08-06 shows 21,771.95 where the restated figure is 10,903.65).",
+      "effect": "Volatis fill days use the dashboard NAV, as in release A5; the fill-closes pin carries split-adjusted closes against as-traded quantities.",
+      "affected_paths": [
+        "strategy returns for volatis-strategy"
+      ],
+      "fix": {
+        "ticket": "#909",
+        "release": "F1",
+        "note": "as-traded closes pin, guards, deposit-day netting"
+      }
+    },
+    {
+      "id": "KI-08",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "AI Factor and EU rows as account-basis figures: they are on the model (restated to the sleeve) basis.",
+      "effect": "Those rows are model basis, as the AI Factor basis ruling of 2026-11-02 (B) directs.",
+      "affected_paths": [
+        "strategies p123-ai-factor, p123-eu"
+      ],
+      "fix": {
+        "ticket": null,
+        "release": "F1",
+        "note": "per the basis ruling, as queued"
+      }
+    },
+    {
+      "id": "KI-09",
+      "status": "OPEN",
+      "verification": "BYTES",
+      "do_not_rely": "Schwab account 691 as covered for positions: its positions cell has no accepted fact path.",
+      "effect": "Holdings against signals for that account cannot be checked from the payload.",
+      "affected_paths": [
+        "fact_coverage_matrix positions row"
+      ],
+      "fix": {
+        "ticket": null,
+        "release": "F1",
+        "note": "691 position row"
+      }
+    },
+    {
+      "id": "KI-10",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "Robuxio return spans as complete: span wording and coverage are open.",
+      "effect": "Return-span wording and coverage for Robuxio are not closed.",
+      "affected_paths": [
+        "strategies robuxio-crypto"
+      ],
+      "fix": {
+        "ticket": null,
+        "release": "F1",
+        "note": "control's item 9 (p123 owner)"
+      }
+    },
+    {
+      "id": "KI-11",
+      "status": "OPEN",
+      "verification": "BYTES",
+      "do_not_rely": "IBKR account history before 2026-02-28 as fully observed: generation f34e5b78 had 42 NAV days missing from 2026-01-01 to 2026-02-27 on a live account, shown as a NAV gap after the nav-calendar fix.",
+      "effect": "A 42-day NAV gap on a live IBKR account; figures spanning it are not backed by observed days there.",
+      "affected_paths": [
+        "calendar_coverage IBKR rows"
+      ],
+      "fix": {
+        "ticket": "#1015",
+        "release": "F1",
+        "note": "F5 closes the gap in F1 (reserve follow-ons)"
+      }
+    },
+    {
+      "id": "KI-12",
+      "status": "OPEN",
+      "verification": "BYTES",
+      "do_not_rely": "Account rows dated before the account's reserve assignment as assigned history: rows were admitted before the assignment for generation f34e5b78 (November 2025 to March 2026).",
+      "effect": "Pre-assignment rows are present in the candidate for that account and period.",
+      "affected_paths": [
+        "pre-assignment rows"
+      ],
+      "fix": {
+        "ticket": "#1015",
+        "release": "F1",
+        "note": "reserve follow-ons"
+      }
+    },
+    {
+      "id": "KI-13",
+      "status": "OPEN",
+      "verification": "BYTES",
+      "do_not_rely": "The NAV conflict count as comparable with the earlier generation: it rose from 6 to 125, of which 119 are new on Schwab reserve 1825d688 for 2025-06-29 to 2025-10-25 (transfer-day date shifts; the ledger wins by rule).",
+      "effect": "More NAV conflicts are reported; the added ones are transfer-day date shifts resolved in the ledger's favour.",
+      "affected_paths": [
+        "nav_conflict_count"
+      ],
+      "fix": {
+        "ticket": "#1015",
+        "release": "F1",
+        "note": "reserve follow-ons"
+      }
+    },
+    {
+      "id": "KI-14",
+      "status": "OPEN",
+      "verification": "CONTROL",
+      "do_not_rely": "The Quantbase admitted-item-set pin as matching the receipt: the contract pin is the historical f72255e5 (computed with fill closes) while the B ledger receipt records the observed 0df05b6a (no fill closes). It is not enforced under a run observation.",
+      "effect": "None on numbers or refusals. The pin and the receipt record different values; provider_ledger compares only without a run observation, provider_admission binds historical values to the contract pin and observed values to the receipt's own recompute.",
+      "affected_paths": [
+        "Quantbase admitted_item_set_sha256 pin"
+      ],
+      "fix": {
+        "ticket": null,
+        "release": "F1",
+        "note": "the F1 carrier re-pins from the F1 ledger build"
+      }
+    }
+  ]
+}

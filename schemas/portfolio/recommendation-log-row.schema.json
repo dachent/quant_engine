@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/recommendation-log-row.schema.json",
+  "title": "Recommendation log row",
+  "description": "One line of records/decisions/recommendation-log.jsonl. The log is append-only: a recommendation is one RECOMMENDATION row; everything that happens to it later (the owner's answer, the execution, an outcome check, a status change) is a further row naming the same rec_id. Each row carries the sha256 of the previous line, so an edited or removed line breaks the chain. tools/recommendation_log.py also rejects fields that do not belong to the row's kind.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["row_id", "kind", "rec_id", "recorded_on", "prev_sha256"],
+  "$defs": {
+    "date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "text": {"type": "string", "minLength": 1, "maxLength": 4000}
+  },
+  "properties": {
+    "row_id": {"type": "integer", "minimum": 1},
+    "kind": {"enum": ["RECOMMENDATION", "OWNER_RESPONSE", "EXECUTION", "OUTCOME_CHECK", "STATUS_CHANGE"]},
+    "rec_id": {"type": "string", "pattern": "^R-[0-9]{4,}$"},
+    "recorded_on": {"$ref": "#/$defs/date"},
+    "prev_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "run_id": {"type": "string", "minLength": 1},
+    "pack_id": {"type": "string", "pattern": "^PACK-[0-9a-f]{12}$"},
+    "policy_version": {"type": "string", "minLength": 1},
+    "date": {"$ref": "#/$defs/date"},
+    "type": {"enum": ["LIMIT_ACTION", "REBALANCE", "STRATEGY_STATUS", "EXECUTION_FIX", "DATA_PULL", "POLICY_RULING", "NO_ACTION"]},
+    "subject": {"$ref": "#/$defs/text"},
+    "recommendation": {"$ref": "#/$defs/text"},
+    "rationale": {"$ref": "#/$defs/text"},
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fact_id", "value"],
+        "properties": {"fact_id": {"type": "string", "minLength": 1}, "value": {"type": "string"}}
+      }
+    },
+    "confidence": {"enum": ["LOW", "MEDIUM", "HIGH"]},
+    "rule_ref": {"$ref": "#/$defs/text"},
+    "would_change_if": {"$ref": "#/$defs/text"},
+    "review_on": {"$ref": "#/$defs/date"},
+    "model": {"$ref": "#/$defs/text"},
+    "response": {"enum": ["ACCEPT", "MODIFY", "REJECT"]},
+    "modified_text": {"$ref": "#/$defs/text"},
+    "reason": {"$ref": "#/$defs/text"},
+    "executed": {"type": "boolean"},
+    "what": {"$ref": "#/$defs/text"},
+    "amount_usd": {"type": "string", "pattern": "^-?[0-9]+(\\.[0-9]+)?$"},
+    "horizon_weeks": {"enum": [4, 13, 26]},
+    "result": {"$ref": "#/$defs/text"},
+    "metric": {"$ref": "#/$defs/text"},
+    "status": {"enum": ["OPEN", "CLOSED", "SUPERSEDED", "WITHDRAWN"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "RECOMMENDATION"}}},
+      "then": {"required": ["run_id", "pack_id", "policy_version", "date", "type", "subject", "recommendation", "rationale", "evidence", "confidence", "rule_ref", "would_change_if", "review_on", "model"]}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "RECOMMENDATION"}, "type": {"not": {"const": "NO_ACTION"}}}, "required": ["type"]},
+      "then": {"properties": {"evidence": {"minItems": 1}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "OWNER_RESPONSE"}}},
+      "then": {"required": ["response", "date"]}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "EXECUTION"}}},
+      "then": {"required": ["executed", "date"]}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "OUTCOME_CHECK"}}},
+      "then": {"required": ["horizon_weeks", "date", "result"]}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "STATUS_CHANGE"}}},
+      "then": {"required": ["status", "date"]}
+    }
+  ]
+}
