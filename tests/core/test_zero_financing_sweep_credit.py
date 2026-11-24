@@ -211,17 +211,58 @@ def test_a_trade_date_credit_needs_the_response_total_to_say_so(tmp_path: Path) 
     assert _verdict(raw, tmp_path) == (False, "RETIREMENT_ACCOUNT_SHOWS_BORROWING")
 
 
-def test_a_negative_trade_date_balance_keeps_its_verdict_unchanged(
+def test_a_negative_trade_date_balance_the_page_confirms_keeps_its_verdict(
     tmp_path: Path,
 ) -> None:
-    """A retirement debit is not made a credit by the positive-credit rule: the verdict is the
-    one it always had (the bracket does not refuse it; its days are priced by the cash replay
-    as financing days at the exact balance)."""
+    """Decision (#1089): a retirement debit is cash owed at the trade date; the cash replay prices
+    its days, so a debit the page shows to the cent keeps the verdict it always had (D's committed
+    artifact depends on it)."""
 
     raw = _capture(
         tmp_path, page_total="-$33.10", trade_date_balance=-33.10, raw_total=-33.10
     )
     assert _verdict(raw, tmp_path) == (True, "ACCOUNT_EXISTS_AT_CAPTURE")
+
+
+def test_a_negative_trade_date_balance_nothing_confirms_is_borrowing(
+    tmp_path: Path,
+) -> None:
+    """The same debit without the page, with a page showing another total, or with a response total
+    that is not the debit, is borrowing by its size: nothing but one JSON vouches for it."""
+
+    cases = {
+        "no-page": dict(page_total="-$33.10", raw_total=-33.10, with_page=False),
+        "other-page": dict(page_total="-$10.00", raw_total=-33.10),
+        "other-total": dict(page_total="-$33.10", raw_total=-40.0),
+    }
+    for name, kwargs in cases.items():
+        directory = tmp_path / name
+        directory.mkdir()
+        raw = _capture(directory, trade_date_balance=-33.10, **kwargs)
+        assert _verdict(raw, directory) == (
+            False,
+            "RETIREMENT_ACCOUNT_SHOWS_BORROWING",
+        ), name
+
+
+def test_a_trade_date_credit_needs_the_page_to_confirm_it(tmp_path: Path) -> None:
+    """Without the balances page nothing but the response itself says the credit is real: the
+    self-consistent response is not enough, and a page with another total does not confirm it."""
+
+    raw = _capture(
+        tmp_path,
+        page_total="640.20",
+        trade_date_balance=640.20,
+        raw_total=640.20,
+        with_page=False,
+    )
+    assert _verdict(raw, tmp_path) == (False, "RETIREMENT_ACCOUNT_SHOWS_BORROWING")
+    other = tmp_path / "other"
+    other.mkdir()
+    raw = _capture(
+        other, page_total="100.00", trade_date_balance=640.20, raw_total=640.20
+    )
+    assert _verdict(raw, other) == (False, "RETIREMENT_ACCOUNT_SHOWS_BORROWING")
 
 
 def test_a_loan_on_the_page_or_in_the_response_still_borrows(tmp_path: Path) -> None:

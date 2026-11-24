@@ -332,14 +332,24 @@ def absent_rolled_positions(
     return {s: q for s, q in sorted(after.quantities.items()) if s not in seen}
 
 
+def derived_row_text(symbol: str, quantity: str, close: str) -> str:
+    """One derived row as the derivation record words it (the one place the wording lives)."""
+
+    return (
+        f"{symbol} quantity={quantity} official_close={close} source={ROLLBACK_SOURCE}"
+    )
+
+
 def assert_derived_rows_checked(
-    derivation: Mapping[str, Any] | None, accounts: Sequence[str]
+    derivation: Mapping[str, Any] | None, derived: Sequence[Mapping[str, Any]]
 ) -> None:
     """Refuse derived rows (positions sold in full after the day) on an account whose derivation
     record does not show them checked: the native NAV of the day must agree with the official value
-    that includes them, with no waived prior closure and no stale-carry patch."""
+    that includes them, with no waived prior closure and no stale-carry patch.  The record must also
+    list exactly the rows the ingest derived (symbol, quantity, official close), so a stale or
+    foreign record cannot vouch for different rows."""
 
-    for account in sorted(set(accounts)):
+    for account in sorted({str(flag["account_id"]) for flag in derived}):
         row = (derivation or {}).get(account)
         if not isinstance(row, Mapping) or not row.get(
             "derived_rows_absent_from_capture"
@@ -352,6 +362,19 @@ def assert_derived_rows_checked(
             raise DeriveError(
                 f"{account}: derived rows are not checked: the native NAV does not agree with the "
                 f"official value ({row.get('derived_rows_native_closure')}), so nothing checks them"
+            )
+        listed = sorted(str(row["derived_rows_absent_from_capture"]).split("; "))
+        actual = sorted(
+            derived_row_text(
+                str(flag["symbol"]), str(flag["quantity"]), str(flag["official_close"])
+            )
+            for flag in derived
+            if str(flag["account_id"]) == account
+        )
+        if listed != actual:
+            raise DeriveError(
+                f"{account}: the derivation record lists other derived rows than the ingest derived "
+                f"(record: {'; '.join(listed)}; derived: {'; '.join(actual)}): a stale or foreign record"
             )
 
 
@@ -698,8 +721,11 @@ def derive(
                 PRIOR_CLOSURE_WAIVED if waived else status
             )
             entry["derived_rows_absent_from_capture"] = "; ".join(
-                f"{symbol} quantity={format(quantity, 'f')} "
-                f"official_close={format(closes[symbol][day], 'f')} source={ROLLBACK_SOURCE}"
+                derived_row_text(
+                    symbol,
+                    format(quantity, "f"),
+                    format(closes[symbol][day], "f"),
+                )
                 for symbol, quantity in absent.items()
             )
         if after_day:

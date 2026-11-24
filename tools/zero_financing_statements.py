@@ -1069,15 +1069,22 @@ def _recompute_capture(
         # a positive trade-date balance that is the account's own cash total is a credit
         # (pending trades), never a loan, and only when the page's own total says so to the
         # cent (confirmed once the page is read, below)
-        if not trade_date_credit:
+        # a negative trade-date balance (and no balance subject to interest) is cash owed at the
+        # trade date: a debit that the cash replay prices day by day, so it clears this bracket
+        # as before, but only when the page's own cash total shows the same debit (checked once
+        # the page is read, below); a debit nothing confirms is borrowing by its size
+        trade_date_debit = raw_loan[0] == 0 and raw_loan[1] < 0
+        if not trade_date_credit and not trade_date_debit:
             return (
                 max(raw_loan),
                 capture_date,
                 scan,
             )  # a retirement account showing a loan
-        credit_to_confirm: Decimal | None = raw_loan[1]
+        credit_to_confirm: Decimal | None = raw_loan[1] if trade_date_credit else None
+        debit_to_confirm: Decimal | None = raw_loan[1] if trade_date_debit else None
     else:
         credit_to_confirm = None
+        debit_to_confirm = None
     claimed_balances = top["balances"]
     if not margin_account and isinstance(claimed_balances, dict):
         claimed_loan = claimed_balances.get("margin_loan_balance")
@@ -1096,6 +1103,17 @@ def _recompute_capture(
         raise ZeroFinancingError("capture needs exactly one raw balances page")
     subject = _page_amount(page, "Balance Subject to Interest") if page else None
     cash_total = _page_amount(page, "Cash & Cash Investments Total") if page else None
+    if debit_to_confirm is not None:
+        # unchanged verdict for a debit the page confirms to the cent (priced by the cash
+        # replay); a page that is absent or shows another total leaves it unexplained
+        return (
+            Decimal(0)
+            if cash_total == debit_to_confirm
+            and (raw_total is None or raw_total == debit_to_confirm)
+            else abs(debit_to_confirm),
+            capture_date,
+            scan,
+        )
     if page is not None and (
         _PAGE_DEBIT_LINE.search(page) or (cash_total is not None and cash_total < 0)
     ):
