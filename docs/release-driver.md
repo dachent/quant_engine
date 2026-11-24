@@ -361,6 +361,21 @@ repository and the source root, and is published by one rename after the loader 
 pin. The root is deterministic: the same source, entries and cutoff give the same pin, and the same cutoff with no entries reproduces the
 source pin.
 
+**Capture proofs (no daily series).** The VTMA trade histories (`implementation/grizzly-signals.csv` and
+`grizzly-blended-history.csv`) show nothing of how far they reach: their last row may be months before the cutoff, and the vendor
+publishes a trade after its date. Release D carried bytes confirmed one day after its cutoff and they lacked a Sell and a Rebuy dated
+before it (issues 1078 and 1097). So `new-cutoff` (for each entry it replaces, or carries into a later cutoff) and `add` (for each entry
+it adds) refuse to seal one of them without `--capture-proof ENTRY=PATH`, listing each as `CAPTURE_PROOF_MISSING <entry>`. The proof is
+JSON `{schema: "release-input-capture-proof/1", entry, sha256, captured_at_utc, method: FRESH_CAPTURE | NO_CHANGE_CONFIRMATION,
+source}`; its `sha256` must be the sealed bytes of the entry (a no-change confirmation is a fresh capture whose bytes equal the carried
+file's) and its capture date (UTC) must be at least `CAPTURE_PROOF_LAG_DAYS` (three) days after the cutoff. The proof is sealed into the
+root as `implementation/capture-proofs/<file>.proof.json`, so the pin binds it. `--drop ENTRY` needs no proof. A proof left behind by a
+dropped entry stays in the root and, being cutoff-dependent, must be dropped or named with `--carry-stale` at the next cutoff. LIMITS: the
+three-day lag is a lower bound from one observation (a trade at 11:00Z was still unpublished 54 hours later), not a measured maximum; the
+proof is self-attested (date, method and source are the operator's words), so the gate stops an accidental stale carry, not a false
+attestation; a capture date in the future is not refused. The check runs when a root is built, not when it is loaded, so roots sealed
+before it existed still verify.
+
 Three stale inputs each cost R2 hours; the driver refuses them at the first stage that could use them:
 
 - **Predecessor vs CURRENT_RELEASE** (`selected-inputs`, `predecessor_check`): the disclosure inputs'

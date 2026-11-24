@@ -34,11 +34,12 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import sleeve_disclosures
 
 from quant_engine.core import (
+    RELEASE_INPUTS_CAPTURE_PROOF_LAG_DAYS as CAPTURE_PROOF_LAG_DAYS,
     RELEASE_INPUTS_CODE_BOUND as CODE_BOUND,
     RELEASE_INPUTS_KIND as RELEASE_INPUT,
     RELEASE_INPUTS_POLICY as POLICY,
@@ -46,6 +47,8 @@ from quant_engine.core import (
     ReleaseInputsError,
     is_cutoff_dependent_release_input as is_cutoff_dependent,
     build_release_inputs_manifest as build_manifest,
+    check_release_inputs_capture_proof as check_capture_proof,
+    release_inputs_capture_proof_entry as capture_proof_entry,
     classify_release_input as classify,
     load_release_inputs,
 )
@@ -230,6 +233,42 @@ def _checked_logical(logical: str) -> str:
     return logical
 
 
+def _capture_proofs(
+    items: Sequence[str],
+    sealed_sha256: Callable[[str], str | None],
+    cutoff: str,
+    required: Sequence[str],
+) -> dict[str, Path]:
+    """``--capture-proof ENTRY=PATH`` items as ``{proof entry: file}``, each checked against the sealed bytes.
+
+    ``required`` are the capture-proof entries (``CAPTURE_PROOF_LAG_DAYS``) whose bytes this root seals
+    anew; each needs a proof taken far enough after ``cutoff`` (the inputs have no daily series, so no
+    reader can tell a stale file from a fresh one), and a proof for any other entry is refused.
+    """
+
+    given = _pairs(items, "--capture-proof", "ENTRY=PATH")
+    proofs: dict[str, Path] = {}
+    for entry, source in given.items():
+        sha = sealed_sha256(entry)
+        if entry not in CAPTURE_PROOF_LAG_DAYS or sha is None:
+            raise ReleaseInputsError(
+                f"--capture-proof {entry}: not a capture-proof input sealed into this root"
+            )
+        path = Path(source)
+        if path.is_symlink() or not path.is_file():
+            raise ReleaseInputsError(f"{source} is not a regular file")
+        check_capture_proof(entry, sha, path.read_bytes(), cutoff)
+        proofs[capture_proof_entry(entry)] = path
+    missing = [entry for entry in required if capture_proof_entry(entry) not in proofs]
+    if missing:
+        raise ReleaseInputsError(
+            "the root seals capture-proof inputs without a capture proof taken at least their lag after "
+            f"{cutoff} (--capture-proof ENTRY=PATH, or --drop the entry):\n  CAPTURE_PROOF_MISSING "
+            + "\n  CAPTURE_PROOF_MISSING ".join(missing)
+        )
+    return proofs
+
+
 def _add(args: argparse.Namespace) -> int:
     loaded = _load(args)
     additions: dict[str, Path] = {}
@@ -250,6 +289,21 @@ def _add(args: argparse.Namespace) -> int:
         additions[logical] = path
     if not additions:
         raise ReleaseInputsError("nothing to add: pass --file LOGICAL=SOURCE")
+    proofs = _capture_proofs(
+        args.capture_proof,
+        lambda n: (
+            hashlib.sha256(additions[n].read_bytes()).hexdigest()
+            if n in additions
+            else None
+        ),
+        loaded.cutoff,
+        [n for n in additions if n in CAPTURE_PROOF_LAG_DAYS],
+    )
+    if set(proofs) & set(additions):
+        raise ReleaseInputsError(
+            "a capture proof is named twice (--file and --capture-proof)"
+        )
+    additions.update(proofs)
     out = args.out
     if _nested(out, loaded.root) or _nested(loaded.root, out):
         raise ReleaseInputsError(
@@ -387,6 +441,28 @@ def _new_cutoff(args: argparse.Namespace) -> int:
                 )
             carry.setdefault(name, reason)
     stale = carry
+    sealed = {name for name in loaded.paths if name not in drops} | set(sources)
+    proofs = _capture_proofs(
+        args.capture_proof,
+        lambda n: (
+            hashlib.sha256(sources[n].read_bytes()).hexdigest()
+            if n in sources
+            else loaded.sha256(n)
+            if n in sealed
+            else None
+        ),
+        cutoff,
+        [
+            n
+            for n in CAPTURE_PROOF_LAG_DAYS
+            if n in sources or (n in sealed and cutoff != loaded.cutoff)
+        ],
+    )
+    if set(proofs) & set(sources):
+        raise ReleaseInputsError(
+            "a capture proof is named twice (--file and --capture-proof)"
+        )
+    sources.update(proofs)
     carried = [
         name for name in loaded.paths if name not in drops and name not in sources
     ]
@@ -619,6 +695,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     add.add_argument(
         "--replace", action="store_true", help="swap a path the root holds"
     )
+    add.add_argument(
+        "--capture-proof",
+        action="append",
+        default=[],
+        metavar="ENTRY=PATH",
+        help="the capture proof JSON of a trade-history input (required for each one added)",
+    )
     new = commands.add_parser("new-cutoff")
     new.add_argument("--root", type=Path, required=True, help="the source root")
     new.add_argument("--manifest-sha256", required=True, help="the source root's pin")
@@ -642,6 +725,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=[],
         metavar="ENTRY=REASON",
         help="carry a cutoff-dependent entry unchanged, with the reason (ENTRY may be a registry-style glob)",
+    )
+    new.add_argument(
+        "--capture-proof",
+        action="append",
+        default=[],
+        metavar="ENTRY=PATH",
+        help="the capture proof JSON of a trade-history input the new root seals (required for each "
+        "one replaced, or carried into a later cutoff)",
     )
     new.add_argument(
         "--baseline",
