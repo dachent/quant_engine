@@ -335,6 +335,10 @@ _PATH_STAGES = {
     # #897: the series label (layer, entity, window, basis) every report and panel series carries.
     "tools/factor_lens_currency.py": ["panel"],
     "tools/series_label.py": ["report", "panel"],
+    # Decisions: pure builders the panel calls (decision block, context pack, recommendation log).
+    "tools/context_pack.py": ["panel"],
+    "tools/portfolio_decision.py": ["panel"],
+    "tools/recommendation_log.py": ["panel"],
     # R2 (registry nine -> fifteen): the economic return-source registry and its
     # schema are read by tests and pinned by digest in the product contract (whose
     # own path carries the stage impact); no producer imports them.
@@ -365,6 +369,11 @@ _PATH_STAGES = {
     # The panel reads the governed mechanism / persistence / alternative-explanation text per strategy
     # (Strategy concepts view); the contract's sha256 rides in the payload block.
     "contracts/strategy-return-sources-v1.json": ["panel"],
+    "contracts/portfolio-known-issues-v1.json": ["panel"],
+    # Decisions: the panel builds the decision block and context pack from the policy; its sha256 rides in the payload.
+    "contracts/portfolio-decision-policy-v1.json": ["panel"],
+    "schemas/portfolio/decision-policy.schema.json": ["panel"],
+    "schemas/portfolio/recommendation-log-row.schema.json": ["panel"],
     # #899: the pinned bounds of the missing Matrixport NAV points; the report and the
     # panel both read it to decide whether the numeric HWM can publish.
     "contracts/portfolio-hwm-gap-bounds-v1.json": ["report", "panel"],
