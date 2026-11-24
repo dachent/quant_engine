@@ -97,6 +97,12 @@ def assemble(capture_dir: Path, out_dir: Path, kind: str = "style") -> dict[str,
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             "source_run_id": str(group["source_run_id"]),
         }
+        if kind == "sector":
+            # the raw file is the evidence of the dividend check: bind it to the run identity
+            raw_file = path.with_name(path.name.replace("_adjusted", ""))
+            groups[path.name]["raw_sha256"] = hashlib.sha256(
+                raw_file.read_bytes()
+            ).hexdigest()
     if len(set(tickers)) != len(tickers):
         raise StyleAssembleError("a ticker appears in two groups")
     run_id = hashlib.sha256(

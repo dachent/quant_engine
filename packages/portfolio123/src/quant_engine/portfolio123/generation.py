@@ -816,6 +816,20 @@ def create_cutover_plan(
         inventory,
         as_of_date,
     )
+    if expected_current_generation_id is not None:
+        # CURRENT may have moved since the early check: the gate must have been built on
+        # the validated generation, and the pointer must still be it as the plan is written.
+        _require_current(
+            destination, expected_current_generation_id, previous_generation_id
+        )
+        gate_previous = gate.get("previous")
+        if (
+            not isinstance(gate_previous, Mapping)
+            or gate_previous.get("generation_id") != expected_current_generation_id
+        ):
+            raise Portfolio123GenerationError(
+                "CURRENT moved while planning; the gate is not bound to the expected CURRENT"
+            )
     payload: dict[str, object] = {
         "as_of_date": as_of_date.isoformat(),
         "data_root": str(destination),

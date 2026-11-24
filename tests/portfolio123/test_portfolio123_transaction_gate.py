@@ -1188,3 +1188,46 @@ def test_plan_cli_requires_the_expected_current_flag(tmp_path: Path) -> None:
                 "2026-09-11",
             ]
         )
+
+
+def test_plan_refuses_when_the_gate_is_not_bound_to_the_expected_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CURRENT moving between the early check and the gate must not write a plan."""
+
+    from quant_engine.portfolio123 import generation as gen
+
+    legacy, har, data = _inputs(tmp_path)
+    current = _generate(
+        legacy,
+        har,
+        data,
+        transaction_captures=[_capture(tmp_path, "a", {"101": _full(5)})],
+    )
+    real_gate = gen._gate_inputs
+
+    def moved(*args: object, **kwargs: object) -> dict[str, object]:
+        gate = real_gate(*args, **kwargs)  # type: ignore[arg-type]
+        return {
+            **gate,
+            "previous": {**gate["previous"], "generation_id": "0" * 64},
+        }
+
+    monkeypatch.setattr(gen, "_gate_inputs", moved)
+    with pytest.raises(Portfolio123GenerationError, match="moved while planning"):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 12),
+            **_auto(
+                har,
+                {
+                    "transaction_captures": [
+                        _capture(tmp_path, "b", {"101": _full(6)})
+                    ],
+                    "expected_current_generation_id": current,
+                },
+                date(2026, 9, 12),
+            ),  # type: ignore[arg-type]
+        )

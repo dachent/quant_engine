@@ -205,3 +205,25 @@ def test_a_ticker_duplicated_across_sector_groups_is_refused(tmp_path: Path) -> 
 def test_an_unknown_capture_kind_is_refused(tmp_path: Path) -> None:
     with pytest.raises(assemble.StyleAssembleError, match="unknown capture kind"):
         assemble.assemble(tmp_path, tmp_path / "out", "base")
+
+
+def test_sector_manifest_binds_the_raw_files_and_style_does_not(tmp_path: Path) -> None:
+    sector = tmp_path / "sector"
+    _sector_capture(sector)
+    first = assemble.assemble(sector, tmp_path / "out", "sector")
+    groups = first["capture"]["groups"]
+    for name, entry in groups.items():
+        raw = sector / name.replace("_adjusted", "")
+        assert entry["raw_sha256"] == hashlib.sha256(raw.read_bytes()).hexdigest()
+    # changing only the raw file (the dividend evidence) changes the run identity
+    raw_bil = sector / "yahoo-sector-bil-history.json"
+    raw_bil.write_text(raw_bil.read_text() + " ")
+    second = assemble.assemble(sector, tmp_path / "out2", "sector")
+    assert second["source_run_id"] != first["source_run_id"]
+    style = tmp_path / "style"
+    style.mkdir()
+    _write_group(style, "spy", "SPY", monthly=False)
+    entry = next(
+        iter(assemble.assemble(style, tmp_path / "o3")["capture"]["groups"].values())
+    )
+    assert "raw_sha256" not in entry
