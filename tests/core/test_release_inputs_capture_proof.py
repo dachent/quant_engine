@@ -375,3 +375,35 @@ def test_add_requires_a_proof_for_each_trade_history(
     report = json.loads(capsys.readouterr().out)
     loaded = load_release_inputs(tmp_path / "a3", report["manifest_sha256"])
     assert capture_proof_entry(SIGNALS) in loaded.paths
+
+
+def test_a_proof_path_cannot_be_supplied_as_a_plain_file(
+    source: tuple[Path, str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # a proof sealed through --file would skip the proof check, so the path is reserved
+    root, pin = source
+    forged = _file(tmp_path, "forged", b"not json")
+    reserved = capture_proof_entry(SIGNALS)
+    assert (
+        cli.main(
+            [
+                "add",
+                "--root",
+                str(root),
+                "--manifest-sha256",
+                pin,
+                "--file",
+                f"{reserved}={forged}",
+                "--out",
+                str(tmp_path / "a"),
+            ]
+        )
+        == 1
+    )
+    assert "--capture-proof" in capsys.readouterr().err
+    args = [*_baseline(tmp_path), "--drop", SIGNALS, "--drop", BLENDED]
+    assert (
+        _new_cutoff(source, tmp_path / "n", *args, "--file", f"{reserved}={forged}")
+        == 1
+    )
+    assert not (tmp_path / "n").exists() and not (tmp_path / "a").exists()

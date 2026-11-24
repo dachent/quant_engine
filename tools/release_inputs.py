@@ -233,6 +233,15 @@ def _checked_logical(logical: str) -> str:
     return logical
 
 
+def _not_a_proof_path(logical: str) -> None:
+    """A capture proof is sealed only through ``--capture-proof``, where it is checked; never as a ``--file``."""
+
+    if logical in {capture_proof_entry(entry) for entry in CAPTURE_PROOF_LAG_DAYS}:
+        raise ReleaseInputsError(
+            f"{logical} is a capture proof: pass it with --capture-proof ENTRY=PATH"
+        )
+
+
 def _capture_proofs(
     items: Sequence[str],
     sealed_sha256: Callable[[str], str | None],
@@ -277,6 +286,7 @@ def _add(args: argparse.Namespace) -> int:
         if not separator or not logical or not source:
             raise ReleaseInputsError(f"--file wants LOGICAL=SOURCE, got {item!r}")
         _checked_logical(logical)
+        _not_a_proof_path(logical)
         if logical in additions:
             raise ReleaseInputsError(f"{logical} is named twice")
         if logical in loaded.paths and not args.replace:
@@ -384,6 +394,8 @@ def _new_cutoff(args: argparse.Namespace) -> int:
     cutoff = _strict_date(args.cutoff)
     loaded = load_release_inputs(args.root, args.manifest_sha256)
     files = _pairs(args.file, "--file", "ENTRY=PATH")
+    for logical in files:
+        _not_a_proof_path(logical)
     if args.baseline is not None:
         if _BASELINE_ENTRY in files:
             raise ReleaseInputsError(
