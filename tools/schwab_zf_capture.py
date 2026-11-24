@@ -329,7 +329,11 @@ def capture_accounts(
             raise CaptureRefused(
                 f"page stamp {et_date(text)} is not {expected_et_date}"
             )
-        if navigated_before is not None and navigations() != navigated_before:
+        if (
+            navigated_before is not None
+            and callable(navigations)
+            and navigations() != navigated_before
+        ):
             raise CaptureRefused(
                 f"the page navigated or reloaded while account {account} was captured: "
                 "keep the page still during a capture and start again"
