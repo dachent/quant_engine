@@ -38,7 +38,13 @@ def _firsts() -> list[int]:
 
 
 def _write_group(
-    folder: Path, name: str, ticker: str, *, monthly: bool, last_dividend: bool = True
+    folder: Path,
+    name: str,
+    ticker: str,
+    *,
+    monthly: bool,
+    last_dividend: bool = True,
+    prefix: str = "yahoo-style-",
 ) -> None:
     pays = set(_firsts()[1:6]) if monthly else set()
     if monthly and not last_dividend:
@@ -66,10 +72,10 @@ def _write_group(
         "tickers": [ticker],
         "columns": COLUMNS,
     }
-    (folder / f"yahoo-style-{name}-history_adjusted.json").write_text(
+    (folder / f"{prefix}{name}-history_adjusted.json").write_text(
         json.dumps({**head, "dataset": "history_adjusted", "rows": rows_adj})
     )
-    (folder / f"yahoo-style-{name}-history.json").write_text(
+    (folder / f"{prefix}{name}-history.json").write_text(
         json.dumps(
             {**head, "dataset": "history", "columns": RAW_COLUMNS, "rows": rows_raw}
         )
@@ -154,3 +160,70 @@ def test_one_ticker_can_be_reissued_from_a_later_capture(tmp_path: Path) -> None
             bad / "yahoo-style-bil-history_adjusted.json",
             tmp_path / "out2",
         )
+
+
+SECTORS = ["XLY", "XLP", "XLE", "XLF", "XLV", "XLI", "XLB", "XLK", "XLU", "XLRE", "XLC"]
+
+
+def _sector_capture(folder: Path) -> None:
+    folder.mkdir()
+    for ticker in SECTORS:
+        _write_group(
+            folder, ticker.lower(), ticker, monthly=False, prefix="yahoo-sector-"
+        )
+    _write_group(folder, "bil", "BIL", monthly=True, prefix="yahoo-sector-")
+
+
+def test_the_twelve_sector_tickers_assemble_from_a_staged_capture(
+    tmp_path: Path,
+) -> None:
+    capture = tmp_path / "capture"
+    _sector_capture(capture)
+    # a style file in the same folder is not part of the sector capture
+    _write_group(capture, "spy", "SPY", monthly=False)
+    manifest = assemble.assemble(capture, tmp_path / "out", "sector")
+    content = (tmp_path / "out" / "us-sector-return.json").read_bytes()
+    assert not (tmp_path / "out" / assemble.OUTPUT_NAME).exists()
+    source = json.loads(content)
+    assert sorted(source["tickers"]) == sorted([*SECTORS, "BIL"])
+    assert len(source["tickers"]) == 12 and len(source["rows"]) == 12 * 120
+    assert manifest["artifact"]["name"] == "us-sector-return.json"
+    assert manifest["artifact"]["sha256"] == hashlib.sha256(content).hexdigest()
+    assert manifest["capture"]["monthly_payers_dividend_checked"] == ["BIL"]
+    assert manifest["capture"]["builder"].startswith("tools/style_capture_assemble.py")
+    assert (tmp_path / "out" / "us-sector-return.json.manifest.json").is_file()
+
+
+def test_a_ticker_duplicated_across_sector_groups_is_refused(tmp_path: Path) -> None:
+    capture = tmp_path / "capture"
+    _sector_capture(capture)
+    _write_group(capture, "xlk-again", "XLK", monthly=False, prefix="yahoo-sector-")
+    with pytest.raises(assemble.StyleAssembleError, match="two groups"):
+        assemble.assemble(capture, tmp_path / "out", "sector")
+
+
+def test_an_unknown_capture_kind_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(assemble.StyleAssembleError, match="unknown capture kind"):
+        assemble.assemble(tmp_path, tmp_path / "out", "base")
+
+
+def test_sector_manifest_binds_the_raw_files_and_style_does_not(tmp_path: Path) -> None:
+    sector = tmp_path / "sector"
+    _sector_capture(sector)
+    first = assemble.assemble(sector, tmp_path / "out", "sector")
+    groups = first["capture"]["groups"]
+    for name, entry in groups.items():
+        raw = sector / name.replace("_adjusted", "")
+        assert entry["raw_sha256"] == hashlib.sha256(raw.read_bytes()).hexdigest()
+    # changing only the raw file (the dividend evidence) changes the run identity
+    raw_bil = sector / "yahoo-sector-bil-history.json"
+    raw_bil.write_text(raw_bil.read_text() + " ")
+    second = assemble.assemble(sector, tmp_path / "out2", "sector")
+    assert second["source_run_id"] != first["source_run_id"]
+    style = tmp_path / "style"
+    style.mkdir()
+    _write_group(style, "spy", "SPY", monthly=False)
+    entry = next(
+        iter(assemble.assemble(style, tmp_path / "o3")["capture"]["groups"].values())
+    )
+    assert "raw_sha256" not in entry

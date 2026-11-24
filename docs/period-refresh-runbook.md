@@ -58,6 +58,14 @@ change between cycles and this document is not regenerated automatically.
   (Moving aside regenerable tail outputs before a re-run — see the section-4
   preamble — is not an edit of a governed artifact: the tail regenerates
   them.)
+- **Plan a provider generation against the real CURRENT (#1081).** A
+  generation staged in a scratch world inherits that world's pointer, which can
+  be the previous release. Read the real data root's `CURRENT.json` generation
+  id and pass it to `tools/portfolio123_generation.py plan
+  --expected-current-generation-id <id>`; the plan refuses when the data root
+  it is given, or an explicit `--previous-generation-id`, is anything else.
+  Preflight: the plan's `previous.generation_id` must equal that id before
+  `stage`.
 
 ## 1. Capture the new period data
 

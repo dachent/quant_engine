@@ -28,6 +28,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Final, Mapping, Sequence
 
@@ -83,6 +84,97 @@ CUTOFF_DEPENDENT: Final[tuple[str, ...]] = (
 
 class ReleaseInputsError(ValueError):
     """The release inputs are missing, unpinned, tampered or outside the registry."""
+
+
+# Inputs with no daily series: nothing in their bytes shows how far they reach (a trade history's last
+# row may legitimately be months before the cutoff), so no reader can tell a fresh file from a stale one.
+# Each is sealed into a root only with a pinned capture proof, and the proof's capture date (UTC) must be at
+# least this many days after the cutoff: the vendor publishes a trade after the trade date, so a capture taken
+# sooner can omit trades dated on or before the cutoff.  Release D's VTMA files were confirmed one day after
+# its cutoff and lacked two trades of the days before; one of them (11:00Z) was still unpublished 54 hours
+# later, so a trade at that hour on the cutoff day needs a capture after cutoff+2 17:00Z: the first whole UTC
+# day that clears it is cutoff+3.  LIMIT: three days is a lower bound from that one observation, not a
+# measured maximum (raise it when a longer delay is observed), and the proof is self-attested.
+_IMPLEMENTATION_INPUTS: Final = "ops/mvp2-release/inputs/implementation"
+CAPTURE_PROOF_LAG_DAYS: Final[Mapping[str, int]] = {
+    f"{_IMPLEMENTATION_INPUTS}/grizzly-signals.csv": 3,
+    f"{_IMPLEMENTATION_INPUTS}/grizzly-blended-history.csv": 3,
+}
+CAPTURE_PROOF_SCHEMA: Final = "release-input-capture-proof/1"
+CAPTURE_PROOF_METHODS: Final = frozenset({"FRESH_CAPTURE", "NO_CHANGE_CONFIRMATION"})
+
+
+def capture_proof_entry(entry: str) -> str:
+    """The release-input path under which the proof of ``entry`` is pinned in the root."""
+
+    return (
+        f"{_IMPLEMENTATION_INPUTS}/capture-proofs/{entry.rsplit('/', 1)[-1]}.proof.json"
+    )
+
+
+def check_capture_proof(
+    entry: str, entry_sha256: str, proof: bytes, cutoff: str
+) -> None:
+    """Refuse a root that seals ``entry`` without a proof of a capture taken after the cutoff.
+
+    The proof is a JSON object ``{schema, entry, sha256, captured_at_utc, method, source}``.  Its
+    ``sha256`` must equal the sealed bytes of the entry (a ``NO_CHANGE_CONFIRMATION`` is a fresh capture
+    whose bytes equal the carried file's) and its capture date (UTC) must be at least the entry's lag in
+    :data:`CAPTURE_PROOF_LAG_DAYS` days after ``cutoff``.
+
+    Rule: this runs only while ``tools/release_inputs.py`` builds a root (``add``, ``new-cutoff``), never in
+    :func:`load_release_inputs`.  The manifest carries no marker that tells a root sealed before the gate
+    (releases D and E) from a new one, so a load-side check would refuse those roots or need an operator-typed
+    legacy flag.  A root assembled outside that tool is outside the gate.
+    """
+
+    lag = CAPTURE_PROOF_LAG_DAYS.get(entry)
+    if lag is None:
+        raise ReleaseInputsError(f"{entry} takes no capture proof")
+    try:
+        body = json.loads(proof.decode("utf-8"))
+        cutoff_day = date.fromisoformat(cutoff)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ReleaseInputsError(f"{entry}: the capture proof is not JSON") from exc
+    expected = {
+        "schema",
+        "entry",
+        "sha256",
+        "captured_at_utc",
+        "method",
+        "source",
+    }
+    if (
+        not isinstance(body, dict)
+        or set(body) != expected
+        or body["schema"] != CAPTURE_PROOF_SCHEMA
+        or body["entry"] != entry
+        or body["method"] not in CAPTURE_PROOF_METHODS
+        or not isinstance(body["source"], str)
+        or not body["source"].strip()
+    ):
+        raise ReleaseInputsError(f"{entry}: the capture proof is malformed")
+    if body["sha256"] != entry_sha256:
+        raise ReleaseInputsError(
+            f"{entry}: the capture proof names other bytes than the file sealed into the root"
+        )
+    try:
+        stamp = datetime.fromisoformat(
+            str(body["captured_at_utc"]).replace("Z", "+00:00")
+        )
+        if stamp.tzinfo is None:
+            raise ValueError("no offset")
+    except ValueError as exc:
+        raise ReleaseInputsError(
+            f"{entry}: the capture proof has no timezone-aware captured_at_utc"
+        ) from exc
+    earliest = cutoff_day + timedelta(days=lag)
+    if stamp.astimezone(timezone.utc).date() < earliest:
+        raise ReleaseInputsError(
+            f"{entry}: captured {stamp.astimezone(timezone.utc).isoformat()}, before {earliest} "
+            f"(cutoff {cutoff} plus {lag} days of vendor publication lag): capture it again, "
+            "the file may lack trades dated on or before the cutoff"
+        )
 
 
 def classify(path: str) -> str | None:

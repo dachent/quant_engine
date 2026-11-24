@@ -776,9 +776,7 @@ def ingest(
     except derive_tool.DeriveError as exc:
         raise IngestError(str(exc)) from exc
     try:
-        derive_tool.assert_derived_rows_checked(
-            derivation, [str(f["account_id"]) for f in derived_rows]
-        )
+        derive_tool.assert_derived_rows_checked(derivation, derived_rows)
     except derive_tool.DeriveError as exc:
         raise IngestError(str(exc)) from exc
     if late:

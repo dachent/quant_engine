@@ -64,6 +64,7 @@ from quant_engine.core.replica_gate import (
     verify_receipt as verify_replica_receipt,
 )
 from quant_engine.core.release_inputs import (
+    CAPTURE_PROOF_LAG_DAYS as RELEASE_INPUTS_CAPTURE_PROOF_LAG_DAYS,
     MANIFEST_NAME as RELEASE_INPUTS_MANIFEST_NAME,
     CODE_BOUND as RELEASE_INPUTS_CODE_BOUND,
     POLICY as RELEASE_INPUTS_POLICY,
@@ -71,6 +72,8 @@ from quant_engine.core.release_inputs import (
     ReleaseInputs,
     ReleaseInputsError,
     build_manifest as build_release_inputs_manifest,
+    capture_proof_entry as release_inputs_capture_proof_entry,
+    check_capture_proof as check_release_inputs_capture_proof,
     classify as classify_release_input,
     is_cutoff_dependent as is_cutoff_dependent_release_input,
     load_release_inputs,
@@ -255,6 +258,9 @@ __all__ = [
     "RELEASE_INPUTS_KIND",
     "ReleaseInputs",
     "build_release_inputs_manifest",
+    "RELEASE_INPUTS_CAPTURE_PROOF_LAG_DAYS",
+    "check_release_inputs_capture_proof",
+    "release_inputs_capture_proof_entry",
     "classify_release_input",
     "ReleaseInputsError",
     "is_cutoff_dependent_release_input",

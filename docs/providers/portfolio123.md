@@ -76,12 +76,19 @@ path while avoiding Windows path-length failures. The generator never parses
 authenticated raw artifacts under issue #19.
 
 ```text
-python tools/portfolio123_generation.py plan LEGACY_ROOT HAR_ROOT DATA_ROOT --as-of-date YYYY-MM-DD
+python tools/portfolio123_generation.py plan LEGACY_ROOT HAR_ROOT DATA_ROOT --as-of-date YYYY-MM-DD \
+  --expected-current-generation-id REAL_CURRENT_ID
 python tools/portfolio123_generation.py stage PLAN_JSON
 python tools/portfolio123_generation.py publish PLAN_JSON GENERATION_ID
 python tools/portfolio123_generation.py verify PLAN_JSON GENERATION_ID
 python tools/portfolio123_generation.py cutover PLAN_JSON GENERATION_ID
 ```
+
+`plan` requires `--expected-current-generation-id`, the CURRENT of the real data root
+(read it from the real root, never from a scratch copy). It refuses when DATA_ROOT's
+CURRENT or an explicit `--previous-generation-id` is a different generation, so a
+generation staged in a scratch world is never planned against the previous release's
+pointer.
 
 `stage` cannot change `CURRENT.json`. `publish` rebuilds the candidate from the
 verified source-run authority before atomically advancing the pointer.
@@ -127,6 +134,7 @@ and counted, and a non-ISO date refuses. A capture directory is retained evidenc
 
 ```text
 python tools/portfolio123_generation.py plan LEGACY_ROOT HAR_ROOT DATA_ROOT --as-of-date YYYY-MM-DD \
+  --expected-current-generation-id REAL_CURRENT_ID \
   --transaction-capture CAPTURE_DIR [--transaction-capture OTHER_DIR] \
   --expected-book BOOK_ID [--expected-book ...] \
   [--previous-generation-id ID] [--supersede-book BOOK_ID=REASON] \
