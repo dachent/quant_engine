@@ -536,6 +536,26 @@ def _inside(path: Path, root: Path) -> bool:
 inside = _inside
 
 
+def stage_timing_env(env: dict[str, str], default_log: Path, repo: Path) -> str:
+    """Set and return the stage's timing log (#1083, #1102).
+
+    The timers are strict no-ops without ``QE_STAGE_TIMING_LOG`` and the driver reads the log back
+    (counters, silent intervals), so the variable is always set: an unset or empty value gets the
+    driver's own file. An operator's own value must be an absolute path outside the repository: a
+    relative path lands in the working tree and fails the stage as a dirty repository.
+    """
+
+    supplied = env.get(STAGE_TIMING_LOG_ENV, "").strip()
+    log = supplied or str(default_log)
+    path = Path(log)
+    if not path.is_absolute():
+        raise Refusal(f"{STAGE_TIMING_LOG_ENV} must be an absolute path, not {log!r}")
+    if _inside(path, repo):
+        raise Refusal(f"{STAGE_TIMING_LOG_ENV} must be outside the repository: {log}")
+    env[STAGE_TIMING_LOG_ENV] = log
+    return log
+
+
 def stage_argv(
     run: Run, stage: Mapping[str, Any], items: Sequence[Any] | None = None
 ) -> list[str]:
@@ -1807,8 +1827,7 @@ def _execute_stage(
         timing_dir = run.cycle / "stage-timing"
         timing_dir.mkdir(parents=True, exist_ok=True)
         timing_log = timing_dir / f"{stage['id']}.{attempt}.jsonl"
-        env.setdefault(STAGE_TIMING_LOG_ENV, str(timing_log))
-        record["timing_log"] = env[STAGE_TIMING_LOG_ENV]
+        record["timing_log"] = stage_timing_env(env, timing_log, run.repo)
         # Cross-process verification receipts (#885) reuse a stored pass across stages. A
         # release stage must not retain or trust a stored pass by default: the default is
         # "off" (every verifier runs live, nothing is written beside the state root). An

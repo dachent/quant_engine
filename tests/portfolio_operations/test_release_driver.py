@@ -1268,3 +1268,74 @@ def test_only_mode_stages_refuse_the_other_mode(world: dict[str, Any]) -> None:
     assert _drive(world, _graph(world, [stage])) == 2
     _config(world, mode="probe", live_workspace=str(world["tmp"] / "live"))
     assert _drive(world, _graph(world, [stage])) == 0
+
+
+def test_stage_timing_env_sets_the_driver_log_when_unset_or_empty(
+    tmp_path: Path,
+) -> None:
+    default = tmp_path / "cycle" / "stage-timing" / "s.1.jsonl"
+    repo = tmp_path / "repo"
+    for env in ({}, {"QE_STAGE_TIMING_LOG": ""}, {"QE_STAGE_TIMING_LOG": "  "}):
+        assert driver.stage_timing_env(env, default, repo) == str(default)
+        assert env["QE_STAGE_TIMING_LOG"] == str(default)
+
+
+def test_stage_timing_env_keeps_an_absolute_log_outside_the_repo(
+    tmp_path: Path,
+) -> None:
+    own = tmp_path / "elsewhere" / "mine.jsonl"
+    env = {"QE_STAGE_TIMING_LOG": str(own)}
+    assert driver.stage_timing_env(env, tmp_path / "d.jsonl", tmp_path / "repo") == str(
+        own
+    )
+    assert env["QE_STAGE_TIMING_LOG"] == str(own)
+
+
+def test_stage_timing_env_refuses_a_relative_or_in_repo_log(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    default = tmp_path / "d.jsonl"
+    for bad, reason in (
+        ("timing.jsonl", "absolute"),
+        (str(Path("sub") / "t.jsonl"), "absolute"),
+        (str(repo / "t.jsonl"), "outside the repository"),
+        (str(repo / "a" / ".." / "t.jsonl"), "outside the repository"),
+    ):
+        env = {"QE_STAGE_TIMING_LOG": bad}
+        with pytest.raises(driver.Refusal, match=reason):
+            driver.stage_timing_env(env, default, repo)
+        assert env["QE_STAGE_TIMING_LOG"] == bad  # nothing launched, nothing rewritten
+
+
+def test_a_stage_gets_the_timing_log_even_when_the_operator_exports_it_empty(
+    world: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QE_STAGE_TIMING_LOG", "")
+    stage = {
+        "id": "t",
+        "outputs": ["{cycle}/t.txt"],
+        "argv": [
+            "{python}",
+            "-c",
+            "import os,sys;open(sys.argv[1],'w').write(os.environ['QE_STAGE_TIMING_LOG'])",
+            "{cycle}/t.txt",
+        ],
+    }
+    assert _drive(world, _graph(world, [stage])) == 0
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text("utf-8"))
+    log = state["stages"]["t"]["timing_log"]
+    assert Path(log).parent == world["cycle"] / "stage-timing"
+    assert (world["cycle"] / "t.txt").read_text("utf-8") == log
+
+
+def test_a_relative_operator_timing_log_fails_the_stage_before_it_launches(
+    world: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QE_STAGE_TIMING_LOG", "timing.jsonl")
+    stage = {
+        "id": "t",
+        "outputs": ["{cycle}/t.txt"],
+        "argv": _write_stage("{cycle}/t.txt"),
+    }
+    assert _drive(world, _graph(world, [stage])) != 0
+    assert not (world["cycle"] / "t.txt").exists()
