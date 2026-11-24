@@ -121,6 +121,11 @@ def check_capture_proof(
     ``sha256`` must equal the sealed bytes of the entry (a ``NO_CHANGE_CONFIRMATION`` is a fresh capture
     whose bytes equal the carried file's) and its capture date (UTC) must be at least the entry's lag in
     :data:`CAPTURE_PROOF_LAG_DAYS` days after ``cutoff``.
+
+    Rule: this runs only while ``tools/release_inputs.py`` builds a root (``add``, ``new-cutoff``), never in
+    :func:`load_release_inputs`.  The manifest carries no marker that tells a root sealed before the gate
+    (releases D and E) from a new one, so a load-side check would refuse those roots or need an operator-typed
+    legacy flag.  A root assembled outside that tool is outside the gate.
     """
 
     lag = CAPTURE_PROOF_LAG_DAYS.get(entry)

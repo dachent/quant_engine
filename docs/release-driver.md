@@ -384,7 +384,7 @@ root as `implementation/capture-proofs/<file>.proof.json`, so the pin binds it. 
 dropped entry stays in the root and, being cutoff-dependent, must be dropped or named with `--carry-stale` at the next cutoff. LIMITS: the
 three-day lag is a lower bound from one observation (a trade at 11:00Z was still unpublished 54 hours later), not a measured maximum; the
 proof is self-attested (date, method and source are the operator's words), so the gate stops an accidental stale carry, not a false
-attestation; a capture date in the future is not refused. The check runs when a root is built, not when it is loaded, so roots sealed
+attestation; a capture date in the future is not refused. The check runs when a root is built, not when it is loaded (rule, not an oversight: the manifest has no marker separating a root sealed before the gate from a new one, so a load-side check would refuse them or need an operator-typed legacy flag; a root assembled outside `tools/release_inputs.py` is outside the gate), so roots sealed
 before it existed still verify.
 
 Three stale inputs each cost R2 hours; the driver refuses them at the first stage that could use them:
