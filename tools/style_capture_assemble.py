@@ -20,6 +20,16 @@ from typing import Any, Mapping, Sequence
 import base_proxy_factors
 
 OUTPUT_NAME = "yahoo-style-adjusted.json"
+# kind -> (group-file prefix, assembled file name, builder label).  The sector capture
+# (``yahoo_refresh_capture`` kind sector) assembles with the same logic and checks.
+KINDS = {
+    "style": ("yahoo-style-", OUTPUT_NAME, "tools/style_capture_assemble.py"),
+    "sector": (
+        "yahoo-sector-",
+        "us-sector-return.json",
+        "tools/style_capture_assemble.py --kind sector",
+    ),
+}
 MONTHLY_PAYERS = ("BIL", "HYG", "IEF", "LQD", "TLT")
 
 
@@ -55,10 +65,13 @@ def check_monthly_payers(raw_groups: Sequence[Mapping[str, Any]]) -> list[str]:
     return sorted(checked)
 
 
-def assemble(capture_dir: Path, out_dir: Path) -> dict[str, Any]:
-    """Write ``yahoo-style-adjusted.json`` and its manifest under ``out_dir``."""
+def assemble(capture_dir: Path, out_dir: Path, kind: str = "style") -> dict[str, Any]:
+    """Write the assembled source of ``kind`` and its manifest under ``out_dir``."""
 
-    adjusted_files = sorted(capture_dir.glob("yahoo-style-*-history_adjusted.json"))
+    if kind not in KINDS:
+        raise StyleAssembleError(f"unknown capture kind: {kind}")
+    prefix, output_name, builder = KINDS[kind]
+    adjusted_files = sorted(capture_dir.glob(f"{prefix}*-history_adjusted.json"))
     if not adjusted_files:
         raise StyleAssembleError("no adjusted group files in the capture")
     adjusted = [_load(path) for path in adjusted_files]
@@ -114,7 +127,7 @@ def assemble(capture_dir: Path, out_dir: Path) -> dict[str, Any]:
         "source_run_id": run_id,
         "request": {"dataset": "history_adjusted", "tickers": tickers},
         "artifact": {
-            "name": OUTPUT_NAME,
+            "name": output_name,
             "sha256": hashlib.sha256(content).hexdigest(),
             "size_bytes": len(content),
         },
@@ -125,15 +138,15 @@ def assemble(capture_dir: Path, out_dir: Path) -> dict[str, Any]:
             "per_ticker": dict(sorted(per_ticker.items())),
         },
         "capture": {
-            "builder": "tools/style_capture_assemble.py",
+            "builder": builder,
             "carried": [],
             "groups": groups,
             "monthly_payers_dividend_checked": checked,
         },
     }
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / OUTPUT_NAME).write_bytes(content)
-    (out_dir / f"{OUTPUT_NAME}.manifest.json").write_bytes(
+    (out_dir / output_name).write_bytes(content)
+    (out_dir / f"{output_name}.manifest.json").write_bytes(
         (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
     )
     return manifest
@@ -143,8 +156,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture-dir", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument("--kind", choices=sorted(KINDS), default="style")
     args = parser.parse_args(argv)
-    manifest = assemble(args.capture_dir, args.out_dir)
+    manifest = assemble(args.capture_dir, args.out_dir, args.kind)
     print(json.dumps(manifest["artifact"], sort_keys=True))
     return 0
 

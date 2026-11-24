@@ -216,6 +216,27 @@ def _book_stats(rows: Iterable[Mapping[str, str]]) -> dict[str, dict[str, Any]]:
     return stats
 
 
+def _require_current(
+    data_root: Path, expected: str, previous_generation_id: str | None
+) -> None:
+    """Refuse a plan whose CURRENT, or explicit predecessor, is not the real CURRENT."""
+
+    if _SHA256.fullmatch(expected) is None:
+        raise Portfolio123GenerationError("expected CURRENT generation ID is invalid")
+    if not (data_root / "CURRENT.json").exists():
+        raise Portfolio123GenerationError("data root has no CURRENT to compare")
+    actual = read_current(data_root).generation_id
+    if actual != expected:
+        raise Portfolio123GenerationError(
+            f"data root CURRENT {actual} is not the expected real CURRENT {expected}"
+        )
+    if previous_generation_id is not None and previous_generation_id != expected:
+        raise Portfolio123GenerationError(
+            f"previous generation {previous_generation_id} is not the expected real "
+            f"CURRENT {expected}"
+        )
+
+
 def _previous_gate(data_root: Path, generation_id: str | None) -> dict[str, Any] | None:
     """Per-book transaction stats of the generation a new one must not regress from."""
 
@@ -680,8 +701,14 @@ def create_cutover_plan(
     untrusted_har_ids: Mapping[str, str] | None = None,
     identity_decisions: Sequence[Mapping[str, Any]] = (),
     identity_review_accepted: Mapping[str, str] | None = None,
+    expected_current_generation_id: str | None = None,
 ) -> dict[str, object]:
     """Hash every approved input and create a private content-addressed plan.
+
+    ``expected_current_generation_id`` is the CURRENT of the real data root. When given,
+    the plan is refused unless this ``data_root`` (for example a scratch copy of the
+    world) has that same CURRENT and any explicit ``previous_generation_id`` equals it,
+    so a generation is never planned against another release's pointer.
 
     ``transaction_captures`` are saved Portfolio123 capture directories
     (``capture-manifest.json`` plus ``raw/strategy_<id>_transactions.csv`` and
@@ -701,6 +728,10 @@ def create_cutover_plan(
     legacy = _root(legacy_root, "legacy_root", existing=True)
     har = _root(har_root, "har_root", existing=True)
     destination = _root(data_root, "data_root", existing=True)
+    if expected_current_generation_id is not None:
+        _require_current(
+            destination, expected_current_generation_id, previous_generation_id
+        )
     captures = [
         _root(path, "transaction_capture", existing=True)
         for path in transaction_captures
