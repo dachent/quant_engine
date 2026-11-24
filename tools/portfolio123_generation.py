@@ -43,6 +43,12 @@ def _parser() -> argparse.ArgumentParser:
         help="generation the transaction gate compares with (default: CURRENT)",
     )
     plan.add_argument(
+        "--expected-current-generation-id",
+        required=True,
+        help="CURRENT generation of the REAL data root; the plan is refused when DATA_ROOT "
+        "(for example a scratch world) or --previous-generation-id differs from it",
+    )
+    plan.add_argument(
         "--supersede-book",
         action="append",
         default=[],
@@ -159,6 +165,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             transaction_captures=args.transaction_capture,
             expected_books=args.expected_book,
             previous_generation_id=args.previous_generation_id,
+            expected_current_generation_id=args.expected_current_generation_id,
             supersede_books=supersede,
             transaction_exempt_books=exempt,
             identity_corrections=corrections,

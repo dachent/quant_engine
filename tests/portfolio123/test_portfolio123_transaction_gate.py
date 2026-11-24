@@ -1112,3 +1112,122 @@ def test_observations_without_an_interval_or_with_an_unreadable_one_are_refused(
             _generate(
                 legacy, har, data, date(2026, 9, 11), transaction_captures=[capture]
             )
+
+
+def test_plan_refuses_a_data_root_whose_current_is_not_the_real_current(
+    tmp_path: Path,
+) -> None:
+    """#1081: a scratch world holding the previous release must not be planned against."""
+
+    legacy, har, data = _inputs(tmp_path)
+    scratch_current = _generate(
+        legacy,
+        har,
+        data,
+        transaction_captures=[_capture(tmp_path, "a", {"101": _full(5)})],
+    )
+    real_current = hashlib.sha256(b"the real CURRENT").hexdigest()
+    with pytest.raises(
+        Portfolio123GenerationError, match="not the expected real CURRENT"
+    ):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 12),
+            expected_current_generation_id=real_current,
+        )
+    with pytest.raises(Portfolio123GenerationError, match="expected CURRENT"):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 12),
+            expected_current_generation_id="not-a-hash",
+        )
+    # an explicit predecessor other than the real CURRENT is refused too
+    with pytest.raises(Portfolio123GenerationError, match="previous generation"):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 12),
+            previous_generation_id=real_current,
+            expected_current_generation_id=scratch_current,
+        )
+    # the matching CURRENT plans and stages, and CURRENT does not move
+    planned = create_cutover_plan(
+        legacy,
+        har,
+        data,
+        as_of_date=date(2026, 9, 12),
+        **_auto(
+            har,
+            {
+                "transaction_captures": [_capture(tmp_path, "b", {"101": _full(6)})],
+                "expected_current_generation_id": scratch_current,
+            },
+            date(2026, 9, 12),
+        ),  # type: ignore[arg-type]
+    )
+    assert stage_candidate(Path(str(planned["plan_path"])))["generation_id"]
+    assert _current(data) == scratch_current
+
+
+def test_plan_cli_requires_the_expected_current_flag(tmp_path: Path) -> None:
+    import portfolio123_generation as cli
+
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "plan",
+                str(tmp_path),
+                str(tmp_path),
+                str(tmp_path),
+                "--as-of-date",
+                "2026-09-11",
+            ]
+        )
+
+
+def test_plan_refuses_when_the_gate_is_not_bound_to_the_expected_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CURRENT moving between the early check and the gate must not write a plan."""
+
+    from quant_engine.portfolio123 import generation as gen
+
+    legacy, har, data = _inputs(tmp_path)
+    current = _generate(
+        legacy,
+        har,
+        data,
+        transaction_captures=[_capture(tmp_path, "a", {"101": _full(5)})],
+    )
+    real_gate = gen._gate_inputs
+
+    def moved(*args: object, **kwargs: object) -> dict[str, object]:
+        gate = real_gate(*args, **kwargs)  # type: ignore[arg-type]
+        return {
+            **gate,
+            "previous": {**gate["previous"], "generation_id": "0" * 64},
+        }
+
+    monkeypatch.setattr(gen, "_gate_inputs", moved)
+    with pytest.raises(Portfolio123GenerationError, match="moved while planning"):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 12),
+            **_auto(
+                har,
+                {
+                    "transaction_captures": [
+                        _capture(tmp_path, "b", {"101": _full(6)})
+                    ],
+                    "expected_current_generation_id": current,
+                },
+                date(2026, 9, 12),
+            ),  # type: ignore[arg-type]
+        )
