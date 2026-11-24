@@ -300,6 +300,17 @@ never touched. Every stage records `seconds`, `seconds_total` over its attempts,
 `work_counters` (from the stage's `counters` JSON or the `counter_keys` found in its output).
 `<cycle>/release-driver-timing.log` has one line per start and finish.
 
+**Stage timers (`QE_STAGE_TIMING_LOG`).** The in-process timers (`stage_timing`) are strict no-ops
+unless this variable names a file: no clock read, no stderr line, no log. The driver sets it for
+every process stage to `<cycle>/stage-timing/<stage>.<attempt>.jsonl`, also when the operator
+exported it empty, because it reads the file back (`timing_summary`, and the `model_fit_calls` and
+`receipt_reuse_count` counters of the `counter_keys` stages). An operator's own value is kept only
+if it is an absolute path outside the repository; a relative or in-repo path is refused before the
+stage launches (it would write into the working tree and fail the stage as a dirty repository).
+A manual run outside the driver has no timing log unless the operator sets one (absolute, outside
+the repo), so it loses the stderr timing lines, the log, and any counter taken from them; its
+results are unchanged, since timings are never hashed into a generation, receipt or journal.
+
 ## Offline plan
 
 `plan --offline --ids ids.json --recorded cmds.json` prints every stage's command line from the
