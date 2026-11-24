@@ -6920,6 +6920,127 @@ def test_report_projects_hash_bound_leverage_disclosures_to_report(
         reporter.build_report_data(baseline_root, provider_ledger_root=provider_root)
 
 
+def test_statement_evidence_rows_without_an_amount_satisfy_the_panel_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """schwab_margin_interest rows carry source/opening/ytd amounts but no `amount`; the
+    projection makes it explicitly UNAVAILABLE so every disclosure satisfies the panel schema."""
+    monkeypatch.setattr(
+        reporter,
+        "_PORTABLE_HWM_PRODUCT_CONTRACT",
+        _bind_synthetic_product_contract(tmp_path / "report-contract"),
+    )
+    provider_generation = "a" * 64
+    usd = {"currency": "USD", "status": "AVAILABLE"}
+    evidence = {
+        "account_id": "account-margin",
+        "as_of_date": "2026-01-31",
+        "average_balance": {**usd, "value": "100.00"},
+        "classification": "MARGIN_INTEREST_STATEMENT_EVIDENCE",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "generation_id": "b" * 64,
+        "mapping_reason": "ACCOUNT_LEVEL_OBSERVATION",
+        "mapping_status": "UNMAPPED",
+        "measurement_basis": "STATEMENT_CHARGED_PERIOD",
+        "opening_amount": {**usd, "value": "90.00"},
+        "period_end": "2026-01-28",
+        "period_start": "2025-12-30",
+        "provider_id": "schwab",
+        "record_id": "schwab:margin-interest:account-margin:2026-01-31:STATEMENT_CHARGED_PERIOD:2",
+        "source_amount": {**usd, "value": "1.25"},
+        "source_artifact_id": "margin-interest/statement.pdf",
+        "source_record_id": "margin-interest:account-margin:2026-01-31:STATEMENT_CHARGED_PERIOD:2",
+        "strategy_id": None,
+        "ytd_amount": {**usd, "value": "1.25"},
+    }
+    with_amount = {
+        **evidence,
+        "amount": {**usd, "value": "1.25"},
+        "record_id": "schwab:with-amount",
+        "source_record_id": "with-amount",
+    }
+    gross = {
+        "account_id": "account-margin",
+        "amount": {**usd, "value": "70402.37"},
+        "as_of_date": "2026-11-20",
+        "classification": "GROSS_EXPOSURE",
+        "evidence": {"lines": 1},
+        "evidence_layer": "ACCOUNT_LIVE",
+        "generation_id": "b" * 64,
+        "mapping_status": "MAPPED",
+        "measurement_basis": "GROSS_POSITION_MARKET_VALUE",
+        "provider_id": "schwab",
+        "record_id": "schwab:schwab-gross-exposure:account-margin:2026-11-20",
+        "source_artifact_id": "gross-exposure/schwab/closes-0.csv",
+        "source_artifact_sha256": "c" * 64,
+        "source_field": "quantity x close",
+        "source_record_id": "schwab-gross-exposure:account-margin:2026-11-20",
+        "strategy_id": "strategy-1",
+    }
+    refused = {
+        **gross,
+        "amount": {"status": "UNAVAILABLE", "value": None},
+        "record_id": "schwab:refused",
+        "refusal": "NAV_CLOSURE_FAILS_OR_CASH_NOT_OBSERVED",
+        "source_record_id": "refused",
+    }
+    provider_catalog = {
+        "financing_cost_observations": [evidence, with_amount],
+        "financing_liability_observations": [],
+        "leverage_exposure_observations": [gross, refused],
+        "provider_generations": [{"provider_id": "schwab"}],
+        "reconciliation_checks": [],
+    }
+    provider_bytes = canonical_json_bytes(provider_catalog)
+    provider_root = tmp_path / "provider-ledger"
+    provider_dir = provider_root / "generations" / provider_generation
+    provider_dir.mkdir(parents=True)
+    (provider_dir / "provider-ledger.json").write_bytes(provider_bytes)
+    catalog = _baseline_catalog()
+    catalog["source_artifacts"].append(
+        {
+            "artifact_id": "providers/provider-ledger/provider-ledger.json",
+            "as_of_date": "2026-01-03",
+            "schema_name": "provider-ledger-catalog",
+            "schema_version": "2",
+            "sha256": hashlib.sha256(provider_bytes).hexdigest(),
+            "source_key": "provider-ledger-generation",
+        }
+    )
+    baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, provider_ledger_root=provider_root
+    )
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    panel_schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    row_validator = Draft202012Validator(
+        {"$ref": "#/$defs/leverage_disclosure", "$defs": panel_schema["$defs"]},
+        format_checker=FormatChecker(),
+    )
+    rows = report["leverage_disclosures"]
+    assert rows
+    assert [
+        (row["record_id"], error.message)
+        for row in rows
+        for error in row_validator.iter_errors(row)
+    ] == []
+    projected = {row.get("record_id"): row for row in rows}
+    assert projected[evidence["record_id"]]["amount"] == {
+        "status": "UNAVAILABLE",
+        "value": None,
+    }
+    assert projected["schwab:with-amount"]["amount"] == with_amount["amount"]
+    assert (
+        projected[evidence["record_id"]]["opening_amount"] == evidence["opening_amount"]
+    )
+
+
 def test_report_emits_account_financing_rows_from_the_owner_declaration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

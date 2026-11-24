@@ -9359,6 +9359,11 @@ def _leverage_disclosures(
                     **item,
                     "data_class": data_class,
                     "account_id": account_id,
+                    # statement-evidence rows (schwab_margin_interest) carry source and balance
+                    # amounts but no `amount`: it is explicitly unavailable, never absent
+                    "amount": item["amount"]
+                    if "amount" in item
+                    else {"status": "UNAVAILABLE", "value": None},
                     "included_in_nav": item.get("included_in_nav"),
                     "native_source_record_id": item.get("native_source_record_id"),
                     "security_id": item.get("security_id"),
