@@ -12723,6 +12723,16 @@ def _dataset_disposition(
     )
 
 
+def _catalog_row_key(item: Mapping[str, Any]) -> tuple[str, str, str]:
+    """The order of every fact list in the catalog (and of the rows an admission hashes)."""
+
+    return (
+        str(item["provider_id"]),
+        str(item.get("as_of_date") or item.get("event_date") or ""),
+        str(item["record_id"]),
+    )
+
+
 def _admit_or_declare_receipt(
     authority: Mapping[str, Any],
     identities: Sequence[ProviderGenerationIdentity],
@@ -13100,6 +13110,11 @@ def build_catalog(
         exceptions.extend(findings)
     zero_sets: list[tuple[str, list[dict[str, Any]], list[SourceArtifact]]] = []
     zero_projected: list[dict[str, Any]] = []
+    # Ledger-derived (statement/closure) rows that join `combined` after the provider facts.  The
+    # baseline stage re-derives the admission receipt from the FINAL catalog rows of each provider,
+    # so the ledger's receipt must count the same rows: they are added to the receipt's facts
+    # below, keyed (provider, fact).  Specs without these keys add nothing (receipts unchanged).
+    receipt_extra: dict[tuple[str, str], list[dict[str, Any]]] = {}
     if "zero_financing_observations" in spec:
         # the account type rule reaches back to each account's first NAV day
         first_nav: dict[str, date] = {}
@@ -13196,6 +13211,10 @@ def build_catalog(
             ],
         )
         combined["leverage_exposure_observations"].extend(exposure_rows)
+        for row in exposure_rows:
+            receipt_extra.setdefault(
+                (str(row["provider_id"]), "leverage_exposure_observations"), []
+            ).append(row)
         provider_artifacts.extend(exposure_artifacts)
     if "schwab_margin_interest" in spec:
         interest_rows, interest_artifacts = _schwab_margin_interest_rows(
@@ -13206,6 +13225,10 @@ def build_catalog(
             manifests,
         )
         combined["financing_cost_observations"].extend(interest_rows)
+        for row in interest_rows:
+            receipt_extra.setdefault(
+                (str(row["provider_id"]), "financing_cost_observations"), []
+            ).append(row)
         exceptions.extend(
             {
                 "account_in_provenance": row["account_id"] in accounts,
@@ -13567,23 +13590,29 @@ def build_catalog(
         ),
         reserve_nav_windows=reserve_nav_windows,
     )
+    receipt_facts: dict[str, dict[str, list[dict[str, Any]]]] = provider_facts
+    if receipt_extra:
+        receipt_facts = {
+            provider_id: {fact: list(rows) for fact, rows in facts_.items()}
+            for provider_id, facts_ in provider_facts.items()
+        }
+        for (provider_id, fact), rows in sorted(receipt_extra.items()):
+            merged = receipt_facts[provider_id].setdefault(fact, [])
+            merged.extend(rows)
+            # each disposition hashes its rows in order, and the baseline re-derives them from
+            # the catalog, which is sorted by this key
+            merged.sort(key=_catalog_row_key)
     admit_or_declare, admit_or_declare_bytes = _admit_or_declare_receipt(
         authority,
         identities,
         manifests,
         catalogs,
-        provider_facts,
+        receipt_facts,
         provider_strategy_returns,
     )
     fact_counts = []
     for fact_type, rows in sorted(combined.items()):
-        rows.sort(
-            key=lambda item: (
-                str(item["provider_id"]),
-                str(item.get("as_of_date") or item.get("event_date") or ""),
-                str(item["record_id"]),
-            )
-        )
+        rows.sort(key=_catalog_row_key)
         fact_counts.append(
             {
                 "fact_type": fact_type,
