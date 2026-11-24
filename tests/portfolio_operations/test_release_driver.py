@@ -1339,3 +1339,8 @@ def test_a_relative_operator_timing_log_fails_the_stage_before_it_launches(
     }
     assert _drive(world, _graph(world, [stage])) != 0
     assert not (world["cycle"] / "t.txt").exists()
+    # refused before any stage state: no "running" record that reconcile would turn into "interrupted"
+    state_file = world["cycle"] / driver.STATE_NAME
+    if state_file.exists():
+        assert "t" not in json.loads(state_file.read_text("utf-8"))["stages"]
+    assert not list(world["cycle"].glob("*.prev-*"))

@@ -551,7 +551,14 @@ def stage_timing_env(env: dict[str, str], default_log: Path, repo: Path) -> str:
     if not path.is_absolute():
         raise Refusal(f"{STAGE_TIMING_LOG_ENV} must be an absolute path, not {log!r}")
     if _inside(path, repo):
-        raise Refusal(f"{STAGE_TIMING_LOG_ENV} must be outside the repository: {log}")
+        raise Refusal(
+            f"{STAGE_TIMING_LOG_ENV} must be outside the repository: {log}"
+            + (
+                ""
+                if supplied
+                else " (the driver log: the cycle is inside the repository)"
+            )
+        )
     env[STAGE_TIMING_LOG_ENV] = log
     return log
 
@@ -604,6 +611,10 @@ def check_config_paths(run: Run) -> None:
     refused here, before any stage reads it.
     """
 
+    # the variable is process-wide: a bad value is refused here, before any stage state is touched
+    stage_timing_env(
+        dict(os.environ), run.cycle / "stage-timing" / "check.jsonl", run.repo
+    )
     for file, sha in sorted(dict(run.config.get("pinned_files", {})).items()):
         if not Path(file).is_file() or _file_sha(Path(file)) != sha:
             raise Refusal(
